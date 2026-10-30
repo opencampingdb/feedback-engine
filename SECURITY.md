@@ -13,6 +13,13 @@ Use the same address to report abuse of the feedback intake, such as a flood of 
 - **Free text** (report notes and review text) has email addresses, phone numbers and links replaced with `[removed]` by the intake. The apply step refuses reviews that still contain contact details, links, social media handles, personal names or offensive language, and withholds such notes from PR bodies.
 - **Secrets** (`APP_KEYS`, `DEVICE_SALT`, GitHub App keys) live in Cloudflare Worker secrets and GitHub Actions secrets. None are in this repository; `wrangler.toml` holds placeholders only.
 
+## Owners
+
+- **Tokens.** A claim or listing returns a 32 byte random token once. The intake stores only its SHA-256, in the claim and in `owners/<place id>.json` once approved, and replaces an update's token with its hash before storage. Nothing logs the token.
+- **Contact details.** Owner names and emails stay in the private inbox (`owner-claims/`, `owners/` and the stored submissions). They are never written to `data` or a PR.
+- **Approval.** A claim reaches `data` only after a person ticks its box in the `feedback/review` PR and merges it. Boxes count only in the PR body and in comments written by the bot, and only at the start of a line, so text from an owner cannot add or tick one.
+- **Proof pages.** The apply run fetches an owner's proof page with https only, on public host names, checking every resolved address before connecting (no loopback, private, link-local or shared ranges), following at most three redirects that are each checked again, with a 10 second timeout and a 1 MB cap.
+
 ## GitHub App permissions
 
 - `opencampingdb-intake` is installed on the `inbox` repository only, with `contents: write`. Its private key lives only in the Worker's secrets. Each installation token it requests is limited to `inbox` and `contents: write`.
