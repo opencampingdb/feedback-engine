@@ -1,0 +1,26 @@
+# Copy to .github/workflows/apply-feedback.yml in the private inbox repository.
+# Replace both REPLACE_WITH_ENGINE_SHA values with the same full 40 character
+# commit SHA of opencampingdb/feedback-engine, and update them together.
+#
+# Repository secrets in the inbox:
+#   OCDB_BOT_CLIENT_ID    Client ID of the opencampingdb-bot GitHub App
+#   OCDB_BOT_PRIVATE_KEY  Private key of the opencampingdb-bot GitHub App
+
+name: Apply feedback
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    uses: opencampingdb/feedback-engine/.github/workflows/apply-feedback.yml@REPLACE_WITH_ENGINE_SHA
+    with:
+      engine-ref: REPLACE_WITH_ENGINE_SHA
+    secrets:
+      app-client-id: ${{ secrets.OCDB_BOT_CLIENT_ID }}
+      app-private-key: ${{ secrets.OCDB_BOT_PRIVATE_KEY }}

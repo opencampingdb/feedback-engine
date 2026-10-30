@@ -1,0 +1,21 @@
+{
+  "name": "@opencampingdb/apply",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Applies Open Camping DB feedback from the inbox repository to a checkout of the data repository.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "ocdb-apply": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "apply": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@opencampingdb/feedback": "0.1.0"
+  }
+}

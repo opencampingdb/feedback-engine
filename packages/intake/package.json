@@ -1,0 +1,18 @@
+{
+  "name": "@opencampingdb/intake",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that accepts Open Camping DB feedback and writes it to the inbox repository.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@opencampingdb/feedback": "0.1.0"
+  },
+  "devDependencies": {
+    "wrangler": "4.156.0"
+  }
+}
