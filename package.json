@@ -1,0 +1,29 @@
+{
+  "name": "feedback-engine",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "workspaces": [
+    "packages/sdk",
+    "packages/intake",
+    "packages/apply"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/sdk && npm run build -w packages/apply",
+    "typecheck": "tsc -p packages/sdk --noEmit && tsc -p packages/intake --noEmit && tsc -p packages/apply --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3",
+    "vitest": "5.0.5"
+  },
+  "allowScripts": {
+    "workerd@1.20261023.1": true,
+    "esbuild@0.28.2": true
+  }
+}

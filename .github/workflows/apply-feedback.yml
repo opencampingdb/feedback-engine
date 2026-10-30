@@ -1,0 +1,225 @@
+# Reusable workflow: applies feedback from the calling repository (the private
+# inbox) to opencampingdb/data. Call it from the inbox repository on a
+# schedule; see packages/apply/examples/inbox-apply-feedback.yml.
+# The data repository must sit in the same organisation as the inbox.
+#
+# Each run keeps at most two open PRs to data, on fixed branches:
+#   feedback/auto    automatic changes only, merges itself when CI passes
+#   feedback/review  changes and reports a person decides on, label needs-review
+# When a PR from a branch is already open, the run adds a commit and a comment
+# to it instead of opening another. The inbox moves are committed last, so a
+# failed run is simply repeated: the apply script writes nothing it has
+# already written.
+#
+# Both tokens come from the opencampingdb-bot GitHub App, never GITHUB_TOKEN,
+# so the data PRs trigger the data repository's CI.
+
+name: Apply feedback
+
+on:
+  workflow_call:
+    inputs:
+      data-repository-name:
+        description: Name of the data repository, in the same organisation as the inbox
+        type: string
+        default: data
+      data-base-branch:
+        description: Branch of the data repository PRs go to
+        type: string
+        default: main
+      engine-repository:
+        description: owner/name of the feedback-engine repository
+        type: string
+        default: opencampingdb/feedback-engine
+      engine-ref:
+        description: Commit of feedback-engine to run. Use the same SHA the caller pins this workflow to.
+        type: string
+        required: true
+    secrets:
+      app-client-id:
+        description: Client ID of the opencampingdb-bot GitHub App
+        required: true
+      app-private-key:
+        description: Private key of the opencampingdb-bot GitHub App
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apply-feedback-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Apply feedback
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Token for the inbox
+        id: inbox-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Token for the data repository
+        id: data-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.data-repository-name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Check out the engine
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.engine-repository }}
+          ref: ${{ inputs.engine-ref }}
+          path: engine
+          persist-credentials: false
+
+      - name: Check out the inbox
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: inbox
+          token: ${{ steps.inbox-token.outputs.token }}
+
+      - name: Check out data for automatic changes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
+          ref: ${{ inputs.data-base-branch }}
+          path: data-auto
+          fetch-depth: 0
+          token: ${{ steps.data-token.outputs.token }}
+
+      - name: Check out data for review changes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
+          ref: ${{ inputs.data-base-branch }}
+          path: data-review
+          fetch-depth: 0
+          token: ${{ steps.data-token.outputs.token }}
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Build the apply script
+        working-directory: engine
+        run: |
+          npm ci --ignore-scripts --include-workspace-root --workspace packages/sdk --workspace packages/apply
+          npm run build
+
+      - name: Start from the open PR branches
+        id: branches
+        env:
+          GH_TOKEN: ${{ steps.data-token.outputs.token }}
+          APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
+          DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
+          BASE_BRANCH: ${{ inputs.data-base-branch }}
+        run: |
+          bot_id="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          echo "bot_email=${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+          for kind in auto review; do
+            branch="feedback/${kind}"
+            dir="data-${kind}"
+            git -C "$dir" config user.name "${APP_SLUG}[bot]"
+            git -C "$dir" config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+            open="$(gh pr list --repo "$DATA_REPO" --head "$branch" --base "$BASE_BRANCH" --state open --json number --jq length)"
+            if [ "$open" != "0" ]; then
+              git -C "$dir" fetch origin "$branch"
+              git -C "$dir" switch -c "$branch" "origin/${branch}"
+              # Keep the branch current with the base. On a conflict, carry on
+              # from the branch as it is and leave the conflict to the PR.
+              git -C "$dir" merge --no-edit "origin/${BASE_BRANCH}" || git -C "$dir" merge --abort
+              echo "${kind}_open=true" >> "$GITHUB_OUTPUT"
+            else
+              git -C "$dir" switch -c "$branch"
+              echo "${kind}_open=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      - name: Apply feedback
+        id: apply
+        run: >
+          node engine/packages/apply/dist/cli.js
+          --inbox inbox
+          --data data-auto
+          --review-data data-review
+          --auto-pr-body "$RUNNER_TEMP/auto-pr-body.md"
+          --review-pr-body "$RUNNER_TEMP/review-pr-body.md"
+          --summary "$RUNNER_TEMP/summary.json"
+
+      - name: Publish automatic changes
+        if: steps.apply.outputs.auto_changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.data-token.outputs.token }}
+          DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
+          BASE_BRANCH: ${{ inputs.data-base-branch }}
+          PR_OPEN: ${{ steps.branches.outputs.auto_open }}
+          RUN_ID: ${{ github.run_id }}
+        working-directory: data-auto
+        run: |
+          git add -A
+          git commit -m "Apply feedback automatically (run ${RUN_ID})"
+          if [ "$PR_OPEN" = "true" ]; then
+            git push origin HEAD:refs/heads/feedback/auto
+            gh pr comment feedback/auto --repo "$DATA_REPO" --body-file "$RUNNER_TEMP/auto-pr-body.md"
+          else
+            # No open PR uses the branch, so it can be replaced.
+            git push --force origin HEAD:refs/heads/feedback/auto
+            url="$(gh pr create --repo "$DATA_REPO" --base "$BASE_BRANCH" --head feedback/auto \
+              --title "Feedback: automatic changes" --body-file "$RUNNER_TEMP/auto-pr-body.md")"
+            gh pr merge "$url" --auto --squash
+          fi
+
+      - name: Publish changes for review
+        if: steps.apply.outputs.review_changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.data-token.outputs.token }}
+          DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
+          BASE_BRANCH: ${{ inputs.data-base-branch }}
+          PR_OPEN: ${{ steps.branches.outputs.review_open }}
+          RUN_ID: ${{ github.run_id }}
+        working-directory: data-review
+        run: |
+          git add -A
+          if [ "$PR_OPEN" = "true" ]; then
+            if ! git diff --cached --quiet; then
+              git commit -m "Feedback for review (run ${RUN_ID})"
+            fi
+            git push origin HEAD:refs/heads/feedback/review
+            gh pr comment feedback/review --repo "$DATA_REPO" --body-file "$RUNNER_TEMP/review-pr-body.md"
+          else
+            # A run whose only items are reports to read changes no file. The
+            # empty commit still lets a PR carry them.
+            git commit --allow-empty -m "Feedback for review (run ${RUN_ID})"
+            git push --force origin HEAD:refs/heads/feedback/review
+            gh pr create --repo "$DATA_REPO" --base "$BASE_BRANCH" --head feedback/review \
+              --title "Feedback: for a person to check" --label needs-review \
+              --body-file "$RUNNER_TEMP/review-pr-body.md"
+          fi
+
+      - name: Commit the inbox moves
+        if: steps.apply.outputs.inbox_changed == 'true'
+        env:
+          APP_SLUG: ${{ steps.inbox-token.outputs.app-slug }}
+          BOT_EMAIL: ${{ steps.branches.outputs.bot_email }}
+          RUN_ID: ${{ github.run_id }}
+        working-directory: inbox
+        run: |
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "$BOT_EMAIL"
+          git add -A
+          git commit -m "Move applied and refused feedback (run ${RUN_ID})"
+          git push

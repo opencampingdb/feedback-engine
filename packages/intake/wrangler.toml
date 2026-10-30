@@ -1,0 +1,22 @@
+# Open Camping DB feedback intake. Replace every REPLACE_ME before deploying.
+# Secrets are set with `wrangler secret put`, never written here:
+#   APP_KEYS            JSON map of app key to {"app": "<name>", "daily_limit": <number>}
+#   DEVICE_SALT         long random string used to hash device ids
+#   GH_APP_ID           GitHub App id
+#   GH_APP_PRIVATE_KEY  GitHub App private key (PEM)
+#   GH_INSTALLATION_ID  installation id of the App on the inbox repository
+
+name = "ocdb-feedback-intake"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[vars]
+INBOX_REPO = "opencampingdb/inbox"
+INBOX_BRANCH = "main"
+# Comma separated list of web origins allowed to call the intake, or * for any.
+ALLOWED_ORIGINS = "*"
+
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "REPLACE_ME_KV_NAMESPACE_ID"
