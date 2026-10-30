@@ -1,6 +1,6 @@
 # Owner terms
 
-Draft for approval. These terms apply when you claim a place, list a private property or update a place in Open Camping DB as its owner.
+These terms apply when you claim a place, list a private property or update a place in Open Camping DB as its owner.
 
 When you tick the box, you agree that:
 
