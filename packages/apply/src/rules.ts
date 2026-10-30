@@ -7,7 +7,7 @@ import {
 } from "@opencampingdb/feedback";
 import { moderateReview } from "./moderation.js";
 import { roundCoord } from "./serialise.js";
-import type { Place, Review } from "./types.js";
+import type { Place, Review, Source } from "./types.js";
 
 /**
  * The apply-feedback rules from SPEC "Apply feedback", as pure functions.
@@ -32,8 +32,25 @@ export const REVIEWED_FACTS: ReadonlySet<FactName> = new Set<FactName>(["website
 
 /** Kind given to a draft record for a `new_place` report until a person sets it. */
 export const DRAFT_KIND = "campground";
+const DRAFT_GROUP = "overnight";
 
-export type Outcome = "applied" | "refused" | "needs_review" | "waiting";
+/**
+ * Follows a merged id to the record it was merged into (a person may merge a
+ * record whose target was itself merged later). Returns undefined when the id
+ * is not in `places`, the chain is broken or it loops. Never returns a tombstone.
+ */
+export function resolvePlace(id: string | null, places: ReadonlyMap<string, Place>): string | undefined {
+  let current = id ?? undefined;
+  for (let hops = 0; current !== undefined && hops < 10; hops++) {
+    const record = places.get(current);
+    if (!record) return undefined;
+    if (record.status !== "merged") return current;
+    current = record.merged_into;
+  }
+  return undefined;
+}
+
+export type Outcome = "applied" | "refused" | "needs_review" | "waiting" | "awaiting_approval";
 
 export interface Decision {
   id: string;
@@ -58,6 +75,8 @@ export interface RulesInput {
   places: ReadonlyMap<string, Place>;
   /** Reviews already in the data for a place. */
   reviews: (placeId: string) => readonly Review[];
+  /** Kind code to group, from `data/schema/kinds.json`. */
+  kinds?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -66,8 +85,9 @@ export interface RulesInput {
  */
 export type ReviewEdit =
   | { kind: "new_place"; record: Place; feedback: string }
-  | { kind: "location"; place: string; location: { lat: number; lon: number }; feedback: string }
-  | { kind: "fact"; place: string; fact: FactName; value: FactValue; feedback: string }
+  | { kind: "location"; place: string; location: { lat: number; lon: number }; feedback: string; source?: Source }
+  | { kind: "fact"; place: string; fact: FactName; value: FactValue; feedback: string; source?: Source }
+  | { kind: "name"; place: string; name: string; feedback: string; source?: Source }
   /** Nothing to write: the PR body carries it for a person to read. */
   | { kind: "note"; place: string; feedback: string };
 
@@ -160,14 +180,21 @@ export function applyRules(input: RulesInput): RulesOutput {
 
   const pending = [...input.pending].sort(byReceived);
 
-  // Feedback about a place that is not in the data is refused, except new places.
+  // Feedback for a merged id goes to the record it was merged into. Feedback
+  // about a place that is not in the data is refused, except new places.
   const known: StoredFeedback[] = [];
   for (const item of pending) {
     const isNewPlace = item.type === "report" && item.report.kind === "new_place";
-    if (!isNewPlace && (item.place === null || !input.places.has(item.place))) {
-      decide(item, "refused", `place ${item.place ?? "(none)"} is not in the data`);
-    } else {
+    if (isNewPlace) {
       known.push(item);
+      continue;
+    }
+    const target = resolvePlace(item.place, input.places);
+    if (target === undefined) {
+      const merged = item.place !== null && input.places.get(item.place)?.status === "merged";
+      decide(item, "refused", merged ? `place ${item.place} was merged into a record that is not in the data` : `place ${item.place ?? "(none)"} is not in the data`);
+    } else {
+      known.push(target === item.place ? item : ({ ...item, place: target } as StoredFeedback));
     }
   }
 
@@ -266,6 +293,12 @@ export function applyRules(input: RulesInput): RulesOutput {
       for (const item of mine) {
         const at = time(item);
         const isReport = item.type === "report";
+
+        // The owner closed it for a while; the owner's dates decide, not reports.
+        if (place.status === "temporarily_closed") {
+          decide(item, "applied", "place is temporarily closed by its owner");
+          continue;
+        }
 
         if (isClosureEvidence(item)) {
           if (place.status === "closed") {
@@ -368,6 +401,16 @@ export function applyRules(input: RulesInput): RulesOutput {
         const at = time(item);
         const agreeing = [...open].filter((r) => r.report.value === value && inWindow(r, at));
         if (distinctDevices(agreeing) < 2) continue;
+        if (place.fact_sources[fact] === "owner") {
+          // The verified owner set this value. A person decides between them.
+          edits.push({ kind: "fact", place: placeId, fact, value, feedback: agreeing[0]!.id });
+          note(placeId, `${fact}: ${distinctDevices(agreeing)} devices report ${JSON.stringify(value)}, the owner set ${JSON.stringify(current())}`, false, agreeing);
+          for (const r of agreeing) {
+            open.delete(r);
+            decide(r, "needs_review", `${fact} was set by the owner, so a person decides`);
+          }
+          continue;
+        }
         setFact(value);
         note(
           placeId,
@@ -396,11 +439,13 @@ export function applyRules(input: RulesInput): RulesOutput {
       if (kind === "new_place" && item.location) {
         // The id comes from the feedback id, so running the same item again writes the same file.
         const id = `ocdb_${item.id.replace(/^fb_/, "")}`;
+        const picked = item.report.place_kind;
+        const pickedGroup = picked === undefined ? undefined : input.kinds?.get(picked);
         const draft: Place = {
           id,
           name: null,
-          kind: DRAFT_KIND,
-          group: "overnight",
+          kind: pickedGroup ? picked! : DRAFT_KIND,
+          group: pickedGroup ?? input.kinds?.get(DRAFT_KIND) ?? DRAFT_GROUP,
           location: { lat: roundCoord(item.location.lat), lon: roundCoord(item.location.lon) },
           osm: null,
           facts: {},
@@ -444,13 +489,19 @@ export function applyEdit(current: Place | undefined, edit: ReviewEdit, nowIso: 
   if (edit.kind === "new_place") return current ? undefined : edit.record;
   if (!current) return undefined;
   const next = structuredClone(current);
+  if (current.status === "merged") return undefined; // never write to a tombstone
+  const source = edit.source ?? "feedback";
   if (edit.kind === "location") {
     next.location = { ...edit.location };
-    next.fact_sources.location = "feedback";
+    next.fact_sources.location = source;
+  } else if (edit.kind === "name") {
+    next.name = edit.name;
+    next.fact_sources.name = source;
   } else {
     (next.facts as Record<string, FactValue>)[edit.fact] = edit.value;
-    next.fact_sources[edit.fact] = "feedback";
+    next.fact_sources[edit.fact] = source;
   }
+  if (source === "owner") next.owner_verified = true;
   if (JSON.stringify(next) === JSON.stringify(current)) return undefined;
   next.updated = nowIso;
   return next;

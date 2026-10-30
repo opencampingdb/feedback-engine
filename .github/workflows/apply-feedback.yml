@@ -7,7 +7,9 @@
 #   feedback/auto    automatic changes only, merges itself when CI passes
 #   feedback/review  changes and reports a person decides on, label needs-review
 # When a PR from a branch is already open, the run adds a commit and a comment
-# to it instead of opening another. The inbox moves are committed last, so a
+# to it instead of opening another. Owner claims and listings go to
+# feedback/review with an approval box each and the label owner-claim; the next
+# run reads the merged PR and approves the ticked ones. The inbox moves are committed last, so a
 # failed run is simply repeated: the apply script writes nothing it has
 # already written.
 #
@@ -149,13 +151,25 @@ jobs:
             fi
           done
 
+      - name: Read recent review PRs for owner approvals
+        env:
+          GH_TOKEN: ${{ steps.data-token.outputs.token }}
+          DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
+        run: |
+          gh pr list --repo "$DATA_REPO" --head feedback/review --state all --limit 30 \
+            --json number,state,body,comments > "$RUNNER_TEMP/review-prs.json"
+
       - name: Apply feedback
         id: apply
+        env:
+          APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
         run: >
           node engine/packages/apply/dist/cli.js
           --inbox inbox
           --data data-auto
           --review-data data-review
+          --review-prs "$RUNNER_TEMP/review-prs.json"
+          --bot-login "$APP_SLUG"
           --auto-pr-body "$RUNNER_TEMP/auto-pr-body.md"
           --review-pr-body "$RUNNER_TEMP/review-pr-body.md"
           --summary "$RUNNER_TEMP/summary.json"
@@ -190,6 +204,7 @@ jobs:
           DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
           BASE_BRANCH: ${{ inputs.data-base-branch }}
           PR_OPEN: ${{ steps.branches.outputs.review_open }}
+          OWNER_CLAIMS: ${{ steps.apply.outputs.owner_claims }}
           RUN_ID: ${{ github.run_id }}
         working-directory: data-review
         run: |
@@ -200,13 +215,18 @@ jobs:
             fi
             git push origin HEAD:refs/heads/feedback/review
             gh pr comment feedback/review --repo "$DATA_REPO" --body-file "$RUNNER_TEMP/review-pr-body.md"
+            if [ "$OWNER_CLAIMS" = "true" ]; then
+              gh pr edit feedback/review --repo "$DATA_REPO" --add-label owner-claim
+            fi
           else
             # A run whose only items are reports to read changes no file. The
             # empty commit still lets a PR carry them.
             git commit --allow-empty -m "Feedback for review (run ${RUN_ID})"
             git push --force origin HEAD:refs/heads/feedback/review
+            labels="needs-review"
+            if [ "$OWNER_CLAIMS" = "true" ]; then labels="needs-review,owner-claim"; fi
             gh pr create --repo "$DATA_REPO" --base "$BASE_BRANCH" --head feedback/review \
-              --title "Feedback: for a person to check" --label needs-review \
+              --title "Feedback: for a person to check" --label "$labels" \
               --body-file "$RUNNER_TEMP/review-pr-body.md"
           fi
 

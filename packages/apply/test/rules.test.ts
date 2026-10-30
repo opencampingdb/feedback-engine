@@ -59,6 +59,11 @@ function run(
     history: opts.history ?? [],
     places,
     reviews: (id) => (opts.reviews ?? []).filter((r) => r.place === id),
+    kinds: new Map([
+      ["campground", "overnight"],
+      ["free_camp", "overnight"],
+      ["picnic_site", "utility"],
+    ]),
   };
   const out = applyRules(input);
   const outcome = (item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.outcome;
@@ -416,5 +421,48 @@ describe("unknown places", () => {
     const out = run([r]);
     expect(out.outcome(r)).toBe("refused");
     expect(out.decisions[0]?.reason).toMatch(/not in the data/);
+  });
+});
+
+describe("merged places", () => {
+  const tombstone = () => place({ id: OTHER, status: "merged", merged_into: PLACE });
+
+  it("redirects feedback for a merged id to the place it was merged into", () => {
+    const item = closed(0, "dev-a");
+    const aimed = { ...item, place: OTHER } as StoredFeedback;
+    const out = run([aimed], { places: [tombstone(), place()] });
+    expect(out.after()?.status).toBe("reported_closed");
+    expect(out.after(OTHER)).toBeUndefined();
+    expect(out.outcome(aimed)).toBe("applied");
+  });
+
+  it("never writes to a tombstone whose target is missing", () => {
+    const aimed = { ...closed(0, "dev-a"), place: OTHER } as StoredFeedback;
+    const out = run([aimed], { places: [place({ id: OTHER, status: "merged", merged_into: "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZZ" })] });
+    expect(out.outcome(aimed)).toBe("refused");
+    expect(out.places.size).toBe(0);
+  });
+});
+
+describe("new place kind", () => {
+  const newPlace = (placeKind?: string) =>
+    ({
+      ...base(0, "dev-a", null),
+      type: "report",
+      location: { lat: -35.1, lon: 149.2 },
+      report: { kind: "new_place", ...(placeKind ? { place_kind: placeKind } : {}) },
+    }) as StoredFeedback;
+  const draftOf = (out: ReturnType<typeof run>) => {
+    const edit = out.edits[0];
+    return edit?.kind === "new_place" ? edit.record : undefined;
+  };
+
+  it("uses the kind the user picked, with its group from kinds.json", () => {
+    expect(draftOf(run([newPlace("picnic_site")]))).toMatchObject({ kind: "picnic_site", group: "utility" });
+  });
+
+  it("falls back to campground for a kind the data does not know", () => {
+    expect(draftOf(run([newPlace("spaceport")]))).toMatchObject({ kind: "campground", group: "overnight" });
+    expect(draftOf(run([newPlace()]))).toMatchObject({ kind: "campground", group: "overnight" });
   });
 });

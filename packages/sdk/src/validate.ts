@@ -10,8 +10,6 @@ import type {
   OwnerFacts,
   OwnerSubmission,
   OwnerUpdate,
-  PlaceGroup,
-  PlaceKind,
   ReportBody,
   ReportKind,
   ReviewBody,
@@ -29,35 +27,8 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   "new_place",
   "other",
 ];
-/** Every kind with its group (SPEC "Place record", plus `farm_stay` from "Owners"). */
-export const PLACE_GROUPS: Readonly<Record<PlaceKind, PlaceGroup>> = {
-  free_camp: "overnight",
-  paid_campground: "overnight",
-  caravan_park: "overnight",
-  national_park_campsite: "overnight",
-  state_forest_campsite: "overnight",
-  showground: "overnight",
-  campground: "overnight",
-  farm_stay: "overnight",
-  rest_area: "utility",
-  dump_point: "utility",
-  drinking_water_point: "utility",
-  public_toilet: "utility",
-  public_shower: "utility",
-  laundromat: "utility",
-  picnic_site: "utility",
-  information_centre: "services",
-  fuel: "services",
-  lpg_refill_swap: "services",
-  mechanic: "services",
-  attraction: "attraction",
-  lookout: "attraction",
-  swimming_spot: "attraction",
-  boat_ramp: "attraction",
-  hospital_emergency: "emergency",
-  ferry_terminal: "transport",
-};
-export const PLACE_KINDS = Object.keys(PLACE_GROUPS) as PlaceKind[];
+/** Shape of a kind code. The list itself is `data/schema/kinds.json`. */
+const KIND_CODE = /^[a-z][a-z_]{1,39}$/;
 
 export const MAX_TEXT_LENGTH = 2000;
 export const MAX_DESCRIPTION_LENGTH = 500;
@@ -216,6 +187,12 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
   }
   const note = checkText(value.note, "report.note", errors, false);
   if (note !== undefined) out.note = note;
+  if (value.place_kind !== undefined) {
+    if (kind !== "new_place") errors.push("report.place_kind is only allowed when report.kind is new_place");
+    else if (typeof value.place_kind !== "string" || !KIND_CODE.test(value.place_kind)) {
+      errors.push("report.place_kind must be a kind code from data/schema/kinds.json");
+    } else out.place_kind = value.place_kind;
+  }
   return out;
 }
 
