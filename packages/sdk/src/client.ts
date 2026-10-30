@@ -1,4 +1,15 @@
-import type { CheckBody, FeedbackSubmission, LatLon, ReportBody, ReviewBody } from "./types.js";
+import type {
+  AcceptedResponse,
+  CheckBody,
+  FeedbackSubmission,
+  LatLon,
+  OwnerClaimResponse,
+  OwnerContact,
+  OwnerListingSubmission,
+  OwnerUpdate,
+  ReportBody,
+  ReviewBody,
+} from "./types.js";
 import { validateSubmission } from "./validate.js";
 
 /** Storage the client keeps its queue and device id in. AsyncStorage matches this shape. */
@@ -68,10 +79,43 @@ export interface FlushResult {
   remaining: number;
 }
 
+export interface OwnerClaimInput {
+  place: string;
+  owner: OwnerContact;
+  /** https page on the owner's own website or Facebook page where they will show the code. */
+  proofUrl: string;
+  /** The owner ticked the box agreeing to the owner terms. */
+  termsAccepted: boolean;
+}
+
+export interface OwnerListingInput {
+  location: LatLon;
+  owner: OwnerContact;
+  proofUrl: string;
+  listing: OwnerListingSubmission["listing"];
+  termsAccepted: boolean;
+}
+
+export interface OwnerUpdateInput {
+  place: string;
+  update: OwnerUpdate;
+  termsAccepted: boolean;
+}
+
 export interface FeedbackClient {
   report(input: ReportInput): Promise<SubmitResult>;
   review(input: ReviewInput): Promise<SubmitResult>;
   check(input: CheckInput): Promise<SubmitResult>;
+  /**
+   * Claims an existing place for its owner. Sent at once, never queued, because
+   * the token in the answer is shown only once. Show `code` and `token` to the
+   * owner straight away.
+   */
+  ownerClaim(input: OwnerClaimInput): Promise<OwnerClaimResponse>;
+  /** Lists a private property (farm stay) that is not in the data yet. Sent at once. */
+  ownerListing(input: OwnerListingInput): Promise<OwnerClaimResponse>;
+  /** Sends an owner's change, with the token from their approved claim. Sent at once. */
+  ownerUpdate(token: string, input: OwnerUpdateInput): Promise<AcceptedResponse>;
   /** Sends queued items that are due. Call when the app comes to the foreground or regains a connection. */
   flush(): Promise<FlushResult>;
   /** Number of items waiting to be sent. */
@@ -82,6 +126,29 @@ export class ConsentRequiredError extends Error {
   constructor() {
     super("Feedback needs consent: true, given after the user agreed to CONSENT_TEXT");
     this.name = "ConsentRequiredError";
+  }
+}
+
+export class OwnerTermsRequiredError extends Error {
+  constructor() {
+    super("Owner submissions need termsAccepted: true, given after the owner agreed to the owner terms");
+    this.name = "OwnerTermsRequiredError";
+  }
+}
+
+/** The intake refused an owner submission, or could not be reached (httpStatus 0). Nothing was queued. */
+export class OwnerRequestError extends Error {
+  readonly httpStatus: number;
+  readonly details: string[];
+  constructor(httpStatus: number, details: string[] = []) {
+    super(
+      httpStatus === 0
+        ? "The intake could not be reached. Nothing was sent; try again when online."
+        : `The intake refused the owner submission with ${httpStatus}${details.length ? `: ${details.join("; ")}` : ""}`,
+    );
+    this.name = "OwnerRequestError";
+    this.httpStatus = httpStatus;
+    this.details = details;
   }
 }
 
@@ -268,7 +335,7 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
       const queue = await readQueue();
       const item: QueueItem = {
         localId: randomUUID(),
-        body: checked.value,
+        body: checked.value as FeedbackSubmission,
         queuedAt: now(),
         attempts: 0,
         nextAttemptAt: 0,
@@ -291,7 +358,75 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
     return { status: "rejected", httpStatus: outcome.httpStatus } as const;
   }
 
+  /** Sends an owner submission straight away and returns the intake's answer. */
+  async function sendOwner(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (body.terms_accepted !== true) throw new OwnerTermsRequiredError();
+    const full = { ...body, device: await serial(device), app_version: appVersion };
+    const checked = validateSubmission(full);
+    if (!checked.ok) throw new FeedbackValidationError(checked.errors);
+    let res: Awaited<ReturnType<FetchLike>>;
+    try {
+      res = await doFetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-app-key": appKey },
+        body: JSON.stringify(checked.value),
+      });
+    } catch {
+      throw new OwnerRequestError(0);
+    }
+    let answer: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = await res.json();
+      if (parsed && typeof parsed === "object") answer = parsed as Record<string, unknown>;
+    } catch {
+      // Leave the answer empty.
+    }
+    if (res.status < 200 || res.status >= 300) {
+      const details = Array.isArray(answer.details) ? answer.details.map(String) : [];
+      throw new OwnerRequestError(res.status, details);
+    }
+    return answer;
+  }
+
+  const claimResponse = (answer: Record<string, unknown>): OwnerClaimResponse => ({
+    id: String(answer.id ?? ""),
+    code: String(answer.code ?? ""),
+    token: String(answer.token ?? ""),
+  });
+
   return {
+    ownerClaim: async (input) =>
+      claimResponse(
+        await sendOwner({
+          type: "owner_claim",
+          place: input.place,
+          terms_accepted: input.termsAccepted,
+          owner: input.owner,
+          claim: { proof_url: input.proofUrl },
+        }),
+      ),
+    ownerListing: async (input) =>
+      claimResponse(
+        await sendOwner({
+          type: "owner_listing",
+          place: null,
+          location: input.location,
+          terms_accepted: input.termsAccepted,
+          owner: input.owner,
+          claim: { proof_url: input.proofUrl },
+          listing: input.listing,
+        }),
+      ),
+    ownerUpdate: async (token, input) => {
+      const answer = await sendOwner({
+        type: "owner_update",
+        place: input.place,
+        terms_accepted: input.termsAccepted,
+        token,
+        update: input.update,
+      });
+      return { id: String(answer.id ?? "") };
+    },
     report: (input) => submit({ ...input }, "report"),
     review: (input) => submit({ ...input }, "review"),
     check: (input) => submit({ ...input }, "check"),

@@ -1,4 +1,12 @@
-import { stripContactDetails, validateSubmission, type FeedbackSubmission, type StoredFeedback } from "@opencampingdb/feedback";
+import {
+  isOwnerSubmission,
+  stripContactDetails,
+  validateSubmission,
+  type FeedbackSubmission,
+  type OwnerSubmission,
+  type StoredFeedback,
+  type StoredOwnerSubmission,
+} from "@opencampingdb/feedback";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
 import { checkAndCount, type KVLike } from "./ratelimit.js";
 import { ulid } from "./ulid.js";
@@ -77,6 +85,49 @@ export async function hashDevice(salt: string, device: string): Promise<string> 
     .join("");
 }
 
+const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+function base64url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** SHA-256 of the token text, as lower case hex. */
+export async function hashToken(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Code and token for a claim or listing. The code (`OCDB-` and 4 Crockford
+ * characters) goes on the owner's own page. The token is 32 random bytes,
+ * base64url, returned once and stored only as its SHA-256.
+ */
+export function newOwnerSecrets(randomBytes: (n: number) => Uint8Array): { code: string; token: string } {
+  const codeBytes = randomBytes(4);
+  const code = `OCDB-${[...codeBytes].map((b) => CROCKFORD[b % 32]).join("")}`;
+  return { code, token: base64url(randomBytes(32)) };
+}
+
+/**
+ * The stored form of an owner submission. Contact details stay (the inbox is
+ * private). A claim or listing gains the code and token hash; an update has its
+ * token replaced by the hash.
+ */
+async function storeOwner(
+  submission: OwnerSubmission,
+  fields: { id: string; received: string; app: string; device: string },
+  secrets: { code: string; token: string } | undefined,
+): Promise<StoredOwnerSubmission> {
+  const { device: _device, ...rest } = submission;
+  if (rest.type === "owner_update") {
+    const { token, ...withoutToken } = rest;
+    return { ...fields, ...withoutToken, token_sha256: await hashToken(token) };
+  }
+  return { ...fields, ...rest, code: secrets!.code, token_sha256: await hashToken(secrets!.token) };
+}
+
 /** Removes contact details from every free text field. */
 export function sanitise(submission: FeedbackSubmission): FeedbackSubmission {
   if (submission.type === "report" && submission.report.note !== undefined) {
@@ -137,11 +188,49 @@ export function createHandler(deps: Deps) {
     const day = received.slice(0, 10);
     const device = await hashDevice(env.DEVICE_SALT, checked.value.device);
 
-    const limit = await checkAndCount(env.RATE_LIMIT, day, device, app.app, app.daily_limit, nowMs);
+    const submission = checked.value;
+    const isOwner = isOwnerSubmission(submission);
+    const limit = await checkAndCount(
+      env.RATE_LIMIT,
+      day,
+      device,
+      app.app,
+      app.daily_limit,
+      nowMs,
+      isOwner ? "owner" : "feedback",
+    );
     if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
 
     const id = `fb_${ulid(nowMs, deps.randomBytes)}`;
-    const { type, place, location, app_version, consent, ...rest } = sanitise(checked.value);
+    const config: GitHubAppConfig = {
+      appId: env.GH_APP_ID,
+      privateKeyPem: env.GH_APP_PRIVATE_KEY,
+      installationId: env.GH_INSTALLATION_ID,
+      repo: env.INBOX_REPO,
+    };
+    const write = (stored: unknown) =>
+      github.createFile(
+        config,
+        env.INBOX_BRANCH ?? "main",
+        `pending/${day}/${id}.json`,
+        `${JSON.stringify(stored, null, 2)}\n`,
+        `Add ${id}`,
+      );
+
+    if (isOwner) {
+      const random = deps.randomBytes ?? ((n: number) => crypto.getRandomValues(new Uint8Array(n)));
+      const secrets = submission.type === "owner_update" ? undefined : newOwnerSecrets(random);
+      const stored = await storeOwner(submission, { id, received, app: app.app, device }, secrets);
+      try {
+        await write(stored);
+      } catch {
+        return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
+      }
+      // The token is in this answer only. It is never stored or logged.
+      return json(202, secrets ? { id, code: secrets.code, token: secrets.token } : { id }, cors);
+    }
+
+    const { type, place, location, app_version, consent, ...rest } = sanitise(submission as FeedbackSubmission);
     const stored = {
       id,
       received,
@@ -157,20 +246,8 @@ export function createHandler(deps: Deps) {
       ...("check" in rest ? { check: rest.check } : {}),
     } as StoredFeedback;
 
-    const config: GitHubAppConfig = {
-      appId: env.GH_APP_ID,
-      privateKeyPem: env.GH_APP_PRIVATE_KEY,
-      installationId: env.GH_INSTALLATION_ID,
-      repo: env.INBOX_REPO,
-    };
     try {
-      await github.createFile(
-        config,
-        env.INBOX_BRANCH ?? "main",
-        `pending/${day}/${id}.json`,
-        `${JSON.stringify(stored, null, 2)}\n`,
-        `Add ${id}`,
-      );
+      await write(stored);
     } catch {
       return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
     }

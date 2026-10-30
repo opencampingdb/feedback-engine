@@ -11,7 +11,8 @@ const NOW = new Date("2026-10-30T00:00:00Z");
 const place: Place = {
   id: PLACE,
   name: "Lake Eppalock Camp",
-  kind: "camp_site",
+  kind: "free_camp",
+  group: "overnight",
   location: { lat: -36.85, lon: 144.55 },
   osm: { type: "node", id: 123456, version: 7 },
   facts: { power: false },
@@ -80,7 +81,7 @@ describe("run", () => {
 
     const summary = await run({ inbox, data, now: NOW });
 
-    expect(summary.counts).toEqual({ applied: 3, refused: 1, needs_review: 0, waiting: 1 });
+    expect(summary.counts).toEqual({ applied: 3, refused: 1, needs_review: 0, waiting: 1, awaiting_approval: 0 });
     expect(summary.auto_changed).toBe(true);
     expect(summary.review_changed).toBe(false);
     expect([...summary.auto_files].sort()).toEqual([`places/za/${PLACE}.json`, `reviews/${PLACE}.ndjson`]);

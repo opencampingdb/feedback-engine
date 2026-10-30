@@ -96,7 +96,7 @@ Install it on only `inbox` and `data`. The workflow asks for a token limited to 
 ## 8. Prepare the data repository
 
 - In Settings, General, turn on **Allow auto-merge**.
-- Create a label named `needs-review`.
+- Create the labels `needs-review` and `owner-claim`.
 - Protect `main` with the required check the data repository's CI reports, so auto-merge waits for it.
 
 ## 9. Add the workflow to the inbox

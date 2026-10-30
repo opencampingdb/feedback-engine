@@ -5,6 +5,8 @@ export interface KVLike {
 }
 
 export const DEVICE_DAILY_LIMIT = 20;
+/** Owner claims, listings and updates, per hashed device per day (SPEC "Owners"). */
+export const OWNER_DAILY_LIMIT = 5;
 const TTL_SECONDS = 2 * 24 * 60 * 60;
 
 export interface RateLimitResult {
@@ -32,14 +34,17 @@ export async function checkAndCount(
   app: string,
   appDailyLimit: number,
   nowMs: number,
+  kind: "feedback" | "owner" = "feedback",
 ): Promise<RateLimitResult> {
-  const deviceKey = `d:${day}:${deviceHash}`;
+  // Owner submissions have their own, smaller device counter.
+  const deviceKey = kind === "owner" ? `o:${day}:${deviceHash}` : `d:${day}:${deviceHash}`;
+  const deviceLimit = kind === "owner" ? OWNER_DAILY_LIMIT : DEVICE_DAILY_LIMIT;
   const appKey = `a:${day}:${app}`;
   const [deviceCount, appCount] = await Promise.all([kv.get(deviceKey), kv.get(appKey)]);
   const d = Number(deviceCount ?? 0);
   const a = Number(appCount ?? 0);
   const retryAfter = secondsToMidnightUtc(nowMs);
-  if (d >= DEVICE_DAILY_LIMIT || a >= appDailyLimit) return { allowed: false, retryAfter };
+  if (d >= deviceLimit || a >= appDailyLimit) return { allowed: false, retryAfter };
   await Promise.all([
     kv.put(deviceKey, String(d + 1), { expirationTtl: TTL_SECONDS }),
     kv.put(appKey, String(a + 1), { expirationTtl: TTL_SECONDS }),
