@@ -31,7 +31,7 @@ const WINDOW_MS = WINDOW_DAYS * DAY_MS;
 export const REVIEWED_FACTS: ReadonlySet<FactName> = new Set<FactName>(["website", "phone"]);
 
 /** Kind given to a draft record for a `new_place` report until a person sets it. */
-export const DRAFT_KIND = "camp_site";
+export const DRAFT_KIND = "campground";
 
 export type Outcome = "applied" | "refused" | "needs_review" | "waiting";
 
@@ -400,6 +400,7 @@ export function applyRules(input: RulesInput): RulesOutput {
           id,
           name: null,
           kind: DRAFT_KIND,
+          group: "overnight",
           location: { lat: roundCoord(item.location.lat), lon: roundCoord(item.location.lon) },
           osm: null,
           facts: {},

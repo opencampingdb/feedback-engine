@@ -5,6 +5,8 @@ export {
   backoffDelay,
   ConsentRequiredError,
   FeedbackValidationError,
+  OwnerRequestError,
+  OwnerTermsRequiredError,
 } from "./client.js";
 export type {
   CheckInput,
@@ -12,6 +14,9 @@ export type {
   FeedbackClientOptions,
   FetchLike,
   FlushResult,
+  OwnerClaimInput,
+  OwnerListingInput,
+  OwnerUpdateInput,
   ReportInput,
   ReviewInput,
   StorageAdapter,
@@ -20,11 +25,17 @@ export type {
 export {
   FACTS,
   FEEDBACK_TYPES,
+  MAX_DESCRIPTION_LENGTH,
   MAX_TEXT_LENGTH,
+  OWNER_FACTS,
+  OWNER_TYPES,
+  PLACE_GROUPS,
   PLACE_KINDS,
   REPORT_KINDS,
   isFactName,
+  isOwnerSubmission,
   isPlaceId,
+  isPublicHttpsUrl,
   isValidFactValue,
   validateSubmission,
 } from "./validate.js";
