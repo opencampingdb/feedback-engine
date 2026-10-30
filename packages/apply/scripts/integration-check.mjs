@@ -8,16 +8,23 @@
  * 2. Writes a set of inbox submissions covering every rule.
  * 3. Runs apply with separate automatic and review checkouts, then runs
  *    pipeline.validate on both. Every file apply writes must pass.
- * 4. Runs apply a second time and checks that nothing changes.
+ * 4. Owner flow: a claim and a listing go to review, a ticked and merged
+ *    review PR approves them, and an owner update follows. Validates both
+ *    checkouts again. Proof pages are never fetched: a fake check finds the code.
+ * 5. Runs apply a second time and checks that nothing changes.
  *
  * Usage (from the feedback-engine root, after `npm run build`):
- *   node packages/apply/scripts/integration-check.mjs [--data-repo ../data] [--python python]
+ *   node packages/apply/scripts/integration-check.mjs [--data-repo ../data] [--data-ref owners] [--python python]
+ *
+ * --data-ref reads pipeline/ and schema/ from that commit or branch with
+ * `git archive`, which leaves the data repository's working tree alone.
  *
  * The Python must have the data repository's requirements.txt installed
  * (osmium and jsonschema). Exits 0 when every check passes.
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -29,11 +36,12 @@ const engineRoot = resolve(here, "../../..");
 const { values } = parseArgs({
   options: {
     "data-repo": { type: "string", default: resolve(engineRoot, "../data") },
+    "data-ref": { type: "string" },
     python: { type: "string", default: process.env.PYTHON ?? "python" },
     keep: { type: "boolean", default: false },
   },
 });
-const dataRepo = resolve(values["data-repo"]);
+let dataRepo = resolve(values["data-repo"]);
 const python = values.python;
 const { run } = await import(new URL("../dist/run.js", import.meta.url).href);
 
@@ -72,10 +80,26 @@ async function copyData(to) {
 }
 
 const root = await mkdtemp(join(tmpdir(), "ocdb-integration-"));
-say(`Data repository: ${dataRepo}`);
+say(`Data repository: ${dataRepo}${values["data-ref"] ? ` at ${values["data-ref"]}` : ""}`);
 say(`Working folder:  ${root}`);
 
+// Never fetch a real proof page from a test run.
+const checkProof = async (url, code) => ({ found: true, checked: new Date().toISOString(), detail: `code ${code} found at ${url}` });
+
 try {
+  if (values["data-ref"]) {
+    const exported = join(root, "data-export");
+    await mkdir(exported, { recursive: true });
+    const tarFile = join(root, "data.tar");
+    const archive = spawnSync("git", ["-C", dataRepo, "archive", "--format=tar", "-o", tarFile, values["data-ref"], "pipeline", "schema"], { encoding: "utf8" });
+    if (archive.status !== 0) throw new Error(`git archive failed: ${archive.stderr}`);
+    // Relative paths: GNU tar reads "C:" in a Windows path as a remote host.
+    const untar = spawnSync("tar", ["-xf", "data.tar", "-C", "data-export"], { cwd: root, encoding: "utf8" });
+    if (untar.status !== 0) throw new Error(`tar failed: ${untar.stderr}`);
+    const commit = spawnSync("git", ["-C", dataRepo, "rev-parse", "--short", values["data-ref"]], { encoding: "utf8" });
+    say(`Exported pipeline and schema from ${values["data-ref"]} (${commit.stdout.trim()})`);
+    dataRepo = exported;
+  }
   // 1. Place records from the fixtures.
   const base = join(root, "data-base");
   await copyData(base);
@@ -134,7 +158,7 @@ try {
   const review = join(root, "data-review");
   await cp(base, auto, { recursive: true });
   await cp(base, review, { recursive: true });
-  const summary = await run({ inbox, data: auto, reviewData: review, now: new Date("2026-10-30T00:00:00Z") });
+  const summary = await run({ inbox, data: auto, reviewData: review, now: new Date("2026-10-30T00:00:00Z"), checkProof });
   say(`\napply: ${JSON.stringify(summary.counts)}`);
   say(`automatic files: ${summary.auto_files.join(", ") || "(none)"}`);
   say(`review files:    ${summary.review_files.join(", ") || "(none)"}\n`);
@@ -146,9 +170,54 @@ try {
     say(result.out.split("\n").map((l) => `      ${l}`).join("\n"));
   }
 
-  // 4. A second run with no new inbox files changes nothing.
+  // 4. Owners: a claim and a listing, approved by merging the review PR, then an update.
+  const token = "q2Vb7Rk1cW9yZ3hVdm5Pb2pQTlR4Y0FyZ0lCd2pUcEs";
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const owner = { name: "Sam Owner", email: "sam@example.com" };
+  async function submitOwner(body, minute) {
+    n += 1;
+    const id = `fb_01JC${String(n).padStart(22, "0")}`;
+    const item = { id, received: `${day}T01:${String(minute).padStart(2, "0")}:00Z`, app: "owner-page", device: "owner0000000001", app_version: "1.0.0", terms_accepted: true, ...body };
+    await mkdir(join(inbox, "pending", day), { recursive: true });
+    await writeFile(join(inbox, "pending", day, `${id}.json`), `${JSON.stringify(item, null, 2)}\n`);
+    return id;
+  }
+  await submitOwner({ type: "owner_claim", place: first.id, owner, claim: { proof_url: "https://riverbend.example/about" }, code: "OCDB-7KQ2", token_sha256: tokenHash }, 1);
+  const listingId = await submitOwner({
+    type: "owner_listing",
+    place: null,
+    location: { lat: -37.3, lon: 142.3 },
+    owner,
+    claim: { proof_url: "https://farm.example/stay" },
+    listing: { name: "Riverbend Farm Stay", description: "Six grassy sites on a working sheep farm.", facts: { booking_url: "https://farm.example/book", toilets: true } },
+    code: "OCDB-AB12",
+    token_sha256: tokenHash,
+  }, 2);
+  const sent = await run({ inbox, data: auto, reviewData: review, now: new Date("2026-10-30T02:00:00Z"), checkProof });
+  check(sent.owner_claims && sent.counts.awaiting_approval === 2, "owner claim and listing sent to the review PR");
+  check(!sent.review_pr_body.includes("sam@example.com") && !sent.review_pr_body.includes("Sam Owner"), "the review PR holds no owner name or email");
+  const merged = { number: 1, state: "MERGED", body: sent.review_pr_body.replace(/^- \[ \] Approve owner/gm, "- [x] Approve owner"), comments: [] };
+  const approved = await run({ inbox, data: auto, reviewData: review, now: new Date("2026-10-30T03:00:00Z"), checkProof, reviewPrs: [merged] });
+  check(approved.auto_changed, "approval writes owner_verified and the farm stay");
+  await submitOwner({ type: "owner_update", place: first.id, token_sha256: tokenHash, update: {
+    facts: { power: true, booking_url: "https://riverbend.example/book" },
+    description: "Shady sites by the river, visited 2026-10.",
+    status: "temporarily_closed",
+    reopens: "2026-12-01",
+  } }, 3);
+  const updated = await run({ inbox, data: auto, reviewData: review, now: new Date("2026-10-30T04:00:00Z"), checkProof });
+  check(updated.counts.applied === 1, "owner update applied");
+  const farmId = `ocdb_${listingId.slice(3)}`;
+  say(`owner files: ${[...approved.auto_files, ...updated.auto_files].join(", ")} (farm stay ${farmId})`);
+  for (const [name, dir] of [["automatic", auto], ["review", review]]) {
+    const result = py(["-m", "pipeline.validate", "--root", "."], dir);
+    check(result.code === 0, `pipeline.validate on the ${name} checkout after the owner flow`);
+    say(result.out.split("\n").map((l) => `      ${l}`).join("\n"));
+  }
+
+  // 5. A second run with no new inbox files changes nothing.
   const before = { auto: await snapshot(auto), review: await snapshot(review), inbox: await snapshot(inbox) };
-  const again = await run({ inbox, data: auto, reviewData: review, now: new Date("2026-10-30T01:00:00Z") });
+  const again = await run({ inbox, data: auto, reviewData: review, now: new Date("2026-10-30T05:00:00Z"), checkProof, reviewPrs: [merged] });
   const after = { auto: await snapshot(auto), review: await snapshot(review), inbox: await snapshot(inbox) };
   check(
     !again.auto_changed && !again.review_changed && !again.inbox_changed && JSON.stringify(before) === JSON.stringify(after),

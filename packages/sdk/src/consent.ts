@@ -16,3 +16,17 @@ export const CONSENT_TEXT =
 
 /** Link to the licence details, for a "Learn more" button. */
 export const CONSENT_LEARN_MORE_URL = "https://github.com/opencampingdb/data#licence";
+
+/** Where the full owner terms are published. */
+export const OWNER_TERMS_URL = "https://opencampingdb.github.io/owners/terms.html";
+
+/**
+ * Short summary of the owner terms, to show next to the tick box on any form
+ * that sends an owner claim, listing or update. Link to OWNER_TERMS_URL for
+ * the full text.
+ */
+export const OWNER_TERMS_SUMMARY =
+  "You run this place, or are allowed to act for whoever does, and it holds any council or other approvals it needs. " +
+  "What you send about the place (its facts, description, booking details and dates) is published in Open Camping DB " +
+  "under the Open Database Licence (ODbL 1.0), so anyone may use and share it. Your name and email stay private: we use " +
+  "them only to check your claim and contact you about this place.";
