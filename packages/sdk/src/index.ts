@@ -29,8 +29,6 @@ export {
   MAX_TEXT_LENGTH,
   OWNER_FACTS,
   OWNER_TYPES,
-  PLACE_GROUPS,
-  PLACE_KINDS,
   REPORT_KINDS,
   isFactName,
   isOwnerSubmission,

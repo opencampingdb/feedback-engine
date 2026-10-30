@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import type { StoredFeedback } from "@opencampingdb/feedback";
+import { isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
+import type { AwaitingClaim, OwnerRecord } from "./owners.js";
 import type { Decision } from "./rules.js";
 import { dumpPlace, dumpReviewLine, placePath, reviewPath } from "./serialise.js";
 import type { Place, Review } from "./types.js";
@@ -9,7 +10,7 @@ export interface PendingFile {
   path: string;
   /** The `<yyyy-mm-dd>` folder it sits in. */
   day: string;
-  item: StoredFeedback;
+  item: StoredSubmission;
 }
 
 const DAY_FOLDER = /^\d{4}-\d{2}-\d{2}$/;
@@ -36,7 +37,7 @@ async function readFeedbackFolder(root: string, day: string): Promise<PendingFil
   for (const name of (await readdir(folder)).sort()) {
     if (!FEEDBACK_FILE.test(name)) continue;
     const path = join(folder, name);
-    const item = JSON.parse(await readFile(path, "utf8")) as StoredFeedback;
+    const item = JSON.parse(await readFile(path, "utf8")) as StoredSubmission;
     out.push({ path, day, item });
   }
   return out;
@@ -56,9 +57,69 @@ export async function readHistory(inbox: string, sinceDay: string): Promise<Stor
   const out: StoredFeedback[] = [];
   for (const day of await dayFolders(root)) {
     if (day < sinceDay) continue;
-    for (const file of await readFeedbackFolder(root, day)) out.push(file.item);
+    for (const file of await readFeedbackFolder(root, day)) {
+      if (!isOwnerSubmission(file.item)) out.push(file.item as StoredFeedback);
+    }
   }
   return out;
+}
+
+const PLACE_FILE = /^ocdb_[0-9A-HJKMNP-TV-Z]{26}\.json$/;
+
+async function readJsonFolder<T>(folder: string, name: RegExp): Promise<T[]> {
+  if (!(await exists(folder))) return [];
+  const out: T[] = [];
+  for (const file of (await readdir(folder)).sort()) {
+    if (name.test(file)) out.push(JSON.parse(await readFile(join(folder, file), "utf8")) as T);
+  }
+  return out;
+}
+
+/** Approved owners: `owners/<place id>.json`. */
+export async function readOwners(inbox: string): Promise<Map<string, OwnerRecord>> {
+  const records = await readJsonFolder<OwnerRecord>(join(inbox, "owners"), PLACE_FILE);
+  return new Map(records.map((r) => [r.place, r]));
+}
+
+/** Writes owner records, replacing any earlier owner of the same place. */
+export async function writeOwners(inbox: string, owners: Iterable<OwnerRecord>): Promise<number> {
+  let written = 0;
+  for (const owner of owners) {
+    await mkdir(join(inbox, "owners"), { recursive: true });
+    await writeFile(join(inbox, "owners", `${owner.place}.json`), `${JSON.stringify(owner, null, 2)}\n`, "utf8");
+    written += 1;
+  }
+  return written;
+}
+
+/** Claims and listings waiting for a person: `owner-claims/<claim id>.json`. */
+export async function readAwaiting(inbox: string): Promise<AwaitingClaim[]> {
+  return readJsonFolder<AwaitingClaim>(join(inbox, "owner-claims"), FEEDBACK_FILE);
+}
+
+/**
+ * Moves decided claims out of `owner-claims/` to `applied/` (approved) or
+ * `refused/`, in the day folder the claim arrived in, with the outcome.
+ */
+export async function settleAwaiting(
+  inbox: string,
+  approvals: readonly { claim: string; outcome: "approved" | "refused"; reason: string }[],
+  runAt: string,
+): Promise<number> {
+  let moved = 0;
+  for (const a of approvals) {
+    const source = join(inbox, "owner-claims", `${a.claim}.json`);
+    if (!(await exists(source))) continue;
+    const waiting = JSON.parse(await readFile(source, "utf8")) as AwaitingClaim;
+    const folder = a.outcome === "approved" ? "applied" : "refused";
+    const target = join(inbox, folder, waiting.item.received.slice(0, 10), `${a.claim}.json`);
+    await mkdir(dirname(target), { recursive: true });
+    const withOutcome = { ...waiting.item, proof: waiting.proof, outcome: { result: a.outcome, reason: a.reason, run: runAt } };
+    await writeFile(target, `${JSON.stringify(withOutcome, null, 2)}\n`, "utf8");
+    await rm(source);
+    moved += 1;
+  }
+  return moved;
 }
 
 /** Moves each decided pending file to `applied/` or `refused/`, adding the outcome. Waiting files stay. */
@@ -67,12 +128,24 @@ export async function moveDecided(
   files: readonly PendingFile[],
   decisions: readonly Decision[],
   runAt: string,
+  awaiting: readonly AwaitingClaim[] = [],
 ): Promise<number> {
   const byId = new Map(decisions.map((d) => [d.id, d]));
+  const waitingFor = new Map(awaiting.map((a) => [a.item.id, a]));
   let moved = 0;
   for (const file of files) {
     const decision = byId.get(file.item.id);
     if (!decision || decision.outcome === "waiting") continue;
+    const claim = waitingFor.get(file.item.id);
+    if (decision.outcome === "awaiting_approval" && claim) {
+      // Waits for a person in owner-claims/, out of the day folders.
+      const target = join(inbox, "owner-claims", basename(file.path));
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, `${JSON.stringify(claim, null, 2)}\n`, "utf8");
+      await rm(file.path);
+      moved += 1;
+      continue;
+    }
     const folder = decision.outcome === "refused" ? "refused" : "applied";
     const target = join(inbox, folder, file.day, basename(file.path));
     await mkdir(dirname(target), { recursive: true });
@@ -110,6 +183,14 @@ export class DataRepo {
     await walk(join(this.root, "places"));
     this.#index = index;
     return index;
+  }
+
+  /** Kind code to group, from `schema/kinds.json`. Undefined when the file is missing. */
+  async kinds(): Promise<Map<string, string> | undefined> {
+    const path = join(this.root, "schema", "kinds.json");
+    if (!(await exists(path))) return undefined;
+    const file = JSON.parse(await readFile(path, "utf8")) as { kinds?: { code: string; group: string }[] };
+    return new Map((file.kinds ?? []).map((k) => [k.code, k.group]));
   }
 
   /** Loads the given place records. Ids with no record are left out. */

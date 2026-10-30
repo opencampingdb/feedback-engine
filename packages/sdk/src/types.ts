@@ -15,37 +15,14 @@ export type ReportKind =
   | "other";
 
 /**
- * Place kinds: the 22 OTWD site types (vocabulary 1.0.0), plus the Open
- * Camping DB extensions `campground`, `picnic_site` and `farm_stay`.
+ * A place kind code from `data/schema/kinds.json` in the data repository (the
+ * OTWD site types plus the Open Camping DB extensions). The list lives there,
+ * not here, so this package does not need a release when it changes.
  */
-export type PlaceKind =
-  | "free_camp"
-  | "paid_campground"
-  | "caravan_park"
-  | "national_park_campsite"
-  | "state_forest_campsite"
-  | "showground"
-  | "campground"
-  | "farm_stay"
-  | "rest_area"
-  | "dump_point"
-  | "drinking_water_point"
-  | "public_toilet"
-  | "public_shower"
-  | "laundromat"
-  | "picnic_site"
-  | "information_centre"
-  | "fuel"
-  | "lpg_refill_swap"
-  | "mechanic"
-  | "attraction"
-  | "lookout"
-  | "swimming_spot"
-  | "boat_ramp"
-  | "hospital_emergency"
-  | "ferry_terminal";
+export type PlaceKind = string;
 
-export type PlaceGroup = "overnight" | "utility" | "services" | "attraction" | "emergency" | "transport";
+/** A kind's group, also from `data/schema/kinds.json`. */
+export type PlaceGroup = string;
 
 export type PetsValue = "yes" | "no" | "leashed";
 export type AccessValue = "2wd" | "awd" | "4wd" | "unknown";
@@ -97,6 +74,12 @@ export interface ReportBody {
   value?: FactValue;
   /** Free text, up to 2,000 characters. */
   note?: string;
+  /**
+   * Only on `new_place`: the kind the user picked, a code from
+   * `data/schema/kinds.json`. Apply falls back to `campground` for a code the
+   * data does not know.
+   */
+  place_kind?: string;
 }
 
 export interface ReviewBody {

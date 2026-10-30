@@ -6,8 +6,6 @@ import {
   OWNER_TERMS_URL,
   OwnerRequestError,
   OwnerTermsRequiredError,
-  PLACE_GROUPS,
-  PLACE_KINDS,
   validateSubmission,
   type FetchLike,
   type StorageAdapter,
@@ -46,15 +44,26 @@ function errorsOf(body: unknown): string {
   return r.ok ? "" : r.errors.join(" | ");
 }
 
-describe("kinds", () => {
-  it("lists the OTWD kinds, the two extensions and farm_stay, each with a group", () => {
-    expect(PLACE_KINDS).toHaveLength(25);
-    expect(PLACE_KINDS).toContain("campground");
-    expect(PLACE_KINDS).toContain("farm_stay");
-    expect(PLACE_KINDS).not.toContain("camp_site");
-    expect(PLACE_GROUPS.farm_stay).toBe("overnight");
-    expect(PLACE_GROUPS.picnic_site).toBe("utility");
-    expect(Object.keys(PLACE_GROUPS).sort()).toEqual([...PLACE_KINDS].sort());
+describe("new place kind", () => {
+  const newPlace = {
+    type: "report",
+    place: null,
+    location: { lat: -36.85, lon: 144.55 },
+    device: DEVICE,
+    app_version: "1.0.0",
+    consent: true,
+  };
+
+  it("accepts a kind code the user picked", () => {
+    const r = validateSubmission({ ...newPlace, report: { kind: "new_place", place_kind: "free_camp" } });
+    expect(r).toMatchObject({ ok: true, value: { report: { place_kind: "free_camp" } } });
+  });
+
+  it("refuses a kind that is not a code, or on another report kind", () => {
+    expect(errorsOf({ ...newPlace, report: { kind: "new_place", place_kind: "Free Camp!" } })).toContain("place_kind");
+    expect(errorsOf({ ...newPlace, place: PLACE, location: undefined, report: { kind: "closed", place_kind: "free_camp" } })).toContain(
+      "place_kind is only allowed",
+    );
   });
 });
 

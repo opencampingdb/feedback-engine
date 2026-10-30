@@ -1,17 +1,22 @@
 #!/usr/bin/env node
-import { appendFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
+import type { ReviewPr } from "./owners.js";
 import { run } from "./run.js";
 
 const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>]
                   [--auto-pr-body <file>] [--review-pr-body <file>]
+                  [--review-prs <file>] [--bot-login <login>]
                   [--summary <file>] [--now <ISO time>]
 
 Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
 tree when left out). Decided items move to <inbox>/applied or <inbox>/refused.
-When GITHUB_OUTPUT is set, also writes auto_changed, review_changed and
-inbox_changed as step outputs.`;
+--review-prs is JSON from \`gh pr list --head feedback/review --state all
+--json number,state,body,comments\`; ticked owner claim boxes in merged PRs
+approve those claims. Only comments by --bot-login count.
+When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
+owner_claims and inbox_changed as step outputs.`;
 
 async function main(): Promise<number> {
   const { values } = parseArgs({
@@ -21,6 +26,8 @@ async function main(): Promise<number> {
       "review-data": { type: "string" },
       "auto-pr-body": { type: "string" },
       "review-pr-body": { type: "string" },
+      "review-prs": { type: "string" },
+      "bot-login": { type: "string", multiple: true },
       summary: { type: "string" },
       now: { type: "string" },
       help: { type: "boolean" },
@@ -36,9 +43,14 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  const reviewPrs = values["review-prs"]
+    ? (JSON.parse(await readFile(values["review-prs"], "utf8")) as ReviewPr[])
+    : undefined;
   const summary = await run({
     inbox: values.inbox,
     data: values.data,
+    ...(reviewPrs ? { reviewPrs } : {}),
+    ...(values["bot-login"] ? { botLogins: values["bot-login"] } : {}),
     ...(values["review-data"] ? { reviewData: values["review-data"] } : {}),
     ...(now ? { now } : {}),
   });
@@ -51,13 +63,15 @@ async function main(): Promise<number> {
     const lines = [
       `auto_changed=${summary.auto_changed}`,
       `review_changed=${summary.review_changed}`,
+      `owner_claims=${summary.owner_claims}`,
       `inbox_changed=${summary.inbox_changed}`,
     ];
     await appendFile(output, `${lines.join("\n")}\n`, "utf8");
   }
   const c = summary.counts;
   console.log(
-    `applied ${c.applied}, for a person ${c.needs_review}, refused ${c.refused}, waiting ${c.waiting}; ` +
+    `applied ${c.applied}, for a person ${c.needs_review}, owner claims sent ${c.awaiting_approval}, ` +
+      `refused ${c.refused}, waiting ${c.waiting}; ` +
       `${summary.auto_files.length} automatic and ${summary.review_files.length} review file(s) changed`,
   );
   return 0;
