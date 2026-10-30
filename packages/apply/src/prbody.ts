@@ -72,7 +72,7 @@ export function reviewPrBody(runAt: string, changes: readonly Change[], places: 
     "",
     `**This PR needs a person.** ${changes.length} item${plural} below came from reports the automatic rules do not decide. ` +
       "Edit the files in this PR if needed, then merge it, or close it to refuse them. " +
-      "A new place is drafted as a camp_site with no name: set its kind and name before merging.",
+      "A new place is drafted as a campground with no name: set its kind, group and name before merging.",
     "",
     "## For a person to check",
     "",
