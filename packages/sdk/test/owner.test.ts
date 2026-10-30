@@ -209,6 +209,6 @@ describe("owner client calls", () => {
     expect(OWNER_TERMS_SUMMARY).toMatch(/ODbL/);
     expect(OWNER_TERMS_SUMMARY).toMatch(/council/);
     expect(OWNER_TERMS_URL).toMatch(/^https:\/\//);
-    expect(OWNER_TERMS_SUMMARY).not.toMatch(/[–—]/);
+    expect(OWNER_TERMS_SUMMARY).not.toMatch(/[\u2013\u2014]/);
   });
 });
