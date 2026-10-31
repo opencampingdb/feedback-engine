@@ -203,7 +203,7 @@ describe("createFeedbackClient", () => {
   it("exports consent wording that names both licences", () => {
     expect(CONSENT_TEXT).toContain("ODbL");
     expect(CONSENT_TEXT).toContain("DbCL");
-    expect(CONSENT_TEXT).toContain("OpenStreetMap as a note");
+    expect(CONSENT_TEXT).toContain("OpenStreetMap as notes");
     expect(CONSENT_TEXT).not.toMatch(/[\u2013\u2014]/);
   });
 });

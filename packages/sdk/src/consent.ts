@@ -12,8 +12,8 @@ export const CONSENT_TEXT =
   "What you send becomes part of Open Camping DB, a free and open list of places to camp and stop in Australia. " +
   "Anyone may use, share and adapt it: the database under the Open Database Licence (ODbL 1.0) and its contents " +
   "under the Database Contents Licence (DbCL 1.0). Please don't include names, email addresses or phone numbers. " +
-  "We never publish who sent it. If we accept your change, we may pass it to OpenStreetMap as a note, so its " +
-  "mappers can check it.";
+  "We never publish who sent it. Changes we accept may also be passed to OpenStreetMap as notes for its volunteer " +
+  "mappers to check.";
 
 /** Link to the licence details, for a "Learn more" button. */
 export const CONSENT_LEARN_MORE_URL = "https://github.com/opencampingdb/data#licence";
@@ -30,5 +30,5 @@ export const OWNER_TERMS_SUMMARY =
   "You run this place, or are allowed to act for whoever does, and it holds any council or other approvals it needs. " +
   "What you send about the place (its facts, description, booking details and dates) is published in Open Camping DB " +
   "under the Open Database Licence (ODbL 1.0), so anyone may use and share it. Your name and email stay private: we use " +
-  "them only to check your claim and contact you about this place. If we accept a fact from you, we may pass it to " +
-  "OpenStreetMap as a note, so its mappers can check it.";
+  "them only to check your claim and contact you about this place. Facts we accept from you may also be passed to " +
+  "OpenStreetMap as notes for its volunteer mappers to check.";
