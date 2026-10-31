@@ -37,6 +37,8 @@ The client keeps its queue and a random device id in storage under keys starting
 
 Show `CONSENT_TITLE` and `CONSENT_TEXT` before the first submission, with an agree button. Store the answer yourself and pass `consent: true` only when the user agreed. Without it the client throws `ConsentRequiredError` and sends nothing.
 
+The text tells users that accepted changes may also be passed to OpenStreetMap as notes for its mappers to check. Keep that sentence if you write your own wording. [osm.md](osm.md) explains what is sent.
+
 ```tsx
 import { Alert } from "react-native";
 import { CONSENT_TEXT, CONSENT_TITLE } from "@opencampingdb/feedback";

@@ -2,13 +2,14 @@
 
 Lets any app send reports, reviews and checks about places in [Open Camping DB](https://github.com/opencampingdb/data). Each submission passes quality rules and reaches the public `opencampingdb/data` repository as a pull request.
 
-It has three parts:
+It has four parts:
 
 | Package | What it does |
 |---|---|
 | [`packages/sdk`](packages/sdk) (`@opencampingdb/feedback`) | Client for React Native, Expo and the web. Queues submissions offline, retries with backoff, keeps a random per-install device id and refuses to send without consent. |
 | [`packages/intake`](packages/intake) | Cloudflare Worker at `POST /v1/feedback`. Checks the app key, the schema and consent, rate limits, removes contact details from free text, hashes the device id and writes one JSON file per submission to the private `inbox` repository. |
 | [`packages/apply`](packages/apply) | Script and reusable GitHub workflow that runs hourly in `inbox`, applies the quality rules and keeps up to two PRs open on `data`: one for automatic changes, one for a person. |
+| [`packages/osm-notes`](packages/osm-notes) | Script and reusable GitHub workflow that runs daily in `inbox` and passes changes accepted into `data` to OpenStreetMap as notes for its mappers to check. It never edits OSM. |
 
 The contract between the parts, and with the `data` repository, is the Open Camping DB `SPEC.md`.
 
@@ -34,6 +35,10 @@ Show `ATTRIBUTION` wherever the data appears, and call `feedback.flush()` when t
 ## Owners
 
 The people who run a place can claim it, keep its facts, description and booking details current, and close it for a while. Owners of private land can list it as a farm stay. A person approves every claim before anything about an owner is published, and owner names and emails stay in the private inbox. [docs/owners.md](docs/owners.md) explains the flow and the SDK calls, and [docs/owner-terms.md](docs/owner-terms.md) holds the terms owners accept.
+
+## Passing changes back to OpenStreetMap
+
+Once a day the OSM notes workflow looks at what changed on `data` `main` and posts a note on OpenStreetMap for each place where travellers or the owner changed a fact, the name or a permanent closure. Changes that came from OSM, contributed places, descriptions, locations, booking details, temporary closures and reviews are never sent. At most 10 notes go out a day, a place gets at most one every 30 days, and a note is never sent twice. [docs/osm.md](docs/osm.md) explains the flow and its limits.
 
 ## Run your own intake
 
@@ -68,7 +73,7 @@ Needs Node 22.12 or later.
 npm install
 npm test          # all packages
 npm run typecheck
-npm run build     # SDK and apply script
+npm run build     # SDK, apply and OSM notes scripts
 ```
 
 ## Licence
