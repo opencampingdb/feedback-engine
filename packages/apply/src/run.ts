@@ -7,13 +7,14 @@ import {
   readHistory,
   readOwners,
   readPending,
+  refuseMalformed,
   settleAwaiting,
   writeOwners,
 } from "./io.js";
-import { applyOwnerRules, type ReviewPr } from "./owners.js";
+import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
 import { autoPrBody, reviewPrBody } from "./prbody.js";
 import { checkProof as realCheckProof, type ProofResult } from "./proof.js";
-import { applyEdit, applyRules, WINDOW_DAYS, type Decision } from "./rules.js";
+import { applyEdit, applyRules, resolvePlace, WINDOW_DAYS, type Decision } from "./rules.js";
 import type { Place, Review } from "./types.js";
 
 export interface RunOptions {
@@ -35,6 +36,8 @@ export interface RunOptions {
   botLogins?: readonly string[];
   /** Checks a proof page. Defaults to fetching it. */
   checkProof?: (url: string, code: string) => Promise<ProofResult>;
+  /** Time the run may spend on proof checks, and how many run at once. Defaults to 3 minutes and 4. */
+  proofBudget?: { ms: number; concurrency: number };
   /** Time of the run. Defaults to now. */
   now?: Date;
 }
@@ -58,6 +61,7 @@ export interface RunSummary {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const PROOF_BUDGET = { ms: 3 * 60_000, concurrency: 4 };
 
 /**
  * One apply run. Writes automatic changes to `data`, review edits to
@@ -73,7 +77,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const sinceDay = new Date(now.getTime() - (WINDOW_DAYS + 1) * DAY_MS).toISOString().slice(0, 10);
   const checkProof = options.checkProof ?? ((url: string, code: string) => realCheckProof(url, code));
 
-  const pendingFiles = await readPending(options.inbox);
+  const { files: pendingFiles, malformed } = await readPending(options.inbox);
   const crowd = pendingFiles.map((f) => f.item).filter((i): i is StoredFeedback => !isOwnerSubmission(i));
   const ownerItems = pendingFiles.map((f) => f.item).filter((i): i is StoredOwnerSubmission => isOwnerSubmission(i));
   const history = await readHistory(options.inbox, sinceDay);
@@ -116,11 +120,30 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     ...(kinds ? { kinds } : {}),
   });
 
-  // Proof pages for claims and listings still in pending/.
+  // Proof pages for claims and listings still in pending/, oldest first, within
+  // the budget. Claims for a missing place are refused and claims past the wait
+  // go to a person without a fresh check. Claims left unchecked keep waiting.
   const proofs = new Map<string, ProofResult>();
-  for (const item of ownerItems) {
-    if (item.type !== "owner_update") proofs.set(item.id, await checkProof(item.claim.proof_url, item.code));
-  }
+  const budget = options.proofBudget ?? PROOF_BUDGET;
+  const toCheck = ownerItems
+    .filter((i): i is Exclude<StoredOwnerSubmission, { type: "owner_update" }> => i.type !== "owner_update")
+    .filter((i) => i.type === "owner_listing" || resolvePlace(i.place, places) !== undefined)
+    .filter((i) => now.getTime() - Date.parse(i.received) < PROOF_WAIT_DAYS * DAY_MS)
+    .sort((a, b) => a.received.localeCompare(b.received) || a.id.localeCompare(b.id));
+  const deadline = Date.now() + budget.ms;
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: budget.concurrency }, async () => {
+      while (next < toCheck.length && Date.now() < deadline) {
+        const item = toCheck[next++]!;
+        // A failed check leaves only that claim unproven.
+        const proof = await checkProof(item.claim.proof_url, item.code).catch(
+          (): ProofResult => ({ found: false, checked: runAt, detail: "the page could not be checked" }),
+        );
+        proofs.set(item.id, proof);
+      }
+    }),
+  );
 
   // Owner rules see the records as the crowd rules left them.
   const afterCrowd = new Map([...places, ...crowdResult.places]);
@@ -157,12 +180,14 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   }
 
   const decisions = [...crowdResult.decisions, ...ownerResult.decisions] as Decision[];
+  const refusedMalformed = await refuseMalformed(options.inbox, malformed, runAt);
   const moved = await moveDecided(options.inbox, pendingFiles, decisions, runAt, ownerResult.awaiting);
   const ownersWritten = await writeOwners(options.inbox, ownerResult.owners.values());
   const settled = await settleAwaiting(options.inbox, ownerResult.approvals, runAt);
 
   const counts = { applied: 0, refused: 0, needs_review: 0, waiting: 0, awaiting_approval: 0 };
   for (const d of decisions) counts[d.outcome] += 1;
+  counts.refused += refusedMalformed;
   const allPlaces = new Map([...afterCrowd, ...autoPlaces]);
   const changes = [...crowdResult.changes, ...ownerResult.changes];
   const autoChanges = changes.filter((c) => c.automatic);
@@ -176,7 +201,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     auto_changed: autoChanged,
     review_changed: reviewChanged,
     owner_claims: ownerClaims,
-    inbox_changed: moved + ownersWritten + settled > 0,
+    inbox_changed: refusedMalformed + moved + ownersWritten + settled > 0,
     counts,
     auto_files: autoFiles,
     review_files: reviewFiles,

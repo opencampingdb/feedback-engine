@@ -48,10 +48,10 @@ function env(): Env {
   };
 }
 
-const post = (body: unknown) =>
+const post = (body: unknown, headers: Record<string, string> = {}) =>
   new Request("https://intake.example/v1/feedback", {
     method: "POST",
-    headers: { "content-type": "application/json", "x-app-key": APP_KEY },
+    headers: { "content-type": "application/json", "x-app-key": APP_KEY, ...headers },
     body: JSON.stringify(body),
   });
 
@@ -179,5 +179,45 @@ describe("owner submissions", () => {
       check: { visited: "2026-10-30", still_there: true },
     };
     expect((await handle(post(check), e)).status).toBe(202);
+  });
+
+  it("keeps owner submissions apart from the app's feedback limit", async () => {
+    e = { ...e, APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "owner-page", daily_limit: 2, owner_daily_limit: 3 } }) };
+    const device = (i: number) => `${String(i).padStart(8, "0")}-e2bb-4255-8caf-4136c566a962`;
+    const check = (i: number) => ({
+      type: "check",
+      place: PLACE,
+      device: device(i),
+      app_version: "1.0.0",
+      consent: true,
+      check: { visited: "2026-10-30", still_there: true },
+    });
+    for (let i = 0; i < 2; i++) expect((await handle(post(check(i)), e)).status).toBe(202);
+    expect((await handle(post(check(2)), e)).status).toBe(429);
+    for (let i = 10; i < 13; i++) expect((await handle(post({ ...claim, device: device(i) }), e)).status).toBe(202);
+    expect((await handle(post({ ...claim, device: device(13) }), e)).status).toBe(429);
+  });
+
+  it("refuses report, review and check with 403 for a key limited to owner submissions", async () => {
+    e = { ...e, APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "owner-page", daily_limit: 1000, kinds: ["owner"] } }) };
+    const base = { place: PLACE, device: DEVICE, app_version: "1.0.0", consent: true };
+    for (const body of [
+      { ...base, type: "report", report: { kind: "closed" } },
+      { ...base, type: "review", review: { stars: 4, text: "Quiet and shady.", visited: "2026-10" } },
+      { ...base, type: "check", check: { visited: "2026-10-30", still_there: true } },
+    ]) {
+      const res = await handle(post(body), e);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: "type_not_allowed_for_app_key" });
+    }
+    expect((await handle(post(claim), e)).status).toBe(202);
+    expect(gh.puts).toHaveLength(1);
+  });
+
+  it("limits each client network to 10 owner submissions a day, whatever device ids it sends", async () => {
+    const from = (i: number) =>
+      post({ ...claim, device: `${String(i).padStart(8, "0")}-e2bb-4255-8caf-4136c566a962` }, { "cf-connecting-ip": "2001:db8:1::5" });
+    for (let i = 0; i < 10; i++) expect((await handle(from(i), e)).status).toBe(202);
+    expect((await handle(from(10), e)).status).toBe(429);
   });
 });

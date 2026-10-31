@@ -24,6 +24,7 @@ These never do:
 - photos, merges and tombstones (`status: merged`)
 - any place with `osm: null`, which covers every contributed place and farm stay. Some contributed places came from sources that must not go into OSM.
 - any value whose source is `contributed`, such as a contributed closure
+- any text value, such as opening hours or a name, that holds an email address, phone number or link (the website and phone facts aside)
 
 A place gets at most one note per run, listing all its changes.
 

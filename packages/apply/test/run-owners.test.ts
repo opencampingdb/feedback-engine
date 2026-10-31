@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReviewPr } from "../src/owners.js";
 import type { ProofResult } from "../src/proof.js";
 import { run } from "../src/run.js";
@@ -90,6 +90,8 @@ const ticked = (body: string, number = 12): ReviewPr => ({
   state: "MERGED",
   body: body.replace(/^- \[ \] Approve owner/gm, "- [x] Approve owner"),
   comments: [],
+  author: { login: "app/opencampingdb-bot" },
+  isCrossRepository: false,
 });
 
 describe("owner claims end to end", () => {
@@ -156,7 +158,7 @@ describe("owner claims end to end", () => {
     });
     const first = await run({ inbox, data, reviewData: review, now: NOW, checkProof });
     expect(first.review_pr_body).toContain(`- [ ] Approve owner listing ${id(3)}:`);
-    const second = await run({ inbox, data, reviewData: review, now: LATER, checkProof, reviewPrs: [ticked(first.review_pr_body)], botLogins: [] });
+    const second = await run({ inbox, data, reviewData: review, now: LATER, checkProof, reviewPrs: [ticked(first.review_pr_body)], botLogins: ["opencampingdb-bot"] });
     const newId = `ocdb_${id(3).slice(3)}`;
     expect(second.auto_files).toContain(placePath(newId));
     const text = await readFile(join(data, placePath(newId)), "utf8");
@@ -164,6 +166,92 @@ describe("owner claims end to end", () => {
     expect(text).toBe(dumpPlace(record));
     expect(record).toMatchObject({ kind: "farm_stay", group: "overnight", osm: null, facts: { entry: "private", booking_required: true } });
     expect(text).toContain('"lat": -36.1,');
+  });
+
+  it("carries on with the run when one proof check fails", async () => {
+    await claim(5);
+    await pending(6, { type: "owner_update", place: PLACE, token_sha256: sha(TOKEN), update: { facts: { power: true } } });
+    const failing = async (): Promise<ProofResult> => {
+      throw new Error("aborted");
+    };
+    const summary = await run({ inbox, data, reviewData: review, now: NOW, checkProof: failing });
+    expect(summary.counts).toMatchObject({ waiting: 1, refused: 1 });
+    expect(await readdir(join(inbox, "pending", "2026-10-31"))).toEqual([`${id(5)}.json`]);
+  });
+
+  it("checks the oldest claims first and leaves the rest waiting when the proof budget runs out", async () => {
+    const body = { type: "owner_claim", place: PLACE, owner, code: "OCDB-7KQ2", token_sha256: sha(TOKEN) };
+    await pending(7, { ...body, received: "2026-10-31T08:30:00Z", claim: { proof_url: "https://b.example/" } });
+    await pending(8, { ...body, received: "2026-10-30T08:00:00Z", claim: { proof_url: "https://a.example/" } });
+    await pending(9, { ...body, received: "2026-10-31T08:45:00Z", claim: { proof_url: "https://c.example/" } });
+    const slow = async (url: string, code: string): Promise<ProofResult> => {
+      await new Promise((r) => setTimeout(r, 50));
+      return checkProof(url, code);
+    };
+    const summary = await run({ inbox, data, reviewData: review, now: NOW, checkProof: slow, proofBudget: { ms: 20, concurrency: 1 } });
+    expect(proofCalls).toEqual(["https://a.example/ OCDB-7KQ2"]);
+    expect(summary.counts).toMatchObject({ awaiting_approval: 1, waiting: 2 });
+    expect(await readdir(join(inbox, "owner-claims"))).toEqual([`${id(8)}.json`]);
+  });
+
+  it("does not fetch the proof page for a claim on a missing place or one past the wait", async () => {
+    await pending(10, {
+      type: "owner_claim",
+      place: "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZB",
+      owner,
+      claim: { proof_url: "https://gone.example/" },
+      code: "OCDB-7KQ2",
+      token_sha256: sha(TOKEN),
+    });
+    await pending(11, {
+      type: "owner_claim",
+      place: PLACE,
+      received: "2026-10-23T08:00:00Z",
+      owner,
+      claim: { proof_url: "https://old.example/" },
+      code: "OCDB-7KQ2",
+      token_sha256: sha(TOKEN),
+    });
+    const summary = await run({ inbox, data, reviewData: review, now: NOW, checkProof });
+    expect(proofCalls).toEqual([]);
+    expect(summary.counts).toMatchObject({ refused: 1, awaiting_approval: 1 });
+    expect(summary.review_pr_body).toContain("NOT found");
+  });
+
+  it("shows in the review PR where the code was found, and flags a different site", async () => {
+    await claim(12);
+    const redirected = async (url: string, code: string): Promise<ProofResult> => {
+      proofCalls.push(`${url} ${code}`);
+      return { found: true, checked: NOW.toISOString(), detail: "code found at https://elsewhere.example/page", url: "https://elsewhere.example/page" };
+    };
+    const summary = await run({ inbox, data, reviewData: review, now: NOW, checkProof: redirected });
+    expect(summary.review_pr_body).toContain("found at https://elsewhere.example/page, ON A DIFFERENT SITE from the submitted https://riverbend.example/about");
+  });
+
+  it("does not flag a redirect between the www and bare names of one site", async () => {
+    await claim(13);
+    const www = async (): Promise<ProofResult> => ({
+      found: true,
+      checked: NOW.toISOString(),
+      detail: "code found at https://www.riverbend.example/about",
+      url: "https://www.riverbend.example/about",
+    });
+    const summary = await run({ inbox, data, reviewData: review, now: NOW, checkProof: www });
+    expect(summary.review_pr_body).toContain("code OCDB-7KQ2 found at https://www.riverbend.example/about.");
+    expect(summary.review_pr_body).not.toContain("DIFFERENT SITE");
+  });
+
+  it("skips and logs a malformed file in owner-claims/", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await put(join(inbox, "owner-claims", `${id(14)}.json`), { item: { id: "fb_/../x", received: "2026-10-31T08:00:00Z" }, place: PLACE, sent: NOW.toISOString(), proof: {} });
+      await claim(15);
+      const summary = await run({ inbox, data, reviewData: review, now: NOW, checkProof });
+      expect(summary.counts.awaiting_approval).toBe(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(`${id(14)}.json`));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("keeps the claim in owner-claims while the PR is open, and changes nothing", async () => {

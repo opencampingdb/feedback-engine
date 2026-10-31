@@ -127,8 +127,12 @@ export function ratingOf(reviews: readonly Pick<Review, "stars">[]): Place["rati
   return { count, mean: tenths / 10 };
 }
 
+/**
+ * Independent sources among `items`. Items from one client network count once,
+ * whatever device ids they carry. Items stored without a network count by device.
+ */
 function distinctDevices(items: readonly StoredFeedback[]): number {
-  return new Set(items.map((i) => i.device)).size;
+  return new Set(items.map((i) => i.origin ?? i.device)).size;
 }
 
 /** Whether `item` arrived at or before `at`, and no more than 90 days before it. */
@@ -290,6 +294,7 @@ export function applyRules(input: RulesInput): RulesOutput {
         return evidence.filter((e) => test(e) && inWindow(e, at) && time(e) > after);
       };
       const waitingReopens: StoredFeedback[] = [];
+      const waitingClosures: StoredFeedback[] = [];
 
       for (const item of mine) {
         const at = time(item);
@@ -304,6 +309,29 @@ export function applyRules(input: RulesInput): RulesOutput {
         if (isClosureEvidence(item)) {
           if (place.status === "closed") {
             decide(item, "applied", isReport ? "place is already closed" : "check recorded");
+            continue;
+          }
+          // The verified owner manages the status. Once two devices report a
+          // closure, a person decides instead of the rules.
+          if (place.fact_sources.status === "owner" || place.owner_verified) {
+            const devices = supporting(at, isClosureEvidence, isReopenEvidence);
+            if (distinctDevices(devices) >= 2) {
+              edits.push({ kind: "note", place: placeId, feedback: item.id });
+              note(
+                placeId,
+                `closure reported by ${distinctDevices(devices)} devices within ${WINDOW_DAYS} days for an owner-verified place (check before closing)`,
+                false,
+                devices,
+              );
+              const why = "the owner manages this place's status, so a person decides";
+              decide(item, "needs_review", why);
+              for (const w of waitingClosures.splice(0)) decide(w, "needs_review", why);
+            } else if (isReport) {
+              waitingClosures.push(item);
+              decide(item, "waiting", "an owner-verified place needs a second device before a person checks a closure");
+            } else {
+              decide(item, "applied", "check recorded");
+            }
             continue;
           }
           if (place.status === "open" && isReport) {

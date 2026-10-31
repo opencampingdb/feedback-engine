@@ -48,6 +48,20 @@ export function findContactDetails(text: string): ContactDetailKind[] {
   return [...found];
 }
 
+// Times written HH:MM or HH.MM, and HHMM-HHMM ranges, as opening hours often are.
+const HOUR = String.raw`(?:[01]?\d|2[0-4])`;
+const TIME = new RegExp(String.raw`\b${HOUR}[:.][0-5]\d\b|\b(?:[01]\d|2[0-4])[0-5]\d\s*-\s*(?:[01]\d|2[0-4])[0-5]\d\b`, "g");
+
+/**
+ * Lists the kinds of contact details found in opening hours. Times such as
+ * 08.00 or 0800-1700 are left out before looking for phone numbers.
+ */
+export function findContactDetailsInHours(text: string): ContactDetailKind[] {
+  const found = new Set<ContactDetailKind>(findContactDetails(text).filter((kind) => kind !== "phone"));
+  if (findContactDetails(text.replace(TIME, " ")).includes("phone")) found.add("phone");
+  return [...found];
+}
+
 /** Replaces every email address, link and phone number in `text` with `[removed]`. */
 export function stripContactDetails(text: string): string {
   return text

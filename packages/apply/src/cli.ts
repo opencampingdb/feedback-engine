@@ -13,8 +13,9 @@ Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
 tree when left out). Decided items move to <inbox>/applied or <inbox>/refused.
 --review-prs is JSON from \`gh pr list --head feedback/review --state all
---json number,state,body,comments\`; ticked owner claim boxes in merged PRs
-approve those claims. Only comments by --bot-login count.
+--json number,state,body,comments,author,isCrossRepository\`; ticked owner
+claim boxes in merged PRs approve those claims. Only PRs opened by --bot-login
+from the data repository itself, and only comments by --bot-login, count.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
 

@@ -150,6 +150,24 @@ describe("fact reports", () => {
     expect(out.after()?.fact_sources.entry).toBe("feedback");
   });
 
+  it("two device ids on one network do not change a fact", () => {
+    const a = { ...fact(0, "dev-a", "power", true), origin: "net-1" };
+    const b = { ...fact(1, "dev-b", "power", true), origin: "net-1" };
+    const out = run([a, b], { now: 1 });
+    expect(out.after()).toBeUndefined();
+    expect(out.outcome(a)).toBe("waiting");
+    expect(out.outcome(b)).toBe("waiting");
+  });
+
+  it("refuses opening hours that hold contact details", () => {
+    const a = fact(0, "dev-a", "opening_hours", "Ring 0412 345 678");
+    const b = fact(1, "dev-b", "opening_hours", "Ring 0412 345 678");
+    const out = run([a, b], { now: 1 });
+    expect(out.after()).toBeUndefined();
+    expect(out.outcome(a)).toBe("refused");
+    expect(out.outcome(b)).toBe("refused");
+  });
+
   it("sends website and phone changes to a person", () => {
     const a = fact(0, "dev-a", "website", "https://example.org");
     const out = run([a]);
@@ -259,6 +277,63 @@ describe("closed and reopened", () => {
     const second = run([one, two], { now: 3, places: [place({ status: "closed" })] });
     expect(second.after()?.status).toBe("open");
     expect(second.outcome(one)).toBe("applied");
+  });
+
+  it("closed reports from two device ids on one network leave it reported_closed", () => {
+    const a = { ...closed(0, "dev-a"), origin: "net-1" };
+    const b = { ...closed(1, "dev-b"), origin: "net-1" };
+    const out = run([a, b], { now: 1 });
+    expect(out.after()?.status).toBe("reported_closed");
+  });
+
+  it("closed reports from two networks close the place", () => {
+    const a = { ...closed(0, "dev-a"), origin: "net-1" };
+    const b = { ...closed(1, "dev-b"), origin: "net-2" };
+    const out = run([a, b], { now: 1 });
+    expect(out.after()?.status).toBe("closed");
+  });
+
+  it("sends closed reports from two networks for an owner-verified place to a person", () => {
+    const a = closed(0, "dev-a");
+    const b = closed(1, "dev-b");
+    const out = run([a, b], { now: 1, places: [place({ owner_verified: true })] });
+    expect(out.after()).toBeUndefined();
+    expect(out.outcome(a)).toBe("needs_review");
+    expect(out.outcome(b)).toBe("needs_review");
+    expect(out.edits).toEqual([{ kind: "note", place: PLACE, feedback: b.id }]);
+    expect(out.changes).toMatchObject([{ place: PLACE, automatic: false, feedback: [a.id, b.id] }]);
+  });
+
+  it("leaves one closed report for an owner-verified place waiting, with nothing for a person", () => {
+    const a = closed(0, "dev-a");
+    const out = run([a], { places: [place({ owner_verified: true })] });
+    expect(out.after()).toBeUndefined();
+    expect(out.outcome(a)).toBe("waiting");
+    expect(out.edits).toEqual([]);
+    expect(out.needsReview).toBe(false);
+  });
+
+  it("treats a place whose status the owner set the same way", () => {
+    const c = check(0, "dev-a", false);
+    const one = run([c], { places: [place({ fact_sources: { status: "owner" } })] });
+    expect(one.after()).toBeUndefined();
+    expect(one.outcome(c)).toBe("applied");
+    expect(one.edits).toEqual([]);
+
+    const r = closed(2, "dev-b");
+    const two = run([r], { now: 2, history: [c], places: [place({ fact_sources: { status: "owner" } })] });
+    expect(two.after()).toBeUndefined();
+    expect(two.outcome(r)).toBe("needs_review");
+    expect(two.edits).toEqual([{ kind: "note", place: PLACE, feedback: r.id }]);
+  });
+
+  it("does not count two device ids on one network towards an owner-verified closure", () => {
+    const a = { ...closed(0, "dev-a"), origin: "net-1" };
+    const b = { ...closed(1, "dev-b"), origin: "net-1" };
+    const out = run([a, b], { now: 1, places: [place({ owner_verified: true })] });
+    expect(out.outcome(a)).toBe("waiting");
+    expect(out.outcome(b)).toBe("waiting");
+    expect(out.edits).toEqual([]);
   });
 });
 

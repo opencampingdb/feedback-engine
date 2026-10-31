@@ -1,4 +1,4 @@
-import { findContactDetails } from "./text.js";
+import { findContactDetails, findContactDetailsInHours } from "./text.js";
 import type {
   CheckBody,
   ReportFactName,
@@ -50,7 +50,8 @@ export const FACTS: Readonly<Record<ReportFactName, (value: unknown) => boolean>
   access: (v) => v === "2wd" || v === "awd" || v === "4wd" || v === "unknown",
   entry: (v) => v === "public" || v === "customers" || v === "permit" || v === "private",
   max_stay: (v) => typeof v === "string" && /^[1-9]\d{0,2}[hdw]$/.test(v),
-  opening_hours: (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 100,
+  // Free text, so it must hold no email address, phone number or link.
+  opening_hours: (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 100 && findContactDetailsInHours(v).length === 0,
   website: (v) => typeof v === "string" && v.length <= 300 && /^https:\/\/[^\s]+$/.test(v),
   phone: (v) => typeof v === "string" && /^\+?[\d ]{6,20}$/.test(v),
   water_type: (v) => v === "tank_fill" || v === "fountain",
