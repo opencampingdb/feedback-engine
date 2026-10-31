@@ -1,0 +1,156 @@
+# Reusable workflow: posts changes accepted into opencampingdb/data to
+# OpenStreetMap as notes, so OSM's own mappers can check them and edit OSM if
+# they agree. It never edits OSM data. Call it from the private inbox
+# repository on a daily schedule; see packages/apply/examples/inbox-osm-notes.yml.
+#
+# State lives in the inbox and is committed back after each run:
+#   osm/cursor        the data commit last processed
+#   osm/sent.ndjson   one line per field of every note posted
+# Without the osm-token secret the run is a dry run: it posts nothing, leaves
+# the state as it is and lists the notes it would send in the job summary.
+# docs/osm.md explains which changes become notes and the limits.
+
+name: OSM notes
+
+on:
+  workflow_call:
+    inputs:
+      data-repository-name:
+        description: Name of the data repository, in the same organisation as the inbox
+        type: string
+        default: data
+      data-branch:
+        description: Branch of the data repository whose changes count as approved
+        type: string
+        default: main
+      engine-repository:
+        description: owner/name of the feedback-engine repository
+        type: string
+        default: opencampingdb/feedback-engine
+      engine-ref:
+        description: Commit of feedback-engine to run. Use the same SHA the caller pins this workflow to.
+        type: string
+        required: true
+    secrets:
+      app-client-id:
+        description: Client ID of the opencampingdb-bot GitHub App
+        required: true
+      app-private-key:
+        description: Private key of the opencampingdb-bot GitHub App
+        required: true
+      osm-token:
+        description: OSM OAuth 2.0 access token with the write_notes scope. Leave it out for a dry run.
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osm-notes-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  notes:
+    name: Post OSM notes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Token for the inbox
+        id: inbox-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Token for the data repository
+        id: data-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.data-repository-name }}
+          permission-contents: read
+
+      - name: Check out the engine
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.engine-repository }}
+          ref: ${{ inputs.engine-ref }}
+          path: engine
+          persist-credentials: false
+
+      - name: Check out the inbox
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: inbox
+          token: ${{ steps.inbox-token.outputs.token }}
+
+      - name: Check out data with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
+          ref: ${{ inputs.data-branch }}
+          path: data
+          fetch-depth: 0
+          token: ${{ steps.data-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Build the notes script
+        working-directory: engine
+        run: |
+          npm ci --ignore-scripts --include-workspace-root --workspace packages/osm-notes
+          npm run build -w packages/osm-notes
+
+      - name: Post notes
+        id: notes
+        env:
+          OSM_TOKEN: ${{ secrets.osm-token }}
+        run: >
+          node engine/packages/osm-notes/dist/cli.js
+          --data data
+          --inbox inbox
+          --cursor inbox/osm/cursor
+          --sent inbox/osm/sent.ndjson
+          --summary "$RUNNER_TEMP/osm-notes.md"
+
+      - name: Job summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/osm-notes.md" ]; then cat "$RUNNER_TEMP/osm-notes.md" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      # Runs even when the notes step failed, so a note already posted is
+      # always in the sent log and never posted again.
+      - name: Commit the cursor and sent log
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.inbox-token.outputs.token }}
+          APP_SLUG: ${{ steps.inbox-token.outputs.app-slug }}
+          RUN_ID: ${{ github.run_id }}
+        working-directory: inbox
+        run: |
+          if [ -z "$(git status --porcelain -- osm)" ]; then
+            echo "No state to commit."
+            exit 0
+          fi
+          bot_id="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git add -- osm
+          git commit -m "Record OSM notes (run ${RUN_ID})"
+          # The hourly apply workflow also pushes to the inbox. Only this
+          # workflow writes osm/, so a rebase onto its commits is clean.
+          for attempt in 1 2 3 4 5; do
+            if git pull --rebase --quiet && git push --quiet; then exit 0; fi
+            sleep $((attempt * 10))
+          done
+          echo "Could not push the OSM state to the inbox." >&2
+          exit 1

@@ -1,0 +1,33 @@
+# Copy to .github/workflows/osm-notes.yml in the private inbox repository.
+# Replace both REPLACE_WITH_ENGINE_SHA values with the same full 40 character
+# commit SHA of opencampingdb/feedback-engine, and update them together.
+#
+# Repository secrets in the inbox:
+#   OCDB_BOT_CLIENT_ID    Client ID of the opencampingdb-bot GitHub App
+#   OCDB_BOT_PRIVATE_KEY  Private key of the opencampingdb-bot GitHub App
+#   OSM_NOTES_TOKEN       Optional. OSM OAuth 2.0 token with the write_notes
+#                         scope. Until it is added, every run is a dry run that
+#                         lists the notes it would send in the job summary.
+#
+# The first run records the current data commit in osm/cursor and sends
+# nothing, so only changes accepted after that become notes.
+
+name: OSM notes
+
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notes:
+    uses: opencampingdb/feedback-engine/.github/workflows/osm-notes.yml@REPLACE_WITH_ENGINE_SHA
+    with:
+      engine-ref: REPLACE_WITH_ENGINE_SHA
+    secrets:
+      app-client-id: ${{ secrets.OCDB_BOT_CLIENT_ID }}
+      app-private-key: ${{ secrets.OCDB_BOT_PRIVATE_KEY }}
+      osm-token: ${{ secrets.OSM_NOTES_TOKEN }}
