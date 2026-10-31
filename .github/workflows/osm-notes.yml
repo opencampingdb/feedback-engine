@@ -107,7 +107,8 @@ jobs:
       - name: Build the notes script
         working-directory: engine
         run: |
-          npm ci --ignore-scripts --include-workspace-root --workspace packages/osm-notes
+          npm ci --ignore-scripts --include-workspace-root --workspace packages/sdk --workspace packages/osm-notes
+          npm run build -w packages/sdk
           npm run build -w packages/osm-notes
 
       - name: Post notes

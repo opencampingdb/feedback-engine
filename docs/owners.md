@@ -18,8 +18,8 @@ The page fills in the place id, shows the owner terms and takes the owner throug
 
 1. The owner sends a claim (`owner_claim`) for a place in the data, or a listing (`owner_listing`) for private land that is not. The intake answers with an id, a short code such as `OCDB-7KQ2`, and a token. The token is shown once and never stored: the intake keeps only its SHA-256.
 2. The owner puts the code on their own website or public Facebook page, at the address they gave as `proof_url`.
-3. Each hourly apply run fetches that page and looks for the code. Once it is there (or after 7 days without it), the claim goes to the `feedback/review` PR on the data repository with an approval box and the label `owner-claim`.
-4. A person checks that the proof page belongs to the place, ticks the box and merges the PR. The next run writes the owner record in the private inbox and marks the place `owner_verified: true`, or adds the farm stay, through the automatic PR. Unticked boxes in a merged PR, and claims in a PR closed without merging, are refused.
+3. Each hourly apply run fetches that page and looks for the code. Once it is there, the claim goes to the `feedback/review` PR on the data repository with an approval box and the label `owner-claim`. After 7 days without it, the claim goes there without another fetch, marked as not found.
+4. A person checks that the proof page belongs to the place, ticks the box and merges the PR. The box shows the address the code was found at, and flags it when a redirect led to a different site from the one submitted. The next run writes the owner record in the private inbox and marks the place `owner_verified: true`, or adds the farm stay, through the automatic PR. Unticked boxes in a merged PR, and claims in a PR closed without merging, are refused.
 5. From then on the owner sends updates (`owner_update`) with the token. A matching token is applied within the hour. A wrong token, or a token for another place, is refused.
 
 A lost token means claiming again. Once approved, the new claim replaces the old token.
@@ -32,11 +32,11 @@ Applied directly, each with the source `owner`:
 
 - facts: `fee`, `power`, `pets`, `tents`, `caravans`, `toilets`, `showers`, `drinking_water`, `dump_station`, `max_stay`, `opening_hours`, `entry`, `phone`, `website` and `booking_url`
 - `description`: plain text, up to 500 characters, checked like review text. An empty string removes it.
-- `status: "temporarily_closed"` with a `reopens` date (`YYYY-MM-DD`, after today). The place reopens by itself on that date. `status: "open"` ends a temporary closure early.
+- `status: "temporarily_closed"` with a `reopens` date (`YYYY-MM-DD`, after today), on a place that is not `closed`. The place reopens by itself on that date. `status: "open"` ends a temporary closure early.
 
 Sent to a person instead: a new name, a new location, and reopening a place that is `closed`.
 
-Owners never change reviews, ratings or checks. When two devices report a value that differs from one the owner set, a person decides.
+Owners never change reviews, ratings or checks. When two devices report a value that differs from one the owner set, a person decides. When two devices report that an `owner_verified` place, or one whose status the owner set, has closed, a person decides too. One report changes nothing.
 
 ## Private property listings
 
@@ -53,7 +53,7 @@ Apps should show, for every `farm_stay`: **Private property. Book with the owner
 
 ## Submissions
 
-All three go to `POST /v1/feedback` with the `X-App-Key` header, like other feedback. They carry `terms_accepted: true` instead of `consent`, and count against a limit of 5 owner submissions per device a day.
+All three go to `POST /v1/feedback` with the `X-App-Key` header, like other feedback. They carry `terms_accepted: true` instead of `consent`, and count against a limit of 5 owner submissions per device, and 10 per client network, a day.
 
 ```json
 {

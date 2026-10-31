@@ -80,4 +80,32 @@ describe("noteChanges", () => {
     const next = after({ status: "closed", fact_sources: { fee: "osm", toilets: "osm", status: "contributed" } });
     expect(noteChanges(before, next)).toEqual([]);
   });
+
+  it("never sends a text value that holds contact details, but still sends website and phone", () => {
+    const next = after({
+      name: "Call 0412 345 678 Camp",
+      facts: { fee: true, toilets: false, opening_hours: "Ring 0412 345 678", website: "https://camp.example.org", phone: "+61 3 5432 1098" },
+      fact_sources: { fee: "osm", toilets: "osm", name: "owner", opening_hours: "feedback", website: "owner", phone: "owner" },
+    });
+    expect(noteChanges(before, next)).toEqual([
+      { field: "phone", value: "+61 3 5432 1098", previous: null, source: "owner" },
+      { field: "website", value: "https://camp.example.org", previous: null, source: "owner" },
+    ]);
+  });
+
+  it("sends opening hours written as HHMM ranges", () => {
+    const next = after({
+      facts: { fee: true, toilets: false, opening_hours: "Mo-Fr 0800-1700" },
+      fact_sources: { fee: "osm", toilets: "osm", opening_hours: "feedback" },
+    });
+    expect(noteChanges(before, next)).toEqual([{ field: "opening_hours", value: "Mo-Fr 0800-1700", previous: null, source: "feedback" }]);
+  });
+
+  it("sends plain opening hours", () => {
+    const next = after({
+      facts: { fee: true, toilets: false, opening_hours: "Mo-Su 07:00-19:00" },
+      fact_sources: { fee: "osm", toilets: "osm", opening_hours: "feedback" },
+    });
+    expect(noteChanges(before, next)).toEqual([{ field: "opening_hours", value: "Mo-Su 07:00-19:00", previous: null, source: "feedback" }]);
+  });
 });

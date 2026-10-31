@@ -17,7 +17,7 @@ npx wrangler login
 
 ## 2. Create the KV namespace
 
-The intake counts submissions per device and per app in Workers KV.
+The intake counts submissions per device, per client network and per app in Workers KV. A network is the client address from `CF-Connecting-IP`, cut to its IPv4 /24 or IPv6 /48 and kept only as a salted hash. Each network may send 100 feedback submissions and, counted separately, 10 owner submissions a day.
 
 ```sh
 npx wrangler kv namespace create RATE_LIMIT
@@ -25,7 +25,7 @@ npx wrangler kv namespace create RATE_LIMIT
 
 Copy the `id` it prints into `packages/intake/wrangler.toml`, replacing `REPLACE_ME_KV_NAMESPACE_ID`. Keep that edit in your own deployment, not in a commit to this repository.
 
-On the free plan KV allows 1,000 writes a day. Each accepted submission makes two (one device counter, one app counter), so the free plan carries about 500 submissions a day. Above that, use the Workers paid plan.
+On the free plan KV allows 1,000 writes a day. Each accepted submission makes three (one device counter, one network counter, one app counter), so the free plan carries about 330 submissions a day. Above that, use the Workers paid plan.
 
 ## 3. Create the private inbox repository
 
@@ -59,6 +59,12 @@ npx wrangler secret put GH_INSTALLATION_ID
 
   ```json
   {"9f3c1d0e7b2a4c5d8e6f": {"app": "camporacle", "daily_limit": 5000}}
+  ```
+
+  Two optional fields limit what a key may do. `owner_daily_limit` is the key's daily limit for owner claims, listings and updates, counted apart from its other feedback so that feedback cannot use up the owners' share. It defaults to `daily_limit`. `kinds` lists what the key may send: `["feedback"]` for reports, reviews and checks, `["owner"]` for owner submissions, or both. A key without `kinds` may send everything, and any other submission gets `403`. The owner page's key ships in a public web page, so give it `"kinds": ["owner"]`:
+
+  ```json
+  {"0a7e5b2c9d4f1e3a6b8c": {"app": "owner-page", "daily_limit": 1000, "owner_daily_limit": 200, "kinds": ["owner"]}}
   ```
 
   Make keys with `openssl rand -hex 16`. To revoke a key, remove it and set the secret again.

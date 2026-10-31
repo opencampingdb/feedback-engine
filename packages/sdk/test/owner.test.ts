@@ -102,6 +102,7 @@ describe("owner validation", () => {
     [{ ...update, update: { status: "temporarily_closed", reopens: "2026-02-30" } }, "update.reopens"],
     [{ ...update, update: { facts: { rating: 5 } } }, "update.facts.rating"],
     [{ ...update, update: { description: "x".repeat(501) } }, "update.description"],
+    [{ ...update, update: { facts: { opening_hours: "Call 0412 345 678 for hours" } } }, "update.facts.opening_hours"],
   ])("refuses %#: %s", (body, message) => {
     expect(errorsOf(body)).toContain(message);
   });

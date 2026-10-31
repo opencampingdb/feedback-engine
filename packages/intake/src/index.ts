@@ -12,7 +12,10 @@ import { checkAndCount, type KVLike } from "./ratelimit.js";
 import { ulid } from "./ulid.js";
 
 export interface Env {
-  /** Secret. JSON map of app key to `{ "app": "<name>", "daily_limit": <number> }`. */
+  /**
+   * Secret. JSON map of app key to `{ "app": "<name>", "daily_limit": <number> }`,
+   * optionally with `owner_daily_limit` and `kinds` (`["feedback"]`, `["owner"]` or both).
+   */
   APP_KEYS: string;
   /** Secret. Salt for hashing device ids. */
   DEVICE_SALT: string;
@@ -27,10 +30,18 @@ export interface Env {
   RATE_LIMIT: KVLike;
 }
 
+type SubmissionKind = "feedback" | "owner";
+
 interface AppEntry {
   app: string;
   daily_limit: number;
+  /** Daily limit for owner submissions, counted apart from other feedback. Defaults to `daily_limit`. */
+  owner_daily_limit?: number;
+  /** Kinds of submission the key may send. Every kind when left out. */
+  kinds?: SubmissionKind[];
 }
+
+const isLimit = (v: unknown): v is number => typeof v === "number" && v > 0;
 
 export const MAX_BODY_BYTES = 16 * 1024;
 const APP_NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
@@ -63,17 +74,48 @@ export function parseAppKeys(raw: string): Map<string, AppEntry> {
   if (typeof parsed !== "object" || parsed === null) return out;
   for (const [key, value] of Object.entries(parsed)) {
     const entry = value as Partial<AppEntry>;
+    const kindsValid =
+      entry.kinds === undefined ||
+      (Array.isArray(entry.kinds) && entry.kinds.length > 0 && entry.kinds.every((k) => k === "feedback" || k === "owner"));
     if (
       key.length >= 16 &&
       typeof entry.app === "string" &&
       APP_NAME.test(entry.app) &&
-      typeof entry.daily_limit === "number" &&
-      entry.daily_limit > 0
+      isLimit(entry.daily_limit) &&
+      (entry.owner_daily_limit === undefined || isLimit(entry.owner_daily_limit)) &&
+      kindsValid
     ) {
-      out.set(key, { app: entry.app, daily_limit: entry.daily_limit });
+      out.set(key, {
+        app: entry.app,
+        daily_limit: entry.daily_limit,
+        ...(entry.owner_daily_limit !== undefined ? { owner_daily_limit: entry.owner_daily_limit } : {}),
+        ...(entry.kinds !== undefined ? { kinds: [...entry.kinds] } : {}),
+      });
     }
   }
   return out;
+}
+
+/**
+ * The client's network: an IPv4 address cut to its /24 (`203.0.113`), an IPv6
+ * address to its /48 (`2001:db8:1`). Undefined when `ip` is not an address.
+ */
+export function networkPrefix(ip: string): string | undefined {
+  const text = ip.trim().toLowerCase();
+  const v4 = /^(?:::ffff:)?(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (v4) {
+    const parts = v4.slice(1).map(Number);
+    return parts.every((p) => p <= 255) ? parts.slice(0, 3).join(".") : undefined;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return undefined;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  if (![...head, ...tail].every((g) => /^[0-9a-f]{1,4}$/.test(g))) return undefined;
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return undefined;
+  const groups = [...head, ...Array<string>(missing).fill("0"), ...tail];
+  return groups.slice(0, 3).map((g) => parseInt(g, 16).toString(16)).join(":");
 }
 
 /** SHA-256 of salt and device id, first 16 hex characters. */
@@ -187,17 +229,23 @@ export function createHandler(deps: Deps) {
     const received = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, "Z");
     const day = received.slice(0, 10);
     const device = await hashDevice(env.DEVICE_SALT, checked.value.device);
+    // Cloudflare sets CF-Connecting-IP to the client address. Only a salted hash of its network is kept.
+    const network = networkPrefix(request.headers.get("cf-connecting-ip") ?? "");
+    const origin = network === undefined ? undefined : await hashDevice(env.DEVICE_SALT, `ip:${network}`);
 
     const submission = checked.value;
     const isOwner = isOwnerSubmission(submission);
+    const kind: SubmissionKind = isOwner ? "owner" : "feedback";
+    if (app.kinds && !app.kinds.includes(kind)) return json(403, { error: "type_not_allowed_for_app_key" }, cors);
     const limit = await checkAndCount(
       env.RATE_LIMIT,
       day,
       device,
       app.app,
-      app.daily_limit,
+      isOwner ? (app.owner_daily_limit ?? app.daily_limit) : app.daily_limit,
       nowMs,
-      isOwner ? "owner" : "feedback",
+      kind,
+      origin,
     );
     if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
 
@@ -239,6 +287,7 @@ export function createHandler(deps: Deps) {
       place,
       ...(location ? { location } : {}),
       device,
+      ...(origin ? { origin } : {}),
       app_version,
       consent,
       ...("report" in rest ? { report: rest.report } : {}),

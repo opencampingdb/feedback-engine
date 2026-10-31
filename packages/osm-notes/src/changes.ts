@@ -1,3 +1,4 @@
+import { findContactDetails, findContactDetailsInHours } from "@opencampingdb/feedback";
 import { NEVER_SENT } from "./tags.js";
 import type { NoteChange, Place } from "./types.js";
 
@@ -9,8 +10,17 @@ import type { NoteChange, Place } from "./types.js";
  * contributed values never leave Open Camping DB. Description, location,
  * booking details, ratings, temporary closures and reopening dates are
  * never sent, and nothing is sent for a place that is not in OSM or is a
- * merged tombstone.
+ * merged tombstone. A text value holding an email address, phone number or
+ * link is never sent, except a website or phone fact.
  */
+
+/** Facts whose value is itself a contact detail. */
+const CONTACT_FACTS: ReadonlySet<string> = new Set(["website", "phone"]);
+
+function sendable(field: string, value: unknown): boolean {
+  if (typeof value !== "string" || CONTACT_FACTS.has(field)) return true;
+  return (field === "opening_hours" ? findContactDetailsInHours(value) : findContactDetails(value)).length === 0;
+}
 
 function sourceOf(place: Place, field: string): "feedback" | "owner" | undefined {
   const source = place.fact_sources?.[field];
@@ -40,13 +50,13 @@ export function noteChanges(previous: Place | null, next: Place): NoteChange[] {
     const before = previous.facts?.[fact];
     if (before === value) continue;
     const source = sourceOf(next, fact);
-    if (!source) continue;
+    if (!source || !sendable(fact, value)) continue;
     out.push({ field: fact, value, previous: before ?? null, source });
   }
 
   if (next.name && next.name !== previous.name) {
     const source = sourceOf(next, "name");
-    if (source) out.push({ field: "name", value: next.name, previous: previous.name, source });
+    if (source && sendable("name", next.name)) out.push({ field: "name", value: next.name, previous: previous.name, source });
   }
 
   // Only a permanent closure. OSM does not map temporary closures.
