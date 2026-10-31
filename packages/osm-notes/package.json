@@ -1,0 +1,18 @@
+{
+  "name": "@opencampingdb/osm-notes",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Posts approved Open Camping DB changes to OpenStreetMap as notes for its mappers to check.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "ocdb-osm-notes": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "notes": "node dist/cli.js"
+  }
+}

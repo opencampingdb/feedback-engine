@@ -208,6 +208,7 @@ describe("owner client calls", () => {
   it("exports the owner terms summary", () => {
     expect(OWNER_TERMS_SUMMARY).toMatch(/ODbL/);
     expect(OWNER_TERMS_SUMMARY).toMatch(/council/);
+    expect(OWNER_TERMS_SUMMARY).toMatch(/OpenStreetMap as notes/);
     expect(OWNER_TERMS_URL).toMatch(/^https:\/\//);
     expect(OWNER_TERMS_SUMMARY).not.toMatch(/[\u2013\u2014]/);
   });
