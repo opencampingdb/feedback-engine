@@ -280,6 +280,7 @@ export function applyRules(input: RulesInput): RulesOutput {
       const mine = items.filter((i) => i.place === placeId);
       const evidence = [...input.history.filter((h) => h.place === placeId), ...mine].sort(byReceived);
       const place = record(placeId);
+      const statusBefore = place.status;
 
       // Evidence one way counts only if it came after the latest evidence the other way.
       const latest = (at: number, test: (i: StoredFeedback) => boolean) =>
@@ -354,6 +355,8 @@ export function applyRules(input: RulesInput): RulesOutput {
           decide(item, "applied", "check recorded");
         }
       }
+      // Marks the status as coming from feedback, so the OSM notes can tell it from a contributed closure.
+      if (place.status !== statusBefore) place.fact_sources.status = "feedback";
     }
   }
 

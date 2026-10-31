@@ -179,6 +179,11 @@ describe("closed and reopened", () => {
     expect(out.after()?.status).toBe("closed");
   });
 
+  it("marks a closure as coming from feedback", () => {
+    const out = run([closed(0, "dev-a"), closed(10, "dev-b")], { now: 10 });
+    expect(out.after()?.fact_sources.status).toBe("feedback");
+  });
+
   it("counts a closed report from an earlier run as history", () => {
     const earlier = closed(0, "dev-a");
     const out = run([closed(30, "dev-b")], {

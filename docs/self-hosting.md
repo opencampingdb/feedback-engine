@@ -113,6 +113,10 @@ Run the workflow once by hand from the Actions tab. With items in `pending/` it 
 
 When a PR from either branch is already open, later runs add a commit and a comment to it. Once a PR is merged or closed, the next run starts the branch again from `main`. With nothing to do the workflow ends without changes.
 
+## 10. Pass changes to OpenStreetMap (optional)
+
+Copy [`packages/apply/examples/inbox-osm-notes.yml`](../packages/apply/examples/inbox-osm-notes.yml) to `.github/workflows/osm-notes.yml` in `inbox`, with the same engine SHA. It uses the same bot App secrets. Without the `OSM_NOTES_TOKEN` secret it is a dry run that lists in the job summary the notes it would post. [osm.md](osm.md) covers the OSM token and the limits.
+
 ## Running the apply script locally
 
 With both repositories checked out next to each other:
