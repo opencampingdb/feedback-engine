@@ -58,8 +58,18 @@ export function dumpReviewLine(review: Review): string {
   return JSON.stringify(sorted);
 }
 
-/** Where the data repository keeps a place record: `places/<last 2 characters of id, lower case>/<id>.json`. */
+const PLACE_ID = /^ocdb_[0-9A-HJKMNP-TV-Z]{26}$/;
+
+function checkPlaceId(id: string): void {
+  if (!PLACE_ID.test(id)) throw new Error(`refusing place id ${JSON.stringify(id)}`);
+}
+
+/**
+ * Where the data repository keeps a place record: `places/<last 2 characters of id, lower case>/<id>.json`.
+ * Throws for an id that is not `ocdb_<ulid>`.
+ */
 export function placePath(id: string): string {
+  checkPlaceId(id);
   return `places/${id.slice(-2).toLowerCase()}/${id}.json`;
 }
 
@@ -68,6 +78,8 @@ export function roundCoord(value: number): number {
   return Math.round(value * 1e6) / 1e6;
 }
 
+/** `reviews/<place id>.ndjson`. Throws for an id that is not `ocdb_<ulid>`. */
 export function reviewPath(placeId: string): string {
+  checkPlaceId(placeId);
   return `reviews/${placeId}.ndjson`;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dumpPlace, dumpReviewLine, placePath, pythonFloat } from "../src/serialise.js";
+import { dumpPlace, dumpReviewLine, placePath, pythonFloat, reviewPath } from "../src/serialise.js";
 import type { Place } from "../src/types.js";
 
 describe("pythonFloat", () => {
@@ -106,5 +106,12 @@ describe("dumpReviewLine", () => {
 describe("placePath", () => {
   it("follows SPEC: places/<last 2 characters of id, lower case>/<id>.json", () => {
     expect(placePath("ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA")).toBe("places/za/ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA.json");
+  });
+
+  it("refuses an id that is not an Open Camping DB id", () => {
+    for (const id of ["ocdb_../../../etc/passwd", "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZ/", "../places/za/x", ""]) {
+      expect(() => placePath(id)).toThrow(/refusing place id/);
+      expect(() => reviewPath(id)).toThrow(/refusing place id/);
+    }
   });
 });

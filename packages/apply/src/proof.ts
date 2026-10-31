@@ -21,6 +21,8 @@ export interface ProofResult {
   checked: string;
   /** Plain English for the PR body. */
   detail: string;
+  /** The address the code was found at, after any redirects. */
+  url?: string;
 }
 
 export interface TransportResponse {
@@ -185,9 +187,16 @@ export async function checkProof(proofUrl: string, code: string, options: ProofO
       continue;
     }
     if (res.status < 200 || res.status >= 300) return result(false, `the page answered ${res.status}`);
-    const text = await readCapped(res.body, options.maxBytes ?? MAX_BYTES);
+    let text: string;
+    try {
+      text = await readCapped(res.body, options.maxBytes ?? MAX_BYTES);
+    } catch (error) {
+      const e = error as Error;
+      if (e.name === "TimeoutError" || e.name === "AbortError") return result(false, "the page timed out");
+      return result(false, "the page could not be read");
+    }
     return text.toUpperCase().includes(code.toUpperCase())
-      ? result(true, `code found at ${url.href}`)
+      ? { ...result(true, `code found at ${url.href}`), url: url.href }
       : result(false, "code not found on the page");
   }
 }

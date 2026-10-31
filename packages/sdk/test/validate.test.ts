@@ -50,6 +50,25 @@ describe("validateSubmission", () => {
     if (!r.ok) expect(r.errors.join(" | ")).toContain(message);
   });
 
+  it("refuses opening hours that hold contact details, and accepts plain opening hours", () => {
+    const hours = (value: string) =>
+      validateSubmission({ ...base, type: "report", place: PLACE, report: { kind: "fact", fact: "opening_hours", value } });
+    for (const value of ["Ring 0412 345 678", "see camp.example.com.au", "jo@example.com"]) {
+      expect(hours(value)).toMatchObject({ ok: false, errors: ["report.value is not a valid value for opening_hours"] });
+    }
+    expect(hours("Mo-Fr 08:00-17:00; Sa 09:00-12:00").ok).toBe(true);
+    expect(hours("24/7").ok).toBe(true);
+  });
+
+  it("accepts opening hours written with dots or as HHMM ranges, and still refuses phone numbers and links", () => {
+    const hours = (value: string) =>
+      validateSubmission({ ...base, type: "report", place: PLACE, report: { kind: "fact", fact: "opening_hours", value } });
+    for (const value of ["08.00-17.00", "08.00 - 17.00", "0800-1700", "Mo-Fr 0800-1700"]) expect(hours(value).ok).toBe(true);
+    for (const value of ["0412 345 678", "0412-345-678", "1300 123 456", "https://camp.example.org/hours"]) {
+      expect(hours(value).ok).toBe(false);
+    }
+  });
+
   it("refuses a device that is not a UUID", () => {
     const r = validateSubmission({ ...base, device: "abc", type: "check", place: PLACE, check: { visited: "2026-10-01", still_there: true } });
     expect(r.ok).toBe(false);

@@ -91,7 +91,7 @@ await feedback.review({ place, review: { stars: 4, text: "Flat sites, clean toil
 await feedback.check({ place, check: { visited: "2026-10-30", still_there: true }, consent: true });
 ```
 
-Facts a report may name: `fee`, `power`, `tents`, `caravans`, `toilets`, `showers`, `drinking_water`, `dump_station` (true or false), `pets` (`yes`, `no`, `leashed`), `access` (`2wd`, `awd`, `4wd`, `unknown`), `entry` (`public`, `customers`, `permit`, `private`), `max_stay` (such as `48h`, `2d`, `1w`), `opening_hours`, `website` (https only) and `phone`. Website and phone changes are checked by a person.
+Facts a report may name: `fee`, `power`, `tents`, `caravans`, `toilets`, `showers`, `drinking_water`, `dump_station` (true or false), `pets` (`yes`, `no`, `leashed`), `access` (`2wd`, `awd`, `4wd`, `unknown`), `entry` (`public`, `customers`, `permit`, `private`), `max_stay` (such as `48h`, `2d`, `1w`), `opening_hours` (with no email address, phone number or link), `website` (https only) and `phone`. Website and phone changes are checked by a person.
 
 Ask users not to put names, email addresses or phone numbers in notes or reviews. The intake removes contact details it finds, and reviews that still contain personal details are refused.
 

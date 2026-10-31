@@ -15,6 +15,32 @@ export interface PendingFile {
 
 const DAY_FOLDER = /^\d{4}-\d{2}-\d{2}$/;
 const FEEDBACK_FILE = /^fb_[0-9A-HJKMNP-TV-Z]{26}\.json$/;
+const FEEDBACK_ID = /^fb_[0-9A-HJKMNP-TV-Z]{26}$/;
+const RECEIVED = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
+
+/**
+ * Why `item` cannot be used, or undefined when it has a feedback id (equal to
+ * `expectedId` when given) and an ISO 8601 UTC `received`.
+ */
+function storedProblem(item: StoredSubmission, expectedId?: string): string | undefined {
+  if (typeof item !== "object" || item === null) return "the file is not a JSON object";
+  if (typeof item.id !== "string" || !FEEDBACK_ID.test(item.id) || (expectedId !== undefined && item.id !== expectedId)) {
+    return "id does not match the file name";
+  }
+  if (typeof item.received !== "string" || !RECEIVED.test(item.received) || Number.isNaN(Date.parse(item.received))) {
+    return "received is not an ISO 8601 UTC time";
+  }
+  return undefined;
+}
+
+/** A file in a day folder whose content cannot be used. `day` and `name` come from the checked folder and file names. */
+export interface MalformedFile {
+  path: string;
+  day: string;
+  name: string;
+  raw: string;
+  reason: string;
+}
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -31,24 +57,59 @@ async function dayFolders(root: string): Promise<string[]> {
   return entries.filter((e) => e.isDirectory() && DAY_FOLDER.test(e.name)).map((e) => e.name).sort();
 }
 
-async function readFeedbackFolder(root: string, day: string): Promise<PendingFile[]> {
+async function readFeedbackFolder(root: string, day: string): Promise<{ files: PendingFile[]; malformed: MalformedFile[] }> {
   const folder = join(root, day);
-  const out: PendingFile[] = [];
+  const files: PendingFile[] = [];
+  const malformed: MalformedFile[] = [];
   for (const name of (await readdir(folder)).sort()) {
     if (!FEEDBACK_FILE.test(name)) continue;
     const path = join(folder, name);
-    const item = JSON.parse(await readFile(path, "utf8")) as StoredSubmission;
-    out.push({ path, day, item });
+    const raw = await readFile(path, "utf8");
+    let item: StoredSubmission;
+    try {
+      item = JSON.parse(raw) as StoredSubmission;
+    } catch {
+      malformed.push({ path, day, name, raw, reason: "the file is not valid JSON" });
+      continue;
+    }
+    const problem = storedProblem(item, name.slice(0, -5));
+    if (problem) malformed.push({ path, day, name, raw, reason: problem });
+    else files.push({ path, day, item });
   }
-  return out;
+  return { files, malformed };
 }
 
-/** Every file in `pending/`. */
-export async function readPending(inbox: string): Promise<PendingFile[]> {
+/** Every file in `pending/`. Files whose content cannot be used are returned apart, for `refuseMalformed`. */
+export async function readPending(inbox: string): Promise<{ files: PendingFile[]; malformed: MalformedFile[] }> {
   const root = join(inbox, "pending");
-  const out: PendingFile[] = [];
-  for (const day of await dayFolders(root)) out.push(...(await readFeedbackFolder(root, day)));
-  return out;
+  const files: PendingFile[] = [];
+  const malformed: MalformedFile[] = [];
+  for (const day of await dayFolders(root)) {
+    const read = await readFeedbackFolder(root, day);
+    files.push(...read.files);
+    malformed.push(...read.malformed);
+  }
+  return { files, malformed };
+}
+
+/** Moves pending files whose content cannot be used to `refused/<day>/<file name>`, with the reason. */
+export async function refuseMalformed(inbox: string, malformed: readonly MalformedFile[], runAt: string): Promise<number> {
+  for (const file of malformed) {
+    const target = join(inbox, "refused", file.day, file.name);
+    await mkdir(dirname(target), { recursive: true });
+    const outcome = { result: "refused", reason: `the inbox file could not be used: ${file.reason}`, run: runAt };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(file.raw);
+    } catch {
+      parsed = undefined;
+    }
+    const isObject = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+    const body = isObject ? { ...(parsed as Record<string, unknown>), outcome } : { raw: file.raw, outcome };
+    await writeFile(target, `${JSON.stringify(body, null, 2)}\n`, "utf8");
+    await rm(file.path);
+  }
+  return malformed.length;
 }
 
 /** Items in `applied/` from day folders on or after `sinceDay`, as evidence for the rules. */
@@ -57,7 +118,9 @@ export async function readHistory(inbox: string, sinceDay: string): Promise<Stor
   const out: StoredFeedback[] = [];
   for (const day of await dayFolders(root)) {
     if (day < sinceDay) continue;
-    for (const file of await readFeedbackFolder(root, day)) {
+    const read = await readFeedbackFolder(root, day);
+    for (const bad of read.malformed) console.warn(`skipping ${bad.path}: ${bad.reason}`);
+    for (const file of read.files) {
       if (!isOwnerSubmission(file.item)) out.push(file.item as StoredFeedback);
     }
   }
@@ -94,7 +157,24 @@ export async function writeOwners(inbox: string, owners: Iterable<OwnerRecord>):
 
 /** Claims and listings waiting for a person: `owner-claims/<claim id>.json`. */
 export async function readAwaiting(inbox: string): Promise<AwaitingClaim[]> {
-  return readJsonFolder<AwaitingClaim>(join(inbox, "owner-claims"), FEEDBACK_FILE);
+  const folder = join(inbox, "owner-claims");
+  const out: AwaitingClaim[] = [];
+  if (!(await exists(folder))) return out;
+  for (const name of (await readdir(folder)).sort()) {
+    if (!FEEDBACK_FILE.test(name)) continue;
+    const path = join(folder, name);
+    let problem: string | undefined;
+    let waiting: AwaitingClaim | undefined;
+    try {
+      waiting = JSON.parse(await readFile(path, "utf8")) as AwaitingClaim;
+      problem = storedProblem(waiting?.item as StoredSubmission, name.slice(0, -5));
+    } catch {
+      problem = "the file is not valid JSON";
+    }
+    if (problem || !waiting) console.warn(`skipping ${path}: ${problem}`);
+    else out.push(waiting);
+  }
+  return out;
 }
 
 /**
@@ -169,6 +249,13 @@ export class DataRepo {
 
   constructor(readonly root: string) {}
 
+  /** `relativePath` under the checkout, which must stay inside `folder`. */
+  #inside(folder: "places" | "reviews", relativePath: string): string {
+    const path = join(this.root, relativePath);
+    if (!resolve(path).startsWith(resolve(this.root, folder) + sep)) throw new Error(`refusing to write outside ${folder}/: ${relativePath}`);
+    return path;
+  }
+
   async #placeIndex(): Promise<Map<string, string>> {
     if (this.#index) return this.#index;
     const index = new Map<string, string>();
@@ -205,7 +292,7 @@ export class DataRepo {
   }
 
   async reviews(placeId: string): Promise<Review[]> {
-    const path = join(this.root, reviewPath(placeId));
+    const path = this.#inside("reviews", reviewPath(placeId));
     if (!(await exists(path))) return [];
     return (await readFile(path, "utf8"))
       .split("\n")
@@ -221,7 +308,7 @@ export class DataRepo {
     const index = await this.#placeIndex();
     const written: string[] = [];
     for (const place of places) {
-      const path = join(this.root, placePath(place.id));
+      const path = this.#inside("places", placePath(place.id));
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, dumpPlace(place), "utf8");
       const old = index.get(place.id);
@@ -240,7 +327,7 @@ export class DataRepo {
    * endings and a trailing newline. Existing lines keep their text.
    */
   async addReviews(placeId: string, reviews: readonly Review[]): Promise<string> {
-    const path = join(this.root, reviewPath(placeId));
+    const path = this.#inside("reviews", reviewPath(placeId));
     await mkdir(dirname(path), { recursive: true });
     const existing = (await exists(path)) ? (await readFile(path, "utf8")).split(/\r?\n/) : [];
     const entries = existing
