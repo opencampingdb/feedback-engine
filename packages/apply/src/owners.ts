@@ -57,6 +57,10 @@ export interface ReviewPr {
   state: "OPEN" | "MERGED" | "CLOSED";
   body: string;
   comments: { author: { login: string } | null; body: string }[];
+  /** Who opened the PR. Only PRs the bot opened count. */
+  author: { login: string } | null;
+  /** True when the PR comes from a fork. Those never count. */
+  isCrossRepository: boolean;
 }
 
 /** What the review PR shows for a claim or listing. */
@@ -110,13 +114,15 @@ const APPROVAL_LINE = /^- \[([ xX])\] Approve owner (?:claim|listing) (fb_[0-9A-
 /**
  * The approval boxes in a review PR: in its body, and in comments written by
  * the bot. Only boxes at the start of a line count, so text quoted from an
- * owner (always on one line, after the box) cannot add or tick one.
+ * owner (always on one line, after the box) cannot add or tick one. A PR from
+ * a fork, or one the bot did not open, has none.
  */
 export function parseApprovals(pr: ReviewPr, botLogins: readonly string[]): { ticked: string[]; listed: string[] } {
   const logins = new Set(botLogins.flatMap((l) => [l, `${l}[bot]`, `app/${l}`]));
-  const texts = [pr.body, ...pr.comments.filter((c) => c.author && logins.has(c.author.login)).map((c) => c.body)];
   const ticked: string[] = [];
   const listed: string[] = [];
+  if (pr.isCrossRepository !== false || !pr.author || !logins.has(pr.author.login)) return { ticked, listed };
+  const texts = [pr.body, ...pr.comments.filter((c) => c.author && logins.has(c.author.login)).map((c) => c.body)];
   for (const text of texts) {
     for (const m of text.replace(/\r\n/g, "\n").matchAll(APPROVAL_LINE)) {
       const id = m[2]!;
@@ -329,6 +335,11 @@ export function applyOwnerRules(input: OwnerInput): OwnerOutput {
     }
     if (u.status === "temporarily_closed" && (!u.reopens || u.reopens <= today)) {
       decide(item, "refused", `the reopens date ${u.reopens ?? "(none)"} has already passed`);
+      return;
+    }
+    // Only a person reopens a closed place, so it cannot close temporarily and reopen by itself.
+    if (u.status === "temporarily_closed" && (working.get(target) ?? input.places.get(target))?.status === "closed") {
+      decide(item, "refused", "the place is closed: a person must reopen it before it can close temporarily");
       return;
     }
 

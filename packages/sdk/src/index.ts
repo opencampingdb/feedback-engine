@@ -38,5 +38,5 @@ export {
   validateSubmission,
 } from "./validate.js";
 export type { ValidationResult } from "./validate.js";
-export { REMOVED_MARKER, findContactDetails, stripContactDetails } from "./text.js";
+export { REMOVED_MARKER, findContactDetails, findContactDetailsInHours, stripContactDetails } from "./text.js";
 export type { ContactDetailKind } from "./text.js";

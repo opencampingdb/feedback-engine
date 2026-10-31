@@ -32,7 +32,12 @@ describe("checkProof", () => {
   it("finds the code on the page, ignoring case, and sends the Open Camping DB User-Agent", async () => {
     const { t, seen } = transport({ "https://farm.example/about": page(200, "<p>Listed on Open Camping DB: ocdb-7kq2</p>") });
     const result = await checkProof("https://farm.example/about", "OCDB-7KQ2", { transport: t, now: NOW });
-    expect(result).toEqual({ found: true, checked: "2026-10-31T09:00:00Z", detail: "code found at https://farm.example/about" });
+    expect(result).toEqual({
+      found: true,
+      checked: "2026-10-31T09:00:00Z",
+      detail: "code found at https://farm.example/about",
+      url: "https://farm.example/about",
+    });
     expect(seen[0]!.headers["user-agent"]).toBe(USER_AGENT);
     expect(USER_AGENT).toMatch(/^OpenCampingDB\//);
     expect(seen[0]!.timeoutMs).toBeGreaterThan(0);
@@ -51,12 +56,13 @@ describe("checkProof", () => {
     expect(seen).toHaveLength(0);
   });
 
-  it("follows a redirect to another https page", async () => {
+  it("follows a redirect to another https page and gives the address the code was found at", async () => {
     const { t } = transport({
-      "https://farm.example/about": page(301, "", { location: "/about-us" }),
-      "https://farm.example/about-us": page(200, "code OCDB-7KQ2"),
+      "https://farm.example/about": page(301, "", { location: "https://other.example/about-us" }),
+      "https://other.example/about-us": page(200, "code OCDB-7KQ2"),
     });
-    expect((await checkProof("https://farm.example/about", "OCDB-7KQ2", { transport: t, now: NOW })).found).toBe(true);
+    const result = await checkProof("https://farm.example/about", "OCDB-7KQ2", { transport: t, now: NOW });
+    expect(result).toMatchObject({ found: true, url: "https://other.example/about-us" });
   });
 
   it.each(["https://127.0.0.1/x", "https://localhost/x", "https://[::1]/x", "http://farm.example/x", "https://10.0.0.5/admin"])(
@@ -97,6 +103,29 @@ describe("checkProof", () => {
     expect(await at("https://farm.example/gone")).toMatchObject({ found: false, detail: "the page answered 404" });
     expect(await at("https://farm.example/slow")).toMatchObject({ found: false, detail: expect.stringMatching(/timed out/) });
     expect(await at("https://farm.example/inside")).toMatchObject({ found: false, detail: expect.stringMatching(/private address/) });
+  });
+
+  it("reports a page that fails part way through its body without throwing", async () => {
+    const reset: TransportResponse = {
+      status: 200,
+      headers: {},
+      body: (async function* () {
+        yield new TextEncoder().encode("<p>Welcome");
+        throw Object.assign(new Error("aborted"), { code: "ECONNRESET" });
+      })(),
+    };
+    const stalled: TransportResponse = {
+      status: 200,
+      headers: {},
+      body: (async function* () {
+        yield new TextEncoder().encode("<p>Welcome");
+        throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+      })(),
+    };
+    const { t } = transport({ "https://farm.example/reset": reset, "https://farm.example/stalled": stalled });
+    const at = (u: string) => checkProof(u, "OCDB-7KQ2", { transport: t, now: NOW });
+    expect(await at("https://farm.example/reset")).toMatchObject({ found: false, detail: "the page could not be read" });
+    expect(await at("https://farm.example/stalled")).toMatchObject({ found: false, detail: "the page timed out" });
   });
 });
 

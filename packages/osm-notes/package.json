@@ -14,5 +14,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "notes": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@opencampingdb/feedback": "0.2.0"
   }
 }

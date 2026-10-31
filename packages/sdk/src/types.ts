@@ -240,6 +240,11 @@ interface StoredFields {
   id: string;
   /** SHA-256 of salt and device, first 16 hex characters. */
   device: string;
+  /**
+   * SHA-256 of salt and the client's network (IPv4 /24 or IPv6 /48), first 16
+   * hex characters. Absent when the intake saw no client address.
+   */
+  origin?: string;
   /** ISO 8601 UTC time the intake accepted it. */
   received: string;
   /** App name from the app key list, for example `camporacle`. */

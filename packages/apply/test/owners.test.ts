@@ -165,6 +165,13 @@ describe("owner updates", () => {
     expect(out.after()).toBeUndefined();
   });
 
+  it("refuses a temporary closure of a closed place, so it never reopens by itself", () => {
+    const item = updateItem({ status: "temporarily_closed", reopens: "2026-11-01" });
+    const out = run({ pending: [item], places: [place({ status: "closed" }), place({ id: OTHER })] });
+    expect(out.decision(item)).toMatchObject({ outcome: "refused", reason: expect.stringMatching(/closed/) });
+    expect(out.after()).toBeUndefined();
+  });
+
   it("reopens a temporarily closed place once its date arrives", () => {
     const closed = place({ status: "temporarily_closed", reopens: "2026-10-31", fact_sources: { power: "osm", fee: "osm", status: "owner" } });
     const out = run({ places: [closed] });
@@ -258,7 +265,15 @@ function awaitingOf(item: StoredOwnerSubmission, sent = ago(1)): AwaitingClaim {
   return { item: item as AwaitingClaim["item"], place: placeId, sent, proof: found };
 }
 
-const merged = (body: string, comments: ReviewPr["comments"] = []): ReviewPr => ({ number: 7, state: "MERGED", body, comments });
+const PR_AUTHOR = { login: "app/opencampingdb-bot" };
+const merged = (body: string, comments: ReviewPr["comments"] = []): ReviewPr => ({
+  number: 7,
+  state: "MERGED",
+  body,
+  comments,
+  author: PR_AUTHOR,
+  isCrossRepository: false,
+});
 
 describe("approval by merging the review PR", () => {
   it("reads only ticked boxes at the start of a line, from the body and the bot's comments", () => {
@@ -271,6 +286,22 @@ describe("approval by merging the review PR", () => {
       ticked: ["fb_01JC0000000000000000000001", "fb_01JC0000000000000000000003"],
       listed: ["fb_01JC0000000000000000000001", "fb_01JC0000000000000000000002", "fb_01JC0000000000000000000003"],
     });
+  });
+
+  it("ignores PRs from a fork and PRs the bot did not open", () => {
+    const body = "- [x] Approve owner claim fb_01JC0000000000000000000001: x";
+    const none = { ticked: [], listed: [] };
+    expect(parseApprovals({ ...merged(body), isCrossRepository: true }, ["opencampingdb-bot"])).toEqual(none);
+    expect(parseApprovals({ ...merged(body), author: { login: "someone" } }, ["opencampingdb-bot"])).toEqual(none);
+    expect(parseApprovals({ ...merged(body), author: null }, ["opencampingdb-bot"])).toEqual(none);
+    expect(parseApprovals(merged(body), ["opencampingdb-bot"]).ticked).toEqual(["fb_01JC0000000000000000000001"]);
+  });
+
+  it("does not refuse a claim named in a closed PR from a fork", () => {
+    const item = claimItem();
+    const fork: ReviewPr = { ...merged(`- [ ] Approve owner claim ${item.id}: x`), number: 99, state: "CLOSED", isCrossRepository: true, author: { login: "someone" } };
+    const out = run({ ownerList: [], awaiting: [awaitingOf(item)], reviewPrs: [fork] });
+    expect(out.approvals).toEqual([]);
   });
 
   it("approves a ticked claim: writes the owner record and sets owner_verified", () => {
@@ -339,7 +370,7 @@ describe("approval by merging the review PR", () => {
     const out = run({
       ownerList: [],
       awaiting: [awaitingOf(a), awaitingOf(b)],
-      reviewPrs: [merged(`- [ ] Approve owner claim ${a.id}: x`), { number: 8, state: "CLOSED", body: `- [x] Approve owner claim ${b.id}: y`, comments: [] }],
+      reviewPrs: [merged(`- [ ] Approve owner claim ${a.id}: x`), { ...merged(`- [x] Approve owner claim ${b.id}: y`), number: 8, state: "CLOSED" }],
     });
     expect(out.approvals).toEqual([
       { claim: a.id, outcome: "refused", reason: "not ticked when review PR #7 was merged" },
@@ -355,7 +386,7 @@ describe("approval by merging the review PR", () => {
     const out = run({
       ownerList: [],
       awaiting: [awaitingOf(a, ago(3)), awaitingOf(b, ago(61))],
-      reviewPrs: [{ number: 9, state: "OPEN", body: `- [x] Approve owner claim ${a.id}: x\n- [ ] Approve owner claim ${b.id}: y`, comments: [] }],
+      reviewPrs: [{ ...merged(`- [x] Approve owner claim ${a.id}: x\n- [ ] Approve owner claim ${b.id}: y`), number: 9, state: "OPEN" }],
     });
     expect(out.approvals).toEqual([{ claim: b.id, outcome: "refused", reason: "no decision within 60 days" }]);
   });

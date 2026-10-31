@@ -62,10 +62,23 @@ export function autoPrBody(
   return `${lines.join("\n")}\n`;
 }
 
+/** Host name without a leading `www.`, or an empty string for an address that does not parse. */
+function siteOf(address: string): string {
+  try {
+    return new URL(address).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
 function claimSummary(c: ClaimForReview, places: ReadonlyMap<string, Place>): string {
-  const proof = c.proof.found
-    ? `code ${c.code} found at ${c.proofUrl}`
-    : `code ${c.code} NOT found at ${c.proofUrl} (${safeSummary(c.proof.detail)})`;
+  // The code may have been found after a redirect. Show where, and flag another site.
+  const foundAt = c.proof.url ?? c.proofUrl;
+  const proof = !c.proof.found
+    ? `code ${c.code} NOT found at ${c.proofUrl} (${safeSummary(c.proof.detail)})`
+    : siteOf(foundAt) === siteOf(c.proofUrl)
+      ? `code ${c.code} found at ${foundAt}`
+      : `code ${c.code} found at ${foundAt}, ON A DIFFERENT SITE from the submitted ${c.proofUrl}: check both belong to the place`;
   const replaces = c.replaces ? ` Replaces the current owner (claim ${c.replaces.claim}, approved ${c.replaces.approved}).` : "";
   if (c.type === "owner_listing" && c.listing) {
     const facts = Object.entries(c.listing.facts)

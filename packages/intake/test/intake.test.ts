@@ -1,7 +1,7 @@
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createAppJwt, importPrivateKey } from "../src/github.js";
-import { createHandler, hashDevice, type Env } from "../src/index.js";
+import { createHandler, hashDevice, networkPrefix, type Env } from "../src/index.js";
 import type { KVLike } from "../src/ratelimit.js";
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", {
@@ -210,6 +210,57 @@ describe("intake", () => {
       expect((await handle(post({ ...review, device }), e)).status).toBe(202);
     }
     expect((await handle(post({ ...review, device: "7b241101-e2bb-4255-8caf-4136c566a962" }), e)).status).toBe(429);
+  });
+
+  it("stores a salted hash of the client network, never the address", async () => {
+    const res = await handle(post(review, { "cf-connecting-ip": "203.0.113.45" }), env());
+    expect(res.status).toBe(202);
+    const put = gh.calls.find((c) => c.method === "PUT")!;
+    const stored = decodeContent(put);
+    expect(stored.origin).toBe(await hashDevice("pepper", "ip:203.0.113"));
+    expect(JSON.stringify(stored)).not.toContain("203.0.113");
+  });
+
+  it("cuts IPv4 addresses to the /24 and IPv6 addresses to the /48", () => {
+    expect(networkPrefix("203.0.113.45")).toBe("203.0.113");
+    expect(networkPrefix("::ffff:203.0.113.45")).toBe("203.0.113");
+    expect(networkPrefix("2001:DB8:0001:abcd::1")).toBe("2001:db8:1");
+    expect(networkPrefix("2001:db8::")).toBe("2001:db8:0");
+    expect(networkPrefix("::1")).toBe("0:0:0");
+    expect(networkPrefix("")).toBeUndefined();
+    expect(networkPrefix("999.0.0.1")).toBeUndefined();
+    expect(networkPrefix("1::2::3")).toBeUndefined();
+  });
+
+  it("limits each client network to 100 a day, whatever device ids it sends", async () => {
+    const kv = fakeKv();
+    const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "camporacle", daily_limit: 1000 } }) };
+    const from = (ip: string, i: number) =>
+      post({ ...review, device: `${String(i).padStart(8, "0")}-e2bb-4255-8caf-4136c566a962` }, { "cf-connecting-ip": ip });
+    for (let i = 0; i < 100; i++) expect((await handle(from(`203.0.113.${i}`, i), e)).status).toBe(202);
+    expect((await handle(from("203.0.113.200", 100), e)).status).toBe(429);
+    // Another network still gets through.
+    expect((await handle(from("198.51.100.7", 101), e)).status).toBe(202);
+  });
+
+  it("refuses owner submissions with 403 for a key limited to feedback", async () => {
+    const e = { ...env(), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "camporacle", daily_limit: 3, kinds: ["feedback"] } }) };
+    const claim = {
+      type: "owner_claim",
+      place: PLACE,
+      device: DEVICE,
+      app_version: "1.0.0",
+      terms_accepted: true,
+      owner: { name: "Jo Bloggs", email: "jo@example.com" },
+      claim: { proof_url: "https://riverbend.example/about" },
+    };
+    expect((await handle(post(claim), e)).status).toBe(403);
+    expect((await handle(post(review), e)).status).toBe(202);
+  });
+
+  it("ignores an app key whose kinds are not feedback or owner", async () => {
+    const e = { ...env(), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "camporacle", daily_limit: 3, kinds: ["everything"] } }) };
+    expect((await handle(post(review), e)).status).toBe(401);
   });
 
   it("returns 503 when GitHub refuses the write so the client retries", async () => {

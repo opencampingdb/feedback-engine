@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { run } from "../src/run.js";
 import { dumpPlace } from "../src/serialise.js";
 import type { Place } from "../src/types.js";
@@ -255,6 +255,48 @@ describe("run", () => {
     const summary = await run({ inbox, data, now: NOW });
     expect([...summary.auto_files].sort()).toEqual([`places/oc/${PLACE}.json`, `places/za/${PLACE}.json`]);
     expect(await readdir(join(data, "places", "oc"))).toEqual([]);
+  });
+
+  it("moves a pending file whose id does not match its file name to refused/, writes no data and carries on", async () => {
+    const newPlace = { type: "report", place: null, location: { lat: -36.9, lon: 144.6 }, report: { kind: "new_place" } };
+    const bad = { ...item(30, "2026-10-29T01:00:00Z", "aaaa", newPlace), id: "fb_/../../../../outside/01JC0000000000000000000030" };
+    await put(join(inbox, "pending", "2026-10-29", `${id(30)}.json`), bad);
+    await pending(32, "2026-10-29T02:00:00Z", "bbbb", { type: "check", check: { visited: "2026-10-29", still_there: true } });
+    const dataBefore = await snapshot(data);
+    const summary = await run({ inbox, data, now: NOW });
+    expect(await snapshot(data)).toEqual(dataBefore);
+    expect(summary.counts).toMatchObject({ applied: 1, refused: 1 });
+    expect(summary.inbox_changed).toBe(true);
+    const refused = JSON.parse(await readFile(join(inbox, "refused", "2026-10-29", `${id(30)}.json`), "utf8"));
+    expect(refused.outcome).toMatchObject({ result: "refused", reason: expect.stringMatching(/id does not match the file name/) });
+    expect(await readdir(join(inbox, "applied", "2026-10-29"))).toEqual([`${id(32)}.json`]);
+    expect(Object.keys(await snapshot(root)).every((p) => p.startsWith("inbox/") || p.startsWith("data/"))).toBe(true);
+  });
+
+  it("moves a pending file whose received time is not ISO 8601, or that is not JSON, to refused/", async () => {
+    await put(join(inbox, "pending", "2026-10-29", `${id(31)}.json`), item(31, "../../x", "aaaa", { type: "check", check: { visited: "2026-10-29", still_there: true } }));
+    await put(join(inbox, "pending", "2026-10-29", `${id(33)}.json`), "{not json");
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.counts.refused).toBe(2);
+    expect((await readdir(join(inbox, "refused", "2026-10-29"))).sort()).toEqual([`${id(31)}.json`, `${id(33)}.json`]);
+    const notJson = JSON.parse(await readFile(join(inbox, "refused", "2026-10-29", `${id(33)}.json`), "utf8"));
+    expect(notJson).toMatchObject({ raw: "{not json", outcome: { result: "refused" } });
+    const badTime = JSON.parse(await readFile(join(inbox, "refused", "2026-10-29", `${id(31)}.json`), "utf8"));
+    expect(badTime.outcome.reason).toMatch(/received is not an ISO 8601 UTC time/);
+  });
+
+  it("skips and logs a malformed file in applied/ history", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const bad = { ...item(34, "2026-10-28T01:00:00Z", "aaaa", { type: "report", report: { kind: "closed" } }), id: "fb_x" };
+      await put(join(inbox, "applied", "2026-10-28", `${id(34)}.json`), bad);
+      await pending(35, "2026-10-29T01:00:00Z", "bbbb", { type: "report", report: { kind: "closed" } });
+      const summary = await run({ inbox, data, now: NOW });
+      expect(summary.counts.applied).toBe(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(join("applied", "2026-10-28", `${id(34)}.json`)));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("does nothing when the inbox is empty", async () => {
