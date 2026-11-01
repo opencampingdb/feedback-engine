@@ -29,6 +29,12 @@ export interface Place {
    * Left out when there are none. Set it with `setSource`.
    */
   fact_dates?: Partial<Record<SourceKey, string>>;
+  /**
+   * When a traveller last checked the place and found it there, UTC: the time
+   * of the apply run that accepted the check. Set only while the place is open,
+   * and does not move `updated`. Missing when no check has confirmed it.
+   */
+  last_confirmed?: string;
   updated: string;
   /** Plain text from a verified owner, at most 500 characters. */
   description?: string;
