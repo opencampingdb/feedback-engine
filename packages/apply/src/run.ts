@@ -14,7 +14,7 @@ import {
 import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
 import { autoPrBody, reviewPrBody } from "./prbody.js";
 import { checkProof as realCheckProof, type ProofResult } from "./proof.js";
-import { applyEdit, applyRules, resolvePlace, WINDOW_DAYS, type Decision } from "./rules.js";
+import { applyEdit, applyHeldReview, applyRules, resolvePlace, WINDOW_DAYS, type Decision } from "./rules.js";
 import type { Place, Review } from "./types.js";
 
 export interface RunOptions {
@@ -105,11 +105,17 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     }
   }
 
+  // Review lines of every place a review or a review report is about, following merged ids.
   const reviewIds = new Set(
-    crowd.filter((p): p is Extract<StoredFeedback, { type: "review" }> => p.type === "review").map((p) => p.place),
+    crowd
+      .filter((p) => p.type === "review" || p.type === "review_report")
+      .map((p) => resolvePlace(p.place, places))
+      .filter((p): p is string => p !== undefined),
   );
   const reviews = new Map<string, Review[]>();
-  for (const id of reviewIds) if (places.has(id)) reviews.set(id, await auto.reviews(id));
+  for (const id of reviewIds) reviews.set(id, await auto.reviews(id));
+  const blocked = await auto.blocked();
+  const reviewers = await auto.reviewers(blocked);
 
   const crowdResult = applyRules({
     now: runAt,
@@ -118,6 +124,8 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     places,
     reviews: (id) => reviews.get(id) ?? [],
     ...(kinds ? { kinds } : {}),
+    blocked,
+    reviewers,
   });
 
   // Proof pages for claims and listings still in pending/, oldest first, within
@@ -161,13 +169,29 @@ export async function run(options: RunOptions): Promise<RunSummary> {
 
   const autoPlaces = new Map([...crowdResult.places, ...ownerResult.places]);
   const autoFiles = await auto.writePlaces(autoPlaces.values());
-  for (const [placeId, added] of crowdResult.reviews) autoFiles.push(await auto.addReviews(placeId, added));
+  for (const [placeId, lines] of crowdResult.reviews) {
+    const written = await auto.writeReviews(placeId, lines);
+    if (written) autoFiles.push(written);
+  }
 
   // Review edits, applied on top of whatever the review checkout already holds.
   const reviewFiles: string[] = [];
   const effective = new Set<string>();
   for (const edit of [...crowdResult.edits, ...ownerResult.edits]) {
     if (edit.kind === "note") {
+      effective.add(edit.feedback);
+      continue;
+    }
+    if (edit.kind === "review") {
+      // A held review: its line, and the place's rating, wait in the review checkout.
+      const current = (await review.places([edit.place])).get(edit.place);
+      const held = current && current.status !== "merged" ? applyHeldReview(await review.reviews(edit.place), edit.review, await review.blocked()) : undefined;
+      if (!current || !held) continue;
+      const written = await review.writeReviews(edit.place, held.lines);
+      if (written) reviewFiles.push(written);
+      if (JSON.stringify(current.rating) !== JSON.stringify(held.rating)) {
+        reviewFiles.push(...(await review.writePlaces([{ ...current, rating: held.rating, updated: runAt }])));
+      }
       effective.add(edit.feedback);
       continue;
     }

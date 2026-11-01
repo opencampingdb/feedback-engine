@@ -4,7 +4,7 @@ import { isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@
 import type { AwaitingClaim, OwnerRecord } from "./owners.js";
 import type { Decision } from "./rules.js";
 import { dumpPlace, dumpReviewLine, placePath, reviewPath } from "./serialise.js";
-import type { Place, Review } from "./types.js";
+import type { BlockedList, Place, Review } from "./types.js";
 
 export interface PendingFile {
   path: string;
@@ -323,19 +323,46 @@ export class DataRepo {
   }
 
   /**
-   * Adds review lines and rewrites the file with every line sorted by id, LF
-   * endings and a trailing newline. Existing lines keep their text.
+   * Writes every review line of a place, sorted by id, with LF endings and a
+   * trailing newline. Returns the path, or undefined when the file already
+   * holds exactly that.
    */
-  async addReviews(placeId: string, reviews: readonly Review[]): Promise<string> {
+  async writeReviews(placeId: string, reviews: readonly Review[]): Promise<string | undefined> {
     const path = this.#inside("reviews", reviewPath(placeId));
+    const text = [...reviews]
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((r) => `${dumpReviewLine(r)}\n`)
+      .join("");
+    if ((await exists(path)) && (await readFile(path, "utf8")) === text) return undefined;
     await mkdir(dirname(path), { recursive: true });
-    const existing = (await exists(path)) ? (await readFile(path, "utf8")).split(/\r?\n/) : [];
-    const entries = existing
-      .filter((line) => line.trim())
-      .map((line) => ({ id: (JSON.parse(line) as Review).id, line }));
-    for (const r of reviews) entries.push({ id: r.id, line: dumpReviewLine(r) });
-    entries.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    await writeFile(path, entries.map((e) => `${e.line}\n`).join(""), "utf8");
+    await writeFile(path, text, "utf8");
     return reviewPath(placeId);
+  }
+
+  /** Contributors in `moderation/blocked_contributors.json`. Empty when the file is missing. */
+  async blocked(): Promise<Set<string>> {
+    const path = join(this.root, "moderation", "blocked_contributors.json");
+    if (!(await exists(path))) return new Set();
+    const list = JSON.parse(await readFile(path, "utf8")) as Partial<BlockedList>;
+    return new Set((list.contributors ?? []).map((entry) => entry.contributor));
+  }
+
+  /**
+   * Contributors with at least one visible review anywhere in the data, so
+   * their next reviews are trusted. Reads every review file.
+   */
+  async reviewers(blocked: ReadonlySet<string>): Promise<Set<string>> {
+    const out = new Set<string>();
+    const folder = join(this.root, "reviews");
+    if (!(await exists(folder))) return out;
+    for (const name of await readdir(folder)) {
+      if (!name.endsWith(".ndjson")) continue;
+      for (const line of (await readFile(join(folder, name), "utf8")).split("\n")) {
+        if (!line.trim()) continue;
+        const review = JSON.parse(line) as Review;
+        if (review.hidden === undefined && review.contributor && !blocked.has(review.contributor)) out.add(review.contributor);
+      }
+    }
+    return out;
   }
 }

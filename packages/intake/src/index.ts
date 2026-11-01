@@ -7,14 +7,19 @@ import {
   type StoredFeedback,
   type StoredOwnerSubmission,
 } from "@opencampingdb/feedback";
+import { verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
+import { fromBase64, hex, sha256, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
-import { checkAndCount, type KVLike } from "./ratelimit.js";
+import { IntegrityError, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
+import { ATTEST_KEY_DAILY_LIMIT, checkAndCount, CONTRIBUTOR_DAILY_LIMIT, type KVLike } from "./ratelimit.js";
 import { ulid } from "./ulid.js";
 
 export interface Env {
   /**
    * Secret. JSON map of app key to `{ "app": "<name>", "daily_limit": <number> }`,
-   * optionally with `owner_daily_limit` and `kinds` (`["feedback"]`, `["owner"]` or both).
+   * optionally with `owner_daily_limit`, `kinds` (`["feedback"]`, `["owner"]`
+   * or both), `requires_attestation`, `ios`, `android`,
+   * `requires_visited_nearby` and `contributor_daily_limit`.
    */
   APP_KEYS: string;
   /** Secret. Salt for hashing device ids. */
@@ -28,6 +33,10 @@ export interface Env {
   /** Comma separated list of allowed web origins, or `*`. */
   ALLOWED_ORIGINS?: string;
   RATE_LIMIT: KVLike;
+  /** Registered App Attest keys and open challenges. Needed when an app key has `ios`. */
+  ATTEST?: KVLike;
+  /** Secret. Google service account key file (JSON) allowed to decode Play Integrity tokens. Needed when an app key has `android`. */
+  GOOGLE_SERVICE_ACCOUNT?: string;
 }
 
 type SubmissionKind = "feedback" | "owner";
@@ -39,6 +48,17 @@ interface AppEntry {
   owner_daily_limit?: number;
   /** Kinds of submission the key may send. Every kind when left out. */
   kinds?: SubmissionKind[];
+  /**
+   * Every report, review, check and review report must carry an App Attest
+   * assertion (with `ios`) or a Play Integrity token (with `android`).
+   */
+  requires_attestation?: boolean;
+  ios?: IosConfig;
+  android?: AndroidConfig;
+  /** Reviews must carry `visited_nearby: true`. */
+  requires_visited_nearby?: boolean;
+  /** Feedback per contributor per day. Defaults to CONTRIBUTOR_DAILY_LIMIT. */
+  contributor_daily_limit?: number;
 }
 
 const isLimit = (v: unknown): v is number => typeof v === "number" && v > 0;
@@ -50,6 +70,8 @@ export interface Deps {
   fetch: Fetch;
   now: () => number;
   randomBytes?: (n: number) => Uint8Array;
+  /** App Attest root certificate (PEM). Apple's by default; tests pass their own. */
+  appAttestRoot?: string;
 }
 
 function corsHeaders(request: Request, env: Env): Record<string, string> {
@@ -77,19 +99,52 @@ export function parseAppKeys(raw: string): Map<string, AppEntry> {
     const kindsValid =
       entry.kinds === undefined ||
       (Array.isArray(entry.kinds) && entry.kinds.length > 0 && entry.kinds.every((k) => k === "feedback" || k === "owner"));
+    const iosValid =
+      entry.ios === undefined ||
+      (typeof entry.ios?.app_id === "string" &&
+        /^[A-Z0-9]{10}\.[A-Za-z0-9.-]+$/.test(entry.ios.app_id) &&
+        (entry.ios.environment === undefined || entry.ios.environment === "production" || entry.ios.environment === "development"));
+    const androidValid =
+      entry.android === undefined ||
+      (typeof entry.android?.package === "string" &&
+        /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/.test(entry.android.package) &&
+        (entry.android.certificate_sha256 === undefined ||
+          (Array.isArray(entry.android.certificate_sha256) && entry.android.certificate_sha256.every((d) => typeof d === "string"))));
+    // An app key that requires attestation must say how its apps attest.
+    const attestValid =
+      entry.requires_attestation === undefined ||
+      entry.requires_attestation === false ||
+      (entry.requires_attestation === true && (entry.ios !== undefined || entry.android !== undefined));
     if (
       key.length >= 16 &&
       typeof entry.app === "string" &&
       APP_NAME.test(entry.app) &&
       isLimit(entry.daily_limit) &&
       (entry.owner_daily_limit === undefined || isLimit(entry.owner_daily_limit)) &&
-      kindsValid
+      (entry.contributor_daily_limit === undefined || isLimit(entry.contributor_daily_limit)) &&
+      (entry.requires_visited_nearby === undefined || typeof entry.requires_visited_nearby === "boolean") &&
+      kindsValid &&
+      iosValid &&
+      androidValid &&
+      attestValid
     ) {
       out.set(key, {
         app: entry.app,
         daily_limit: entry.daily_limit,
         ...(entry.owner_daily_limit !== undefined ? { owner_daily_limit: entry.owner_daily_limit } : {}),
         ...(entry.kinds !== undefined ? { kinds: [...entry.kinds] } : {}),
+        ...(entry.requires_attestation ? { requires_attestation: true } : {}),
+        ...(entry.ios ? { ios: { app_id: entry.ios.app_id, ...(entry.ios.environment ? { environment: entry.ios.environment } : {}) } } : {}),
+        ...(entry.android
+          ? {
+              android: {
+                package: entry.android.package,
+                ...(entry.android.certificate_sha256 ? { certificate_sha256: [...entry.android.certificate_sha256] } : {}),
+              },
+            }
+          : {}),
+        ...(entry.requires_visited_nearby ? { requires_visited_nearby: true } : {}),
+        ...(entry.contributor_daily_limit !== undefined ? { contributor_daily_limit: entry.contributor_daily_limit } : {}),
       });
     }
   }
@@ -116,6 +171,19 @@ export function networkPrefix(ip: string): string | undefined {
   if (halves.length === 2 ? missing < 1 : missing !== 0) return undefined;
   const groups = [...head, ...Array<string>(missing).fill("0"), ...tail];
   return groups.slice(0, 3).map((g) => parseInt(g, 16).toString(16)).join(":");
+}
+
+/**
+ * SHA-256 of salt and `text`, first 16 hex characters. Case is kept: a
+ * contributor id or key id is compared exactly.
+ */
+export async function saltedHash(salt: string, text: string): Promise<string> {
+  return hex((await sha256(`${salt}:${text}`)).subarray(0, 8));
+}
+
+/** The stored contributor id for the id an app sent: `ctr_` and 16 hex characters, different for each app. */
+export async function hashContributor(salt: string, app: string, contributor: string): Promise<string> {
+  return `ctr_${await saltedHash(salt, `contributor:${app}:${contributor}`)}`;
 }
 
 /** SHA-256 of salt and device id, first 16 hex characters. */
@@ -181,8 +249,112 @@ export function sanitise(submission: FeedbackSubmission): FeedbackSubmission {
   return submission;
 }
 
+/** Seconds an App Attest challenge stays usable. */
+export const CHALLENGE_TTL_SECONDS = 300;
+/** App Attest registrations per hashed client network per day. */
+export const REGISTER_ORIGIN_DAILY_LIMIT = 50;
+
+type Attested = { attested: "app_attest" | "play_integrity"; keyId?: string } | { error: "attestation_required" | "attestation_invalid" };
+
 export function createHandler(deps: Deps) {
   const github = new GitHubApp(deps.fetch, deps.now);
+  const integrity = new PlayIntegrity(deps.fetch, deps.now);
+  const random = deps.randomBytes ?? ((n: number) => crypto.getRandomValues(new Uint8Array(n)));
+
+  /** Checks the attestation headers against the exact body text. */
+  async function attest(request: Request, env: Env, app: AppEntry, body: string): Promise<Attested> {
+    const platform = request.headers.get("x-attest-platform");
+    if (platform === "ios" && app.ios && env.ATTEST) {
+      const keyId = request.headers.get("x-attest-key-id") ?? "";
+      const assertion = fromBase64(request.headers.get("x-attest-assertion") ?? "");
+      if (!keyId || !assertion) return { error: "attestation_required" };
+      const stored = await env.ATTEST.get(`aa:${keyId}`);
+      const key = stored ? (JSON.parse(stored) as AttestedKey) : undefined;
+      if (!key || key.app !== app.app) return { error: "attestation_invalid" };
+      try {
+        const { counter } = await verifyAssertion({ assertion, clientData: new TextEncoder().encode(body), key, config: app.ios });
+        await env.ATTEST.put(`aa:${keyId}`, JSON.stringify({ ...key, counter }));
+      } catch (error) {
+        if (error instanceof Error) return { error: "attestation_invalid" };
+        throw error;
+      }
+      return { attested: "app_attest", keyId };
+    }
+    if (platform === "android" && app.android && env.GOOGLE_SERVICE_ACCOUNT) {
+      const token = request.headers.get("x-attest-token");
+      if (!token) return { error: "attestation_required" };
+      try {
+        await integrity.verify({
+          token,
+          requestHash: hex(await sha256(body)),
+          config: app.android,
+          account: JSON.parse(env.GOOGLE_SERVICE_ACCOUNT) as ServiceAccount,
+        });
+      } catch (error) {
+        if (error instanceof IntegrityError || error instanceof SyntaxError) return { error: "attestation_invalid" };
+        throw error;
+      }
+      return { attested: "play_integrity" };
+    }
+    return { error: "attestation_required" };
+  }
+
+  /** `POST /v1/attest/challenge`: a one-time challenge for an App Attest attestation. */
+  async function challenge(env: Env, app: AppEntry, cors: Record<string, string>): Promise<Response> {
+    if (!app.ios || !env.ATTEST) return json(404, { error: "not_found" }, cors);
+    const value = toBase64Url(random(32));
+    await env.ATTEST.put(`ac:${value}`, app.app, { expirationTtl: CHALLENGE_TTL_SECONDS });
+    return json(200, { challenge: value }, cors);
+  }
+
+  /** `POST /v1/attest/register`: checks an install's attestation and keeps its key. */
+  async function register(request: Request, env: Env, app: AppEntry, text: string, cors: Record<string, string>): Promise<Response> {
+    if (!app.ios || !env.ATTEST) return json(404, { error: "not_found" }, cors);
+    let body: { key_id?: unknown; attestation?: unknown; challenge?: unknown };
+    try {
+      body = JSON.parse(text) as typeof body;
+    } catch {
+      return json(400, { error: "invalid", details: ["body must be JSON"] }, cors);
+    }
+    const { key_id: keyId, challenge: given } = body;
+    const attestation = typeof body.attestation === "string" ? fromBase64(body.attestation) : undefined;
+    if (typeof keyId !== "string" || !/^[A-Za-z0-9+/=_-]{40,64}$/.test(keyId) || typeof given !== "string" || !attestation) {
+      return json(400, { error: "invalid", details: ["key_id, attestation (base64) and challenge are required"] }, cors);
+    }
+    const network = networkPrefix(request.headers.get("cf-connecting-ip") ?? "");
+    if (network !== undefined) {
+      const day = new Date(deps.now()).toISOString().slice(0, 10);
+      const origin = await hashDevice(env.DEVICE_SALT, `ip:${network}`);
+      const counted = Number((await env.RATE_LIMIT.get(`r:${day}:${origin}`)) ?? 0);
+      if (counted >= REGISTER_ORIGIN_DAILY_LIMIT) return json(429, { error: "rate_limited" }, cors);
+      await env.RATE_LIMIT.put(`r:${day}:${origin}`, String(counted + 1), { expirationTtl: 2 * 24 * 60 * 60 });
+    }
+    // A challenge is used once, by the app it was issued to.
+    const issuedTo = await env.ATTEST.get(`ac:${given}`);
+    await env.ATTEST.delete(`ac:${given}`);
+    if (issuedTo !== app.app) return json(401, { error: "attestation_invalid", details: ["unknown or used challenge"] }, cors);
+    // A key is registered once, so a key cannot be moved to another install's record.
+    if ((await env.ATTEST.get(`aa:${keyId}`)) !== null) {
+      return json(409, { error: "attestation_invalid", details: ["key is already registered"] }, cors);
+    }
+    try {
+      const { publicKey } = await verifyAttestation({
+        attestation,
+        keyId,
+        challenge: given,
+        config: app.ios,
+        now: deps.now(),
+        ...(deps.appAttestRoot ? { rootPem: deps.appAttestRoot } : {}),
+      });
+      const key: AttestedKey = { app: app.app, public_key: publicKey, counter: 0 };
+      await env.ATTEST.put(`aa:${keyId}`, JSON.stringify(key));
+    } catch (error) {
+      // Any failure to read or check the object refuses it, with the reason.
+      if (error instanceof Error) return json(401, { error: "attestation_invalid", details: [error.message] }, cors);
+      throw error;
+    }
+    return json(201, { key_id: keyId }, cors);
+  }
 
   return async function handle(request: Request, env: Env): Promise<Response> {
     const cors = corsHeaders(request, env);
@@ -194,12 +366,15 @@ export function createHandler(deps: Deps) {
         headers: {
           ...cors,
           "access-control-allow-methods": "POST, OPTIONS",
-          "access-control-allow-headers": "content-type, x-app-key",
+          "access-control-allow-headers": "content-type, x-app-key, x-attest-platform, x-attest-key-id, x-attest-assertion, x-attest-token",
           "access-control-max-age": "86400",
         },
       });
     }
-    if (url.pathname !== "/v1/feedback") return json(404, { error: "not_found" }, cors);
+    const route = url.pathname;
+    if (route !== "/v1/feedback" && route !== "/v1/attest/challenge" && route !== "/v1/attest/register") {
+      return json(404, { error: "not_found" }, cors);
+    }
     if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
 
     let apps: Map<string, AppEntry>;
@@ -213,8 +388,10 @@ export function createHandler(deps: Deps) {
 
     const declared = Number(request.headers.get("content-length") ?? 0);
     if (declared > MAX_BODY_BYTES) return json(413, { error: "too_large" }, cors);
+    if (route === "/v1/attest/challenge") return challenge(env, app, cors);
     const text = await request.text();
     if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) return json(413, { error: "too_large" }, cors);
+    if (route === "/v1/attest/register") return register(request, env, app, text, cors);
 
     let body: unknown;
     try {
@@ -237,6 +414,30 @@ export function createHandler(deps: Deps) {
     const isOwner = isOwnerSubmission(submission);
     const kind: SubmissionKind = isOwner ? "owner" : "feedback";
     if (app.kinds && !app.kinds.includes(kind)) return json(403, { error: "type_not_allowed_for_app_key" }, cors);
+
+    let proof: { attested: "app_attest" | "play_integrity"; keyId?: string } | undefined;
+    let contributor: string | undefined;
+    let attestKey: string | undefined;
+    const extra: { prefix: string; id: string; limit: number }[] = [];
+    if (!isOwner) {
+      const feedback = submission as FeedbackSubmission;
+      if (app.requires_attestation) {
+        const result = await attest(request, env, app, text);
+        if ("error" in result) return json(401, { error: result.error }, cors);
+        proof = result;
+      }
+      if (feedback.contributor !== undefined) contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
+      else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
+      if (proof?.keyId) attestKey = `ak_${await saltedHash(env.DEVICE_SALT, `key:${proof.keyId}`)}`;
+      if (contributor === undefined && (feedback.type === "review" || feedback.type === "review_report")) {
+        return json(400, { error: "contributor_required" }, cors);
+      }
+      if (feedback.type === "review" && app.requires_visited_nearby && feedback.review.visited_nearby !== true) {
+        return json(400, { error: "visited_nearby_required" }, cors);
+      }
+      if (contributor) extra.push({ prefix: "c", id: contributor, limit: app.contributor_daily_limit ?? CONTRIBUTOR_DAILY_LIMIT });
+      if (attestKey) extra.push({ prefix: "k", id: attestKey, limit: ATTEST_KEY_DAILY_LIMIT });
+    }
     const limit = await checkAndCount(
       env.RATE_LIMIT,
       day,
@@ -246,6 +447,7 @@ export function createHandler(deps: Deps) {
       nowMs,
       kind,
       origin,
+      extra,
     );
     if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
 
@@ -266,7 +468,6 @@ export function createHandler(deps: Deps) {
       );
 
     if (isOwner) {
-      const random = deps.randomBytes ?? ((n: number) => crypto.getRandomValues(new Uint8Array(n)));
       const secrets = submission.type === "owner_update" ? undefined : newOwnerSecrets(random);
       const stored = await storeOwner(submission, { id, received, app: app.app, device }, secrets);
       try {
@@ -288,11 +489,15 @@ export function createHandler(deps: Deps) {
       ...(location ? { location } : {}),
       device,
       ...(origin ? { origin } : {}),
+      ...(contributor ? { contributor } : {}),
+      ...(proof ? { attested: proof.attested } : {}),
+      ...(attestKey ? { attest_key: attestKey } : {}),
       app_version,
       consent,
       ...("report" in rest ? { report: rest.report } : {}),
       ...("review" in rest ? { review: rest.review } : {}),
       ...("check" in rest ? { check: rest.check } : {}),
+      ...("review_report" in rest ? { review_report: rest.review_report } : {}),
     } as StoredFeedback;
 
     try {

@@ -78,6 +78,10 @@ export interface RulesInput {
   reviews: (placeId: string) => readonly Review[];
   /** Kind code to group, from `data/schema/kinds.json`. */
   kinds?: ReadonlyMap<string, string>;
+  /** Contributors in `moderation/blocked_contributors.json`. */
+  blocked?: ReadonlySet<string>;
+  /** Contributors with a visible review in the data: their reviews are trusted. */
+  reviewers?: ReadonlySet<string>;
 }
 
 /**
@@ -89,6 +93,8 @@ export type ReviewEdit =
   | { kind: "location"; place: string; location: { lat: number; lon: number }; feedback: string; source?: Source }
   | { kind: "fact"; place: string; fact: FactName; value: FactValue; feedback: string; source?: Source }
   | { kind: "name"; place: string; name: string; feedback: string; source?: Source }
+  /** A review held for a person: the first from its contributor, or text also sent for another place. */
+  | { kind: "review"; place: string; review: Review; feedback: string }
   /** Nothing to write: the PR body carries it for a person to read. */
   | { kind: "note"; place: string; feedback: string };
 
@@ -100,7 +106,11 @@ export interface RulesOutput {
    * whose only change is `last_confirmed` keeps its `updated`.
    */
   places: Map<string, Place>;
-  /** Review lines to append, per place. */
+  /**
+   * Every review line of each place whose reviews changed, as the file should
+   * now hold them: new reviews added, a contributor's older review replaced,
+   * reviews hidden after reports.
+   */
   reviews: Map<string, Review[]>;
   /** Changes for a person, in the order they arrived. */
   edits: ReviewEdit[];
@@ -111,6 +121,12 @@ export interface RulesOutput {
 type ReportItem = Extract<StoredFeedback, { type: "report" }>;
 type ReviewItem = Extract<StoredFeedback, { type: "review" }>;
 type CheckItem = Extract<StoredFeedback, { type: "check" }>;
+type ReviewReportItem = Extract<StoredFeedback, { type: "review_report" }>;
+
+/** Reports from this many different contributors hide a review until a person decides. */
+export const REPORTS_TO_HIDE = 3;
+/** Review text this long or longer, sent word for word for two places, goes to a person. */
+const REPEATED_TEXT_LENGTH = 40;
 
 const time = (item: StoredFeedback) => Date.parse(item.received);
 
@@ -130,6 +146,19 @@ export function ratingOf(reviews: readonly Pick<Review, "stars">[]): Place["rati
   const tenths = Math.floor((20 * sum + count) / (2 * count));
   return { count, mean: tenths / 10 };
 }
+
+/** Whether a review is published and counts in the rating: not hidden, not from a blocked contributor. */
+export function isVisible(review: Review, blocked: ReadonlySet<string> = new Set()): boolean {
+  return review.hidden === undefined && !blocked.has(review.contributor);
+}
+
+/** Whether a stored item was applied by the rules (not held for a person, not refused). */
+function wasApplied(item: StoredFeedback): boolean {
+  return (item as { outcome?: { result?: string } }).outcome?.result === "applied";
+}
+
+/** Review text with case, spacing and punctuation removed, to spot one text sent for several places. */
+const sameText = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "");
 
 /**
  * Independent sources among `items`. Items from one client network count once,
@@ -193,11 +222,17 @@ export function applyRules(input: RulesInput): RulesOutput {
   };
 
   const pending = [...input.pending].sort(byReceived);
+  const blocked = input.blocked ?? new Set<string>();
 
   // Feedback for a merged id goes to the record it was merged into. Feedback
   // about a place that is not in the data is refused, except new places.
+  // Everything from a blocked contributor is refused.
   const known: StoredFeedback[] = [];
   for (const item of pending) {
+    if (item.contributor !== undefined && blocked.has(item.contributor)) {
+      decide(item, "refused", "the contributor is blocked");
+      continue;
+    }
     const isNewPlace = item.type === "report" && item.report.kind === "new_place";
     if (isNewPlace) {
       known.push(item);
@@ -212,7 +247,25 @@ export function applyRules(input: RulesInput): RulesOutput {
     }
   }
 
+  // The review lines of each place as this run leaves them.
+  const reviewLines = new Map<string, Review[]>();
+  const linesOf = (placeId: string): Review[] => {
+    let lines = reviewLines.get(placeId);
+    if (!lines) {
+      lines = input.reviews(placeId).map((r) => ({ ...r }));
+      reviewLines.set(placeId, lines);
+    }
+    return lines;
+  };
+  const changedReviews = new Set<string>();
+
   applyReviews(known.filter((i): i is ReviewItem => i.type === "review"));
+  applyReviewReports(known.filter((i): i is ReviewReportItem => i.type === "review_report"));
+  for (const placeId of changedReviews) {
+    const lines = linesOf(placeId).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    newReviews.set(placeId, lines);
+    record(placeId).rating = ratingOf(lines.filter((r) => isVisible(r, blocked)));
+  }
   applyStatus(
     known.filter(
       (i): i is ReportItem | CheckItem =>
@@ -253,20 +306,27 @@ export function applyRules(input: RulesInput): RulesOutput {
   };
 
   function applyReviews(items: ReviewItem[]): void {
-    const accepted = new Map<string, ReviewItem[]>();
+    const trusted = new Set(input.reviewers ?? []);
+    for (const h of input.history) if (h.contributor !== undefined && wasApplied(h)) trusted.add(h.contributor);
+    const reviewsSent = [...input.history, ...items].filter((i): i is ReviewItem => i.type === "review");
+
     for (const item of items) {
       const reasons = moderateReview(item.review.text);
       if (reasons.length > 0) {
         decide(item, "refused", `review text contains ${reasons.join(", ")}`);
         continue;
       }
+      if (item.contributor === undefined) {
+        decide(item, "refused", "review has no contributor");
+        continue;
+      }
       const reviewId = `rev_${item.id.replace(/^fb_/, "")}`;
-      const added = newReviews.get(item.place) ?? [];
-      if (input.reviews(item.place).some((r) => r.id === reviewId) || added.some((r) => r.id === reviewId)) {
+      const lines = linesOf(item.place);
+      if (lines.some((r) => r.id === reviewId)) {
         decide(item, "applied", "review is already in the data");
         continue;
       }
-      added.push({
+      const review: Review = {
         id: reviewId,
         place: item.place,
         stars: item.review.stars,
@@ -274,21 +334,66 @@ export function applyRules(input: RulesInput): RulesOutput {
         visited: item.review.visited,
         created: item.received,
         app: item.app,
-      });
-      newReviews.set(item.place, added);
-      accepted.set(item.place, [...(accepted.get(item.place) ?? []), item]);
-      decide(item, "applied", "review accepted");
+        contributor: item.contributor,
+        ...(item.review.visited_nearby === true ? { visited_nearby: true as const } : {}),
+      };
+      const text = sameText(item.review.text);
+      const repeated =
+        text.length >= REPEATED_TEXT_LENGTH &&
+        reviewsSent.some((other) => other.place !== item.place && other.id !== item.id && sameText(other.review.text) === text);
+      if (repeated || !trusted.has(item.contributor)) {
+        const why = repeated ? "the same text was sent for another place" : "first review from this contributor";
+        edits.push({ kind: "review", place: item.place, review, feedback: item.id });
+        note(item.place, `${item.review.stars} star review, ${why}${quote(item.review.text.slice(0, 300))} (check before merging)`, false, [item]);
+        decide(item, "needs_review", `${why}, so a person checks it`);
+        continue;
+      }
+      // One review per contributor per place: the newer replaces the older.
+      const older = lines.filter((r) => r.contributor === item.contributor);
+      for (const r of older) lines.splice(lines.indexOf(r), 1);
+      lines.push(review);
+      changedReviews.add(item.place);
+      const replaced = older.length > 0 ? `, replacing ${older.map((r) => r.id).join(", ")}` : "";
+      note(item.place, `review added${replaced}`, true, [item]);
+      decide(item, "applied", older.length > 0 ? "review accepted, replacing the contributor's earlier review" : "review accepted");
     }
-    for (const [placeId, added] of newReviews) {
-      const place = record(placeId);
-      place.rating = ratingOf([...input.reviews(placeId), ...added]);
-      const plural = added.length === 1 ? "" : "s";
-      note(
-        placeId,
-        `${added.length} review${plural} added, rating ${place.rating!.mean} from ${place.rating!.count}`,
-        true,
-        accepted.get(placeId) ?? [],
+  }
+
+  function applyReviewReports(items: ReviewReportItem[]): void {
+    const reportsSent = [...input.history.filter((h): h is ReviewReportItem => h.type === "review_report")];
+    for (const item of items) {
+      const { review: reviewId, reason } = item.review_report;
+      if (item.contributor === undefined) {
+        decide(item, "refused", "review report has no contributor");
+        continue;
+      }
+      const target = linesOf(item.place).find((r) => r.id === reviewId);
+      if (!target) {
+        decide(item, "refused", `review ${reviewId} is not in the data for this place`);
+        continue;
+      }
+      if (target.contributor === item.contributor) {
+        decide(item, "refused", "a contributor cannot report their own review");
+        continue;
+      }
+      reportsSent.push(item);
+      edits.push({ kind: "note", place: item.place, feedback: item.id });
+      note(item.place, `review ${reviewId} reported as ${reason} (decide: keep, hide or block the contributor)`, false, [item]);
+      decide(item, "needs_review", "review reports are read by a person");
+
+      const reporters = new Set(
+        reportsSent.filter((r) => r.review_report.review === reviewId && r.contributor !== undefined).map((r) => r.contributor),
       );
+      if (target.hidden === undefined && reporters.size >= REPORTS_TO_HIDE) {
+        target.hidden = "reported";
+        changedReviews.add(item.place);
+        note(
+          item.place,
+          `review ${reviewId} hidden after reports from ${reporters.size} contributors, until a person decides`,
+          true,
+          reportsSent.filter((r) => r.review_report.review === reviewId),
+        );
+      }
     }
   }
 
@@ -535,12 +640,35 @@ export function applyRules(input: RulesInput): RulesOutput {
 }
 
 /**
- * Applies one review edit to the record as it is in the review checkout.
+ * Adds a held review to the review lines as the review checkout has them,
+ * replacing the same contributor's older review of the place, and returns
+ * the lines and the place's new rating. Undefined when the review is already
+ * there.
+ */
+export function applyHeldReview(
+  lines: readonly Review[],
+  review: Review,
+  blocked: ReadonlySet<string> = new Set(),
+): { lines: Review[]; rating: Place["rating"] } | undefined {
+  if (lines.some((r) => r.id === review.id)) return undefined;
+  const next = [...lines.filter((r) => r.contributor !== review.contributor), review].sort((a, b) =>
+    a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+  );
+  return { lines: next, rating: ratingOf(next.filter((r) => isVisible(r, blocked))) };
+}
+
+/**
+ * Applies one review edit to the record as it is in the review checkout. A
+ * held review is written by `applyHeldReview` instead.
  * Returns the new record, or undefined when there is nothing to write: the
  * edit is already there, it is a note, or a person has already edited the
  * draft of a new place.
  */
-export function applyEdit(current: Place | undefined, edit: ReviewEdit, nowIso: string): Place | undefined {
+export function applyEdit(
+  current: Place | undefined,
+  edit: Exclude<ReviewEdit, { kind: "review" }>,
+  nowIso: string,
+): Place | undefined {
   if (edit.kind === "note") return undefined;
   if (edit.kind === "new_place") return current ? undefined : edit.record;
   if (!current) return undefined;

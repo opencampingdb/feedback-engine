@@ -1,7 +1,7 @@
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createAppJwt, importPrivateKey } from "../src/github.js";
-import { createHandler, hashDevice, networkPrefix, type Env } from "../src/index.js";
+import { createHandler, hashContributor, hashDevice, networkPrefix, type Env } from "../src/index.js";
 import type { KVLike } from "../src/ratelimit.js";
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", {
@@ -22,6 +22,9 @@ function fakeKv(): KVLike & { data: Map<string, string> } {
     get: async (k) => data.get(k) ?? null,
     put: async (k, v) => {
       data.set(k, v);
+    },
+    delete: async (k) => {
+      data.delete(k);
     },
   };
 }
@@ -82,6 +85,7 @@ const review = {
   type: "review",
   place: PLACE,
   device: DEVICE,
+  contributor: "acct_3f9a8b7c6d5e4f30",
   app_version: "1.0.0",
   consent: true,
   review: { stars: 4, text: "Lovely spot. Call 0412 345 678 or email jo@example.com", visited: "2026-10" },
@@ -120,12 +124,15 @@ describe("intake", () => {
       type: "review",
       place: PLACE,
       device: await hashDevice("pepper", DEVICE),
+      contributor: await hashContributor("pepper", "camporacle", "acct_3f9a8b7c6d5e4f30"),
       app_version: "1.0.0",
       consent: true,
       review: { stars: 4, text: "Lovely spot. Call [removed] or email [removed]", visited: "2026-10" },
     });
     expect(stored.device).toMatch(/^[0-9a-f]{16}$/);
     expect(JSON.stringify(stored)).not.toContain(DEVICE);
+    expect(stored.contributor).toMatch(/^ctr_[0-9a-f]{16}$/);
+    expect(JSON.stringify(stored)).not.toContain("acct_3f9a8b7c6d5e4f30");
   });
 
   it("asks for an installation token limited to the inbox and contents: write", async () => {
@@ -196,7 +203,7 @@ describe("intake", () => {
     expect(res.status).toBe(429);
     expect(Number(res.headers.get("retry-after"))).toBe(12 * 60 * 60);
     // A different device still gets through.
-    const other = { ...review, device: "9b241101-e2bb-4255-8caf-4136c566a962" };
+    const other = { ...review, device: "9b241101-e2bb-4255-8caf-4136c566a962", contributor: "acct_other_contributor_1" };
     expect((await handle(post(other), e)).status).toBe(202);
     // The next day the device may send again.
     clock += 24 * 60 * 60 * 1000;
@@ -236,7 +243,10 @@ describe("intake", () => {
     const kv = fakeKv();
     const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "camporacle", daily_limit: 1000 } }) };
     const from = (ip: string, i: number) =>
-      post({ ...review, device: `${String(i).padStart(8, "0")}-e2bb-4255-8caf-4136c566a962` }, { "cf-connecting-ip": ip });
+      post(
+        { ...review, device: `${String(i).padStart(8, "0")}-e2bb-4255-8caf-4136c566a962`, contributor: `acct_${String(i).padStart(16, "0")}` },
+        { "cf-connecting-ip": ip },
+      );
     for (let i = 0; i < 100; i++) expect((await handle(from(`203.0.113.${i}`, i), e)).status).toBe(202);
     expect((await handle(from("203.0.113.200", 100), e)).status).toBe(429);
     // Another network still gets through.
