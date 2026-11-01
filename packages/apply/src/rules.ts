@@ -7,7 +7,8 @@ import {
 } from "@opencampingdb/feedback";
 import { moderateReview } from "./moderation.js";
 import { roundCoord } from "./serialise.js";
-import type { Place, Review, Source } from "./types.js";
+import { setSource } from "./sources.js";
+import type { Place, Review, Source, SourceKey } from "./types.js";
 
 /**
  * The apply-feedback rules from SPEC "Apply feedback", as pure functions.
@@ -384,7 +385,7 @@ export function applyRules(input: RulesInput): RulesOutput {
         }
       }
       // Marks the status as coming from feedback, so the OSM notes can tell it from a contributed closure.
-      if (place.status !== statusBefore) place.fact_sources.status = "feedback";
+      if (place.status !== statusBefore) setSource(place, "status", "feedback", nowIso);
     }
   }
 
@@ -407,7 +408,7 @@ export function applyRules(input: RulesInput): RulesOutput {
       const current = () => (place.facts as Record<string, unknown>)[fact];
       const setFact = (value: FactValue) => {
         (place.facts as Record<string, FactValue>)[fact] = value;
-        place.fact_sources[fact] = "feedback";
+        setSource(place, fact, "feedback", nowIso);
       };
 
       if (REVIEWED_FACTS.has(fact)) {
@@ -483,6 +484,7 @@ export function applyRules(input: RulesInput): RulesOutput {
           status: "open",
           rating: null,
           fact_sources: { location: "feedback" },
+          fact_dates: { location: nowIso },
           updated: nowIso,
         };
         edits.push({ kind: "new_place", record: draft, feedback: item.id });
@@ -522,18 +524,22 @@ export function applyEdit(current: Place | undefined, edit: ReviewEdit, nowIso: 
   const next = structuredClone(current);
   if (current.status === "merged") return undefined; // never write to a tombstone
   const source = edit.source ?? "feedback";
+  let key: SourceKey;
   if (edit.kind === "location") {
     next.location = { ...edit.location };
-    next.fact_sources.location = source;
+    key = "location";
   } else if (edit.kind === "name") {
     next.name = edit.name;
-    next.fact_sources.name = source;
+    key = "name";
   } else {
     (next.facts as Record<string, FactValue>)[edit.fact] = edit.value;
-    next.fact_sources[edit.fact] = source;
+    key = edit.fact;
   }
+  next.fact_sources[key] = source;
   if (source === "owner") next.owner_verified = true;
+  // Compared before the date is set, so an edit already in the record writes nothing.
   if (JSON.stringify(next) === JSON.stringify(current)) return undefined;
+  setSource(next, key, source, nowIso);
   next.updated = nowIso;
   return next;
 }
