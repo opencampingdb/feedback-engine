@@ -5,6 +5,7 @@
 #   GH_APP_ID           GitHub App id
 #   GH_APP_PRIVATE_KEY  GitHub App private key (PEM)
 #   GH_INSTALLATION_ID  installation id of the App on the inbox repository
+#   GOOGLE_SERVICE_ACCOUNT  Google service account key file (JSON), only for app keys with "android"
 
 name = "ocdb-feedback-intake"
 main = "src/index.ts"
@@ -20,3 +21,8 @@ ALLOWED_ORIGINS = "*"
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
 id = "REPLACE_ME_KV_NAMESPACE_ID"
+
+# Registered App Attest keys and challenges. Needed only for app keys with "ios".
+[[kv_namespaces]]
+binding = "ATTEST"
+id = "REPLACE_ME_ATTEST_KV_NAMESPACE_ID"

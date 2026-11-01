@@ -14,5 +14,6 @@ await feedback.review({ place, review: { stars: 5, text: "Quiet and shady", visi
 - A random per-install device id is made once and kept in storage.
 - Nothing is sent unless `consent: true` is passed. Show `CONSENT_TEXT` first.
 - Show `ATTRIBUTION` wherever the data appears.
+- Reviews and `reportReview()` carry the signed-in traveller's opaque `contributor` id. Pass an `attest` function when the app key requires App Attest or Play Integrity; it gets the exact body and its SHA-256 at send time.
 
 The full guide is [docs/integration.md](../../docs/integration.md). Licence: Apache 2.0.

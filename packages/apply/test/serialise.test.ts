@@ -96,9 +96,10 @@ describe("dumpReviewLine", () => {
         visited: "2026-10",
         created: "2026-10-30T00:00:00Z",
         app: "camporacle",
+        contributor: "ctr_0123456789abcdef",
       }),
     ).toBe(
-      '{"app":"camporacle","created":"2026-10-30T00:00:00Z","id":"rev_1","place":"ocdb_1","stars":4,"text":"Quiet \\"spot\\"","visited":"2026-10"}',
+      '{"app":"camporacle","contributor":"ctr_0123456789abcdef","created":"2026-10-30T00:00:00Z","id":"rev_1","place":"ocdb_1","stars":4,"text":"Quiet \\"spot\\"","visited":"2026-10"}',
     );
   });
 });

@@ -43,6 +43,17 @@ async function snapshot(dir: string): Promise<Record<string, string>> {
 }
 
 const id = (n: number) => `fb_01JC${String(n).padStart(22, "0")}`;
+const OTHER = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZB";
+const TRUSTED = "ctr_7a7a7a7a7a7a7a7a";
+const NEWCOMER = "ctr_5e5e5e5e5e5e5e5e";
+
+/** Makes TRUSTED a contributor with a published review, of another place. */
+async function trustContributor(): Promise<void> {
+  await put(
+    join(data, "reviews", `${OTHER}.ndjson`),
+    `{"app":"camporacle","contributor":"${TRUSTED}","created":"2026-09-01T00:00:00Z","id":"rev_01JB0000000000000000000001","place":"${OTHER}","stars":5,"text":"","visited":"2026-08"}\n`,
+  );
+}
 
 function item(n: number, received: string, device: string, extra: Record<string, unknown>) {
   return { id: id(n), received, app: "camporacle", place: PLACE, device, app_version: "1.0.0", consent: true, ...extra };
@@ -69,8 +80,10 @@ describe("run", () => {
     const power = { type: "report", report: { kind: "fact", fact: "power", value: true } };
     await pending(1, `${day}T01:00:00Z`, "aaaa", power);
     await pending(2, `${day}T02:00:00Z`, "bbbb", power);
+    await trustContributor();
     await pending(3, `${day}T03:00:00Z`, "cccc", {
       type: "review",
+      contributor: TRUSTED,
       review: { stars: 4, text: "Flat sites and clean toilets.", visited: "2026-10" },
     });
     await pending(4, `${day}T04:00:00Z`, "dddd", {
@@ -97,7 +110,7 @@ describe("run", () => {
 
     const reviews = await readFile(join(data, "reviews", `${PLACE}.ndjson`), "utf8");
     expect(reviews).toBe(
-      `{"app":"camporacle","created":"${day}T03:00:00Z","id":"rev_01JC0000000000000000000003","place":"${PLACE}",` +
+      `{"app":"camporacle","contributor":"${TRUSTED}","created":"${day}T03:00:00Z","id":"rev_01JC0000000000000000000003","place":"${PLACE}",` +
         `"stars":4,"text":"Flat sites and clean toilets.","visited":"2026-10"}\n`,
     );
 
@@ -203,7 +216,7 @@ describe("run", () => {
     await put(join(review, "places", "za", `${PLACE}.json`), dumpPlace(place));
     await pending(1, "2026-10-29T01:00:00Z", "aaaa", { type: "report", report: { kind: "fact", fact: "power", value: true } });
     await pending(2, "2026-10-29T02:00:00Z", "bbbb", { type: "report", report: { kind: "closed" } });
-    await pending(3, "2026-10-29T03:00:00Z", "cccc", { type: "review", review: { stars: 5, text: "Quiet.", visited: "2026-10" } });
+    await pending(3, "2026-10-29T03:00:00Z", "cccc", { type: "review", contributor: NEWCOMER, review: { stars: 5, text: "Quiet.", visited: "2026-10" } });
     await pending(4, "2026-10-29T04:00:00Z", "dddd", {
       type: "report",
       location: { lat: -36.9, lon: 144.6 },
@@ -225,7 +238,7 @@ describe("run", () => {
     const power = { type: "report", report: { kind: "fact", fact: "power", value: true } };
     await pending(1, "2026-10-29T01:00:00Z", "aaaa", power);
     await pending(2, "2026-10-29T02:00:00Z", "bbbb", power);
-    await pending(3, "2026-10-29T03:00:00Z", "cccc", { type: "review", review: { stars: 5, text: "Quiet.", visited: "2026-10" } });
+    await pending(3, "2026-10-29T03:00:00Z", "cccc", { type: "review", contributor: NEWCOMER, review: { stars: 5, text: "Quiet.", visited: "2026-10" } });
     await put(join(inbox, "pending", "2026-10-29", `${id(4)}.json`), {
       ...item(4, "2026-10-29T04:00:00Z", "dddd", { type: "report", location: { lat: -35.5, lon: 149 }, report: { kind: "new_place" } }),
       place: null,
@@ -246,10 +259,11 @@ describe("run", () => {
   });
 
   it("keeps review lines sorted by id", async () => {
-    const later = `{"app":"camporacle","created":"2026-11-01T00:00:00Z","id":"rev_01JZ0000000000000000000000","place":"${PLACE}","stars":5,"text":"","visited":"2026-10"}`;
+    const later = `{"app":"camporacle","contributor":"${NEWCOMER}","created":"2026-11-01T00:00:00Z","id":"rev_01JZ0000000000000000000000","place":"${PLACE}","stars":5,"text":"","visited":"2026-10"}`;
     await put(join(data, "reviews", `${PLACE}.ndjson`), `${later}\n`);
     await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace({ ...place, rating: { count: 1, mean: 5 } }));
-    await pending(3, "2026-10-29T00:00:00Z", "aaaa", { type: "review", review: { stars: 4, text: "Quiet.", visited: "2026-10" } });
+    await trustContributor();
+    await pending(3, "2026-10-29T00:00:00Z", "aaaa", { type: "review", contributor: TRUSTED, review: { stars: 4, text: "Quiet.", visited: "2026-10" } });
     await run({ inbox, data, now: NOW });
     const lines = (await readFile(join(data, "reviews", `${PLACE}.ndjson`), "utf8")).split("\n");
     expect(lines).toHaveLength(3);
@@ -258,6 +272,47 @@ describe("run", () => {
     expect(lines[2]).toBe("");
     const record = JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
     expect(record.rating).toEqual({ count: 2, mean: 4.5 });
+  });
+
+  it("holds a newcomer's review in the review checkout with the rating it would give", async () => {
+    const review = join(root, "data-review");
+    await put(join(review, "places", "za", `${PLACE}.json`), dumpPlace(place));
+    await pending(3, "2026-10-29T00:00:00Z", "aaaa", { type: "review", contributor: NEWCOMER, review: { stars: 4, text: "Quiet.", visited: "2026-10" } });
+    const summary = await run({ inbox, data, reviewData: review, now: NOW });
+    expect(summary.counts.needs_review).toBe(1);
+    expect(summary.auto_changed).toBe(false);
+    expect([...summary.review_files].sort()).toEqual([`places/za/${PLACE}.json`, `reviews/${PLACE}.ndjson`]);
+    expect(await readFile(join(review, "reviews", `${PLACE}.ndjson`), "utf8")).toContain(NEWCOMER);
+    const proposed = JSON.parse(await readFile(join(review, "places", "za", `${PLACE}.json`), "utf8")) as Place;
+    expect(proposed.rating).toEqual({ count: 1, mean: 4 });
+    expect(summary.review_pr_body).toContain("first review from this contributor");
+  });
+
+  it("hides a review reported by three contributors and refuses a blocked contributor", async () => {
+    const target = `{"app":"camporacle","contributor":"${NEWCOMER}","created":"2026-10-01T00:00:00Z","id":"rev_01JB0000000000000000000009","place":"${PLACE}","stars":1,"text":"","visited":"2026-09"}`;
+    await put(join(data, "reviews", `${PLACE}.ndjson`), `${target}\n`);
+    await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace({ ...place, rating: { count: 1, mean: 1 } }));
+    await put(join(data, "moderation", "blocked_contributors.json"), {
+      contributors: [{ contributor: "ctr_bbbbbbbbbbbbbbbb", added: "2026-10-01", reason: "spam_ad" }],
+    });
+    const report = (n: number, who: string) =>
+      pending(n, `2026-10-29T0${n}:00:00Z`, `dev${n}`, {
+        type: "review_report",
+        contributor: who,
+        review_report: { review: "rev_01JB0000000000000000000009", reason: "fake" },
+      });
+    await report(1, "ctr_1111111111111111");
+    await report(2, "ctr_2222222222222222");
+    await report(3, "ctr_3333333333333333");
+    await report(4, "ctr_bbbbbbbbbbbbbbbb");
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.counts).toMatchObject({ needs_review: 3, refused: 1 });
+    const lines = await readFile(join(data, "reviews", `${PLACE}.ndjson`), "utf8");
+    expect(JSON.parse(lines)).toMatchObject({ hidden: "reported" });
+    const record = JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
+    expect(record.rating).toBeNull();
+    expect(summary.auto_pr_body).toContain("hidden after reports from 3 contributors");
+    expect(summary.review_pr_body).toContain("reported as fake");
   });
 
   it("moves a record found at another path to the SPEC path", async () => {
