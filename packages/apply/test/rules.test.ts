@@ -264,6 +264,63 @@ describe("closed and reopened", () => {
     expect(out.after()?.status).toBe("open");
   });
 
+  it("a check with still_there true records last_confirmed without moving updated", () => {
+    const c = check(0, "dev-a", true);
+    const out = run([c], { now: 1 });
+    expect(out.after()?.last_confirmed).toBe(at(1));
+    expect(out.after()?.updated).toBe("2026-06-01T00:00:00Z");
+    expect(out.outcome(c)).toBe("applied");
+    expect(out.changes.map((ch) => ch.summary)).toEqual(["confirmed there by a traveller"]);
+  });
+
+  it("a later check moves last_confirmed on", () => {
+    const out = run([check(30, "dev-a", true)], { now: 30, places: [place({ last_confirmed: at(1) })] });
+    expect(out.after()?.last_confirmed).toBe(at(30));
+    expect(out.after()?.updated).toBe("2026-06-01T00:00:00Z");
+  });
+
+  it("a check that clears reported_closed records last_confirmed and moves updated", () => {
+    const out = run([check(5, "dev-b", true)], {
+      now: 5,
+      history: [closed(0, "dev-a")],
+      places: [place({ status: "reported_closed" })],
+    });
+    expect(out.after()?.last_confirmed).toBe(at(5));
+    expect(out.after()?.updated).toBe(at(5));
+  });
+
+  it("a single check on a closed place does not record last_confirmed", () => {
+    const out = run([check(0, "dev-a", true)], { places: [place({ status: "closed" })] });
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("checks on a closed place from two devices reopen it and record last_confirmed", () => {
+    const out = run([check(0, "dev-a", true), check(1, "dev-b", true)], {
+      now: 1,
+      places: [place({ status: "closed" })],
+    });
+    expect(out.after()?.status).toBe("open");
+    expect(out.after()?.last_confirmed).toBe(at(1));
+  });
+
+  it("a check on a temporarily closed place does not record last_confirmed", () => {
+    const out = run([check(0, "dev-a", true)], {
+      places: [place({ status: "temporarily_closed", fact_sources: { power: "osm", fee: "osm", status: "owner" } })],
+    });
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("a check followed by a closed report in the same run does not record last_confirmed", () => {
+    const out = run([check(0, "dev-a", true), closed(1, "dev-b")], { now: 1 });
+    expect(out.after()?.status).toBe("reported_closed");
+    expect(out.after()?.last_confirmed).toBeUndefined();
+  });
+
+  it("a check with still_there false does not record last_confirmed", () => {
+    const out = run([check(0, "dev-a", false)]);
+    expect(out.after()).toBeUndefined();
+  });
+
   it("reports before a reopening no longer count towards closing", () => {
     const out = run([closed(0, "dev-a"), reopened(1, "dev-b"), closed(2, "dev-c")], { now: 3 });
     expect(out.after()?.status).toBe("reported_closed");

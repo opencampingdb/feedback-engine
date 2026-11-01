@@ -129,6 +129,18 @@ describe("run", () => {
     expect(record.status).toBe("closed");
   });
 
+  it("writes last_confirmed for a check that found the place there, leaving updated alone", async () => {
+    await pending(3, "2026-10-29T00:00:00Z", "aaaa", { type: "check", check: { visited: "2026-10-28", still_there: true } });
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.auto_changed).toBe(true);
+    expect(summary.auto_pr_body).toContain("confirmed there by a traveller");
+    const text = await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8");
+    const record = JSON.parse(text) as Place;
+    expect(record.last_confirmed).toBe("2026-10-30T00:00:00Z");
+    expect(record.updated).toBe(place.updated);
+    expect(text).toBe(dumpPlace({ ...place, last_confirmed: "2026-10-30T00:00:00Z" }));
+  });
+
   it("writes a new place only to the review checkout", async () => {
     const review = join(root, "data-review");
     await put(join(review, "places", "za", `${PLACE}.json`), dumpPlace(place));
@@ -261,7 +273,7 @@ describe("run", () => {
     const newPlace = { type: "report", place: null, location: { lat: -36.9, lon: 144.6 }, report: { kind: "new_place" } };
     const bad = { ...item(30, "2026-10-29T01:00:00Z", "aaaa", newPlace), id: "fb_/../../../../outside/01JC0000000000000000000030" };
     await put(join(inbox, "pending", "2026-10-29", `${id(30)}.json`), bad);
-    await pending(32, "2026-10-29T02:00:00Z", "bbbb", { type: "check", check: { visited: "2026-10-29", still_there: true } });
+    await pending(32, "2026-10-29T02:00:00Z", "bbbb", { type: "check", check: { visited: "2026-10-29", still_there: false } });
     const dataBefore = await snapshot(data);
     const summary = await run({ inbox, data, now: NOW });
     expect(await snapshot(data)).toEqual(dataBefore);
