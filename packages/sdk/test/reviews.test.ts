@@ -123,3 +123,62 @@ describe("client", () => {
     expect(await client.pending()).toBe(1);
   });
 });
+
+describe("refused attestation", () => {
+  function setup(replies: { status: number; error?: string }[], onAttestationRejected?: (e: string) => void) {
+    let clock = 1_000_000;
+    let n = 0;
+    const fetch: FetchLike = async () => {
+      const reply = replies[Math.min(n++, replies.length - 1)]!;
+      return {
+        status: reply.status,
+        json: async () => (reply.status === 202 ? { id: "fb_1" } : { error: reply.error }),
+        headers: { get: () => null },
+      };
+    };
+    const client = createFeedbackClient({
+      endpoint: "https://intake.example",
+      appKey: "key-1",
+      appVersion: "1.2.3",
+      storage: memoryStorage(),
+      fetch,
+      now: () => clock,
+      random: () => 0,
+      attest: async () => ({ "x-attest-platform": "ios" }),
+      ...(onAttestationRejected ? { onAttestationRejected } : {}),
+    });
+    return { client, advance: (ms: number) => void (clock += ms), calls: () => n };
+  }
+  const input = { place: PLACE, review: { stars: 4 as const, text: "Shady", visited: "2026-10" }, contributor: CONTRIBUTOR, consent: true };
+
+  it.each(["attestation_required", "attestation_invalid"])("keeps the item queued on 401 %s and tells the app", async (error) => {
+    const seen: string[] = [];
+    const { client, advance } = setup([{ status: 401, error }, { status: 202 }], (e) => void seen.push(e));
+    expect(await client.review(input)).toEqual({ status: "queued" });
+    expect(seen).toEqual([error]);
+    expect(await client.pending()).toBe(1);
+    advance(60 * 60 * 1000);
+    expect(await client.flush()).toEqual({ sent: 1, dropped: 0, remaining: 0 });
+  });
+
+  it("waits before trying a refused attestation again", async () => {
+    const { client, calls } = setup([{ status: 401, error: "attestation_invalid" }, { status: 202 }]);
+    await client.review(input);
+    await client.flush();
+    expect(calls()).toBe(1);
+  });
+
+  it("keeps the item when the app's handler throws", async () => {
+    const { client } = setup([{ status: 401, error: "attestation_invalid" }], () => {
+      throw new Error("keychain locked");
+    });
+    expect(await client.review(input)).toEqual({ status: "queued" });
+    expect(await client.pending()).toBe(1);
+  });
+
+  it("still drops an item refused for an unknown app key", async () => {
+    const { client } = setup([{ status: 401, error: "invalid_app_key" }]);
+    expect(await client.review(input)).toEqual({ status: "rejected", httpStatus: 401 });
+    expect(await client.pending()).toBe(0);
+  });
+});

@@ -144,7 +144,7 @@ export const feedback = createFeedbackClient({
 });
 ```
 
-If `attest` throws, the item stays queued and is tried later.
+If `attest` throws, the item stays queued and is tried later. If the intake refuses the proof (`401 attestation_required` or `attestation_invalid`), the item also stays queued and is tried again with backoff, and the client calls your `onAttestationRejected(error)` if you pass one. On iOS, drop the stored App Attest key there when the error is `attestation_invalid`, so a fresh key registers before the next try.
 
 **iOS, App Attest.** Once per install, generate a key, get a challenge and register the attestation:
 

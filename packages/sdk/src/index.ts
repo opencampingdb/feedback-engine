@@ -9,6 +9,7 @@ export {
   OwnerTermsRequiredError,
 } from "./client.js";
 export type {
+  AttestationError,
   CheckInput,
   FeedbackClient,
   FeedbackClientOptions,
