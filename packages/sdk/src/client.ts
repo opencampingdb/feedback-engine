@@ -60,7 +60,17 @@ export interface FeedbackClientOptions {
    * requestHash). If it throws, the item stays queued and is tried later.
    */
   attest?: (request: { body: string; bodySha256: string }) => Promise<Record<string, string>>;
+  /**
+   * Called when the intake refuses an item's attestation (401
+   * `attestation_required` or `attestation_invalid`). The item stays queued and
+   * is tried again with backoff. On `attestation_invalid` an iOS app can drop
+   * its stored App Attest key here so a fresh key registers before the next try.
+   */
+  onAttestationRejected?: (error: AttestationError) => Promise<void> | void;
 }
+
+/** Why the intake refused an item's attestation. */
+export type AttestationError = "attestation_required" | "attestation_invalid";
 
 export interface ReportInput {
   place: string | null;
@@ -319,6 +329,24 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
       return "stop";
     }
     if (res.status >= 500 || res.status === 408) return "stop";
+    if (res.status === 401) {
+      // A refused attestation keeps the item: the next try brings a fresh
+      // assertion or token. Any other 401 (an unknown app key) drops it.
+      let error: unknown;
+      try {
+        error = ((await res.json()) as { error?: unknown }).error;
+      } catch {
+        error = undefined;
+      }
+      if (error === "attestation_required" || error === "attestation_invalid") {
+        try {
+          await options.onAttestationRejected?.(error);
+        } catch {
+          // The app's own clean-up failing must not lose the item.
+        }
+        return "stop";
+      }
+    }
     record(item.localId, { kind: "dropped", httpStatus: res.status });
     return "drop";
   }
