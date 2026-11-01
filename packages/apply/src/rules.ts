@@ -95,7 +95,10 @@ export type ReviewEdit =
 export interface RulesOutput {
   /** One per pending item, in the order they arrived. */
   decisions: Decision[];
-  /** Place records changed by the automatic rules, with `updated` set. */
+  /**
+   * Place records changed by the automatic rules, with `updated` set. A record
+   * whose only change is `last_confirmed` keeps its `updated`.
+   */
   places: Map<string, Place>;
   /** Review lines to append, per place. */
   reviews: Map<string, Review[]>;
@@ -156,6 +159,12 @@ function isReopenEvidence(item: StoredFeedback): boolean {
     (item.type === "report" && item.report.kind === "reopened") ||
     (item.type === "check" && item.check.still_there === true)
   );
+}
+
+/** The record without last_confirmed, to tell a confirmation from a change. */
+function withoutConfirmed(place: Place): Omit<Place, "last_confirmed"> {
+  const { last_confirmed: _, ...rest } = place;
+  return rest;
 }
 
 const quote = (text: string | undefined) => (text ? `: "${text}"` : "");
@@ -220,12 +229,15 @@ export function applyRules(input: RulesInput): RulesOutput {
     }
   }
 
-  // Keep only records that really changed, and stamp them.
+  // Keep only records that really changed, and stamp them. A new
+  // last_confirmed alone is written but does not move `updated`.
   const changed = new Map<string, Place>();
   for (const [id, place] of working) {
     const original = input.places.get(id);
-    if (!original || JSON.stringify(original) !== JSON.stringify(place)) {
+    if (!original || JSON.stringify(withoutConfirmed(original)) !== JSON.stringify(withoutConfirmed(place))) {
       place.updated = nowIso;
+      changed.set(id, place);
+    } else if (original.last_confirmed !== place.last_confirmed) {
       changed.set(id, place);
     }
   }
@@ -386,6 +398,17 @@ export function applyRules(input: RulesInput): RulesOutput {
       }
       // Marks the status as coming from feedback, so the OSM notes can tell it from a contributed closure.
       if (place.status !== statusBefore) setSource(place, "status", "feedback", nowIso);
+
+      // A traveller found it there and it is still open after this run. One
+      // device is enough, as for clearing reported_closed: it confirms the
+      // status the record already has and changes nothing a traveller sees.
+      const confirming = mine.filter(
+        (i) => i.type === "check" && i.check.still_there === true && decisions.get(i.id)?.outcome === "applied",
+      );
+      if (place.status === "open" && confirming.length > 0) {
+        place.last_confirmed = nowIso;
+        note(placeId, "confirmed there by a traveller", true, confirming);
+      }
     }
   }
 
