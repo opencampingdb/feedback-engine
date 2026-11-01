@@ -7,7 +7,7 @@ It has four parts:
 | Package | What it does |
 |---|---|
 | [`packages/sdk`](packages/sdk) (`@opencampingdb/feedback`) | Client for React Native, Expo and the web. Queues submissions offline, retries with backoff, keeps a random per-install device id and refuses to send without consent. |
-| [`packages/intake`](packages/intake) | Cloudflare Worker at `POST /v1/feedback`. Checks the app key, the schema and consent, rate limits, removes contact details from free text, hashes the device id and writes one JSON file per submission to the private `inbox` repository. |
+| [`packages/intake`](packages/intake) | Cloudflare Worker at `POST /v1/feedback`. Checks the app key, the schema and consent, App Attest or Play Integrity when the key requires it, rate limits, removes contact details from free text, hashes the device and contributor ids and writes one JSON file per submission to the private `inbox` repository. |
 | [`packages/apply`](packages/apply) | Script and reusable GitHub workflow that runs hourly in `inbox`, applies the quality rules and keeps up to two PRs open on `data`: one for automatic changes, one for a person. |
 | [`packages/osm-notes`](packages/osm-notes) | Script and reusable GitHub workflow that runs daily in `inbox` and passes changes accepted into `data` to OpenStreetMap as notes for its mappers to check. It never edits OSM. |
 
@@ -31,6 +31,10 @@ await feedback.check({ place: "ocdb_01JBX...", check: { visited: "2026-10-30", s
 ```
 
 Show `ATTRIBUTION` wherever the data appears, and call `feedback.flush()` when the app returns to the foreground. [docs/integration.md](docs/integration.md) walks through an Expo app step by step. To get an app key, email dev@example.org.
+
+## Reviews
+
+Reviews carry an opaque contributor id from the app's signed-in account. One review per contributor per place, a contributor's first review goes to a person, and advertising and offensive language are refused, also when disguised. Travellers can report a review; three reports hide it until a person decides, and a person can block a contributor. Apps can require App Attest or Play Integrity so that only a genuine copy of the app can post. [docs/integration.md](docs/integration.md) sections 6 and 7 cover the app side, and [SECURITY.md](SECURITY.md) the safeguards.
 
 ## Owners
 
