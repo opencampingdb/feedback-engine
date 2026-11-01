@@ -9,7 +9,9 @@ import type {
   OwnerUpdate,
   ReportBody,
   ReviewBody,
+  ReviewReportReason,
 } from "./types.js";
+import { sha256Hex } from "./sha256.js";
 import { validateSubmission } from "./validate.js";
 
 /** Storage the client keeps its queue and device id in. AsyncStorage matches this shape. */
@@ -47,24 +49,50 @@ export interface FeedbackClientOptions {
   maxQueueAgeMs?: number;
   /** Prefix for storage keys. Default `ocdb.feedback`. */
   storagePrefix?: string;
+  /**
+   * Proves the install to an intake whose app key requires attestation.
+   * Called each time a report, review, check or review report is sent, with
+   * the exact body text and its SHA-256 (lower case hex). Return the
+   * attestation headers: on iOS `x-attest-platform: ios`, `x-attest-key-id`
+   * and `x-attest-assertion` (an App Attest assertion over the body's
+   * SHA-256); on Android `x-attest-platform: android` and `x-attest-token` (a
+   * Play Integrity standard token with the body's SHA-256 as its
+   * requestHash). If it throws, the item stays queued and is tried later.
+   */
+  attest?: (request: { body: string; bodySha256: string }) => Promise<Record<string, string>>;
 }
 
 export interface ReportInput {
   place: string | null;
   location?: LatLon;
   report: ReportBody;
+  /** The signed-in traveller's opaque account id, when there is one. */
+  contributor?: string;
   consent: boolean;
 }
 
 export interface ReviewInput {
   place: string;
   review: ReviewBody;
+  /** The signed-in traveller's opaque account id (a keyed hash, never a name or email). */
+  contributor?: string;
   consent: boolean;
 }
 
 export interface CheckInput {
   place: string;
   check: CheckBody;
+  contributor?: string;
+  consent: boolean;
+}
+
+export interface ReviewReportInput {
+  /** The review's place. */
+  place: string;
+  /** Id of the published review, `rev_<ulid>`. */
+  review: string;
+  reason: ReviewReportReason;
+  contributor?: string;
   consent: boolean;
 }
 
@@ -106,6 +134,8 @@ export interface FeedbackClient {
   report(input: ReportInput): Promise<SubmitResult>;
   review(input: ReviewInput): Promise<SubmitResult>;
   check(input: CheckInput): Promise<SubmitResult>;
+  /** Reports a published review. Queued and retried like the others. */
+  reportReview(input: ReviewReportInput): Promise<SubmitResult>;
   /**
    * Claims an existing place for its owner. Sent at once, never queued, because
    * the token in the answer is shown only once. Show `code` and `token` to the
@@ -250,12 +280,21 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
   }
 
   async function sendOne(item: QueueItem): Promise<"sent" | "drop" | "retry" | "stop"> {
+    const body = JSON.stringify(item.body);
+    let attestation: Record<string, string> = {};
+    if (options.attest) {
+      try {
+        attestation = await options.attest({ body, bodySha256: sha256Hex(body) });
+      } catch {
+        return "stop"; // the platform could not attest now, so try again later
+      }
+    }
     let res: Awaited<ReturnType<FetchLike>>;
     try {
       res = await doFetch(url, {
         method: "POST",
-        headers: { "content-type": "application/json", "x-app-key": appKey },
-        body: JSON.stringify(item.body),
+        headers: { ...attestation, "content-type": "application/json", "x-app-key": appKey },
+        body,
       });
     } catch {
       return "stop"; // offline or the host is unreachable
@@ -284,7 +323,7 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
     return "drop";
   }
 
-  // Outcomes are kept only for items a report(), review() or check() call is waiting on.
+  // Outcomes are kept only for items a report(), review(), check() or reportReview() call is waiting on.
   const waiting = new Set<string>();
   const outcomes = new Map<string, Outcome>();
   function record(localId: string, outcome: Outcome): void {
@@ -430,6 +469,11 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
     report: (input) => submit({ ...input }, "report"),
     review: (input) => submit({ ...input }, "review"),
     check: (input) => submit({ ...input }, "check"),
+    reportReview: ({ place, review, reason, contributor, consent }) =>
+      submit(
+        { place, review_report: { review, reason }, ...(contributor !== undefined ? { contributor } : {}), consent },
+        "review_report",
+      ),
     flush: flushNow,
     pending: () => serial(async () => (await readQueue()).length),
   };
