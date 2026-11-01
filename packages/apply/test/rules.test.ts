@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StoredFeedback } from "@opencampingdb/feedback";
-import { applyEdit, applyRules, ratingOf, type RulesInput } from "../src/rules.js";
+import { applyEdit, applyHeldReview, applyRules, ratingOf, REPORTS_TO_HIDE, type RulesInput } from "../src/rules.js";
 import type { Place, Review } from "../src/types.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
@@ -45,12 +45,36 @@ const reopened = (day: number, device: string): StoredFeedback =>
   ({ ...base(day, device), type: "report", report: { kind: "reopened" } }) as StoredFeedback;
 const check = (day: number, device: string, stillThere: boolean): StoredFeedback =>
   ({ ...base(day, device), type: "check", check: { visited: at(day).slice(0, 10), still_there: stillThere } }) as StoredFeedback;
-const review = (day: number, device: string, stars: number, text: string): StoredFeedback =>
-  ({ ...base(day, device), type: "review", review: { stars, text, visited: "2026-06" } }) as StoredFeedback;
+/** A contributor id for a test name, `ctr_` and 16 hex characters. */
+const ctr = (name: string) => `ctr_${Buffer.from(name).toString("hex").padEnd(16, "0").slice(0, 16)}`;
+const review = (day: number, who: string, stars: number, text: string, placeId = PLACE): StoredFeedback =>
+  ({ ...base(day, who, placeId), contributor: ctr(who), type: "review", review: { stars, text, visited: "2026-06" } }) as StoredFeedback;
+const reviewReport = (day: number, who: string, reviewId: string, reason = "spam_ad"): StoredFeedback =>
+  ({ ...base(day, who), contributor: ctr(who), type: "review_report", review_report: { review: reviewId, reason } }) as StoredFeedback;
+const line = (n: number, who: string, stars: number, extra: Partial<Review> = {}): Review => ({
+  id: `rev_01JA00000000000000000000${String(n).padStart(2, "0")}`,
+  place: PLACE,
+  stars,
+  text: "",
+  visited: "2026-01",
+  created: "2026-01-05T00:00:00Z",
+  app: "example-app",
+  contributor: ctr(who),
+  ...extra,
+});
+/** Stored items as `applied/` holds them, with the outcome a run gave them. */
+const applied = (item: StoredFeedback, result = "applied") => ({ ...item, outcome: { result, reason: "", run: at(0) } }) as unknown as StoredFeedback;
 
 function run(
   pending: StoredFeedback[],
-  opts: { now?: number; history?: StoredFeedback[]; places?: Place[]; reviews?: Review[] } = {},
+  opts: {
+    now?: number;
+    history?: StoredFeedback[];
+    places?: Place[];
+    reviews?: Review[];
+    blocked?: string[];
+    reviewers?: string[];
+  } = {},
 ) {
   const places = new Map((opts.places ?? [place()]).map((p) => [p.id, p]));
   const input: RulesInput = {
@@ -64,6 +88,8 @@ function run(
       ["free_camp", "overnight"],
       ["picnic_site", "utility"],
     ]),
+    blocked: new Set(opts.blocked ?? []),
+    reviewers: new Set(opts.reviewers ?? []),
   };
   const out = applyRules(input);
   const outcome = (item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.outcome;
@@ -397,15 +423,13 @@ describe("closed and reopened", () => {
 });
 
 describe("reviews", () => {
-  it("accepts a clean review, appends it and recalculates the rating", () => {
-    const r = review(0, "dev-a", 3, "Shady, flat sites near the water.");
-    const existing: Review[] = [
-      { id: "rev_01JA0000000000000000000001", place: PLACE, stars: 5, text: "", visited: "2026-01", created: "2026-01-05T00:00:00Z", app: "example-app" },
-      { id: "rev_01JA0000000000000000000002", place: PLACE, stars: 4, text: "", visited: "2026-02", created: "2026-02-05T00:00:00Z", app: "example-app" },
-    ];
-    const out = run([r], { reviews: existing, places: [place({ rating: { count: 2, mean: 4.5 } })] });
+  it("accepts a trusted contributor's clean review and recalculates the rating", () => {
+    const r = review(0, "sam", 3, "Shady, flat sites near the water.");
+    const existing = [line(1, "kim", 5), line(2, "lee", 4)];
+    const out = run([r], { reviews: existing, reviewers: [ctr("sam")], places: [place({ rating: { count: 2, mean: 4.5 } })] });
     expect(out.outcome(r)).toBe("applied");
     expect(out.reviews.get(PLACE)).toEqual([
+      ...existing,
       {
         id: `rev_${r.id.slice(3)}`,
         place: PLACE,
@@ -414,9 +438,75 @@ describe("reviews", () => {
         visited: "2026-06",
         created: r.received,
         app: "example-app",
+        contributor: ctr("sam"),
       },
     ]);
     expect(out.after()?.rating).toEqual({ count: 3, mean: 4 });
+  });
+
+  it("holds a contributor's first review for a person", () => {
+    const r = review(0, "sam", 4, "Quiet and level");
+    const out = run([r]);
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.reviews.size).toBe(0);
+    expect(out.after()).toBeUndefined();
+    expect(out.edits).toEqual([{ kind: "review", place: PLACE, review: expect.objectContaining({ contributor: ctr("sam"), stars: 4 }), feedback: r.id }]);
+  });
+
+  it("trusts a contributor whose feedback was applied before", () => {
+    const earlier = applied({ ...check(-5, "sam", true), contributor: ctr("sam") } as StoredFeedback);
+    const held = applied({ ...check(-5, "kim", true), contributor: ctr("kim") } as StoredFeedback, "needs_review");
+    const a = review(0, "sam", 4, "Quiet");
+    const b = review(0, "kim", 4, "Quiet");
+    const out = run([a, b], { history: [earlier, held] });
+    expect(out.outcome(a)).toBe("applied");
+    expect(out.outcome(b)).toBe("needs_review");
+  });
+
+  it("keeps visited_nearby on the published line", () => {
+    const r = { ...review(0, "sam", 5, "Lovely"), review: { stars: 5, text: "Lovely", visited: "2026-06", visited_nearby: true } } as StoredFeedback;
+    const out = run([r], { reviewers: [ctr("sam")] });
+    expect(out.reviews.get(PLACE)?.[0]?.visited_nearby).toBe(true);
+  });
+
+  it("replaces a contributor's earlier review of the place", () => {
+    const r = review(0, "sam", 2, "Gone downhill");
+    const out = run([r], { reviews: [line(1, "sam", 5), line(2, "kim", 4)], reviewers: [ctr("sam")], places: [place({ rating: { count: 2, mean: 4.5 } })] });
+    expect(out.outcome(r)).toBe("applied");
+    expect(out.reviews.get(PLACE)?.map((l) => l.contributor)).toEqual([ctr("kim"), ctr("sam")]);
+    expect(out.reviews.get(PLACE)?.map((l) => l.stars)).toEqual([4, 2]);
+    expect(out.after()?.rating).toEqual({ count: 2, mean: 3 });
+  });
+
+  it("refuses everything from a blocked contributor", () => {
+    const r = review(0, "spammer", 5, "Great");
+    const c = { ...check(0, "spammer", true), contributor: ctr("spammer") } as StoredFeedback;
+    const out = run([r, c], { blocked: [ctr("spammer")], reviewers: [ctr("spammer")] });
+    expect(out.outcome(r)).toBe("refused");
+    expect(out.outcome(c)).toBe("refused");
+    expect(out.decisions[0]?.reason).toBe("the contributor is blocked");
+  });
+
+  it("leaves hidden and blocked reviews out of the rating", () => {
+    const r = review(0, "sam", 4, "Fine");
+    const existing = [line(1, "kim", 1, { hidden: "reported" }), line(2, "bad", 1), line(3, "lee", 5)];
+    const out = run([r], { reviews: existing, blocked: [ctr("bad")], reviewers: [ctr("sam")] });
+    expect(out.after()?.rating).toEqual({ count: 2, mean: 4.5 });
+  });
+
+  it("holds text sent word for word for another place", () => {
+    const text = "Best camp in the state, everyone should stay here at least once!";
+    const other = applied(review(-3, "kim", 5, text, OTHER));
+    const r = review(0, "sam", 5, text.toUpperCase());
+    const out = run([r], { history: [other], reviewers: [ctr("sam")] });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.decisions[0]?.reason).toMatch(/another place/);
+  });
+
+  it("refuses a review with no contributor", () => {
+    const { contributor: _, ...r } = review(0, "sam", 4, "Nice") as StoredFeedback & { contributor: string };
+    const out = run([r as StoredFeedback]);
+    expect(out.outcome(r as StoredFeedback)).toBe("refused");
   });
 
   it("refuses a review with an email address", () => {
@@ -435,6 +525,7 @@ describe("reviews", () => {
     ["My name is Jo and I loved it", /name/],
     ["Lovely and quiet. Cheers, Sam", /name/],
     ["This place is shit", /language/],
+    ["Powered sites $45 per night, book now!", /advertising/],
   ])("refuses %j", (text, reason) => {
     const r = review(0, "dev-a", 2, text);
     const out = run([r]);
@@ -443,15 +534,15 @@ describe("reviews", () => {
   });
 
   it("does not add the same review twice", () => {
-    const r = review(0, "dev-a", 4, "Nice");
-    const existing: Review = { id: `rev_${r.id.slice(3)}`, place: PLACE, stars: 4, text: "Nice", visited: "2026-06", created: r.received, app: "example-app" };
-    const out = run([r], { reviews: [existing], places: [place({ rating: { count: 1, mean: 4 } })] });
+    const r = review(0, "sam", 4, "Nice");
+    const existing: Review = { ...line(1, "sam", 4), id: `rev_${r.id.slice(3)}`, text: "Nice", visited: "2026-06", created: r.received };
+    const out = run([r], { reviews: [existing], reviewers: [ctr("sam")], places: [place({ rating: { count: 1, mean: 4 } })] });
     expect(out.outcome(r)).toBe("applied");
     expect(out.reviews.size).toBe(0);
   });
 
   it("rounds the mean to 1 decimal place", () => {
-    const out = run([review(0, "a", 5, ""), review(0, "b", 4, ""), review(0, "c", 4, "")]);
+    const out = run([review(0, "a", 5, ""), review(0, "b", 4, ""), review(0, "c", 4, "")], { reviewers: [ctr("a"), ctr("b"), ctr("c")] });
     expect(out.after()?.rating).toEqual({ count: 3, mean: 4.3 });
   });
 
@@ -461,6 +552,47 @@ describe("reviews", () => {
     expect(ratingOf(stars.map((s) => ({ stars: s })))).toEqual({ count: 20, mean: 1.2 });
     expect(ratingOf([{ stars: 4 }, { stars: 5 }])).toEqual({ count: 2, mean: 4.5 });
     expect(ratingOf([{ stars: 4 }, { stars: 4 }, { stars: 5 }, { stars: 5 }, { stars: 5 }, { stars: 4 }, { stars: 4 }, { stars: 4 }])).toEqual({ count: 8, mean: 4.4 });
+  });
+
+  it("adds a held review in the review checkout, replacing the contributor's older one", () => {
+    const held = applyHeldReview([line(1, "sam", 5), line(2, "kim", 3)], line(3, "sam", 1), new Set());
+    expect(held?.lines.map((l) => l.id)).toEqual([line(2, "kim", 3).id, line(3, "sam", 1).id]);
+    expect(held?.rating).toEqual({ count: 2, mean: 2 });
+    expect(applyHeldReview([line(3, "sam", 1)], line(3, "sam", 1))).toBeUndefined();
+  });
+});
+
+describe("review reports", () => {
+  const target = line(1, "author", 5, { text: "Cheap sites, see our page" });
+
+  it("sends every report to a person", () => {
+    const r = reviewReport(0, "kim", target.id);
+    const out = run([r], { reviews: [target], places: [place({ rating: { count: 1, mean: 5 } })] });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.edits).toEqual([{ kind: "note", place: PLACE, feedback: r.id }]);
+    expect(out.changes[0]?.summary).toMatch(/reported as spam_ad/);
+    expect(out.reviews.size).toBe(0);
+  });
+
+  it(`hides a review once ${REPORTS_TO_HIDE} different contributors report it, and the rating leaves it out`, () => {
+    const earlier = [applied(reviewReport(-2, "kim", target.id), "needs_review"), applied(reviewReport(-1, "kim", target.id), "needs_review")];
+    const second = reviewReport(0, "lee", target.id, "fake");
+    const out1 = run([second], { history: earlier, reviews: [target], places: [place({ rating: { count: 1, mean: 5 } })] });
+    expect(out1.reviews.size).toBe(0); // kim twice counts once
+
+    const third = reviewReport(0, "max", target.id, "offensive");
+    const out2 = run([second, third], { history: earlier, reviews: [target], places: [place({ rating: { count: 1, mean: 5 } })] });
+    expect(out2.reviews.get(PLACE)).toEqual([{ ...target, hidden: "reported" }]);
+    expect(out2.after()?.rating).toBeNull();
+    expect(out2.changes.some((c) => c.automatic && /hidden after reports from 3/.test(c.summary))).toBe(true);
+  });
+
+  it("refuses a report of a review that is not there, or of one's own review", () => {
+    const missing = reviewReport(0, "kim", "rev_01JA0000000000000000000099");
+    const own = reviewReport(0, "author", target.id);
+    const out = run([missing, own], { reviews: [target] });
+    expect(out.outcome(missing)).toBe("refused");
+    expect(out.outcome(own)).toBe("refused");
   });
 });
 

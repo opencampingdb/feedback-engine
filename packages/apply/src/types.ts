@@ -64,4 +64,18 @@ export interface Review {
   visited: string;
   created: string;
   app: string;
+  /** Opaque id of the account or attested install that wrote it, `ctr_` and 16 hex characters. */
+  contributor: string;
+  /** The app saw the phone near the place in the 60 days before the review. */
+  visited_nearby?: true;
+  /**
+   * Left out of the release and the rating. `reported`: three contributors
+   * reported it and a person has not decided. `moderator`: a person hid it.
+   */
+  hidden?: "reported" | "moderator";
+}
+
+/** `moderation/blocked_contributors.json` in the data repository. */
+export interface BlockedList {
+  contributors: { contributor: string; added: string; reason: string }[];
 }

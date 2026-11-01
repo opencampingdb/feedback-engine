@@ -25,7 +25,13 @@ npx wrangler kv namespace create RATE_LIMIT
 
 Copy the `id` it prints into `packages/intake/wrangler.toml`, replacing `REPLACE_ME_KV_NAMESPACE_ID`. Keep that edit in your own deployment, not in a commit to this repository.
 
-On the free plan KV allows 1,000 writes a day. Each accepted submission makes three (one device counter, one network counter, one app counter), so the free plan carries about 330 submissions a day. Above that, use the Workers paid plan.
+On the free plan KV allows 1,000 writes a day. Each accepted submission makes three (one device counter, one network counter, one app counter), plus one per contributor and one per attested key, so the free plan carries about 200 to 330 submissions a day. Above that, use the Workers paid plan.
+
+If an app key uses App Attest, create a second namespace for registered keys and challenges, and copy its `id` into the `ATTEST` binding in `wrangler.toml`:
+
+```sh
+npx wrangler kv namespace create ATTEST
+```
 
 ## 3. Create the private inbox repository
 
@@ -67,9 +73,17 @@ npx wrangler secret put GH_INSTALLATION_ID
   {"0a7e5b2c9d4f1e3a6b8c": {"app": "owner-page", "daily_limit": 1000, "owner_daily_limit": 200, "kinds": ["owner"]}}
   ```
 
+  For reviews, `contributor_daily_limit` sets how many submissions one contributor may send a day (20 when left out), and `requires_visited_nearby: true` refuses reviews without `visited_nearby`. To take feedback only from genuine copies of an app, add `"requires_attestation": true` with `ios` (`app_id`, your team id, a dot and the bundle id; `environment` `production` or `development`), `android` (`package`, and optionally `certificate_sha256`, the signing certificate digests Play reports), or both:
+
+  ```json
+  {"9f3c1d0e7b2a4c5d8e6f": {"app": "example-app", "daily_limit": 5000, "requires_attestation": true,
+    "ios": {"app_id": "ABCDE12345.com.example.app"}, "android": {"package": "com.example.app"}}}
+  ```
+
   Make keys with `openssl rand -hex 16`. To revoke a key, remove it and set the secret again.
 - `DEVICE_SALT` is a long random string, for example from `openssl rand -hex 32`. Changing it makes every device look new, which resets the two-device rule for pending items, so set it once.
 - `GH_APP_PRIVATE_KEY` accepts the PEM GitHub gives you (PKCS#1) or PKCS#8.
+- `GOOGLE_SERVICE_ACCOUNT`, needed only for `android`, is the JSON key file of a Google Cloud service account in the project linked to the app in Play Console, allowed to decode integrity tokens. Set it with `npx wrangler secret put GOOGLE_SERVICE_ACCOUNT < key.json`.
 
 `INBOX_REPO`, `INBOX_BRANCH` and `ALLOWED_ORIGINS` are plain variables in `wrangler.toml`. Set `INBOX_REPO` to `<your organisation>/inbox`. `ALLOWED_ORIGINS` lists the web origins allowed to call the intake from a browser, comma separated, or `*`. Native apps do not send an origin and are not affected.
 
