@@ -18,7 +18,7 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 
 function fakeKv(): KVLike {
   const data = new Map<string, string>();
-  return { get: async (k) => data.get(k) ?? null, put: async (k, v) => void data.set(k, v) };
+  return { get: async (k) => data.get(k) ?? null, put: async (k, v) => void data.set(k, v), delete: async (k) => void data.delete(k) };
 }
 
 function fakeGitHub() {

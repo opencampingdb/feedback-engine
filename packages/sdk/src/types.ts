@@ -3,7 +3,7 @@
  * (`POST /v1/feedback`), matching SPEC.md "Feedback submission".
  */
 
-export type FeedbackType = "report" | "review" | "check";
+export type FeedbackType = "report" | "review" | "check" | "review_report";
 export type OwnerType = "owner_claim" | "owner_listing" | "owner_update";
 
 export type ReportKind =
@@ -88,6 +88,21 @@ export interface ReviewBody {
   text: string;
   /** Month of the visit, `YYYY-MM`. */
   visited: string;
+  /**
+   * The app saw the phone within its set distance of the place in the 60 days
+   * before the review. Only `true` is sent; leave it out otherwise. The
+   * location itself is never sent.
+   */
+  visited_nearby?: true;
+}
+
+/** Why a traveller reports a published review. */
+export type ReviewReportReason = "spam_ad" | "offensive" | "off_topic" | "fake" | "personal_details";
+
+export interface ReviewReportBody {
+  /** Id of the published review, `rev_<ulid>`. */
+  review: string;
+  reason: ReviewReportReason;
 }
 
 export interface CheckBody {
@@ -103,6 +118,13 @@ interface SubmissionBase {
   location?: LatLon;
   /** Random per-install UUID. The intake hashes it before storage. */
   device: string;
+  /**
+   * Opaque id of the traveller's account: a keyed hash made by the app, never
+   * a name or email. 16 to 128 characters of `A-Z a-z 0-9 _ -`. Reviews and
+   * review reports need it unless the app key proves the install with App
+   * Attest. The intake hashes it again (`ctr_` and 16 hex) before storage.
+   */
+  contributor?: string;
   app_version: string;
   /** The user accepted the ODbL/DbCL contribution terms. */
   consent: true;
@@ -123,6 +145,13 @@ export interface CheckSubmission extends SubmissionBase {
   type: "check";
   place: string;
   check: CheckBody;
+}
+
+/** A traveller's report of a published review. `place` is the review's place. */
+export interface ReviewReportSubmission extends SubmissionBase {
+  type: "review_report";
+  place: string;
+  review_report: ReviewReportBody;
 }
 
 /** Contact details of an owner. They stay in the private inbox and are never published. */
@@ -211,7 +240,7 @@ export interface OwnerUpdate {
 export type OwnerSubmission = OwnerClaimSubmission | OwnerListingSubmission | OwnerUpdateSubmission;
 
 /** The JSON body an app sends to the intake. */
-export type FeedbackSubmission = ReportSubmission | ReviewSubmission | CheckSubmission;
+export type FeedbackSubmission = ReportSubmission | ReviewSubmission | CheckSubmission | ReviewReportSubmission;
 
 /** Every body the intake accepts. */
 export type Submission = FeedbackSubmission | OwnerSubmission;
@@ -221,7 +250,7 @@ export type Submission = FeedbackSubmission | OwnerSubmission;
  * the validated submission with `device` replaced by its salted hash, plus the
  * id, the time it arrived and the app name taken from the app key.
  */
-export type StoredFeedback = DistributiveOmit<FeedbackSubmission, "device"> & StoredFields;
+export type StoredFeedback = DistributiveOmit<FeedbackSubmission, "device" | "contributor"> & StoredFields;
 
 /**
  * An owner submission as stored. A claim or listing gains the `code` the owner
@@ -229,9 +258,11 @@ export type StoredFeedback = DistributiveOmit<FeedbackSubmission, "device"> & St
  * SHA-256 (hex) of the owner's token, and never the token itself.
  */
 export type StoredOwnerSubmission =
-  | (Omit<OwnerClaimSubmission, "device"> & StoredFields & { code: string; token_sha256: string })
-  | (Omit<OwnerListingSubmission, "device"> & StoredFields & { code: string; token_sha256: string })
-  | (Omit<OwnerUpdateSubmission, "device" | "token"> & StoredFields & { token_sha256: string });
+  | (Omit<OwnerClaimSubmission, "device"> & OwnerStoredFields & { code: string; token_sha256: string })
+  | (Omit<OwnerListingSubmission, "device"> & OwnerStoredFields & { code: string; token_sha256: string })
+  | (Omit<OwnerUpdateSubmission, "device" | "token"> & OwnerStoredFields & { token_sha256: string });
+
+type OwnerStoredFields = Omit<StoredFields, "contributor" | "attested" | "attest_key">;
 
 /** Everything that can be in `inbox/pending/`. */
 export type StoredSubmission = StoredFeedback | StoredOwnerSubmission;
@@ -249,6 +280,20 @@ interface StoredFields {
   received: string;
   /** App name from the app key list, for example `camporacle`. */
   app: string;
+  /**
+   * In place of the app's own value: `ctr_` and the first 16 hex characters of
+   * SHA-256 of salt, app name and the contributor the app sent. On an iOS
+   * submission without one, the same hash of the attested key id. Published
+   * with reviews.
+   */
+  contributor?: string;
+  /**
+   * How the install was proven: `app_attest` or `play_integrity`. Absent when
+   * the app key does not require attestation.
+   */
+  attested?: "app_attest" | "play_integrity";
+  /** `ak_` and 16 hex characters of the salted App Attest key id: a second signal beside the contributor. */
+  attest_key?: string;
 }
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;

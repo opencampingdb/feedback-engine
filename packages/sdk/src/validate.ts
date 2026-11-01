@@ -13,10 +13,12 @@ import type {
   ReportBody,
   ReportKind,
   ReviewBody,
+  ReviewReportBody,
+  ReviewReportReason,
   Submission,
 } from "./types.js";
 
-export const FEEDBACK_TYPES = ["report", "review", "check"] as const;
+export const FEEDBACK_TYPES = ["report", "review", "check", "review_report"] as const;
 export const OWNER_TYPES = ["owner_claim", "owner_listing", "owner_update"] as const;
 const ALL_TYPES: readonly string[] = [...FEEDBACK_TYPES, ...OWNER_TYPES];
 export const REPORT_KINDS: readonly ReportKind[] = [
@@ -26,6 +28,13 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   "wrong_location",
   "new_place",
   "other",
+];
+export const REVIEW_REPORT_REASONS: readonly ReviewReportReason[] = [
+  "spam_ad",
+  "offensive",
+  "off_topic",
+  "fake",
+  "personal_details",
 ];
 /** Shape of a kind code. The list itself is `data/schema/kinds.json`. */
 const KIND_CODE = /^[a-z][a-z_]{1,39}$/;
@@ -79,6 +88,8 @@ export const OWNER_FACTS: Readonly<Record<OwnerFactName, (value: unknown) => boo
 };
 
 const PLACE_ID = /^ocdb_[0-9A-HJKMNP-TV-Z]{26}$/;
+const REVIEW_ID = /^rev_[0-9A-HJKMNP-TV-Z]{26}$/;
+const CONTRIBUTOR = /^[A-Za-z0-9_-]{16,128}$/;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const EMAIL = /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -89,11 +100,13 @@ const TOP_LEVEL_KEYS = new Set([
   "place",
   "location",
   "device",
+  "contributor",
   "app_version",
   "consent",
   "report",
   "review",
   "check",
+  "review_report",
   "terms_accepted",
   "token",
   "owner",
@@ -126,6 +139,16 @@ function isValidDate(value: string): boolean {
 
 export function isPlaceId(value: unknown): value is string {
   return typeof value === "string" && PLACE_ID.test(value);
+}
+
+/** A published review id, `rev_<ulid>`. */
+export function isReviewId(value: unknown): value is string {
+  return typeof value === "string" && REVIEW_ID.test(value);
+}
+
+/** A contributor id as an app sends it: 16 to 128 characters of `A-Z a-z 0-9 _ -`. */
+export function isContributor(value: unknown): value is string {
+  return typeof value === "string" && CONTRIBUTOR.test(value);
 }
 
 export function isFactName(value: unknown): value is ReportFactName {
@@ -210,7 +233,27 @@ function checkReview(value: unknown, errors: string[]): ReviewBody | undefined {
   if (typeof visited !== "string" || !YEAR_MONTH.test(visited)) {
     errors.push("review.visited must be YYYY-MM");
   }
-  return { stars: stars as ReviewBody["stars"], text: text ?? "", visited: visited as string };
+  if (value.visited_nearby !== undefined && value.visited_nearby !== true) {
+    errors.push("review.visited_nearby must be true, or left out");
+  }
+  return {
+    stars: stars as ReviewBody["stars"],
+    text: text ?? "",
+    visited: visited as string,
+    ...(value.visited_nearby === true ? { visited_nearby: true as const } : {}),
+  };
+}
+
+function checkReviewReport(value: unknown, errors: string[]): ReviewReportBody | undefined {
+  if (!isObject(value)) {
+    errors.push("review_report must be an object");
+    return undefined;
+  }
+  if (!isReviewId(value.review)) errors.push("review_report.review must be a review id (rev_<ulid>)");
+  if (typeof value.reason !== "string" || !(REVIEW_REPORT_REASONS as readonly string[]).includes(value.reason)) {
+    errors.push(`review_report.reason must be one of ${REVIEW_REPORT_REASONS.join(", ")}`);
+  }
+  return { review: value.review as string, reason: value.reason as ReviewReportReason };
 }
 
 function checkCheck(value: unknown, errors: string[]): CheckBody | undefined {
@@ -243,7 +286,7 @@ export function validateSubmission(input: unknown): ValidationResult {
     return { ok: false, errors };
   }
   if ((OWNER_TYPES as readonly string[]).includes(type)) return validateOwner(input, type as OwnerSubmission["type"]);
-  for (const other of [...FEEDBACK_TYPES, "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
+  for (const other of ["report", "review", "check", "review_report", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
     if (other !== type && input[other] !== undefined) errors.push(`${other} is not allowed when type is ${type}`);
   }
 
@@ -257,6 +300,11 @@ export function validateSubmission(input: unknown): ValidationResult {
     errors.push(`app_version must be a string of 1 to ${MAX_APP_VERSION_LENGTH} characters`);
   }
 
+  const contributor = input.contributor;
+  if (contributor !== undefined && !isContributor(contributor)) {
+    errors.push("contributor must be 16 to 128 characters of letters, digits, _ and -");
+  }
+
   const place = input.place;
   if (place !== null && !isPlaceId(place)) errors.push("place must be an Open Camping DB id (ocdb_<ulid>) or null");
 
@@ -265,6 +313,7 @@ export function validateSubmission(input: unknown): ValidationResult {
   const base = {
     place: place as string | null,
     device: device as string,
+    ...(contributor !== undefined ? { contributor: contributor as string } : {}),
     app_version: appVersion as string,
     consent: true as const,
     ...(location ? { location } : {}),
@@ -289,6 +338,9 @@ export function validateSubmission(input: unknown): ValidationResult {
     if (type === "review") {
       const review = checkReview(input.review, errors);
       if (review) value = { ...base, place: place as string, type: "review", review };
+    } else if (type === "review_report") {
+      const reviewReport = checkReviewReport(input.review_report, errors);
+      if (reviewReport) value = { ...base, place: place as string, type: "review_report", review_report: reviewReport };
     } else {
       const check = checkCheck(input.check, errors);
       if (check) value = { ...base, place: place as string, type: "check", check };
@@ -410,7 +462,7 @@ const OWNER_FIELDS: Record<OwnerSubmission["type"], string[]> = {
 /** Validates the three owner submission types (SPEC "Owners"). */
 function validateOwner(input: Record<string, unknown>, type: OwnerSubmission["type"]): ValidationResult {
   const errors: string[] = [];
-  for (const key of ["report", "review", "check", "token", "owner", "claim", "listing", "update", "location"]) {
+  for (const key of ["report", "review", "check", "review_report", "contributor", "token", "owner", "claim", "listing", "update", "location"]) {
     if (input[key] !== undefined && !OWNER_FIELDS[type].includes(key)) errors.push(`${key} is not allowed when type is ${type}`);
   }
   if (input.terms_accepted !== true) errors.push("terms_accepted must be true");
