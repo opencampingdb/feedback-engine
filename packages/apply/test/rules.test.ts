@@ -93,6 +93,7 @@ describe("fact reports", () => {
     const out = run([a, b], { now: 90 });
     expect(out.after()?.facts.power).toBe(true);
     expect(out.after()?.fact_sources.power).toBe("feedback");
+    expect(out.after()?.fact_dates).toEqual({ power: at(90) });
     expect(out.after()?.updated).toBe(at(90));
     expect(out.outcome(a)).toBe("applied");
     expect(out.outcome(b)).toBe("applied");
@@ -200,6 +201,7 @@ describe("closed and reopened", () => {
   it("marks a closure as coming from feedback", () => {
     const out = run([closed(0, "dev-a"), closed(10, "dev-b")], { now: 10 });
     expect(out.after()?.fact_sources.status).toBe("feedback");
+    expect(out.after()?.fact_dates?.status).toBe(at(10));
   });
 
   it("counts a closed report from an earlier run as history", () => {
@@ -433,6 +435,7 @@ describe("items for a person", () => {
       status: "open",
       facts: {},
       fact_sources: { location: "feedback" },
+      fact_dates: { location: at(1) },
     });
   });
 
@@ -473,7 +476,22 @@ describe("applyEdit", () => {
 
   it("moves a place and marks the location as feedback", () => {
     const out = applyEdit(place(), { kind: "location", place: PLACE, location: { lat: -36.9, lon: 144.6 }, feedback: "fb_x" }, now);
-    expect(out).toMatchObject({ location: { lat: -36.9, lon: 144.6 }, fact_sources: { location: "feedback" }, updated: now });
+    expect(out).toMatchObject({
+      location: { lat: -36.9, lon: 144.6 },
+      fact_sources: { location: "feedback" },
+      fact_dates: { location: now },
+      updated: now,
+    });
+  });
+
+  it("keeps the dates of other values and moves only the edited one", () => {
+    const earlier = "2026-09-01T00:00:00Z";
+    const before = place({
+      fact_sources: { power: "feedback", fee: "osm", name: "feedback" },
+      fact_dates: { power: earlier, name: earlier },
+    });
+    const out = applyEdit(before, { kind: "name", place: PLACE, name: "Eppalock Camp", feedback: "fb_x" }, now);
+    expect(out?.fact_dates).toEqual({ power: earlier, name: now });
   });
 
   it("sets a reviewed fact and marks it as feedback", () => {
@@ -483,7 +501,11 @@ describe("applyEdit", () => {
   });
 
   it("returns undefined when the edit is already there", () => {
-    const moved = place({ location: { lat: -36.9, lon: 144.6 }, fact_sources: { power: "osm", fee: "osm", location: "feedback" } });
+    const moved = place({
+      location: { lat: -36.9, lon: 144.6 },
+      fact_sources: { power: "osm", fee: "osm", location: "feedback" },
+      fact_dates: { location: "2026-09-01T00:00:00Z" },
+    });
     expect(applyEdit(moved, { kind: "location", place: PLACE, location: { lat: -36.9, lon: 144.6 }, feedback: "fb_x" }, now)).toBeUndefined();
   });
 
