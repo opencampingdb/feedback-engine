@@ -109,6 +109,7 @@ describe("owner updates", () => {
     expect(out.after()).toMatchObject({
       facts: { power: true, fee: true, booking_url: "https://riverbend.example/book" },
       fact_sources: { power: "owner", fee: "osm", booking_url: "owner", description: "owner" },
+      fact_dates: { power: NOW, booking_url: NOW, description: NOW },
       description: "Shady sites by the river.",
       owner_verified: true,
       updated: NOW,
@@ -146,16 +147,29 @@ describe("owner updates", () => {
   it("removes the description when an empty one is sent", () => {
     const out = run({
       pending: [updateItem({ description: "" })],
-      places: [place({ description: "Old text", owner_verified: true, fact_sources: { power: "osm", fee: "osm", description: "owner" } })],
+      places: [
+        place({
+          description: "Old text",
+          owner_verified: true,
+          fact_sources: { power: "osm", fee: "osm", description: "owner" },
+          fact_dates: { description: "2026-09-01T00:00:00Z" },
+        }),
+      ],
     });
     expect(out.after()?.description).toBeUndefined();
     expect(out.after()?.fact_sources.description).toBeUndefined();
+    expect(out.after()?.fact_dates).toBeUndefined();
   });
 
   it("closes a place temporarily until its reopening date", () => {
     const item = updateItem({ status: "temporarily_closed", reopens: "2026-12-01" });
     const out = run({ pending: [item] });
-    expect(out.after()).toMatchObject({ status: "temporarily_closed", reopens: "2026-12-01", fact_sources: { status: "owner" } });
+    expect(out.after()).toMatchObject({
+      status: "temporarily_closed",
+      reopens: "2026-12-01",
+      fact_sources: { status: "owner" },
+      fact_dates: { status: NOW },
+    });
   });
 
   it("refuses a reopening date that has already passed", () => {
@@ -354,6 +368,15 @@ describe("approval by merging the review PR", () => {
         name: "owner",
         location: "owner",
         description: "owner",
+      },
+      fact_dates: {
+        booking_url: NOW,
+        toilets: NOW,
+        entry: NOW,
+        booking_required: NOW,
+        name: NOW,
+        location: NOW,
+        description: NOW,
       },
       status: "open",
       rating: null,
