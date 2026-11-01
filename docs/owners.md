@@ -50,6 +50,7 @@ Apps should show, for every `farm_stay`: **Private property. Book with the owner
 - `status: "temporarily_closed"` with `reopens`: show "Closed until" and the date.
 - `description`: the owner's own words. Show it as written, as plain text.
 - `fact_sources` values of `owner` mark facts the owner set.
+- `fact_dates` gives, for each of those values, when it was accepted (UTC). Apply writes a date with every `feedback` and `owner` value it sets.
 
 ## Submissions
 

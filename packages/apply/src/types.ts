@@ -6,6 +6,9 @@ export type PlaceStatus = "open" | "reported_closed" | "closed" | "temporarily_c
 /** Where a value in a place record came from. */
 export type Source = "osm" | "feedback" | "contributed" | "owner";
 
+/** Keys of `fact_sources` and `fact_dates`: every fact, plus the name, location, status and description. */
+export type SourceKey = FactName | "name" | "location" | "status" | "description";
+
 /** A place record in the data repository (`places/<last 2 of id, lower case>/<id>.json`). */
 export interface Place {
   id: string;
@@ -13,12 +16,19 @@ export interface Place {
   kind: PlaceKind;
   group: PlaceGroup;
   location: { lat: number; lon: number };
-  osm: { type: "node" | "way" | "relation"; id: number; version: number } | null;
+  /** `timestamp`: when this version of the OSM object was saved, UTC. Missing on records not yet synced with it. */
+  osm: { type: "node" | "way" | "relation"; id: number; version: number; timestamp?: string } | null;
   facts: PlaceFacts;
   status: PlaceStatus;
   rating: { count: number; mean: number } | null;
   /** Where each fact, the name, the location and the status came from. */
-  fact_sources: Partial<Record<FactName | "name" | "location" | "status" | "description", Source>>;
+  fact_sources: Partial<Record<SourceKey, Source>>;
+  /**
+   * When each value not from OSM was accepted, UTC: one entry for every
+   * `fact_sources` entry that is `feedback`, `contributed` or `owner`.
+   * Left out when there are none. Set it with `setSource`.
+   */
+  fact_dates?: Partial<Record<SourceKey, string>>;
   updated: string;
   /** Plain text from a verified owner, at most 500 characters. */
   description?: string;

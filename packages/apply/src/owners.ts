@@ -3,7 +3,8 @@ import { moderateReview } from "./moderation.js";
 import type { ProofResult } from "./proof.js";
 import { resolvePlace, type Change, type Decision, type ReviewEdit } from "./rules.js";
 import { roundCoord } from "./serialise.js";
-import type { Place } from "./types.js";
+import { dropSource, setSource } from "./sources.js";
+import type { Place, SourceKey } from "./types.js";
 
 /**
  * The owner rules from SPEC "Owners", as pure functions.
@@ -236,10 +237,6 @@ export function applyOwnerRules(input: OwnerInput): OwnerOutput {
 
   function farmStay(item: Listing, id: string): Place {
     const facts: Record<string, FactValue> = { ...item.listing.facts, entry: "private", booking_required: true };
-    const sources: Place["fact_sources"] = {};
-    for (const k of Object.keys(facts)) (sources as Record<string, string>)[k] = "owner";
-    sources.name = "owner";
-    sources.location = "owner";
     const place: Place = {
       id,
       name: item.listing.name,
@@ -248,16 +245,18 @@ export function applyOwnerRules(input: OwnerInput): OwnerOutput {
       location: { lat: roundCoord(item.location.lat), lon: roundCoord(item.location.lon) },
       osm: null,
       facts,
-      fact_sources: sources,
+      fact_sources: {},
       status: "open",
       rating: null,
       owner_verified: true,
       updated: nowIso,
     };
+    const owned: SourceKey[] = [...(Object.keys(facts) as SourceKey[]), "name", "location"];
     if (item.listing.description) {
       place.description = item.listing.description;
-      sources.description = "owner";
+      owned.push("description");
     }
+    for (const key of owned) setSource(place, key, "owner", nowIso);
     return place;
   }
 
@@ -348,29 +347,29 @@ export function applyOwnerRules(input: OwnerInput): OwnerOutput {
     let forPerson = false;
     for (const [fact, value] of Object.entries(u.facts ?? {})) {
       (place.facts as Record<string, FactValue>)[fact] = value as FactValue;
-      (place.fact_sources as Record<string, string>)[fact] = "owner";
+      setSource(place, fact as SourceKey, "owner", nowIso);
       changed.push(fact);
     }
     if (u.description !== undefined) {
       if (u.description === "") {
         delete place.description;
-        delete place.fact_sources.description;
+        dropSource(place, "description");
       } else {
         place.description = u.description;
-        place.fact_sources.description = "owner";
+        setSource(place, "description", "owner", nowIso);
       }
       changed.push("description");
     }
     if (u.status === "temporarily_closed") {
       place.status = "temporarily_closed";
       place.reopens = u.reopens!;
-      place.fact_sources.status = "owner";
+      setSource(place, "status", "owner", nowIso);
       changed.push(`status temporarily_closed until ${u.reopens}`);
     } else if (u.status === "open") {
       if (place.status === "temporarily_closed" || place.status === "reported_closed") {
         place.status = "open";
         delete place.reopens;
-        place.fact_sources.status = "owner";
+        setSource(place, "status", "owner", nowIso);
         changed.push("status open");
       } else if (place.status === "closed") {
         out.edits.push({ kind: "note", place: target, feedback: item.id });
