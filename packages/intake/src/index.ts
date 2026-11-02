@@ -399,10 +399,10 @@ export function createHandler(deps: Deps) {
     } catch {
       return json(400, { error: "invalid", details: ["body must be JSON"] }, cors);
     }
-    const checked = validateSubmission(body);
+    const nowMs = deps.now();
+    const checked = validateSubmission(body, new Date(nowMs));
     if (!checked.ok) return json(400, { error: "invalid", details: checked.errors }, cors);
 
-    const nowMs = deps.now();
     const received = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, "Z");
     const day = received.slice(0, 10);
     const device = await hashDevice(env.DEVICE_SALT, checked.value.device);
@@ -429,7 +429,7 @@ export function createHandler(deps: Deps) {
       if (feedback.contributor !== undefined) contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
       else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
       if (proof?.keyId) attestKey = `ak_${await saltedHash(env.DEVICE_SALT, `key:${proof.keyId}`)}`;
-      if (contributor === undefined && (feedback.type === "review" || feedback.type === "review_report")) {
+      if (contributor === undefined && ["review", "review_report", "fee"].includes(feedback.type)) {
         return json(400, { error: "contributor_required" }, cors);
       }
       if (feedback.type === "review" && app.requires_visited_nearby && feedback.review.visited_nearby !== true) {
@@ -498,6 +498,7 @@ export function createHandler(deps: Deps) {
       ...("review" in rest ? { review: rest.review } : {}),
       ...("check" in rest ? { check: rest.check } : {}),
       ...("review_report" in rest ? { review_report: rest.review_report } : {}),
+      ...("fee" in rest ? { fee: rest.fee } : {}),
     } as StoredFeedback;
 
     try {

@@ -3,8 +3,8 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
 import type { AwaitingClaim, OwnerRecord } from "./owners.js";
 import type { Decision } from "./rules.js";
-import { dumpPlace, dumpReviewLine, placePath, reviewPath } from "./serialise.js";
-import type { BlockedList, Place, Review } from "./types.js";
+import { dumpFeeLine, dumpPlace, dumpReviewLine, feePath, placePath, reviewPath } from "./serialise.js";
+import type { BlockedList, Fee, Place, Review } from "./types.js";
 
 export interface PendingFile {
   path: string;
@@ -250,7 +250,7 @@ export class DataRepo {
   constructor(readonly root: string) {}
 
   /** `relativePath` under the checkout, which must stay inside `folder`. */
-  #inside(folder: "places" | "reviews", relativePath: string): string {
+  #inside(folder: "places" | "reviews" | "fees", relativePath: string): string {
     const path = join(this.root, relativePath);
     if (!resolve(path).startsWith(resolve(this.root, folder) + sep)) throw new Error(`refusing to write outside ${folder}/: ${relativePath}`);
     return path;
@@ -337,6 +337,32 @@ export class DataRepo {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, text, "utf8");
     return reviewPath(placeId);
+  }
+
+  async fees(placeId: string): Promise<Fee[]> {
+    const path = this.#inside("fees", feePath(placeId));
+    if (!(await exists(path))) return [];
+    return (await readFile(path, "utf8"))
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as Fee);
+  }
+
+  /**
+   * Writes every fee line of a place, sorted by id, with LF endings and a
+   * trailing newline. Returns the path, or undefined when the file already
+   * holds exactly that.
+   */
+  async writeFees(placeId: string, fees: readonly Fee[]): Promise<string | undefined> {
+    const path = this.#inside("fees", feePath(placeId));
+    const text = [...fees]
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((f) => `${dumpFeeLine(f)}\n`)
+      .join("");
+    if ((await exists(path)) && (await readFile(path, "utf8")) === text) return undefined;
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, text, "utf8");
+    return feePath(placeId);
   }
 
   /** Contributors in `moderation/blocked_contributors.json`. Empty when the file is missing. */

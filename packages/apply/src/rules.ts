@@ -8,7 +8,7 @@ import {
 import { moderateReview } from "./moderation.js";
 import { roundCoord } from "./serialise.js";
 import { setSource } from "./sources.js";
-import type { Place, Review, Source, SourceKey } from "./types.js";
+import type { Fee, Place, Review, Source, SourceKey } from "./types.js";
 
 /**
  * The apply-feedback rules from SPEC "Apply feedback", as pure functions.
@@ -76,6 +76,8 @@ export interface RulesInput {
   places: ReadonlyMap<string, Place>;
   /** Reviews already in the data for a place. */
   reviews: (placeId: string) => readonly Review[];
+  /** Fees already in the data for a place. None when left out. */
+  fees?: (placeId: string) => readonly Fee[];
   /** Kind code to group, from `data/schema/kinds.json`. */
   kinds?: ReadonlyMap<string, string>;
   /** Contributors in `moderation/blocked_contributors.json`. */
@@ -112,6 +114,11 @@ export interface RulesOutput {
    * reviews hidden after reports.
    */
   reviews: Map<string, Review[]>;
+  /**
+   * Every fee line of each place whose fees changed, sorted by id: new fees
+   * added, a contributor's older fee for the same site type replaced.
+   */
+  fees: Map<string, Fee[]>;
   /** Changes for a person, in the order they arrived. */
   edits: ReviewEdit[];
   changes: Change[];
@@ -122,6 +129,7 @@ type ReportItem = Extract<StoredFeedback, { type: "report" }>;
 type ReviewItem = Extract<StoredFeedback, { type: "review" }>;
 type CheckItem = Extract<StoredFeedback, { type: "check" }>;
 type ReviewReportItem = Extract<StoredFeedback, { type: "review_report" }>;
+type FeeItem = Extract<StoredFeedback, { type: "fee" }>;
 
 /** Reports from this many different contributors hide a review until a person decides. */
 export const REPORTS_TO_HIDE = 3;
@@ -204,6 +212,7 @@ export function applyRules(input: RulesInput): RulesOutput {
   const decisions = new Map<string, Decision>();
   const working = new Map<string, Place>();
   const newReviews = new Map<string, Review[]>();
+  const newFees = new Map<string, Fee[]>();
   const changes: Change[] = [];
   const edits: ReviewEdit[] = [];
 
@@ -266,6 +275,7 @@ export function applyRules(input: RulesInput): RulesOutput {
     newReviews.set(placeId, lines);
     record(placeId).rating = ratingOf(lines.filter((r) => isVisible(r, blocked)));
   }
+  applyFees(known.filter((i): i is FeeItem => i.type === "fee"));
   applyStatus(
     known.filter(
       (i): i is ReportItem | CheckItem =>
@@ -300,6 +310,7 @@ export function applyRules(input: RulesInput): RulesOutput {
     decisions: ordered,
     places: changed,
     reviews: newReviews,
+    fees: newFees,
     edits,
     changes,
     needsReview: ordered.some((d) => d.outcome === "needs_review"),
@@ -357,6 +368,47 @@ export function applyRules(input: RulesInput): RulesOutput {
       note(item.place, `review added${replaced}`, true, [item]);
       decide(item, "applied", older.length > 0 ? "review accepted, replacing the contributor's earlier review" : "review accepted");
     }
+  }
+
+  /**
+   * Fees hold no free text, so they are published at once. One fee per
+   * contributor per place per site type: the newer replaces the older.
+   */
+  function applyFees(items: FeeItem[]): void {
+    const feeLines = new Map<string, Fee[]>();
+    for (const item of items) {
+      if (item.contributor === undefined) {
+        decide(item, "refused", "fee has no contributor");
+        continue;
+      }
+      let lines = feeLines.get(item.place);
+      if (!lines) {
+        lines = (input.fees?.(item.place) ?? []).map((f) => ({ ...f }));
+        feeLines.set(item.place, lines);
+      }
+      const feeId = `fee_${item.id.replace(/^fb_/, "")}`;
+      if (lines.some((f) => f.id === feeId)) {
+        decide(item, "applied", "fee is already in the data");
+        continue;
+      }
+      const older = lines.filter((f) => f.contributor === item.contributor && f.site === item.fee.site);
+      for (const f of older) lines.splice(lines.indexOf(f), 1);
+      lines.push({
+        id: feeId,
+        place: item.place,
+        amount: item.fee.amount,
+        site: item.fee.site,
+        paid: item.fee.paid,
+        created: item.received,
+        app: item.app,
+        contributor: item.contributor,
+      });
+      newFees.set(item.place, lines);
+      const replaced = older.length > 0 ? `, replacing ${older.map((f) => f.id).join(", ")}` : "";
+      note(item.place, `${item.fee.site} fee of $${item.fee.amount.toFixed(2)} a night paid ${item.fee.paid}${replaced}`, true, [item]);
+      decide(item, "applied", older.length > 0 ? "fee accepted, replacing the contributor's earlier fee for this site type" : "fee accepted");
+    }
+    for (const lines of newFees.values()) lines.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   }
 
   function applyReviewReports(items: ReviewReportItem[]): void {
