@@ -12,7 +12,13 @@ export type ReportKind =
   | "fact"
   | "wrong_location"
   | "new_place"
-  | "other";
+  | "other"
+  /** A better name. `value` is the name. A person checks it. */
+  | "name"
+  /** A short description. `value` is the text. A person checks it. */
+  | "description"
+  /** What the place is. `place_kind` is the kind code. A person checks it. */
+  | "kind";
 
 /**
  * A place kind code from `data/schema/kinds.json` in the data repository (the
@@ -24,18 +30,36 @@ export type PlaceKind = string;
 /** A kind's group, also from `data/schema/kinds.json`. */
 export type PlaceGroup = string;
 
-export type PetsValue = "yes" | "no" | "leashed";
+export type PetsValue = "yes" | "no" | "leashed" | "seasonal";
+/** true when there is a charge, false when free, donation when payment is by donation. */
+export type FeeValue = boolean | "donation";
+/** offroad: only off-road caravans get in. */
+export type CaravansValue = boolean | "offroad";
+/** The park chain or club a place belongs to. */
+export type BrandValue =
+  | "aspen"
+  | "big4"
+  | "discovery"
+  | "family_parks"
+  | "gday"
+  | "ingenia"
+  | "kui"
+  | "nrma"
+  | "reflections"
+  | "tawk"
+  | "yha"
+  | "acc";
 export type AccessValue = "2wd" | "awd" | "4wd" | "unknown";
 export type EntryValue = "public" | "customers" | "permit" | "private";
 export type WaterType = "tank_fill" | "fountain";
 
 /** Facts a place record can hold, with the value type of each. */
 export interface PlaceFacts {
-  fee?: boolean;
+  fee?: FeeValue;
   power?: boolean;
   pets?: PetsValue;
   tents?: boolean;
-  caravans?: boolean;
+  caravans?: CaravansValue;
   toilets?: boolean;
   showers?: boolean;
   drinking_water?: boolean;
@@ -52,13 +76,75 @@ export interface PlaceFacts {
   water_type?: WaterType;
   /** Where to book. https only. */
   booking_url?: string;
-  /** Set on private property listings. */
+  /** Bookings are needed before arriving. */
   booking_required?: boolean;
+  // Who can get in.
+  wheelchair?: boolean;
+  generators?: boolean;
+  motorhomes?: boolean;
+  camper_trailers?: boolean;
+  motorbikes?: boolean;
+  /** Big rigs and buses 10 m and longer can get in and turn around. */
+  big_rigs?: boolean;
+  // What is there.
+  non_drinking_water?: boolean;
+  laundry?: boolean;
+  kitchen?: boolean;
+  bbq?: boolean;
+  drive_through?: boolean;
+  ensuite_sites?: boolean;
+  bins?: boolean;
+  picnic_tables?: boolean;
+  campfires?: boolean;
+  cabins?: boolean;
+  pub?: boolean;
+  // What to do.
+  swimming?: boolean;
+  fishing?: boolean;
+  walking_tracks?: boolean;
+  scenery?: boolean;
+  wildlife?: boolean;
+  playground?: boolean;
+  games_room?: boolean;
+  shade?: boolean;
+  cycling_tracks?: boolean;
+  offroad_tracks?: boolean;
+  boat_ramp_nearby?: boolean;
+  near_road?: boolean;
+  // Services.
+  telstra_signal?: boolean;
+  mobile_signal?: boolean;
+  wifi?: boolean;
+  tv_reception?: boolean;
+  pet_sitting?: boolean;
+  fuel?: boolean;
+  lpg?: boolean;
+  car_wash?: boolean;
+  vehicle_storage?: boolean;
+  // Warnings.
+  self_contained_only?: boolean;
+  crocodiles?: boolean;
+  seasonal_closure?: boolean;
+  dangerous_when_wet?: boolean;
+  over_50s?: boolean;
+  nudist?: boolean;
+  // Brand and contacts.
+  brand?: BrandValue;
+  email?: string;
+  phone_2?: string;
+  /** https only. */
+  facebook?: string;
+  /** https only. */
+  instagram?: string;
+  /** https only. */
+  tiktok?: string;
+  /** https only. */
+  x?: string;
 }
 
 export type FactName = keyof PlaceFacts;
-/** Facts an app report may name. Booking facts come only from owners. */
-export type ReportFactName = Exclude<FactName, "booking_url" | "booking_required">;
+/** Facts an app report may name. booking_url comes only from owners. */
+export type ReportFactName = Exclude<FactName, "booking_url">;
 export type FactValue = boolean | string;
 
 export interface LatLon {
@@ -70,14 +156,14 @@ export interface ReportBody {
   kind: ReportKind;
   /** Required when `kind` is `fact`. */
   fact?: ReportFactName;
-  /** Required when `kind` is `fact`. */
+  /** Required when `kind` is `fact`, `name` (the name) or `description` (the text). */
   value?: FactValue;
   /** Free text, up to 2,000 characters. */
   note?: string;
   /**
-   * Only on `new_place`: the kind the user picked, a code from
+   * On `new_place`: the kind the user picked, a code from
    * `data/schema/kinds.json`. Apply falls back to `campground` for a code the
-   * data does not know.
+   * data does not know. Required on `kind`: the kind the place should be.
    */
   place_kind?: string;
 }
@@ -179,23 +265,8 @@ export interface OwnerContact {
   email: string;
 }
 
-/** Facts a verified owner may set directly. */
-export type OwnerFactName =
-  | "fee"
-  | "power"
-  | "pets"
-  | "tents"
-  | "caravans"
-  | "toilets"
-  | "showers"
-  | "drinking_water"
-  | "dump_station"
-  | "max_stay"
-  | "opening_hours"
-  | "entry"
-  | "phone"
-  | "website"
-  | "booking_url";
+/** Facts a verified owner may set directly: every fact except road access and water_type. */
+export type OwnerFactName = Exclude<FactName, "access" | "water_type">;
 
 export type OwnerFacts = Pick<PlaceFacts, OwnerFactName>;
 

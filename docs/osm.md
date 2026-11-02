@@ -10,7 +10,7 @@ A change counts once it is on `main` in `opencampingdb/data`: an automatic feedb
 
 These go into a note:
 
-- facts: fee, power, pets, tents, caravans, toilets, showers, drinking water, dump point, maximum stay, opening hours, road access, who may stay, water point type, website and phone
+- facts that have an OSM tag (table below): fee, power, pets, tents, caravans, toilets, showers, drinking water, dump point, maximum stay, opening hours, road access, who may stay, water point type, website, phone, email, social pages, brand and the site features OSM maps (wheelchair, motorhomes, laundry, kitchen, barbecues, tables, campfires, cabins, playground, Wi-Fi, nudism)
 - the name
 - a permanent closure (`status: closed`)
 
@@ -20,11 +20,13 @@ These never do:
 - the owner's description
 - location moves
 - `booking_url` and `booking_required`
+- facts with no OSM tag, such as scenery, shade, crocodiles or mobile signal, and values OSM cannot say (`caravans: offroad`, `pets: seasonal`)
+- kind changes and descriptions
 - temporary closures (`temporarily_closed`) and `reopens` dates, which OSM does not map
 - photos, merges and tombstones (`status: merged`)
 - any place with `osm: null`, which covers every contributed place and farm stay. Some contributed places came from sources that must not go into OSM.
 - any value whose source is `contributed`, such as a contributed closure
-- any text value, such as opening hours or a name, that holds an email address, phone number or link (the website and phone facts aside)
+- any text value, such as opening hours or a name, that holds an email address, phone number or link (the website, phone, email and social page facts aside)
 
 A place gets at most one note per run, listing all its changes.
 
@@ -47,14 +49,19 @@ The report count is the number of different devices whose accepted reports (in `
 
 | Fact | OSM tag |
 |---|---|
-| `fee` | `fee=yes` or `fee=no` |
+| `fee` | `fee=yes`, `fee=no` or `fee=donation` |
 | `power` | `power_supply=*` |
 | `tents`, `caravans`, `toilets`, `drinking_water` | the same key, `yes` or `no` |
 | `showers` | `shower=*` |
 | `dump_station` | `sanitary_dump_station=*` |
 | `pets` | `dog=yes`, `dog=leashed` or `dog=no` |
 | `max_stay` | `maxstay=*` |
-| `opening_hours`, `website`, `phone`, `name` | the same key |
+| `opening_hours`, `website`, `phone`, `email`, `name` | the same key |
+| `facebook`, `instagram`, `tiktok`, `x` | `contact:facebook`, `contact:instagram`, `contact:tiktok`, `contact:twitter` |
+| `wheelchair`, `kitchen`, `bbq`, `cabins`, `playground` | the same key, `yes` or `no` |
+| `motorhomes`, `laundry`, `picnic_tables`, `campfires`, `nudist` | `motorhome`, `washing_machine`, `picnic_table`, `openfire`, `nudism`, `yes` or `no` |
+| `wifi` | `internet_access=wlan` or `internet_access=no` |
+| `brand` | `brand=*` with the chain's name (BIG4, Discovery Parks, NRMA Parks and so on). Brands without a settled OSM name are not sent. |
 | `access` | `4wd_only=no` (2wd), `recommended` (awd) or `yes` (4wd). `unknown` is not sent. |
 | `entry` | `access=yes`, `customers`, `permit` or `private` |
 | `water_type` | `amenity=water_point` (tank_fill) or `amenity=drinking_water` (fountain) |
