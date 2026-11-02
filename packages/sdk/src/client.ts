@@ -11,9 +11,10 @@ import type {
   ReportBody,
   ReviewBody,
   ReviewReportReason,
+  PhotoReportReason,
 } from "./types.js";
-import { sha256Hex } from "./sha256.js";
-import { validateSubmission } from "./validate.js";
+import { sha256Hex, sha256HexBytes } from "./sha256.js";
+import { MAX_PHOTO_BYTES, MAX_THUMB_BYTES, validateSubmission } from "./validate.js";
 
 /** Storage the client keeps its queue and device id in. AsyncStorage matches this shape. */
 export interface StorageAdapter {
@@ -28,6 +29,13 @@ export type FetchLike = (input: string, init: {
   body: string;
 }) => Promise<{ status: number; json(): Promise<unknown>; headers: { get(name: string): string | null } }>;
 
+/** The fetch a photo upload uses: the same as FetchLike, with the files as the body. */
+export type PhotoFetchLike = (input: string, init: {
+  method: string;
+  headers: Record<string, string>;
+  body: Uint8Array;
+}) => ReturnType<FetchLike>;
+
 export interface FeedbackClientOptions {
   /** Base URL of the intake, for example `https://feedback.example.org`. */
   endpoint: string;
@@ -38,6 +46,8 @@ export interface FeedbackClientOptions {
   storage: StorageAdapter;
   /** Defaults to the global `fetch`. */
   fetch?: FetchLike;
+  /** Fetch for photo uploads. Defaults to the global `fetch`. */
+  fetchPhoto?: PhotoFetchLike;
   /** Source of random UUIDs. Defaults to `crypto.randomUUID`. */
   randomUUID?: () => string;
   /** Clock, in milliseconds. Defaults to `Date.now`. */
@@ -115,6 +125,44 @@ export interface ReviewReportInput {
   consent: boolean;
 }
 
+export interface PhotoInput {
+  place: string;
+  /** The signed-in traveller's opaque account id. Required for photos. */
+  contributor: string;
+  consent: boolean;
+  /** Full size JPEG, about 1600 px on the long side, EXIF removed. At most 1.5 MB. */
+  full: ArrayBuffer | Uint8Array;
+  /** Thumbnail JPEG, about 400 px on the long side. At most 200 KB. */
+  thumb: ArrayBuffer | Uint8Array;
+}
+
+export interface PhotoReportInput {
+  /** The photo's place. */
+  place: string;
+  /** Id of the published photo, `pho_<ulid>`. */
+  photo: string;
+  reason: PhotoReportReason;
+  contributor?: string;
+  consent: boolean;
+}
+
+export interface PhotoErasureInput {
+  /** The account id whose photos are removed. */
+  contributor: string;
+  consent: boolean;
+}
+
+/**
+ * What a photo upload came to. Photos are never queued, because the files are
+ * too big for the queue's storage: on `offline` the app keeps the files and
+ * calls `photo` again later. `error` is the intake's reason on a refusal, such
+ * as `rate_limited`, `attestation_invalid` or `not_jpeg`.
+ */
+export type PhotoResult =
+  | { status: "sent"; id: string }
+  | { status: "rejected"; httpStatus: number; error?: string }
+  | { status: "offline" };
+
 export type SubmitResult =
   | { status: "sent"; id: string }
   | { status: "queued" }
@@ -157,6 +205,19 @@ export interface FeedbackClient {
   fee(input: FeeInput): Promise<SubmitResult>;
   /** Reports a published review. Queued and retried like the others. */
   reportReview(input: ReviewReportInput): Promise<SubmitResult>;
+  /**
+   * Uploads a photo of a place, sent at once and never queued. The answer's
+   * id is the photo's, `pho_<ulid>`. The photo stays private until a person
+   * or the apply rules accept it and its record is merged.
+   */
+  photo(input: PhotoInput): Promise<PhotoResult>;
+  /** Reports a published photo. Queued and retried like a review report. */
+  reportPhoto(input: PhotoReportInput): Promise<SubmitResult>;
+  /**
+   * Asks for every photo from the contributor to be removed. Call it before
+   * deleting the account. Queued and retried like the others.
+   */
+  erasePhotos(input: PhotoErasureInput): Promise<SubmitResult>;
   /**
    * Claims an existing place for its owner. Sent at once, never queued, because
    * the token in the answer is shown only once. Show `code` and `token` to the
@@ -241,6 +302,23 @@ function defaultRandomUUID(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/** A JPEG starts with the SOI marker and another marker: FF D8 FF. */
+export function isJpeg(bytes: Uint8Array): boolean {
+  return bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+}
+
+function base64Url(bytes: Uint8Array): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const n = (bytes[i]! << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
+    out += alphabet[(n >> 18) & 63]! + alphabet[(n >> 12) & 63]!;
+    if (i + 1 < bytes.length) out += alphabet[(n >> 6) & 63]!;
+    if (i + 2 < bytes.length) out += alphabet[n & 63]!;
+  }
+  return out;
+}
+
 /** Delay before the next try after `attempts` failures, with jitter between half and all of it. */
 export function backoffDelay(attempts: number, random: () => number = Math.random): number {
   const ceiling = Math.min(MAX_DELAY_MS, BASE_DELAY_MS * 2 ** Math.max(0, attempts - 1));
@@ -257,8 +335,11 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
     storagePrefix = "ocdb.feedback",
   } = options;
   const url = `${options.endpoint.replace(/\/+$/, "")}/v1/feedback`;
+  const photoUrl = `${options.endpoint.replace(/\/+$/, "")}/v1/photos`;
   const doFetch: FetchLike =
     options.fetch ?? ((input, init) => (globalThis.fetch as unknown as FetchLike)(input, init));
+  const doFetchPhoto: PhotoFetchLike =
+    options.fetchPhoto ?? ((input, init) => (globalThis.fetch as unknown as PhotoFetchLike)(input, init));
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
   const now = options.now ?? Date.now;
   const random = options.random ?? Math.random;
@@ -466,6 +547,77 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
     return answer;
   }
 
+  /** Sends a photo's meta in a header and both files, full then thumb, as the body. */
+  async function sendPhoto(input: PhotoInput): Promise<PhotoResult> {
+    if (input.consent !== true) throw new ConsentRequiredError();
+    const full = input.full instanceof Uint8Array ? input.full : new Uint8Array(input.full);
+    const thumb = input.thumb instanceof Uint8Array ? input.thumb : new Uint8Array(input.thumb);
+    const problems: string[] = [];
+    if (!isJpeg(full)) problems.push("full is not a JPEG");
+    if (!isJpeg(thumb)) problems.push("thumb is not a JPEG");
+    if (full.length > MAX_PHOTO_BYTES) problems.push(`full is over ${MAX_PHOTO_BYTES} bytes`);
+    if (thumb.length > MAX_THUMB_BYTES) problems.push(`thumb is over ${MAX_THUMB_BYTES} bytes`);
+    if (problems.length > 0) throw new FeedbackValidationError(problems);
+    const meta = {
+      type: "photo",
+      place: input.place,
+      contributor: input.contributor,
+      device: await serial(device),
+      app_version: appVersion,
+      consent: true,
+      photo: {
+        full_sha256: sha256HexBytes(full),
+        full_bytes: full.length,
+        thumb_sha256: sha256HexBytes(thumb),
+        thumb_bytes: thumb.length,
+      },
+    };
+    const checked = validateSubmission(meta, new Date(now()));
+    if (!checked.ok) throw new FeedbackValidationError(checked.errors);
+    const text = JSON.stringify(checked.value);
+    let attestation: Record<string, string> = {};
+    if (options.attest) {
+      try {
+        attestation = await options.attest({ body: text, bodySha256: sha256Hex(text) });
+      } catch {
+        return { status: "offline" };
+      }
+    }
+    const body = new Uint8Array(full.length + thumb.length);
+    body.set(full);
+    body.set(thumb, full.length);
+    let res: Awaited<ReturnType<FetchLike>>;
+    try {
+      res = await doFetchPhoto(photoUrl, {
+        method: "POST",
+        headers: {
+          ...attestation,
+          "content-type": "application/octet-stream",
+          "x-app-key": appKey,
+          "x-photo-meta": base64Url(new TextEncoder().encode(text)),
+        },
+        body,
+      });
+    } catch {
+      return { status: "offline" };
+    }
+    let answer: { id?: unknown; error?: unknown } = {};
+    try {
+      answer = ((await res.json()) ?? {}) as typeof answer;
+    } catch {
+      // Leave the answer empty.
+    }
+    if (res.status >= 200 && res.status < 300) return { status: "sent", id: typeof answer.id === "string" ? answer.id : "" };
+    if (res.status === 401 && (answer.error === "attestation_required" || answer.error === "attestation_invalid")) {
+      try {
+        await options.onAttestationRejected?.(answer.error);
+      } catch {
+        // The app's own clean-up failing does not change the answer.
+      }
+    }
+    return { status: "rejected", httpStatus: res.status, ...(typeof answer.error === "string" ? { error: answer.error } : {}) };
+  }
+
   const claimResponse = (answer: Record<string, unknown>): OwnerClaimResponse => ({
     id: String(answer.id ?? ""),
     code: String(answer.code ?? ""),
@@ -514,6 +666,13 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
         { place, review_report: { review, reason }, ...(contributor !== undefined ? { contributor } : {}), consent },
         "review_report",
       ),
+    photo: sendPhoto,
+    reportPhoto: ({ place, photo, reason, contributor, consent }) =>
+      submit(
+        { place, photo_report: { photo, reason }, ...(contributor !== undefined ? { contributor } : {}), consent },
+        "photo_report",
+      ),
+    erasePhotos: ({ contributor, consent }) => submit({ place: null, contributor, consent }, "photo_erasure"),
     flush: flushNow,
     pending: () => serial(async () => (await readQueue()).length),
   };

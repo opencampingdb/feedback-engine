@@ -13,6 +13,8 @@ export const ORIGIN_DAILY_LIMIT = 100;
 export const OWNER_ORIGIN_DAILY_LIMIT = 10;
 /** Feedback per contributor per day, unless the app key sets `contributor_daily_limit`. */
 export const CONTRIBUTOR_DAILY_LIMIT = 20;
+/** Photo uploads per contributor per day. */
+export const PHOTO_CONTRIBUTOR_DAILY_LIMIT = 10;
 /** Feedback per attested App Attest key per day. */
 export const ATTEST_KEY_DAILY_LIMIT = 30;
 const TTL_SECONDS = 2 * 24 * 60 * 60;

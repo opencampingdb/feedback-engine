@@ -125,6 +125,9 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   for (const id of feeIds) fees.set(id, await auto.fees(id));
   const blocked = await auto.blocked();
   const reviewers = await auto.reviewers(blocked);
+  // Every photo line, when anything in this run is about photos.
+  const photoTypes = new Set(["photo", "photo_report", "photo_erasure"]);
+  const photos = crowd.some((p) => photoTypes.has(p.type)) ? await auto.allPhotos() : [];
 
   const crowdResult = applyRules({
     now: runAt,
@@ -136,6 +139,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     ...(kinds ? { kinds } : {}),
     blocked,
     reviewers,
+    photos,
   });
 
   // Proof pages for claims and listings still in pending/, oldest first, within
@@ -187,6 +191,12 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     const written = await auto.writeFees(placeId, lines);
     if (written) autoFiles.push(written);
   }
+  for (const [placeId, lines] of crowdResult.photos) {
+    const written = await auto.writePhotos(placeId, lines);
+    if (written) autoFiles.push(written);
+  }
+  const removedWritten = await auto.addRemovedPhotos(crowdResult.removedPhotos);
+  if (removedWritten) autoFiles.push(removedWritten);
 
   // Review edits, applied on top of whatever the review checkout already holds.
   const reviewFiles: string[] = [];
@@ -194,6 +204,26 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   for (const edit of [...crowdResult.edits, ...ownerResult.edits]) {
     if (edit.kind === "note") {
       effective.add(edit.feedback);
+      continue;
+    }
+    if (edit.kind === "photo") {
+      // A held photo: its line waits in the review checkout.
+      const current = (await review.places([edit.place])).get(edit.place);
+      const lines = await review.photos(edit.place);
+      if (!current || current.status === "merged" || lines.some((p) => p.id === edit.photo.id)) continue;
+      const written = await review.writePhotos(edit.place, [...lines, edit.photo]);
+      if (written) reviewFiles.push(written);
+      effective.add(edit.feedback);
+      continue;
+    }
+    if (edit.kind === "photo_erasure") {
+      // Held photos from the contributor leave the review checkout too.
+      if (sameTree) continue;
+      for (const placeId of new Set((await review.allPhotos()).filter((p) => p.contributor === edit.contributor).map((p) => p.place))) {
+        const lines = await review.photos(placeId);
+        const written = await review.writePhotos(placeId, lines.filter((p) => p.contributor !== edit.contributor));
+        if (written) reviewFiles.push(written);
+      }
       continue;
     }
     if (edit.kind === "review") {

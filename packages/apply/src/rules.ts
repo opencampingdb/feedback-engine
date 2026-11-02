@@ -8,7 +8,7 @@ import {
 import { moderateReview } from "./moderation.js";
 import { roundCoord } from "./serialise.js";
 import { setSource } from "./sources.js";
-import type { Fee, Place, Review, Source, SourceKey } from "./types.js";
+import type { Fee, Photo, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
 
 /**
  * The apply-feedback rules from SPEC "Apply feedback", as pure functions.
@@ -93,6 +93,8 @@ export interface RulesInput {
   blocked?: ReadonlySet<string>;
   /** Contributors with a visible review in the data: their reviews are trusted. */
   reviewers?: ReadonlySet<string>;
+  /** Every photo line in the data. None when left out. */
+  photos?: readonly Photo[];
 }
 
 /**
@@ -110,6 +112,10 @@ export type ReviewEdit =
   | { kind: "kind"; place: string; placeKind: string; group: string; feedback: string; source?: Source }
   /** A review held for a person: the first from its contributor, or text also sent for another place. */
   | { kind: "review"; place: string; review: Review; feedback: string }
+  /** A photo held for a person: the first from its contributor, or a file also sent for another place. */
+  | { kind: "photo"; place: string; photo: Photo; feedback: string }
+  /** Removes the contributor's held photos from the review checkout. */
+  | { kind: "photo_erasure"; contributor: string; feedback: string }
   /** Nothing to write: the PR body carries it for a person to read. */
   | { kind: "note"; place: string; feedback: string };
 
@@ -132,6 +138,13 @@ export interface RulesOutput {
    * added, a contributor's older fee for the same site type replaced.
    */
   fees: Map<string, Fee[]>;
+  /**
+   * Every photo line of each place whose photos changed, sorted by id. An
+   * empty list means the place has no photos left.
+   */
+  photos: Map<string, Photo[]>;
+  /** Photos whose files are deleted: refused uploads and erased contributors' photos. */
+  removedPhotos: RemovedPhotos["photos"];
   /** Changes for a person, in the order they arrived. */
   edits: ReviewEdit[];
   changes: Change[];
@@ -143,8 +156,11 @@ type ReviewItem = Extract<StoredFeedback, { type: "review" }>;
 type CheckItem = Extract<StoredFeedback, { type: "check" }>;
 type ReviewReportItem = Extract<StoredFeedback, { type: "review_report" }>;
 type FeeItem = Extract<StoredFeedback, { type: "fee" }>;
+type PhotoItem = Extract<StoredFeedback, { type: "photo" }>;
+type PhotoReportItem = Extract<StoredFeedback, { type: "photo_report" }>;
+type ErasureItem = Extract<StoredFeedback, { type: "photo_erasure" }>;
 
-/** Reports from this many different contributors hide a review until a person decides. */
+/** Reports from this many different contributors hide a review or a photo until a person decides. */
 export const REPORTS_TO_HIDE = 3;
 /** Review text this long or longer, sent word for word for two places, goes to a person. */
 const REPEATED_TEXT_LENGTH = 40;
@@ -174,6 +190,9 @@ export function isVisible(review: Review, blocked: ReadonlySet<string> = new Set
 }
 
 /** Whether a stored item was applied by the rules (not held for a person, not refused). */
+/** A photo upload's photo id: `pho_` and the item's ulid. */
+const photoIdOf = (item: StoredFeedback) => `pho_${item.id.replace(/^fb_/, "")}`;
+
 function wasApplied(item: StoredFeedback): boolean {
   return (item as { outcome?: { result?: string } }).outcome?.result === "applied";
 }
@@ -245,6 +264,11 @@ export function applyRules(input: RulesInput): RulesOutput {
 
   const pending = [...input.pending].sort(byReceived);
   const blocked = input.blocked ?? new Set<string>();
+  const newPhotos = new Map<string, Photo[]>();
+  const removedPhotos: RemovedPhotos["photos"] = [];
+  const removePhoto = (photo: string, reason: RemovedPhotos["photos"][number]["reason"]) => {
+    if (!removedPhotos.some((r) => r.photo === photo)) removedPhotos.push({ photo, removed: nowIso, reason });
+  };
 
   // Feedback for a merged id goes to the record it was merged into. Feedback
   // about a place that is not in the data is refused, except new places.
@@ -255,7 +279,7 @@ export function applyRules(input: RulesInput): RulesOutput {
       decide(item, "refused", "the contributor is blocked");
       continue;
     }
-    const isNewPlace = item.type === "report" && item.report.kind === "new_place";
+    const isNewPlace = (item.type === "report" && item.report.kind === "new_place") || item.type === "photo_erasure";
     if (isNewPlace) {
       known.push(item);
       continue;
@@ -289,6 +313,11 @@ export function applyRules(input: RulesInput): RulesOutput {
     record(placeId).rating = ratingOf(lines.filter((r) => isVisible(r, blocked)));
   }
   applyFees(known.filter((i): i is FeeItem => i.type === "fee"));
+  // Erasures first, so a photo sent in the same run by an erased contributor is refused.
+  const erased = applyErasures(known.filter((i): i is ErasureItem => i.type === "photo_erasure"));
+  applyPhotos(known.filter((i): i is PhotoItem => i.type === "photo"), erased);
+  applyPhotoReports(known.filter((i): i is PhotoReportItem => i.type === "photo_report"));
+  for (const lines of newPhotos.values()) lines.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   applyStatus(
     known.filter(
       (i): i is ReportItem | CheckItem =>
@@ -318,12 +347,19 @@ export function applyRules(input: RulesInput): RulesOutput {
     }
   }
 
+  // A refused upload's files are deleted.
+  for (const item of pending) {
+    if (item.type === "photo" && decisions.get(item.id)?.outcome === "refused") removePhoto(photoIdOf(item), "refused");
+  }
+
   const ordered = pending.map((p) => decisions.get(p.id)!);
   return {
     decisions: ordered,
     places: changed,
     reviews: newReviews,
     fees: newFees,
+    photos: newPhotos,
+    removedPhotos,
     edits,
     changes,
     needsReview: ordered.some((d) => d.outcome === "needs_review"),
@@ -422,6 +458,133 @@ export function applyRules(input: RulesInput): RulesOutput {
       decide(item, "applied", older.length > 0 ? "fee accepted, replacing the contributor's earlier fee for this site type" : "fee accepted");
     }
     for (const lines of newFees.values()) lines.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+
+  /** The photo lines of a place as this run leaves them. */
+  function photoLinesOf(placeId: string): Photo[] {
+    let lines = newPhotos.get(placeId);
+    if (!lines) {
+      lines = (input.photos ?? []).filter((p) => p.place === placeId).map((p) => ({ ...p }));
+      newPhotos.set(placeId, lines);
+    }
+    return lines;
+  }
+
+  /**
+   * Removes every photo from each contributor that asked: lines in the data,
+   * photos they sent in the last 90 days, and held ones on the review branch.
+   * Returns the erased contributors.
+   */
+  function applyErasures(items: ErasureItem[]): Set<string> {
+    const erased = new Set<string>();
+    for (const item of items) {
+      const contributor = item.contributor;
+      if (contributor === undefined) {
+        decide(item, "refused", "erasure has no contributor");
+        continue;
+      }
+      erased.add(contributor);
+      let count = 0;
+      for (const placeId of new Set((input.photos ?? []).filter((p) => p.contributor === contributor).map((p) => p.place))) {
+        const lines = photoLinesOf(placeId);
+        for (const p of lines.filter((l) => l.contributor === contributor)) {
+          lines.splice(lines.indexOf(p), 1);
+          removePhoto(p.id, "erased");
+          count += 1;
+        }
+      }
+      for (const h of input.history) {
+        if (h.type === "photo" && h.contributor === contributor) removePhoto(photoIdOf(h), "erased");
+      }
+      edits.push({ kind: "photo_erasure", contributor, feedback: item.id });
+      note("(all places)", `photos from ${contributor} removed at their request (${count} published)`, true, [item]);
+      decide(item, "applied", `photos removed at the contributor's request, ${count} published`);
+    }
+    return erased;
+  }
+
+  function applyPhotos(items: PhotoItem[], erased: ReadonlySet<string>): void {
+    const trusted = new Set(
+      (input.photos ?? []).filter((p) => p.hidden === undefined && !blocked.has(p.contributor)).map((p) => p.contributor),
+    );
+    for (const h of input.history) if (h.type === "photo" && h.contributor !== undefined && wasApplied(h)) trusted.add(h.contributor);
+    const sent = [...input.history, ...items].filter((i): i is PhotoItem => i.type === "photo");
+    for (const item of items) {
+      if (item.contributor === undefined) {
+        decide(item, "refused", "photo has no contributor");
+        continue;
+      }
+      if (erased.has(item.contributor)) {
+        decide(item, "refused", "the contributor asked for their photos to be removed");
+        continue;
+      }
+      const photoId = photoIdOf(item);
+      const lines = photoLinesOf(item.place);
+      if (lines.some((p) => p.id === photoId)) {
+        decide(item, "applied", "photo is already in the data");
+        continue;
+      }
+      const photo: Photo = {
+        id: photoId,
+        place: item.place,
+        contributor: item.contributor,
+        created: item.received,
+        app: item.app,
+        licence: "CC-BY-4.0",
+        width: item.photo.width,
+        height: item.photo.height,
+        sha256: item.photo.full_sha256,
+      };
+      const repeated =
+        (input.photos ?? []).some((p) => p.sha256 === photo.sha256 && p.place !== item.place) ||
+        sent.some((other) => other.id !== item.id && other.place !== item.place && other.photo.full_sha256 === photo.sha256);
+      if (repeated || !trusted.has(item.contributor)) {
+        const why = repeated ? "the same file was sent for another place" : "first photo from this contributor";
+        edits.push({ kind: "photo", place: item.place, photo, feedback: item.id });
+        note(item.place, `photo ${photoId} (${photo.width} x ${photo.height}), ${why} (look at it before merging)`, false, [item]);
+        decide(item, "needs_review", `${why}, so a person checks it`);
+        continue;
+      }
+      lines.push(photo);
+      note(item.place, `photo ${photoId} added`, true, [item]);
+      decide(item, "applied", "photo accepted");
+    }
+  }
+
+  function applyPhotoReports(items: PhotoReportItem[]): void {
+    const reportsSent = [...input.history.filter((h): h is PhotoReportItem => h.type === "photo_report")];
+    for (const item of items) {
+      const { photo: photoId, reason } = item.photo_report;
+      if (item.contributor === undefined) {
+        decide(item, "refused", "photo report has no contributor");
+        continue;
+      }
+      const target = photoLinesOf(item.place).find((p) => p.id === photoId);
+      if (!target) {
+        decide(item, "refused", `photo ${photoId} is not in the data for this place`);
+        continue;
+      }
+      if (target.contributor === item.contributor) {
+        decide(item, "refused", "a contributor cannot report their own photo");
+        continue;
+      }
+      reportsSent.push(item);
+      edits.push({ kind: "note", place: item.place, feedback: item.id });
+      note(item.place, `photo ${photoId} reported as ${reason} (decide: keep, hide, remove or block the contributor)`, false, [item]);
+      decide(item, "needs_review", "photo reports are read by a person");
+      const reporters = new Set(
+        reportsSent.filter((r) => r.photo_report.photo === photoId && r.contributor !== undefined).map((r) => r.contributor),
+      );
+      if (target.hidden === undefined && reporters.size >= REPORTS_TO_HIDE) {
+        target.hidden = "reported";
+        note(
+          item.place,
+          `photo ${photoId} hidden after reports from ${reporters.size} contributors, until a person decides`,
+          true,
+          reportsSent.filter((r) => r.photo_report.photo === photoId),
+        );
+      }
+    }
   }
 
   function applyReviewReports(items: ReviewReportItem[]): void {
@@ -742,14 +905,15 @@ export function applyHeldReview(
 
 /**
  * Applies one review edit to the record as it is in the review checkout. A
- * held review is written by `applyHeldReview` instead.
+ * held review is written by `applyHeldReview` instead, and photo edits by the
+ * runner.
  * Returns the new record, or undefined when there is nothing to write: the
  * edit is already there, it is a note, or a person has already edited the
  * draft of a new place.
  */
 export function applyEdit(
   current: Place | undefined,
-  edit: Exclude<ReviewEdit, { kind: "review" }>,
+  edit: Exclude<ReviewEdit, { kind: "review" | "photo" | "photo_erasure" }>,
   nowIso: string,
 ): Place | undefined {
   if (edit.kind === "note") return undefined;

@@ -10,7 +10,7 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "@opencampingdb/feedback": "0.5.1"
+    "@opencampingdb/feedback": "0.6.0"
   },
   "devDependencies": {
     "wrangler": "4.156.2"
