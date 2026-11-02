@@ -29,7 +29,16 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const WINDOW_MS = WINDOW_DAYS * DAY_MS;
 
 /** Facts a person must check: a single report proposes the change on the PR. */
-export const REVIEWED_FACTS: ReadonlySet<FactName> = new Set<FactName>(["website", "phone"]);
+export const REVIEWED_FACTS: ReadonlySet<FactName> = new Set<FactName>([
+  "website",
+  "phone",
+  "phone_2",
+  "email",
+  "facebook",
+  "instagram",
+  "tiktok",
+  "x",
+]);
 
 /** Kind given to a draft record for a `new_place` report until a person sets it. */
 export const DRAFT_KIND = "campground";
@@ -95,6 +104,10 @@ export type ReviewEdit =
   | { kind: "location"; place: string; location: { lat: number; lon: number }; feedback: string; source?: Source }
   | { kind: "fact"; place: string; fact: FactName; value: FactValue; feedback: string; source?: Source }
   | { kind: "name"; place: string; name: string; feedback: string; source?: Source }
+  /** A new description. An empty string removes it. */
+  | { kind: "description"; place: string; description: string; feedback: string; source?: Source }
+  /** A new kind, with its group from `data/schema/kinds.json`. */
+  | { kind: "kind"; place: string; placeKind: string; group: string; feedback: string; source?: Source }
   /** A review held for a person: the first from its contributor, or text also sent for another place. */
   | { kind: "review"; place: string; review: Review; feedback: string }
   /** Nothing to write: the PR body carries it for a person to read. */
@@ -682,6 +695,24 @@ export function applyRules(input: RulesInput): RulesOutput {
           note(item.place, `location reported wrong, no new location given${quote(text)}`, false, [item]);
         }
         decide(item, "needs_review", "location reports are checked by a person");
+      } else if (kind === "name" && item.place && typeof item.report.value === "string") {
+        edits.push({ kind: "name", place: item.place, name: item.report.value, feedback: item.id });
+        note(item.place, `name changed to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
+        decide(item, "needs_review", "names are checked by a person");
+      } else if (kind === "description" && item.place && typeof item.report.value === "string") {
+        edits.push({ kind: "description", place: item.place, description: item.report.value, feedback: item.id });
+        note(item.place, `description set to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
+        decide(item, "needs_review", "descriptions are checked by a person");
+      } else if (kind === "kind" && item.place) {
+        const picked = item.report.place_kind;
+        const group = picked === undefined ? undefined : input.kinds?.get(picked);
+        if (picked === undefined || group === undefined) {
+          decide(item, "refused", `${String(picked)} is not a kind in data/schema/kinds.json`);
+          continue;
+        }
+        edits.push({ kind: "kind", place: item.place, placeKind: picked, group, feedback: item.id });
+        note(item.place, `kind changed to ${picked}${quote(text)} (check before merging)`, false, [item]);
+        decide(item, "needs_review", "kind changes are checked by a person");
       } else if (kind === "other" && item.place) {
         edits.push({ kind: "note", place: item.place, feedback: item.id });
         note(item.place, `report${quote(text) || " with no note"}`, false, [item]);
@@ -734,6 +765,14 @@ export function applyEdit(
   } else if (edit.kind === "name") {
     next.name = edit.name;
     key = "name";
+  } else if (edit.kind === "description") {
+    if (edit.description === "") delete next.description;
+    else next.description = edit.description;
+    key = "description";
+  } else if (edit.kind === "kind") {
+    next.kind = edit.placeKind;
+    next.group = edit.group;
+    key = "kind";
   } else {
     (next.facts as Record<string, FactValue>)[edit.fact] = edit.value;
     key = edit.fact;

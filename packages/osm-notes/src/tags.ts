@@ -14,6 +14,16 @@ const YES_NO: Readonly<Record<string, string>> = {
   showers: "shower",
   drinking_water: "drinking_water",
   dump_station: "sanitary_dump_station",
+  wheelchair: "wheelchair",
+  motorhomes: "motorhome",
+  laundry: "washing_machine",
+  kitchen: "kitchen",
+  bbq: "bbq",
+  picnic_tables: "picnic_table",
+  campfires: "openfire",
+  cabins: "cabins",
+  playground: "playground",
+  nudist: "nudism",
 };
 
 /** Facts copied from a tag as written: fact name to OSM key. */
@@ -22,7 +32,24 @@ const AS_WRITTEN: Readonly<Record<string, string>> = {
   opening_hours: "opening_hours",
   website: "website",
   phone: "phone",
+  email: "email",
+  facebook: "contact:facebook",
+  instagram: "contact:instagram",
+  tiktok: "contact:tiktok",
+  x: "contact:twitter",
   name: "name",
+};
+
+/** The brand fact as OSM brand=* writes it. Brands without a settled OSM name are not sent. */
+const BRAND: Readonly<Record<string, string>> = {
+  big4: "BIG4",
+  discovery: "Discovery Parks",
+  nrma: "NRMA Parks",
+  ingenia: "Ingenia Holidays",
+  reflections: "Reflections Holiday Parks",
+  gday: "G'day Parks",
+  family_parks: "Family Parks",
+  yha: "YHA",
 };
 
 /** The road access fact comes from 4wd_only. `unknown` has no tag. */
@@ -51,6 +78,8 @@ export const NEVER_SENT = new Set(["booking_url", "booking_required"]);
 /** `key=value` for a fact, or undefined when no OSM tag matches the value. */
 export function osmTag(field: string, value: boolean | string): string | undefined {
   const yesNo = YES_NO[field];
+  if (field === "fee" && value === "donation") return "fee=donation";
+  if (field === "wifi" && typeof value === "boolean") return `internet_access=${value ? "wlan" : "no"}`;
   if (yesNo) return typeof value === "boolean" ? `${yesNo}=${value ? "yes" : "no"}` : undefined;
   const written = AS_WRITTEN[field];
   if (written) return typeof value === "string" && value.trim() ? `${written}=${value}` : undefined;
@@ -59,6 +88,7 @@ export function osmTag(field: string, value: boolean | string): string | undefin
   if (field === "access") return ACCESS[value];
   if (field === "entry") return ENTRY[value];
   if (field === "water_type") return WATER_TYPE[value];
+  if (field === "brand") return BRAND[value] ? `brand=${BRAND[value]}` : undefined;
   return undefined;
 }
 
@@ -72,10 +102,48 @@ const YES_NO_WORDS: Readonly<Record<string, readonly [string, string]>> = {
   showers: ["there are showers", "there are no showers"],
   drinking_water: ["there is drinking water", "there is no drinking water"],
   dump_station: ["there is a dump point", "there is no dump point"],
+  wheelchair: ["it is wheelchair accessible", "it is not wheelchair accessible"],
+  generators: ["generators are allowed", "generators are not allowed"],
+  motorhomes: ["motorhomes can get in", "motorhomes cannot get in"],
+  camper_trailers: ["camper trailers can get in", "camper trailers cannot get in"],
+  motorbikes: ["motorbikes can get in", "motorbikes cannot get in"],
+  big_rigs: ["big rigs can get in and turn around", "big rigs cannot get in"],
+  non_drinking_water: ["there is water that is not for drinking", "there is no non-drinking water"],
+  laundry: ["there is a laundry", "there is no laundry"],
+  kitchen: ["there is a camp kitchen", "there is no camp kitchen"],
+  bbq: ["there are barbecues", "there are no barbecues"],
+  drive_through: ["there are drive-through sites", "there are no drive-through sites"],
+  ensuite_sites: ["there are ensuite sites", "there are no ensuite sites"],
+  bins: ["there are rubbish bins", "there are no rubbish bins"],
+  picnic_tables: ["there are tables", "there are no tables"],
+  campfires: ["campfires are allowed", "campfires are not allowed"],
+  cabins: ["there are cabins", "there are no cabins"],
+  pub: ["there is a pub on site", "there is no pub on site"],
+  swimming: ["you can swim there", "you cannot swim there"],
+  fishing: ["you can fish there", "you cannot fish there"],
+  walking_tracks: ["there are walking tracks", "there are no walking tracks"],
+  playground: ["there is a playground", "there is no playground"],
+  games_room: ["there is a games room", "there is no games room"],
+  shade: ["the sites have shade", "the sites have no shade"],
+  wifi: ["there is Wi-Fi", "there is no Wi-Fi"],
+  telstra_signal: ["there is Telstra signal", "there is no Telstra signal"],
+  mobile_signal: ["there is mobile signal on other networks", "there is no mobile signal on other networks"],
+  self_contained_only: ["only self-contained vehicles may stay", "vehicles need not be self-contained"],
+  crocodiles: ["there are crocodiles in the water nearby", "there are no crocodiles nearby"],
+  dangerous_when_wet: ["the way in is dangerous when wet", "the way in is fine when wet"],
+  over_50s: ["only guests 50 and older may stay", "guests of any age may stay"],
+  nudist: ["it is a nudist place", "it is not a nudist place"],
 };
 
 const STRING_WORDS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
-  pets: { yes: "dogs are allowed", leashed: "dogs are allowed on a lead", no: "dogs are not allowed" },
+  pets: {
+    yes: "dogs are allowed",
+    leashed: "dogs are allowed on a lead",
+    no: "dogs are not allowed",
+    seasonal: "dogs are allowed only in some months",
+  },
+  fee: { donation: "payment is by donation" },
+  caravans: { offroad: "only off-road caravans can get in" },
   access: { "2wd": "the road is fine for 2WD", awd: "AWD is recommended", "4wd": "the road is 4WD only" },
   entry: {
     public: "anyone may stay",
@@ -91,6 +159,12 @@ const LABELS: Readonly<Record<string, string>> = {
   opening_hours: "opening hours",
   website: "website",
   phone: "phone number",
+  phone_2: "second phone number",
+  email: "email address",
+  facebook: "Facebook page",
+  instagram: "Instagram page",
+  tiktok: "TikTok page",
+  x: "X page",
   name: "name",
 };
 
