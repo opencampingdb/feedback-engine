@@ -69,6 +69,15 @@ describe("photo pass route", () => {
     expect((await handle(post(good), env({}, false))).status).toBe(403);
   });
 
+  it("gives a development key with photo_pass_unattested a pass without attestation", async () => {
+    const e = env();
+    e.APP_KEYS = JSON.stringify({ [APP_KEY]: { app: "camporacle-dev", daily_limit: 100, photo_pass_unattested: true } });
+    const res = await handle(post(good), e);
+    expect(res.status).toBe(200);
+    const { pass } = (await res.json()) as { pass: string };
+    expect((await verifyPass(SECRET, pass, NOW))?.app).toBe("camporacle-dev");
+  });
+
   it("answers 404 when the intake has no pass secret", async () => {
     const e = env();
     delete e.PHOTO_PASS_SECRET;

@@ -223,9 +223,11 @@ export interface FeedbackClient {
   /**
    * A photo pass to send in `x-photo-pass` with every photo request. Kept in
    * memory and reused until five minutes before it expires, so call it before
-   * each photo request. Needs an app key that requires attestation.
+   * each photo request. Pass `renew: true` after the photo server answers
+   * `401 invalid_pass`, to drop the kept pass and get a new one. Needs an app
+   * key that requires attestation, or one allowed unattested passes.
    */
-  photoPass(): Promise<PhotoPassResult>;
+  photoPass(options?: { renew?: boolean }): Promise<PhotoPassResult>;
   /** Reports a published photo. Queued and retried like a review report. */
   reportPhoto(input: PhotoReportInput): Promise<SubmitResult>;
   /**
@@ -681,7 +683,8 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
     return { status: "rejected", httpStatus: res.status, ...(typeof answer.error === "string" ? { error: answer.error } : {}) };
   }
 
-  function photoPass(): Promise<PhotoPassResult> {
+  function photoPass(passOptions: { renew?: boolean } = {}): Promise<PhotoPassResult> {
+    if (passOptions.renew) currentPass = undefined;
     if (currentPass && Date.parse(currentPass.expires) - now() > PASS_REFRESH_MS) return Promise.resolve({ status: "ok", ...currentPass });
     passRequest ??= requestPass().finally(() => {
       passRequest = undefined;

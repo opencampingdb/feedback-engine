@@ -70,7 +70,9 @@ if (pass.status === "ok") {
 }
 ```
 
-`photoPass` keeps the pass in memory and asks for a new one when less than five minutes are left, so call it before each photo request. It needs an app key with `requires_attestation`. Otherwise the intake answers `403 attestation_not_required_for_app_key`. On `offline`, show placeholders and try again later.
+`photoPass` keeps the pass in memory and asks for a new one when less than five minutes are left, so call it before each photo request. After `401 invalid_pass`, call `photoPass({ renew: true })` and try once more. It needs an app key with `requires_attestation`. Otherwise the intake answers `403 attestation_not_required_for_app_key`.
+
+Simulators cannot attest. For development builds, set `photo_pass_unattested: true` on the development app key, give that key an app name of its own (for example `camporacle-dev`), and give that name a small `daily_limit` in `PHOTO_KEYS`, such as 2000. Anyone who reads the development key out of a development build can then use at most that much. Never put the development key in a store build. On `offline`, show placeholders and try again later.
 
 ```
 GET https://photos.camporacle.com.au/v1/photos/<id>/full.jpg
@@ -85,7 +87,7 @@ Answers are cached for a day, at the edge and on the phone. Credit each photo sh
 | Status | Meaning |
 |---|---|
 | `200` | the JPEG |
-| `401 invalid_pass` | the pass is altered or has expired. Get a new one with `photoPass` |
+| `401 invalid_pass` | the pass is altered or has expired. Get a new one with `photoPass({ renew: true })` |
 | `401 invalid_app_key` | no pass, and a missing or unknown photo key |
 | `404 not_found` | no such photo, or it is no longer published |
 | `429 rate_limited` | too many requests from one address: 300 a minute |

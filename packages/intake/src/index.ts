@@ -81,6 +81,13 @@ interface AppEntry {
   requires_visited_nearby?: boolean;
   /** Feedback per contributor per day. Defaults to CONTRIBUTOR_DAILY_LIMIT. */
   contributor_daily_limit?: number;
+  /**
+   * Photo passes without attestation, for a development key used on
+   * simulators, which cannot attest. Give the key an app name of its own
+   * with a small daily limit in the photo server's PHOTO_KEYS, and never
+   * ship it in a store build.
+   */
+  photo_pass_unattested?: boolean;
 }
 
 const isLimit = (v: unknown): v is number => typeof v === "number" && v > 0;
@@ -155,6 +162,7 @@ export function parseAppKeys(raw: string): Map<string, AppEntry> {
       (entry.owner_daily_limit === undefined || isLimit(entry.owner_daily_limit)) &&
       (entry.contributor_daily_limit === undefined || isLimit(entry.contributor_daily_limit)) &&
       (entry.requires_visited_nearby === undefined || typeof entry.requires_visited_nearby === "boolean") &&
+      (entry.photo_pass_unattested === undefined || typeof entry.photo_pass_unattested === "boolean") &&
       kindsValid &&
       iosValid &&
       androidValid &&
@@ -177,6 +185,7 @@ export function parseAppKeys(raw: string): Map<string, AppEntry> {
           : {}),
         ...(entry.requires_visited_nearby ? { requires_visited_nearby: true } : {}),
         ...(entry.contributor_daily_limit !== undefined ? { contributor_daily_limit: entry.contributor_daily_limit } : {}),
+        ...(entry.photo_pass_unattested ? { photo_pass_unattested: true } : {}),
       });
     }
   }
@@ -498,11 +507,14 @@ export function createHandler(deps: Deps) {
    * `POST /v1/photos/pass`: a photo pass for an attested install. The body is
    * `{ "type": "photo_pass", "device", "app_version", "time" }`, with `time`
    * the phone's clock, so a captured request stops working within minutes.
-   * Only app keys that require attestation get passes.
+   * Only app keys that require attestation get passes, and development keys
+   * with `photo_pass_unattested`.
    */
   async function photoPass(request: Request, env: Env, app: AppEntry, text: string, cors: Record<string, string>): Promise<Response> {
     if (!env.PHOTO_PASS_SECRET) return json(404, { error: "not_found" }, cors);
-    if (!app.requires_attestation) return json(403, { error: "attestation_not_required_for_app_key" }, cors);
+    if (!app.requires_attestation && !app.photo_pass_unattested) {
+      return json(403, { error: "attestation_not_required_for_app_key" }, cors);
+    }
     let body: { type?: unknown; device?: unknown; app_version?: unknown; time?: unknown };
     try {
       body = JSON.parse(text) as typeof body;
@@ -522,8 +534,10 @@ export function createHandler(deps: Deps) {
       return json(400, { error: "invalid", details: ["type photo_pass, device (a UUID), app_version and time are required"] }, cors);
     }
     if (!Number.isFinite(sent) || Math.abs(sent - nowMs) > PASS_CLOCK_SKEW_MS) return json(400, { error: "clock_skew" }, cors);
-    const proof = await attest(request, env, app, text);
-    if ("error" in proof) return json(401, { error: proof.error }, cors);
+    if (app.requires_attestation) {
+      const proof = await attest(request, env, app, text);
+      if ("error" in proof) return json(401, { error: proof.error }, cors);
+    }
 
     const day = new Date(nowMs).toISOString().slice(0, 10);
     const device = await hashDevice(env.DEVICE_SALT, body.device);
