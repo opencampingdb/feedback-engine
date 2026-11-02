@@ -38,11 +38,11 @@ Reviews carry an opaque contributor id from the app's signed-in account. One rev
 
 ## Owners
 
-The people who run a place can claim it, keep its facts, description and booking details current, and close it for a while. Owners of private land can list it as a farm stay. A person approves every claim before anything about an owner is published, and owner names and emails stay in the private inbox. [docs/owners.md](docs/owners.md) explains the flow and the SDK calls, and [docs/owner-terms.md](docs/owner-terms.md) holds the terms owners accept.
+The people who run a place can claim it, keep its facts (including every site feature, the brand and contacts), description and booking details current, and close it for a while. Owners of private land can list it as a farm stay. A person approves every claim before anything about an owner is published, and owner names and emails stay in the private inbox. [docs/owners.md](docs/owners.md) explains the flow and the SDK calls, and [docs/owner-terms.md](docs/owner-terms.md) holds the terms owners accept.
 
 ## Passing changes back to OpenStreetMap
 
-Once a day the OSM notes workflow looks at what changed on `data` `main` and posts a note on OpenStreetMap for each place where travellers or the owner changed a fact, the name or a permanent closure. Changes that came from OSM, contributed places, descriptions, locations, booking details, temporary closures and reviews are never sent. At most 10 notes go out a day, a place gets at most one every 30 days, and a note is never sent twice. [docs/osm.md](docs/osm.md) explains the flow and its limits.
+Once a day the OSM notes workflow looks at what changed on `data` `main` and posts a note on OpenStreetMap for each place where travellers or the owner changed a fact that OSM has a tag for, the name or a permanent closure. Changes that came from OSM, contributed places, kinds, descriptions, locations, booking details, facts OSM does not map (such as scenery or mobile signal), temporary closures and reviews are never sent. At most 10 notes go out a day, a place gets at most one every 30 days, and a note is never sent twice. [docs/osm.md](docs/osm.md) explains the flow and its limits.
 
 ## Run your own intake
 
@@ -55,11 +55,11 @@ Every hour the apply workflow reads `inbox/pending/`, compares each item with th
 - **Fee:** what a traveller paid per night (Australian dollars, more than 0 and at most 1,000), for an unpowered or powered site or a cabin, and the month they paid, within the last 24 months. It needs a contributor and holds no free text, so it is published at once in `fees/<place id>.ndjson`. One fee per contributor per place per site type: a newer one replaces the older.
 - **Review:** accepted when the text is at most 2,000 characters and has no links, contact details, social media handles, personal names or offensive language. It is appended to `reviews/<place id>.ndjson` and the place's rating is recalculated.
 - **Closed report:** marks the place `reported_closed` at once. It becomes `closed` when two different devices report it, or a check finds it gone, within 90 days. A `reopened` report or a check that finds it there clears `reported_closed`. A `closed` place needs two devices within 90 days to reopen. For a place that is `owner_verified`, or whose status its owner set, reports from two devices go to a person instead of closing it, and one report changes nothing.
-- **Fact report:** changes the fact only when two different devices report the same value within 90 days, and records the fact as coming from feedback. Two reports from one device count once. A report that matches the current value is accepted with no change.
+- **Fact report:** changes the fact only when two different devices report the same value within 90 days, and records the fact as coming from feedback. Two reports from one device count once. A report that matches the current value is accepted with no change. Facts include 44 site features (who can get in, what is there, what to do, signal, warnings), each true or false, plus `booking_required`, the park chain (`brand`) and contacts.
 
 Devices count as different only when they also sent from different networks. The intake keeps a salted hash of each submission's network (the client address cut to its IPv4 /24 or IPv6 /48), never the address, and the rules count distinct networks, so one client cannot meet the two-device rule by sending new device ids.
 - **Check:** changes nothing on its own, but counts as evidence for closing or reopening.
-- **New place, wrong location, other, website and phone:** go to a person on the review PR, with a draft change where there is one.
+- **New place, wrong location, name, description, kind and other reports, and contact facts** (website, phones, email and social pages): go to a person on the review PR, with a draft change where there is one. An accepted kind, name or description is kept through later OSM syncs.
 
 Items waiting for a second device stay in `pending/` and are looked at again each hour. After 90 days without agreement they are refused. Accepted items move to `inbox/applied/` and refused ones to `inbox/refused/` with the reason.
 
