@@ -75,6 +75,27 @@ afterEach(async () => {
 });
 
 describe("run", () => {
+  it("writes fees to fees/<place id>.ndjson in canonical form", async () => {
+    const day = "2026-10-29";
+    await put(
+      join(data, "fees", `${PLACE}.ndjson`),
+      `{"amount":30,"app":"camporacle","contributor":"${TRUSTED}","created":"2026-09-01T00:00:00Z","id":"fee_01JB0000000000000000000001","paid":"2026-08","place":"${PLACE}","site":"powered"}\n`,
+    );
+    await pending(1, `${day}T01:00:00Z`, "aaaa", { type: "fee", contributor: TRUSTED, fee: { amount: 36.5, site: "powered", paid: "2026-10" } });
+    await pending(2, `${day}T02:00:00Z`, "bbbb", { type: "fee", contributor: NEWCOMER, fee: { amount: 120, site: "cabin", paid: "2026-09" } });
+
+    const summary = await run({ inbox, data, now: NOW });
+
+    expect(summary.counts).toEqual({ applied: 2, refused: 0, needs_review: 0, waiting: 0, awaiting_approval: 0 });
+    expect(summary.auto_files).toEqual([`fees/${PLACE}.ndjson`]);
+    expect(await readFile(join(data, "fees", `${PLACE}.ndjson`), "utf8")).toBe(
+      `{"amount":36.5,"app":"camporacle","contributor":"${TRUSTED}","created":"${day}T01:00:00Z","id":"fee_01JC0000000000000000000001","paid":"2026-10","place":"${PLACE}","site":"powered"}\n` +
+        `{"amount":120,"app":"camporacle","contributor":"${NEWCOMER}","created":"${day}T02:00:00Z","id":"fee_01JC0000000000000000000002","paid":"2026-09","place":"${PLACE}","site":"cabin"}\n`,
+    );
+    expect(summary.auto_pr_body).toContain("powered fee of $36.50 a night paid 2026-10, replacing fee_01JB0000000000000000000001");
+    expect(summary.review_changed).toBe(false);
+  });
+
   it("applies feedback, writes data files in canonical form and moves inbox files", async () => {
     const day = "2026-10-29";
     const power = { type: "report", report: { kind: "fact", fact: "power", value: true } };

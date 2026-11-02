@@ -11,6 +11,7 @@ export {
 export type {
   AttestationError,
   CheckInput,
+  FeeInput,
   FeedbackClient,
   FeedbackClientOptions,
   FetchLike,
@@ -27,6 +28,9 @@ export type {
 export {
   FACTS,
   FEEDBACK_TYPES,
+  FEE_SITES,
+  MAX_FEE_AGE_MONTHS,
+  MAX_FEE_AMOUNT,
   MAX_DESCRIPTION_LENGTH,
   MAX_TEXT_LENGTH,
   OWNER_FACTS,

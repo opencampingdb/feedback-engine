@@ -15,7 +15,7 @@ import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
 import { autoPrBody, reviewPrBody } from "./prbody.js";
 import { checkProof as realCheckProof, type ProofResult } from "./proof.js";
 import { applyEdit, applyHeldReview, applyRules, resolvePlace, WINDOW_DAYS, type Decision } from "./rules.js";
-import type { Place, Review } from "./types.js";
+import type { Fee, Place, Review } from "./types.js";
 
 export interface RunOptions {
   inbox: string;
@@ -114,6 +114,15 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   );
   const reviews = new Map<string, Review[]>();
   for (const id of reviewIds) reviews.set(id, await auto.reviews(id));
+  // Fee lines of every place a fee is about, following merged ids.
+  const feeIds = new Set(
+    crowd
+      .filter((p) => p.type === "fee")
+      .map((p) => resolvePlace(p.place, places))
+      .filter((p): p is string => p !== undefined),
+  );
+  const fees = new Map<string, Fee[]>();
+  for (const id of feeIds) fees.set(id, await auto.fees(id));
   const blocked = await auto.blocked();
   const reviewers = await auto.reviewers(blocked);
 
@@ -123,6 +132,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     history,
     places,
     reviews: (id) => reviews.get(id) ?? [],
+    fees: (id) => fees.get(id) ?? [],
     ...(kinds ? { kinds } : {}),
     blocked,
     reviewers,
@@ -171,6 +181,10 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const autoFiles = await auto.writePlaces(autoPlaces.values());
   for (const [placeId, lines] of crowdResult.reviews) {
     const written = await auto.writeReviews(placeId, lines);
+    if (written) autoFiles.push(written);
+  }
+  for (const [placeId, lines] of crowdResult.fees) {
+    const written = await auto.writeFees(placeId, lines);
     if (written) autoFiles.push(written);
   }
 
