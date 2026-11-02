@@ -30,7 +30,7 @@ Pages that need a login to see, which includes most Facebook pages, cannot be ch
 
 Applied directly, each with the source `owner`:
 
-- facts: `fee`, `power`, `pets`, `tents`, `caravans`, `toilets`, `showers`, `drinking_water`, `dump_station`, `max_stay`, `opening_hours`, `entry`, `phone`, `website` and `booking_url`
+- facts: every fact a traveller may report (see integration.md section 5), including the site features, `brand`, `email`, `phone_2` and the social pages, plus `booking_url` and `booking_required`. Road `access` and `water_type` are left to travellers and OSM
 - `description`: plain text, up to 500 characters, checked like review text. An empty string removes it.
 - `status: "temporarily_closed"` with a `reopens` date (`YYYY-MM-DD`, after today), on a place that is not `closed`. The place reopens by itself on that date. `status: "open"` ends a temporary closure early.
 

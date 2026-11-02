@@ -15,7 +15,7 @@ import type { NoteChange, Place } from "./types.js";
  */
 
 /** Facts whose value is itself a contact detail. */
-const CONTACT_FACTS: ReadonlySet<string> = new Set(["website", "phone"]);
+const CONTACT_FACTS: ReadonlySet<string> = new Set(["website", "phone", "phone_2", "email", "facebook", "instagram", "tiktok", "x"]);
 
 function sendable(field: string, value: unknown): boolean {
   if (typeof value !== "string" || CONTACT_FACTS.has(field)) return true;

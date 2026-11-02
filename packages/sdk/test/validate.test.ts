@@ -114,3 +114,57 @@ describe("contact details", () => {
     expect(stripContactDetails(text)).toBe(text);
   });
 });
+
+describe("site features and the name, description and kind reports", () => {
+  const report = (r: object) => validateSubmission({ ...base, type: "report", place: PLACE, report: r });
+
+  it.each([
+    ["fee", "donation"],
+    ["caravans", "offroad"],
+    ["pets", "seasonal"],
+    ["campfires", true],
+    ["crocodiles", false],
+    ["booking_required", true],
+    ["brand", "big4"],
+    ["email", "stay@example.com.au"],
+    ["phone_2", "+61 2 9888 9133"],
+    ["facebook", "https://www.facebook.com/lakebend"],
+    ["x", "https://x.com/lakebend"],
+  ])("accepts %s = %j", (fact, value) => {
+    expect(report({ kind: "fact", fact, value }).ok).toBe(true);
+  });
+
+  it.each([
+    ["fee", "free"],
+    ["caravans", "maybe"],
+    ["brand", "Some Park"],
+    ["email", "not an email"],
+    ["instagram", "http://instagram.com/lakebend"],
+    ["booking_url", "https://book.example.com"],
+  ])("refuses %s = %j", (fact, value) => {
+    expect(report({ kind: "fact", fact, value }).ok).toBe(false);
+  });
+
+  it("accepts a name and a description, trimmed", () => {
+    expect(report({ kind: "name", value: " Discovery Parks - Lane Cove " })).toMatchObject({
+      ok: true,
+      value: { report: { kind: "name", value: "Discovery Parks - Lane Cove" } },
+    });
+    expect(report({ kind: "description", value: "Shady sites by the river." }).ok).toBe(true);
+  });
+
+  it("refuses an empty, long or contact-carrying name or description", () => {
+    expect(report({ kind: "name", value: "  " }).ok).toBe(false);
+    expect(report({ kind: "name", value: "x".repeat(301) }).ok).toBe(false);
+    expect(report({ kind: "description", value: "x".repeat(501) }).ok).toBe(false);
+    expect(report({ kind: "description", value: "Call 0412 345 678 to book" }).ok).toBe(false);
+    expect(report({ kind: "name", fact: "power", value: "Lake Bend" }).ok).toBe(false);
+  });
+
+  it("needs a kind code on a kind report", () => {
+    expect(report({ kind: "kind", place_kind: "caravan_park" }).ok).toBe(true);
+    expect(report({ kind: "kind" }).ok).toBe(false);
+    expect(report({ kind: "kind", place_kind: "Caravan Park" }).ok).toBe(false);
+    expect(report({ kind: "closed", place_kind: "caravan_park" }).ok).toBe(false);
+  });
+});

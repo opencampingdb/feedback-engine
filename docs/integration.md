@@ -105,7 +105,26 @@ A fee's `amount` is more than 0 and at most 1,000, with at most 2 decimal places
 
 A check that finds an open place still there sets the record's `last_confirmed` to the time of the next apply run. One check is enough. Checks on a closed or temporarily closed place do not set it.
 
-Facts a report may name: `fee`, `power`, `tents`, `caravans`, `toilets`, `showers`, `drinking_water`, `dump_station` (true or false), `pets` (`yes`, `no`, `leashed`), `access` (`2wd`, `awd`, `4wd`, `unknown`), `entry` (`public`, `customers`, `permit`, `private`), `max_stay` (such as `48h`, `2d`, `1w`), `opening_hours` (with no email address, phone number or link), `website` (https only) and `phone`. Website and phone changes are checked by a person.
+Facts a report may name:
+
+- `fee` (true, false or `donation`), `caravans` (true, false or `offroad`), `pets` (`yes`, `no`, `leashed`, `seasonal`)
+- `power`, `tents`, `toilets`, `showers`, `drinking_water`, `dump_station` and `booking_required` (true or false)
+- the site features in `SITE_FEATURES`, each true or false: who can get in (`wheelchair`, `generators`, `motorhomes`, `camper_trailers`, `motorbikes`, `big_rigs`), what is there (`non_drinking_water`, `laundry`, `kitchen`, `bbq`, `drive_through`, `ensuite_sites`, `bins`, `picnic_tables`, `campfires`, `cabins`, `pub`), what to do (`swimming`, `fishing`, `walking_tracks`, `scenery`, `wildlife`, `playground`, `games_room`, `shade`, `cycling_tracks`, `offroad_tracks`, `boat_ramp_nearby`, `near_road`), services (`telstra_signal`, `mobile_signal`, `wifi`, `tv_reception`, `pet_sitting`, `fuel`, `lpg`, `car_wash`, `vehicle_storage`) and warnings (`self_contained_only`, `crocodiles`, `seasonal_closure`, `dangerous_when_wet`, `over_50s`, `nudist`)
+- `brand`, one of `BRANDS` (`big4`, `discovery`, `nrma` and the other chains and clubs)
+- `access` (`2wd`, `awd`, `4wd`, `unknown`), `entry` (`public`, `customers`, `permit`, `private`), `max_stay` (such as `48h`, `2d`, `1w`), `opening_hours` (with no email address, phone number or link)
+- contacts: `website`, `facebook`, `instagram`, `tiktok` and `x` (https only), `phone`, `phone_2` and `email`
+
+A fact two devices agree on within 90 days is applied. Contact changes (website, phones, email and social pages) are checked by a person, even from one report. `booking_url` comes only from the owner.
+
+Three more report kinds let a traveller fix what Edit site covers on other apps. Each goes to a person, who accepts or rejects it on the review PR:
+
+```ts
+await feedback.report({ place, report: { kind: "name", value: "Discovery Parks - Lane Cove" }, consent: true });
+await feedback.report({ place, report: { kind: "description", value: "Shady riverside sites, close to the train." }, consent: true });
+await feedback.report({ place, report: { kind: "kind", place_kind: "caravan_park" }, consent: true });
+```
+
+A name is 1 to 300 characters and a description at most 500. Neither may hold an email address, phone number or link. `place_kind` is a code from `data/schema/kinds.json`: an unknown code is refused at the next apply run. Once accepted, the new kind is kept through later OSM syncs.
 
 Ask users not to put names, email addresses or phone numbers in notes or reviews. The intake removes contact details it finds, and reviews that still contain personal details, advertising or offensive language (also when spelled with spaces or symbols) are refused.
 
