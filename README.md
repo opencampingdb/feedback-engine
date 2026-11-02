@@ -9,7 +9,7 @@ It has four parts:
 | [`packages/sdk`](packages/sdk) (`@opencampingdb/feedback`) | Client for React Native, Expo and the web. Queues submissions offline, retries with backoff, keeps a random per-install device id and refuses to send without consent. |
 | [`packages/intake`](packages/intake) | Cloudflare Worker at `POST /v1/feedback`. Checks the app key, the schema and consent, App Attest or Play Integrity when the key requires it, rate limits, removes contact details from free text, hashes the device and contributor ids and writes one JSON file per submission to the private `inbox` repository. |
 | [`packages/apply`](packages/apply) | Script and reusable GitHub workflow that runs hourly in `inbox`, applies the quality rules and keeps up to two PRs open on `data`: one for automatic changes, one for a person. |
-| [`packages/osm-notes`](packages/osm-notes) | Script and reusable GitHub workflow that runs daily in `inbox` and passes changes accepted into `data` to OpenStreetMap as notes for its mappers to check. It never edits OSM. |
+| [`packages/osm-notes`](packages/osm-notes) | Retired. It passed accepted changes to OpenStreetMap as notes; the data repository's MapRoulette challenges do that now. Kept because their tag rules follow its `tags.ts` and `changes.ts`. |
 
 The contract between the parts, and with the `data` repository, is the Open Camping DB `SPEC.md`.
 
@@ -42,7 +42,7 @@ The people who run a place can claim it, keep its facts (including every site fe
 
 ## Passing changes back to OpenStreetMap
 
-Once a day the OSM notes workflow looks at what changed on `data` `main` and posts a note on OpenStreetMap for each place where travellers or the owner changed a fact that OSM has a tag for, the name or a permanent closure. Changes that came from OSM, contributed places, kinds, descriptions, locations, booking details, facts OSM does not map (such as scenery or mobile signal), temporary closures and reviews are never sent. At most 10 notes go out a day, a place gets at most one every 30 days, and a note is never sent twice. [docs/osm.md](docs/osm.md) explains the flow and its limits.
+Accepted changes reach OpenStreetMap's mappers as [MapRoulette](https://maproulette.org) tasks, built in the data repository at each OSM sync. The "What travellers report" challenge has one task for each place where a value from travellers or the owner, for a fact OSM has a tag for, the name or a permanent closure, still differs from OSM. A mapper checks the place and edits OSM if they agree, and the task goes away once OSM shows the value. Changes that came from OSM, contributed places, kinds, descriptions, locations, booking details, facts OSM does not map (such as scenery or mobile signal), temporary closures and reviews are never passed on. Open Camping DB never edits OSM itself. The data repository's [maproulette/README.md](https://github.com/opencampingdb/data/blob/main/maproulette/README.md) explains the challenges, and [docs/osm.md](docs/osm.md) what retired the OSM notes.
 
 ## Run your own intake
 
@@ -80,7 +80,7 @@ Needs Node 22.12 or later.
 npm install
 npm test          # all packages
 npm run typecheck
-npm run build     # SDK, apply and OSM notes scripts
+npm run build     # SDK, apply and the retired OSM notes scripts
 ```
 
 ## Licence
