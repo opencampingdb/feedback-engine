@@ -205,6 +205,7 @@ describe("photo pass client", () => {
     expect(await client.photoPass()).toMatchObject({ pass: "p1.example-app.1" });
     clock += 2 * 60_000;
     expect(await client.photoPass()).toMatchObject({ pass: "p1.example-app.2" });
+    expect(await client.photoPass({ renew: true })).toMatchObject({ pass: "p1.example-app.3" });
   });
 
   it("answers offline when the intake cannot be reached", async () => {
