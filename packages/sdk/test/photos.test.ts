@@ -175,3 +175,48 @@ describe("photo client", () => {
     expect(isJpeg(new Uint8Array([0xff, 0xd8]))).toBe(false);
   });
 });
+
+describe("photo pass client", () => {
+  it("asks for a pass with attestation, and reuses it until five minutes before it expires", async () => {
+    let clock = Date.parse("2026-11-03T01:00:00Z");
+    const posts: { url: string; body: string; headers: Record<string, string> }[] = [];
+    const fetch: FetchLike = async (url, init) => {
+      posts.push({ url, body: init.body, headers: init.headers });
+      const expires = new Date(clock + 3600_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+      return { status: 200, json: async () => ({ pass: `p1.example-app.${posts.length}`, expires }), headers: { get: () => null } };
+    };
+    const client = createFeedbackClient({
+      endpoint: "https://intake.example",
+      appKey: "key-1",
+      appVersion: "1.2.3",
+      storage: memoryStorage(),
+      fetch,
+      now: () => clock,
+      attest: async () => ({ "x-attest-platform": "ios" }),
+    });
+    const [a, b] = await Promise.all([client.photoPass(), client.photoPass()]);
+    expect(a).toMatchObject({ status: "ok", pass: "p1.example-app.1" });
+    expect(b).toEqual(a);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.url).toBe("https://intake.example/v1/photos/pass");
+    expect(posts[0]!.headers["x-attest-platform"]).toBe("ios");
+    expect(JSON.parse(posts[0]!.body)).toMatchObject({ type: "photo_pass", app_version: "1.2.3", time: "2026-11-03T01:00:00.000Z" });
+    clock += 54 * 60_000;
+    expect(await client.photoPass()).toMatchObject({ pass: "p1.example-app.1" });
+    clock += 2 * 60_000;
+    expect(await client.photoPass()).toMatchObject({ pass: "p1.example-app.2" });
+  });
+
+  it("answers offline when the intake cannot be reached", async () => {
+    const client = createFeedbackClient({
+      endpoint: "https://intake.example",
+      appKey: "key-1",
+      appVersion: "1.2.3",
+      storage: memoryStorage(),
+      fetch: async () => {
+        throw new TypeError("offline");
+      },
+    });
+    expect(await client.photoPass()).toEqual({ status: "offline" });
+  });
+});

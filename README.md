@@ -8,7 +8,7 @@ It has five parts:
 |---|---|
 | [`packages/sdk`](packages/sdk) (`@opencampingdb/feedback`) | Client for React Native, Expo and the web. Queues submissions offline, retries with backoff, keeps a random per-install device id and refuses to send without consent. |
 | [`packages/intake`](packages/intake) | Cloudflare Worker at `POST /v1/feedback` and `POST /v1/photos`. Checks the app key, the schema and consent, App Attest or Play Integrity when the key requires it, rate limits, removes contact details from free text, hashes the device and contributor ids and writes one JSON file per submission to the private `inbox` repository. |
-| [`packages/photos`](packages/photos) | Cloudflare Worker that serves published photos from R2 to apps with a photo key, behind the edge cache, with a per-address limit, daily read caps and an off switch. |
+| [`packages/photos`](packages/photos) | Cloudflare Worker that serves published photos from R2 to attested installs with a photo pass, and to servers with a photo key, behind the edge cache, with a per-address limit, daily read caps and an off switch. |
 | [`packages/apply`](packages/apply) | Script and reusable GitHub workflow that runs hourly in `inbox`, applies the quality rules and keeps up to two PRs open on `data`: one for automatic changes, one for a person. |
 | [`packages/osm-notes`](packages/osm-notes) | Script and reusable GitHub workflow that runs daily in `inbox` and passes changes accepted into `data` to OpenStreetMap as notes for its mappers to check. It never edits OSM. |
 
@@ -39,7 +39,7 @@ Reviews carry an opaque contributor id from the app's signed-in account. One rev
 
 ## Photos
 
-Signed-in travellers can add photos of a place, licensed under CC BY 4.0. A contributor's first photo goes to a person, three reports hide a photo, and a traveller's photos are removed when they ask before deleting their account. The files stay in a private bucket until their record is merged, and are served only through the photo server. [docs/photos.md](docs/photos.md) covers the app side, moderation and how to run the storage.
+Signed-in travellers can add photos of a place, licensed under CC BY 4.0. A contributor's first photo goes to a person, three reports hide a photo, and a traveller's photos are removed when they ask before deleting their account. The files stay in a private bucket until their record is merged, and are served only through the photo server, to installs that prove themselves with App Attest or Play Integrity. [docs/photos.md](docs/photos.md) covers the app side, moderation and how to run the storage.
 
 ## Owners
 

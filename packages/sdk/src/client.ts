@@ -163,6 +163,15 @@ export type PhotoResult =
   | { status: "rejected"; httpStatus: number; error?: string }
   | { status: "offline" };
 
+/**
+ * A photo pass for the photo server's `x-photo-pass` header, or why there is
+ * none. `expires` is ISO 8601 UTC.
+ */
+export type PhotoPassResult =
+  | { status: "ok"; pass: string; expires: string }
+  | { status: "rejected"; httpStatus: number; error?: string }
+  | { status: "offline" };
+
 export type SubmitResult =
   | { status: "sent"; id: string }
   | { status: "queued" }
@@ -211,6 +220,12 @@ export interface FeedbackClient {
    * or the apply rules accept it and its record is merged.
    */
   photo(input: PhotoInput): Promise<PhotoResult>;
+  /**
+   * A photo pass to send in `x-photo-pass` with every photo request. Kept in
+   * memory and reused until five minutes before it expires, so call it before
+   * each photo request. Needs an app key that requires attestation.
+   */
+  photoPass(): Promise<PhotoPassResult>;
   /** Reports a published photo. Queued and retried like a review report. */
   reportPhoto(input: PhotoReportInput): Promise<SubmitResult>;
   /**
@@ -284,6 +299,8 @@ interface QueueItem {
 type Outcome = { kind: "sent"; id: string } | { kind: "dropped"; httpStatus: number };
 
 const BASE_DELAY_MS = 30_000;
+/** A photo pass is renewed when it has less than this left. */
+const PASS_REFRESH_MS = 5 * 60 * 1000;
 const MAX_DELAY_MS = 6 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -336,6 +353,7 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
   } = options;
   const url = `${options.endpoint.replace(/\/+$/, "")}/v1/feedback`;
   const photoUrl = `${options.endpoint.replace(/\/+$/, "")}/v1/photos`;
+  const passUrl = `${photoUrl}/pass`;
   const doFetch: FetchLike =
     options.fetch ?? ((input, init) => (globalThis.fetch as unknown as FetchLike)(input, init));
   const doFetchPhoto: PhotoFetchLike =
@@ -618,6 +636,59 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
     return { status: "rejected", httpStatus: res.status, ...(typeof answer.error === "string" ? { error: answer.error } : {}) };
   }
 
+  // The current pass, and a request for a new one already under way.
+  let currentPass: { pass: string; expires: string } | undefined;
+  let passRequest: Promise<PhotoPassResult> | undefined;
+
+  async function requestPass(): Promise<PhotoPassResult> {
+    const body = JSON.stringify({
+      type: "photo_pass",
+      device: await serial(device),
+      app_version: appVersion,
+      time: new Date(now()).toISOString(),
+    });
+    let attestation: Record<string, string> = {};
+    if (options.attest) {
+      try {
+        attestation = await options.attest({ body, bodySha256: sha256Hex(body) });
+      } catch {
+        return { status: "offline" };
+      }
+    }
+    let res: Awaited<ReturnType<FetchLike>>;
+    try {
+      res = await doFetch(passUrl, { method: "POST", headers: { ...attestation, "content-type": "application/json", "x-app-key": appKey }, body });
+    } catch {
+      return { status: "offline" };
+    }
+    let answer: { pass?: unknown; expires?: unknown; error?: unknown } = {};
+    try {
+      answer = ((await res.json()) ?? {}) as typeof answer;
+    } catch {
+      // Leave the answer empty.
+    }
+    if (res.status === 200 && typeof answer.pass === "string" && typeof answer.expires === "string") {
+      currentPass = { pass: answer.pass, expires: answer.expires };
+      return { status: "ok", ...currentPass };
+    }
+    if (res.status === 401 && (answer.error === "attestation_required" || answer.error === "attestation_invalid")) {
+      try {
+        await options.onAttestationRejected?.(answer.error);
+      } catch {
+        // The app's own clean-up failing does not change the answer.
+      }
+    }
+    return { status: "rejected", httpStatus: res.status, ...(typeof answer.error === "string" ? { error: answer.error } : {}) };
+  }
+
+  function photoPass(): Promise<PhotoPassResult> {
+    if (currentPass && Date.parse(currentPass.expires) - now() > PASS_REFRESH_MS) return Promise.resolve({ status: "ok", ...currentPass });
+    passRequest ??= requestPass().finally(() => {
+      passRequest = undefined;
+    });
+    return passRequest;
+  }
+
   const claimResponse = (answer: Record<string, unknown>): OwnerClaimResponse => ({
     id: String(answer.id ?? ""),
     code: String(answer.code ?? ""),
@@ -667,6 +738,7 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
         "review_report",
       ),
     photo: sendPhoto,
+    photoPass,
     reportPhoto: ({ place, photo, reason, contributor, consent }) =>
       submit(
         { place, photo_report: { photo, reason }, ...(contributor !== undefined ? { contributor } : {}), consent },

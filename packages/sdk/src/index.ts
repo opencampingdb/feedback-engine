@@ -23,6 +23,7 @@ export type {
   PhotoErasureInput,
   PhotoFetchLike,
   PhotoInput,
+  PhotoPassResult,
   PhotoReportInput,
   PhotoResult,
   ReportInput,

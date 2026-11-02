@@ -16,6 +16,7 @@ import { fromBase64, hex, sha256, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
 import { IntegrityError, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
 import { jpegSize } from "./jpeg.js";
+import { PASS_TTL_SECONDS, signPass } from "./pass.js";
 import {
   ATTEST_KEY_DAILY_LIMIT,
   checkAndCount,
@@ -56,6 +57,8 @@ export interface Env {
   GOOGLE_SERVICE_ACCOUNT?: string;
   /** Private R2 bucket that holds uploaded photos until their record is merged. Needed for `/v1/photos`. */
   PHOTOS_PENDING?: BucketLike;
+  /** Secret, shared with the photo server. Signs photo passes. Needed for `/v1/photos/pass`. */
+  PHOTO_PASS_SECRET?: string;
 }
 
 type SubmissionKind = "feedback" | "owner";
@@ -87,6 +90,12 @@ export const MAX_BODY_BYTES = 16 * 1024;
 export const MAX_PHOTO_BODY_BYTES = MAX_PHOTO_BYTES + MAX_THUMB_BYTES;
 /** Longest `x-photo-meta` header, base64url. */
 export const MAX_PHOTO_META_CHARS = 4096;
+/** Photo passes per hashed device per day, and per hashed client network per day. */
+export const PASS_DEVICE_DAILY_LIMIT = 48;
+export const PASS_ORIGIN_DAILY_LIMIT = 500;
+/** How far a pass request's `time` may be from the intake's clock. */
+const PASS_CLOCK_SKEW_MS = 5 * 60 * 1000;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const APP_NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
 export interface Deps {
@@ -485,6 +494,51 @@ export function createHandler(deps: Deps) {
     return json(202, { id: photoId }, cors);
   }
 
+  /**
+   * `POST /v1/photos/pass`: a photo pass for an attested install. The body is
+   * `{ "type": "photo_pass", "device", "app_version", "time" }`, with `time`
+   * the phone's clock, so a captured request stops working within minutes.
+   * Only app keys that require attestation get passes.
+   */
+  async function photoPass(request: Request, env: Env, app: AppEntry, text: string, cors: Record<string, string>): Promise<Response> {
+    if (!env.PHOTO_PASS_SECRET) return json(404, { error: "not_found" }, cors);
+    if (!app.requires_attestation) return json(403, { error: "attestation_not_required_for_app_key" }, cors);
+    let body: { type?: unknown; device?: unknown; app_version?: unknown; time?: unknown };
+    try {
+      body = JSON.parse(text) as typeof body;
+    } catch {
+      return json(400, { error: "invalid", details: ["body must be JSON"] }, cors);
+    }
+    const nowMs = deps.now();
+    const sent = typeof body.time === "string" ? Date.parse(body.time) : NaN;
+    if (
+      body.type !== "photo_pass" ||
+      typeof body.device !== "string" ||
+      !UUID.test(body.device) ||
+      typeof body.app_version !== "string" ||
+      body.app_version.length === 0 ||
+      body.app_version.length > 32
+    ) {
+      return json(400, { error: "invalid", details: ["type photo_pass, device (a UUID), app_version and time are required"] }, cors);
+    }
+    if (!Number.isFinite(sent) || Math.abs(sent - nowMs) > PASS_CLOCK_SKEW_MS) return json(400, { error: "clock_skew" }, cors);
+    const proof = await attest(request, env, app, text);
+    if ("error" in proof) return json(401, { error: proof.error }, cors);
+
+    const day = new Date(nowMs).toISOString().slice(0, 10);
+    const device = await hashDevice(env.DEVICE_SALT, body.device);
+    const network = networkPrefix(request.headers.get("cf-connecting-ip") ?? "");
+    const counters = [{ key: `pp:${day}:${device}`, limit: PASS_DEVICE_DAILY_LIMIT }];
+    if (network !== undefined) counters.push({ key: `ppn:${day}:${await hashDevice(env.DEVICE_SALT, `ip:${network}`)}`, limit: PASS_ORIGIN_DAILY_LIMIT });
+    const counts = await Promise.all(counters.map((c) => env.RATE_LIMIT.get(c.key).then((v) => Number(v ?? 0))));
+    if (counts.some((n, i) => n >= counters[i]!.limit)) return json(429, { error: "rate_limited" }, cors);
+    await Promise.all(counters.map((c, i) => env.RATE_LIMIT.put(c.key, String(counts[i]! + 1), { expirationTtl: 2 * 24 * 60 * 60 })));
+
+    const expires = Math.floor(nowMs / 1000) + PASS_TTL_SECONDS;
+    const pass = await signPass(env.PHOTO_PASS_SECRET, app.app, expires);
+    return json(200, { pass, expires: new Date(expires * 1000).toISOString().replace(/\.\d{3}Z$/, "Z") }, cors);
+  }
+
   return async function handle(request: Request, env: Env): Promise<Response> {
     const cors = corsHeaders(request, env);
     const url = new URL(request.url);
@@ -501,7 +555,13 @@ export function createHandler(deps: Deps) {
       });
     }
     const route = url.pathname;
-    if (route !== "/v1/feedback" && route !== "/v1/photos" && route !== "/v1/attest/challenge" && route !== "/v1/attest/register") {
+    if (
+      route !== "/v1/feedback" &&
+      route !== "/v1/photos" &&
+      route !== "/v1/photos/pass" &&
+      route !== "/v1/attest/challenge" &&
+      route !== "/v1/attest/register"
+    ) {
       return json(404, { error: "not_found" }, cors);
     }
     if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
@@ -522,6 +582,7 @@ export function createHandler(deps: Deps) {
     const text = await request.text();
     if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) return json(413, { error: "too_large" }, cors);
     if (route === "/v1/attest/register") return register(request, env, app, text, cors);
+    if (route === "/v1/photos/pass") return photoPass(request, env, app, text, cors);
 
     let body: unknown;
     try {

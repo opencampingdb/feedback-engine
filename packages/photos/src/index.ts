@@ -1,11 +1,14 @@
 /**
  * Serves published photos from the `ocdb-photos` bucket:
- * `GET /v1/photos/<pho_id>/full.jpg` and `/thumb.jpg`, for requests carrying
- * an app key in `x-app-key`. Answers come from the edge cache when they can.
+ * `GET /v1/photos/<pho_id>/full.jpg` and `/thumb.jpg`. A request carries a
+ * photo pass from the intake in `x-photo-pass` (apps on phones), or a photo
+ * key in `x-app-key` (servers, which can keep a key secret). Answers come from the edge cache when they can.
  * Reads that reach R2 are counted per app per day, and above the app's
  * `daily_limit` or the server's `DAILY_READ_CAP` the server answers 503 until
  * midnight UTC. Putting `off` in STATE stops all serving within a minute.
  */
+
+import { verifyPass } from "../../intake/src/pass.js";
 
 /** The parts of an R2 bucket binding the server uses. */
 export interface BucketLike {
@@ -30,8 +33,13 @@ export interface CacheLike {
 
 export interface Env {
   PHOTOS: BucketLike;
-  /** Secret. JSON map of app key to `{ "app": "<name>", "daily_limit": <reads a day> }`. */
+  /**
+   * Secret. JSON map of photo key to `{ "app": "<name>", "daily_limit": <reads a day> }`.
+   * An app that uses passes needs an entry too, for its daily limit.
+   */
   PHOTO_KEYS: string;
+  /** Secret, the same as the intake's. Checks photo passes. */
+  PHOTO_PASS_SECRET?: string;
   STATE: KVLike;
   PER_IP?: RateLimiterLike;
   /** Most R2 reads a day across every app. */
@@ -158,13 +166,19 @@ export function createHandler(deps: Deps) {
     } catch {
       return answer(500, "misconfigured");
     }
-    const key = keys.get(request.headers.get("x-app-key") ?? "");
+    const nowMs = deps.now();
+    let key = keys.get(request.headers.get("x-app-key") ?? "");
+    const pass = request.headers.get("x-photo-pass");
+    if (!key && pass && env.PHOTO_PASS_SECRET) {
+      const checked = await verifyPass(env.PHOTO_PASS_SECRET, pass, nowMs);
+      if (!checked) return answer(401, "invalid_pass");
+      key = [...keys.values()].find((k) => k.app === checked.app);
+    }
     if (!key) return answer(401, "invalid_app_key");
 
     const address = request.headers.get("cf-connecting-ip") ?? "";
     if (env.PER_IP && address && !(await env.PER_IP.limit({ key: address })).success) return answer(429, "rate_limited", { "retry-after": "60" });
 
-    const nowMs = deps.now();
     const apps = [...keys.values()].map((k) => k.app);
     await refresh(env, apps, nowMs);
     if (off) return answer(503, "paused", { "retry-after": "3600" });
