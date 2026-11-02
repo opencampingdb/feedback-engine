@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { signPass } from "../../intake/src/pass.js";
 import { createHandler, FLUSH_EVERY, STATE_TTL_MS, type BucketLike, type CacheLike, type Ctx, type Env, type KVLike } from "../src/index.js";
 
 const KEY = "camporacle-photo-key-0001";
@@ -128,5 +129,19 @@ describe("photo server", () => {
       await c.done();
     }
     expect(Number(env.STATE.data.get("reads:2026-11-03:camporacle:3"))).toBe(FLUSH_EVERY + 1);
+  });
+
+  it("serves to a good photo pass and refuses a bad or expired one", async () => {
+    env.PHOTO_PASS_SECRET = "pass-secret";
+    const withPass = (pass: string) =>
+      new Request(`https://photos.example/v1/photos/${PHOTO}/thumb.jpg`, { headers: { "x-photo-pass": pass } });
+    const pass = await signPass("pass-secret", "camporacle", NOW / 1000 + 3600);
+    expect((await handle(withPass(pass), env, ctx())).status).toBe(200);
+    expect(await (await handle(withPass(pass.slice(0, -2) + "AA"), env, ctx())).json()).toEqual({ error: "invalid_pass" });
+    clock += 3600_000;
+    expect((await handle(withPass(pass), env, ctx())).status).toBe(401);
+    // A pass for an app with no entry in PHOTO_KEYS gets nothing.
+    const stranger = await signPass("pass-secret", "stranger", clock / 1000 + 60);
+    expect((await handle(withPass(stranger), env, ctx())).status).toBe(401);
   });
 });

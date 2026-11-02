@@ -5,6 +5,7 @@
 #   GH_APP_ID           GitHub App id
 #   GH_APP_PRIVATE_KEY  GitHub App private key (PEM)
 #   GH_INSTALLATION_ID  installation id of the App on the inbox repository
+#   PHOTO_PASS_SECRET   signs photo passes, the same secret as the photo server's. Only for /v1/photos/pass
 #   GOOGLE_SERVICE_ACCOUNT  Google service account key file (JSON), only for app keys with "android"
 
 name = "ocdb-feedback-intake"

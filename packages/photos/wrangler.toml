@@ -1,7 +1,8 @@
 # Open Camping DB photo server. Replace every REPLACE_ME before deploying, or
 # deploy with an untracked copy holding the real ids (see docs/photos.md).
 # Secrets are set with `wrangler secret put`, never written here:
-#   PHOTO_KEYS  JSON map of app key to {"app": "<name>", "daily_limit": <reads a day>}
+#   PHOTO_KEYS         JSON map of photo key to {"app": "<name>", "daily_limit": <reads a day>}
+#   PHOTO_PASS_SECRET  the same secret as the intake's, to check photo passes
 
 name = "ocdb-photos"
 main = "src/index.ts"

@@ -61,18 +61,32 @@ A person can hide a photo by setting `"hidden": "moderator"` on its line, or del
 
 ## Show a photo
 
+An app on a phone shows photos with a photo pass, never with a fixed key: anything built into an app can be read out of it. The intake gives a pass only to an install that proves itself with App Attest or Play Integrity, and a pass works for an hour.
+
+```ts
+const pass = await feedback.photoPass();
+if (pass.status === "ok") {
+  // Send pass.pass in the x-photo-pass header of every photo request.
+}
 ```
-GET https://<photo server>/v1/photos/<id>/full.jpg
-GET https://<photo server>/v1/photos/<id>/thumb.jpg
-X-App-Key: <your photo key>
+
+`photoPass` keeps the pass in memory and asks for a new one when less than five minutes are left, so call it before each photo request. It needs an app key with `requires_attestation`. Otherwise the intake answers `403 attestation_not_required_for_app_key`. On `offline`, show placeholders and try again later.
+
 ```
+GET https://photos.camporacle.com.au/v1/photos/<id>/full.jpg
+GET https://photos.camporacle.com.au/v1/photos/<id>/thumb.jpg
+X-Photo-Pass: <pass>
+```
+
+A server that shows photos can use a photo key in `X-App-Key` instead, since it can keep the key secret. Never put a photo key in an app.
 
 Answers are cached for a day, at the edge and on the phone. Credit each photo shown, for example "Photo: Open Camping DB traveller, CC BY 4.0".
 
 | Status | Meaning |
 |---|---|
 | `200` | the JPEG |
-| `401 invalid_app_key` | missing or unknown photo key |
+| `401 invalid_pass` | the pass is altered or has expired. Get a new one with `photoPass` |
+| `401 invalid_app_key` | no pass, and a missing or unknown photo key |
 | `404 not_found` | no such photo, or it is no longer published |
 | `429 rate_limited` | too many requests from one address: 300 a minute |
 | `503 daily_read_cap` | the app's daily read limit, or the server's, is reached. `retry-after` says when it resets, at midnight UTC |
@@ -85,7 +99,7 @@ These steps need the Cloudflare account that runs the intake.
 1. **Buckets.** In R2, create `ocdb-photos-pending` and `ocdb-photos`. Leave both private: neither gets public access or an r2.dev address. On `ocdb-photos-pending`, add a lifecycle rule that deletes objects with the prefix `pho_` 180 days after upload. Files under `kept/` are kept.
 2. **Intake.** The intake's `wrangler.toml` binds `ocdb-photos-pending` as `PHOTOS_PENDING`. Deploy the intake again (see [self-hosting.md](self-hosting.md)). Without the binding, `/v1/photos` answers 404.
 3. **KV for the photo server.** Create a namespace, for example `npx wrangler kv namespace create ocdb-photos-state`, and put its id in `packages/photos/wrangler.toml` (or an untracked `wrangler.deploy.toml`, as for the intake).
-4. **Photo keys.** Set the secret: `npx wrangler secret put PHOTO_KEYS` in `packages/photos`, with JSON such as `{"<random key, 32 characters>": {"app": "camporacle", "daily_limit": 100000}}`. `daily_limit` counts the reads that reach R2, not those served from the cache. `DAILY_READ_CAP` in `wrangler.toml` caps all apps together.
+4. **Pass secret and photo keys.** Make one long random secret, for example with `openssl rand -base64 48`, and set it as `PHOTO_PASS_SECRET` on both Workers: `npx wrangler secret put PHOTO_PASS_SECRET` in `packages/intake` and again in `packages/photos`. Then set `PHOTO_KEYS` in `packages/photos`, with JSON such as `{"<random key, 32 characters>": {"app": "camporacle", "daily_limit": 100000}}`. The entry gives the app's daily limit to its passes as well. Its key is only for servers, so CampOracle never ships it. `daily_limit` counts the reads that reach R2, not those served from the cache. `DAILY_READ_CAP` in `wrangler.toml` caps all apps together. Changing `PHOTO_PASS_SECRET` on both Workers ends every pass at once.
 5. **Custom domain.** The `routes` line in `packages/photos/wrangler.toml` names the photo server's host, `photos.camporacle.com.au`. Its zone, `camporacle.com.au`, must be in the same Cloudflare account. Wrangler adds the DNS record and certificate on deploy. Change the line to run the server on another host. The photo server is served only there, so the edge cache sits in front of R2.
 6. **Deploy** the photo server: `npx wrangler deploy` in `packages/photos`.
 7. **Data repository secrets.** Create an R2 API token with Object Read and Write on both buckets, and add `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` as Actions secrets in `opencampingdb/data`. The Photos workflow does nothing without them.

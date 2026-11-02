@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { verifyAttestation } from "../src/appattest.js";
 import { createHandler, type Env } from "../src/index.js";
+import { verifyPass } from "../src/pass.js";
 import type { KVLike } from "../src/ratelimit.js";
 import { APP_ID, makeDevice, type Device } from "./attest-fixtures.js";
 
@@ -155,6 +156,23 @@ describe("App Attest", () => {
     expect(stored.attest_key).toMatch(/^ak_[0-9a-f]{16}$/);
     expect(stored.contributor).toMatch(/^ctr_[0-9a-f]{16}$/);
     expect(JSON.parse(kv.data.get(`aa:${device.keyId}`)!)).toMatchObject({ app: "camporacle", counter: 1 });
+  });
+
+  it("gives an attested install a photo pass the photo server accepts", async () => {
+    expect((await registered()).status).toBe(201);
+    const body = JSON.stringify({ type: "photo_pass", device: "3b241101-e2bb-4255-8caf-4136c566a962", app_version: "1.0.0", time: new Date(NOW).toISOString() });
+    const res = await handle(
+      request("/v1/photos/pass", body, {
+        "x-attest-platform": "ios",
+        "x-attest-key-id": device.keyId,
+        "x-attest-assertion": b64(device.assert(body, 1)),
+      }),
+      { ...env(kv, IOS), PHOTO_PASS_SECRET: "pass-secret" },
+    );
+    expect(res.status).toBe(200);
+    const { pass, expires } = (await res.json()) as { pass: string; expires: string };
+    expect(expires).toBe("2026-11-02T10:00:00Z");
+    expect(await verifyPass("pass-secret", pass, NOW)).toEqual({ app: "camporacle", expires: NOW / 1000 + 3600 });
   });
 
   it("refuses a replayed or older assertion", async () => {
