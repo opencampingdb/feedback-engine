@@ -1,6 +1,6 @@
 # Open Camping DB feedback engine
 
-Lets any app send reports, reviews and checks about places in [Open Camping DB](https://github.com/opencampingdb/data). Each submission passes quality rules and reaches the public `opencampingdb/data` repository as a pull request.
+Lets any app send reports, reviews, checks and fees about places in [Open Camping DB](https://github.com/opencampingdb/data). Each submission passes quality rules and reaches the public `opencampingdb/data` repository as a pull request.
 
 It has four parts:
 
@@ -52,6 +52,7 @@ The intake runs on the Cloudflare Workers free plan. You need a Cloudflare accou
 
 Every hour the apply workflow reads `inbox/pending/`, compares each item with the current `data` checkout and decides:
 
+- **Fee:** what a traveller paid per night (Australian dollars, more than 0 and at most 1,000), for an unpowered or powered site or a cabin, and the month they paid, within the last 24 months. It needs a contributor and holds no free text, so it is published at once in `fees/<place id>.ndjson`. One fee per contributor per place per site type: a newer one replaces the older.
 - **Review:** accepted when the text is at most 2,000 characters and has no links, contact details, social media handles, personal names or offensive language. It is appended to `reviews/<place id>.ndjson` and the place's rating is recalculated.
 - **Closed report:** marks the place `reported_closed` at once. It becomes `closed` when two different devices report it, or a check finds it gone, within 90 days. A `reopened` report or a check that finds it there clears `reported_closed`. A `closed` place needs two devices within 90 days to reopen. For a place that is `owner_verified`, or whose status its owner set, reports from two devices go to a person instead of closing it, and one report changes nothing.
 - **Fact report:** changes the fact only when two different devices report the same value within 90 days, and records the fact as coming from feedback. Two reports from one device count once. A report that matches the current value is accepted with no change.

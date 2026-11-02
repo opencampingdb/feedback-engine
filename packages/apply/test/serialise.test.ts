@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dumpPlace, dumpReviewLine, placePath, pythonFloat, reviewPath } from "../src/serialise.js";
+import { dumpFeeLine, dumpPlace, dumpReviewLine, feePath, placePath, pythonFloat, reviewPath } from "../src/serialise.js";
 import type { Place } from "../src/types.js";
 
 describe("pythonFloat", () => {
@@ -104,6 +104,31 @@ describe("dumpReviewLine", () => {
   });
 });
 
+describe("dumpFeeLine", () => {
+  it("sorts keys with no spaces", () => {
+    expect(
+      dumpFeeLine({
+        id: "fee_1",
+        place: "ocdb_1",
+        amount: 32.5,
+        site: "powered",
+        paid: "2026-10",
+        created: "2026-10-30T00:00:00Z",
+        app: "example-app",
+        contributor: "ctr_0123456789abcdef",
+      }),
+    ).toBe(
+      '{"amount":32.5,"app":"example-app","contributor":"ctr_0123456789abcdef","created":"2026-10-30T00:00:00Z","id":"fee_1","paid":"2026-10","place":"ocdb_1","site":"powered"}',
+    );
+  });
+});
+
+describe("feePath", () => {
+  it("is fees/<place id>.ndjson", () => {
+    expect(feePath("ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA")).toBe("fees/ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA.ndjson");
+  });
+});
+
 describe("placePath", () => {
   it("follows SPEC: places/<last 2 characters of id, lower case>/<id>.json", () => {
     expect(placePath("ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA")).toBe("places/za/ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA.json");
@@ -113,6 +138,7 @@ describe("placePath", () => {
     for (const id of ["ocdb_../../../etc/passwd", "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZ/", "../places/za/x", ""]) {
       expect(() => placePath(id)).toThrow(/refusing place id/);
       expect(() => reviewPath(id)).toThrow(/refusing place id/);
+      expect(() => feePath(id)).toThrow(/refusing place id/);
     }
   });
 });

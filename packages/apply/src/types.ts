@@ -75,6 +75,22 @@ export interface Review {
   hidden?: "reported" | "moderator";
 }
 
+/** One line of `fees/<place id>.ndjson`: what a traveller paid per night. */
+export interface Fee {
+  /** `fee_` and the ulid of the feedback item. */
+  id: string;
+  place: string;
+  /** Australian dollars per night. */
+  amount: number;
+  site: "unpowered" | "powered" | "cabin";
+  /** Month it was paid, `YYYY-MM`. */
+  paid: string;
+  created: string;
+  app: string;
+  /** Opaque id of the account or attested install that sent it, `ctr_` and 16 hex characters. */
+  contributor: string;
+}
+
 /** `moderation/blocked_contributors.json` in the data repository. */
 export interface BlockedList {
   contributors: { contributor: string; added: string; reason: string }[];

@@ -53,7 +53,7 @@ export function askConsent(): Promise<boolean> {
 }
 ```
 
-## 5. Send reports, reviews and checks
+## 5. Send reports, reviews, checks and fees
 
 Each call validates the payload, queues it and tries to send it. The result says what happened:
 
@@ -95,7 +95,13 @@ await feedback.review({
 
 // A check: the user was there and the place still exists (or not).
 await feedback.check({ place, check: { visited: "2026-10-30", still_there: true }, consent: true });
+
+// A fee: what the traveller paid per night in Australian dollars, the site
+// type (FEE_SITES: unpowered, powered, cabin) and the month they paid.
+await feedback.fee({ place, fee: { amount: 32.5, site: "powered", paid: "2026-10" }, contributor, consent: true });
 ```
+
+A fee's `amount` is more than 0 and at most 1,000, with at most 2 decimal places. `paid` is `YYYY-MM`, not in the future and not more than 24 months ago. Fees need `contributor`, like reviews (`400 contributor_required`). They are published at the next apply run in `fees/<place id>.ndjson`, one per contributor per place per site type, a newer one replacing the older. Releases carry the fees paid in the last 24 months.
 
 A check that finds an open place still there sets the record's `last_confirmed` to the time of the next apply run. One check is enough. Checks on a closed or temporarily closed place do not set it.
 
