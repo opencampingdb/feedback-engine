@@ -1,6 +1,6 @@
 {
   "name": "@opencampingdb/feedback",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Client for sending reports, reviews, checks and fees to Open Camping DB.",
   "license": "Apache-2.0",
   "type": "module",
