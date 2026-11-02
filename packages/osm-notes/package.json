@@ -16,6 +16,6 @@
     "notes": "node dist/cli.js"
   },
   "dependencies": {
-    "@opencampingdb/feedback": "0.5.0"
+    "@opencampingdb/feedback": "0.5.1"
   }
 }
