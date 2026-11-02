@@ -6,8 +6,8 @@ export type PlaceStatus = "open" | "reported_closed" | "closed" | "temporarily_c
 /** Where a value in a place record came from. */
 export type Source = "osm" | "feedback" | "contributed" | "owner";
 
-/** Keys of `fact_sources` and `fact_dates`: every fact, plus the name, location, status and description. */
-export type SourceKey = FactName | "name" | "location" | "status" | "description";
+/** Keys of `fact_sources` and `fact_dates`: every fact, plus the name, location, kind, status and description. */
+export type SourceKey = FactName | "name" | "location" | "kind" | "status" | "description";
 
 /** A place record in the data repository (`places/<last 2 of id, lower case>/<id>.json`). */
 export interface Place {

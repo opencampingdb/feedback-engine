@@ -1,6 +1,8 @@
 import { findContactDetails, findContactDetailsInHours } from "./text.js";
 import type {
+  BrandValue,
   CheckBody,
+  FactName,
   FeeBody,
   FeeSite,
   ReportFactName,
@@ -30,7 +32,73 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   "wrong_location",
   "new_place",
   "other",
+  "name",
+  "description",
+  "kind",
 ];
+/** Longest name a `name` report may propose. */
+export const MAX_NAME_LENGTH = 300;
+export const BRANDS: readonly BrandValue[] = [
+  "aspen",
+  "big4",
+  "discovery",
+  "family_parks",
+  "gday",
+  "ingenia",
+  "kui",
+  "nrma",
+  "reflections",
+  "tawk",
+  "yha",
+  "acc",
+];
+/** Site features: facts that are true or false. */
+export const SITE_FEATURES = [
+  "wheelchair",
+  "generators",
+  "motorhomes",
+  "camper_trailers",
+  "motorbikes",
+  "big_rigs",
+  "non_drinking_water",
+  "laundry",
+  "kitchen",
+  "bbq",
+  "drive_through",
+  "ensuite_sites",
+  "bins",
+  "picnic_tables",
+  "campfires",
+  "cabins",
+  "pub",
+  "swimming",
+  "fishing",
+  "walking_tracks",
+  "scenery",
+  "wildlife",
+  "playground",
+  "games_room",
+  "shade",
+  "cycling_tracks",
+  "offroad_tracks",
+  "boat_ramp_nearby",
+  "near_road",
+  "telstra_signal",
+  "mobile_signal",
+  "wifi",
+  "tv_reception",
+  "pet_sitting",
+  "fuel",
+  "lpg",
+  "car_wash",
+  "vehicle_storage",
+  "self_contained_only",
+  "crocodiles",
+  "seasonal_closure",
+  "dangerous_when_wet",
+  "over_50s",
+  "nudist",
+] as const satisfies readonly FactName[];
 export const REVIEW_REPORT_REASONS: readonly ReviewReportReason[] = [
   "spam_ad",
   "offensive",
@@ -51,54 +119,54 @@ export const MAX_DESCRIPTION_LENGTH = 500;
 export const MAX_APP_VERSION_LENGTH = 32;
 
 const isBoolean = (v: unknown): boolean => typeof v === "boolean";
+/** An https link to a page, as for the website and social pages. */
+const isHttpsPage = (max: number) => (v: unknown): boolean =>
+  typeof v === "string" && v.length <= max && /^https:\/\/[^\s]+$/.test(v);
+const isPhone = (v: unknown): boolean => typeof v === "string" && /^\+?[\d ]{6,20}$/.test(v);
+const EMAIL = /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
 
 /** Every fact a report may name, with a check for its value. */
 export const FACTS: Readonly<Record<ReportFactName, (value: unknown) => boolean>> = {
-  fee: isBoolean,
+  fee: (v) => isBoolean(v) || v === "donation",
   power: isBoolean,
   tents: isBoolean,
-  caravans: isBoolean,
+  caravans: (v) => isBoolean(v) || v === "offroad",
   toilets: isBoolean,
   showers: isBoolean,
   drinking_water: isBoolean,
   dump_station: isBoolean,
-  pets: (v) => v === "yes" || v === "no" || v === "leashed",
+  pets: (v) => v === "yes" || v === "no" || v === "leashed" || v === "seasonal",
   access: (v) => v === "2wd" || v === "awd" || v === "4wd" || v === "unknown",
   entry: (v) => v === "public" || v === "customers" || v === "permit" || v === "private",
   max_stay: (v) => typeof v === "string" && /^[1-9]\d{0,2}[hdw]$/.test(v),
   // Free text, so it must hold no email address, phone number or link.
   opening_hours: (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 100 && findContactDetailsInHours(v).length === 0,
-  website: (v) => typeof v === "string" && v.length <= 300 && /^https:\/\/[^\s]+$/.test(v),
-  phone: (v) => typeof v === "string" && /^\+?[\d ]{6,20}$/.test(v),
+  website: isHttpsPage(300),
+  phone: isPhone,
   water_type: (v) => v === "tank_fill" || v === "fountain",
+  booking_required: isBoolean,
+  ...(Object.fromEntries(SITE_FEATURES.map((f) => [f, isBoolean])) as Record<(typeof SITE_FEATURES)[number], (v: unknown) => boolean>),
+  brand: (v) => typeof v === "string" && (BRANDS as readonly string[]).includes(v),
+  email: (v) => typeof v === "string" && v.length <= 254 && EMAIL.test(v),
+  phone_2: isPhone,
+  facebook: isHttpsPage(500),
+  instagram: isHttpsPage(500),
+  tiktok: isHttpsPage(500),
+  x: isHttpsPage(500),
 };
 
 const isHttpsUrl = (v: unknown): boolean => typeof v === "string" && v.length <= 300 && /^https:\/\/[^\s]+$/.test(v);
 
 /** Facts a verified owner may set directly (SPEC "Owners"), with a check for each value. */
-export const OWNER_FACTS: Readonly<Record<OwnerFactName, (value: unknown) => boolean>> = {
-  fee: FACTS.fee,
-  power: FACTS.power,
-  pets: FACTS.pets,
-  tents: FACTS.tents,
-  caravans: FACTS.caravans,
-  toilets: FACTS.toilets,
-  showers: FACTS.showers,
-  drinking_water: FACTS.drinking_water,
-  dump_station: FACTS.dump_station,
-  max_stay: FACTS.max_stay,
-  opening_hours: FACTS.opening_hours,
-  entry: FACTS.entry,
-  phone: FACTS.phone,
-  website: FACTS.website,
-  booking_url: isHttpsUrl,
-};
+export const OWNER_FACTS: Readonly<Record<OwnerFactName, (value: unknown) => boolean>> = (() => {
+  const { access: _access, water_type: _waterType, ...owned } = FACTS;
+  return { ...owned, booking_url: isHttpsUrl };
+})();
 
 const PLACE_ID = /^ocdb_[0-9A-HJKMNP-TV-Z]{26}$/;
 const REVIEW_ID = /^rev_[0-9A-HJKMNP-TV-Z]{26}$/;
 const CONTRIBUTOR = /^[A-Za-z0-9_-]{16,128}$/;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
-const EMAIL = /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const YEAR_MONTH = /^(\d{4})-(0[1-9]|1[0-2])$/;
 const DATE = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
@@ -214,13 +282,27 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
       out.fact = value.fact;
       out.value = value.value as FactValue;
     }
+  } else if (kind === "name" || kind === "description") {
+    const max = kind === "name" ? MAX_NAME_LENGTH : MAX_DESCRIPTION_LENGTH;
+    const text = value.value;
+    if (value.fact !== undefined) errors.push("report.fact is only allowed when report.kind is fact");
+    if (typeof text !== "string" || text.trim().length === 0 || text.length > max) {
+      errors.push(`report.value must be the ${kind}, 1 to ${max} characters`);
+    } else if (findContactDetails(text).length > 0) {
+      errors.push(`report.value must not hold an email address, phone number or link`);
+    } else {
+      out.value = text.trim();
+    }
   } else if (value.fact !== undefined || value.value !== undefined) {
-    errors.push("report.fact and report.value are only allowed when report.kind is fact");
+    errors.push("report.fact and report.value are only allowed when report.kind is fact, name or description");
   }
   const note = checkText(value.note, "report.note", errors, false);
   if (note !== undefined) out.note = note;
+  if (kind === "kind" && value.place_kind === undefined) {
+    errors.push("report.place_kind is required when report.kind is kind");
+  }
   if (value.place_kind !== undefined) {
-    if (kind !== "new_place") errors.push("report.place_kind is only allowed when report.kind is new_place");
+    if (kind !== "new_place" && kind !== "kind") errors.push("report.place_kind is only allowed when report.kind is new_place or kind");
     else if (typeof value.place_kind !== "string" || !KIND_CODE.test(value.place_kind)) {
       errors.push("report.place_kind must be a kind code from data/schema/kinds.json");
     } else out.place_kind = value.place_kind;

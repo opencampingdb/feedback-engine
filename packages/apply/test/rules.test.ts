@@ -751,6 +751,63 @@ describe("items for a person", () => {
   });
 });
 
+describe("name, description and kind reports", () => {
+  const rep = (r: object) => ({ ...base(0, "dev-a"), type: "report", report: r }) as StoredFeedback;
+
+  it("routes each to a person as an edit", () => {
+    const name = rep({ kind: "name", value: "Discovery Parks - Lane Cove" });
+    const text = rep({ kind: "description", value: "Shady sites by the river." });
+    const kind = rep({ kind: "kind", place_kind: "free_camp" });
+    const out = run([name, text, kind]);
+    expect([name, text, kind].map(out.outcome)).toEqual(["needs_review", "needs_review", "needs_review"]);
+    expect(out.after()).toBeUndefined();
+    expect(out.edits).toEqual([
+      { kind: "name", place: PLACE, name: "Discovery Parks - Lane Cove", feedback: name.id },
+      { kind: "description", place: PLACE, description: "Shady sites by the river.", feedback: text.id },
+      { kind: "kind", place: PLACE, placeKind: "free_camp", group: "overnight", feedback: kind.id },
+    ]);
+  });
+
+  it("refuses a kind the data does not know", () => {
+    const item = rep({ kind: "kind", place_kind: "space_port" });
+    const out = run([item]);
+    expect(out.outcome(item)).toBe("refused");
+    expect(out.edits).toEqual([]);
+  });
+
+  it("sends a contact fact to a person even from one device", () => {
+    const item = fact(0, "dev-a", "email", "stay@example.com.au");
+    const out = run([item]);
+    expect(out.outcome(item)).toBe("needs_review");
+    expect(out.edits).toEqual([{ kind: "fact", place: PLACE, fact: "email", value: "stay@example.com.au", feedback: item.id }]);
+  });
+
+  it("applies a site feature when two devices agree", () => {
+    const out = run([fact(0, "dev-a", "campfires", true), fact(0, "dev-b", "campfires", true)]);
+    expect(out.after()?.facts.campfires).toBe(true);
+    expect(out.after()?.fact_sources.campfires).toBe("feedback");
+  });
+});
+
+describe("applyEdit description and kind", () => {
+  const now = "2026-10-30T00:00:00Z";
+
+  it("writes a description with its source and date", () => {
+    const out = applyEdit(place(), { kind: "description", place: PLACE, description: "Shady sites.", feedback: "fb_x" }, now);
+    expect(out).toMatchObject({ description: "Shady sites.", fact_sources: { description: "feedback" }, fact_dates: { description: now }, updated: now });
+  });
+
+  it("removes a description for an empty string", () => {
+    const out = applyEdit(place({ description: "Old" }), { kind: "description", place: PLACE, description: "", feedback: "fb_x" }, now);
+    expect(out?.description).toBeUndefined();
+  });
+
+  it("writes kind and group and marks the kind as feedback", () => {
+    const out = applyEdit(place(), { kind: "kind", place: PLACE, placeKind: "picnic_site", group: "utility", feedback: "fb_x" }, now);
+    expect(out).toMatchObject({ kind: "picnic_site", group: "utility", fact_sources: { kind: "feedback" }, fact_dates: { kind: now } });
+  });
+});
+
 describe("applyEdit", () => {
   const now = "2026-10-30T00:00:00Z";
 
