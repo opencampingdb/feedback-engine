@@ -23,11 +23,11 @@ The intake counts submissions per device, per client network and per app in Work
 npx wrangler kv namespace create RATE_LIMIT
 ```
 
-Copy the `id` it prints into `packages/intake/wrangler.toml`, replacing `REPLACE_ME_KV_NAMESPACE_ID`. Keep that edit in your own deployment, not in a commit to this repository.
+Note the `id` it prints. It replaces `REPLACE_ME_KV_NAMESPACE_ID` in your deploy configuration (step 6). Never commit your ids to this repository.
 
 On the free plan KV allows 1,000 writes a day. Each accepted submission makes three (one device counter, one network counter, one app counter), plus one per contributor and one per attested key, so the free plan carries about 200 to 330 submissions a day. Above that, use the Workers paid plan.
 
-If an app key uses App Attest, create a second namespace for registered keys and challenges, and copy its `id` into the `ATTEST` binding in `wrangler.toml`:
+If an app key uses App Attest, create a second namespace for registered keys and challenges, and note its `id` for the `ATTEST` binding:
 
 ```sh
 npx wrangler kv namespace create ATTEST
@@ -89,9 +89,25 @@ npx wrangler secret put GH_INSTALLATION_ID
 
 ## 6. Deploy
 
+`wrangler.toml` holds placeholders for the namespace ids. Keep your ids in a copy that git does not track, so updating your checkout never resets them, and deploy with that copy:
+
 ```sh
-npx wrangler deploy
+cd packages/intake
+sed -e "s/REPLACE_ME_KV_NAMESPACE_ID/<RATE_LIMIT id>/" \
+    -e "s/REPLACE_ME_ATTEST_KV_NAMESPACE_ID/<ATTEST id>/" wrangler.toml > wrangler.deploy.toml
+npx wrangler deploy -c wrangler.deploy.toml
 ```
+
+Check that the binding list Wrangler prints shows your ids, not `REPLACE_ME`.
+
+To update a running intake to a new release of this repository, move your checkout to it, reinstall and deploy the same way. Secrets set with `wrangler secret put` stay in Cloudflare and need no change:
+
+```sh
+git fetch origin && git checkout --detach origin/main && npm ci
+cd packages/intake && npx wrangler deploy -c wrangler.deploy.toml
+```
+
+The SDK validates each submission, so a release that adds facts or report kinds needs this redeploy before apps send them. Until then the intake refuses them with `400`.
 
 Wrangler prints the Worker URL. Send a test check with a key from `APP_KEYS` and a place id from `data`:
 
