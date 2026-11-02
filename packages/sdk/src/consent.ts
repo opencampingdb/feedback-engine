@@ -15,6 +15,18 @@ export const CONSENT_TEXT =
   "We never publish who sent it. Changes we accept may also be passed to OpenStreetMap as notes for its volunteer " +
   "mappers to check.";
 
+/**
+ * Wording an app should show, with an agree button, before a traveller's
+ * first photo is sent, beside CONSENT_TEXT. Pass `consent: true` to `photo`
+ * only after the user agrees to both. Not final: the wording may change
+ * before photos launch.
+ */
+export const PHOTO_CONSENT_TEXT =
+  "You took this photo yourself. It shows the place: people's faces and number plates are not its subject, and anyone " +
+  "you can recognise in it has agreed to it being shared. You keep the copyright and license it to everyone under " +
+  "Creative Commons Attribution 4.0 (CC BY 4.0), so anyone may use and share it with credit to Open Camping DB " +
+  "travellers. We never publish who sent it, and you can remove all your photos by deleting your account.";
+
 /** Link to the licence details, for a "Learn more" button. */
 export const CONSENT_LEARN_MORE_URL = "https://github.com/opencampingdb/data#licence";
 

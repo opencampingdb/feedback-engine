@@ -3,8 +3,8 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
 import type { AwaitingClaim, OwnerRecord } from "./owners.js";
 import type { Decision } from "./rules.js";
-import { dumpFeeLine, dumpPlace, dumpReviewLine, feePath, placePath, reviewPath } from "./serialise.js";
-import type { BlockedList, Fee, Place, Review } from "./types.js";
+import { dumpFeeLine, dumpPhotoLine, dumpPlace, dumpReviewLine, feePath, photoPath, placePath, reviewPath } from "./serialise.js";
+import type { BlockedList, Fee, Photo, Place, RemovedPhotos, Review } from "./types.js";
 
 export interface PendingFile {
   path: string;
@@ -250,7 +250,7 @@ export class DataRepo {
   constructor(readonly root: string) {}
 
   /** `relativePath` under the checkout, which must stay inside `folder`. */
-  #inside(folder: "places" | "reviews" | "fees", relativePath: string): string {
+  #inside(folder: "places" | "reviews" | "fees" | "photos", relativePath: string): string {
     const path = join(this.root, relativePath);
     if (!resolve(path).startsWith(resolve(this.root, folder) + sep)) throw new Error(`refusing to write outside ${folder}/: ${relativePath}`);
     return path;
@@ -363,6 +363,76 @@ export class DataRepo {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, text, "utf8");
     return feePath(placeId);
+  }
+
+  async photos(placeId: string): Promise<Photo[]> {
+    const path = this.#inside("photos", photoPath(placeId));
+    if (!(await exists(path))) return [];
+    return (await readFile(path, "utf8"))
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as Photo);
+  }
+
+  /** Every photo line in the data. Reads every photo file. */
+  async allPhotos(): Promise<Photo[]> {
+    const folder = join(this.root, "photos");
+    if (!(await exists(folder))) return [];
+    const out: Photo[] = [];
+    for (const name of (await readdir(folder)).sort()) {
+      if (!name.endsWith(".ndjson")) continue;
+      for (const line of (await readFile(join(folder, name), "utf8")).split("\n")) {
+        if (line.trim()) out.push(JSON.parse(line) as Photo);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Writes every photo line of a place, sorted by id. Removes the file when
+   * no lines are left. Returns the path, or undefined when nothing changed.
+   */
+  async writePhotos(placeId: string, photos: readonly Photo[]): Promise<string | undefined> {
+    const path = this.#inside("photos", photoPath(placeId));
+    const there = await exists(path);
+    if (photos.length === 0) {
+      if (!there) return undefined;
+      await rm(path);
+      return photoPath(placeId);
+    }
+    const text = [...photos]
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((p) => `${dumpPhotoLine(p)}\n`)
+      .join("");
+    if (there && (await readFile(path, "utf8")) === text) return undefined;
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, text, "utf8");
+    return photoPath(placeId);
+  }
+
+  /** `moderation/removed_photos.json`. Empty when the file is missing. */
+  async removedPhotos(): Promise<RemovedPhotos["photos"]> {
+    const path = join(this.root, "moderation", "removed_photos.json");
+    if (!(await exists(path))) return [];
+    return (JSON.parse(await readFile(path, "utf8")) as Partial<RemovedPhotos>).photos ?? [];
+  }
+
+  /**
+   * Adds photos to `moderation/removed_photos.json`, keeping the first entry
+   * for an id and sorting by id. Returns the path, or undefined when nothing
+   * was added.
+   */
+  async addRemovedPhotos(entries: readonly RemovedPhotos["photos"][number][]): Promise<string | undefined> {
+    const current = await this.removedPhotos();
+    const known = new Set(current.map((e) => e.photo));
+    const added = entries.filter((e) => !known.has(e.photo) && (known.add(e.photo), true));
+    if (added.length === 0) return undefined;
+    // Keys in sorted order, as Python's json.dumps(sort_keys=True) writes them.
+    const photos = [...current, ...added].map((e) => ({ photo: e.photo, reason: e.reason, removed: e.removed })).sort((a, b) => (a.photo < b.photo ? -1 : a.photo > b.photo ? 1 : 0));
+    const path = join(this.root, "moderation", "removed_photos.json");
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, `${JSON.stringify({ photos }, null, 2)}\n`, "utf8");
+    return "moderation/removed_photos.json";
   }
 
   /** Contributors in `moderation/blocked_contributors.json`. Empty when the file is missing. */

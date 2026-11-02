@@ -1,9 +1,13 @@
 import {
+  isJpeg,
   isOwnerSubmission,
+  MAX_PHOTO_BYTES,
+  MAX_THUMB_BYTES,
   stripContactDetails,
   validateSubmission,
   type FeedbackSubmission,
   type OwnerSubmission,
+  type PhotoSubmission,
   type StoredFeedback,
   type StoredOwnerSubmission,
 } from "@opencampingdb/feedback";
@@ -11,8 +15,21 @@ import { verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } 
 import { fromBase64, hex, sha256, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
 import { IntegrityError, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
-import { ATTEST_KEY_DAILY_LIMIT, checkAndCount, CONTRIBUTOR_DAILY_LIMIT, type KVLike } from "./ratelimit.js";
+import { jpegSize } from "./jpeg.js";
+import {
+  ATTEST_KEY_DAILY_LIMIT,
+  checkAndCount,
+  CONTRIBUTOR_DAILY_LIMIT,
+  PHOTO_CONTRIBUTOR_DAILY_LIMIT,
+  type KVLike,
+} from "./ratelimit.js";
 import { ulid } from "./ulid.js";
+
+/** The part of an R2 bucket binding the photo upload uses. */
+export interface BucketLike {
+  put(key: string, value: Uint8Array, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }): Promise<unknown>;
+  delete(keys: string | string[]): Promise<void>;
+}
 
 export interface Env {
   /**
@@ -37,6 +54,8 @@ export interface Env {
   ATTEST?: KVLike;
   /** Secret. Google service account key file (JSON) allowed to decode Play Integrity tokens. Needed when an app key has `android`. */
   GOOGLE_SERVICE_ACCOUNT?: string;
+  /** Private R2 bucket that holds uploaded photos until their record is merged. Needed for `/v1/photos`. */
+  PHOTOS_PENDING?: BucketLike;
 }
 
 type SubmissionKind = "feedback" | "owner";
@@ -64,6 +83,10 @@ interface AppEntry {
 const isLimit = (v: unknown): v is number => typeof v === "number" && v > 0;
 
 export const MAX_BODY_BYTES = 16 * 1024;
+/** Largest photo upload body: both files. The meta travels in the `x-photo-meta` header. */
+export const MAX_PHOTO_BODY_BYTES = MAX_PHOTO_BYTES + MAX_THUMB_BYTES;
+/** Longest `x-photo-meta` header, base64url. */
+export const MAX_PHOTO_META_CHARS = 4096;
 const APP_NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
 export interface Deps {
@@ -356,6 +379,112 @@ export function createHandler(deps: Deps) {
     return json(201, { key_id: keyId }, cors);
   }
 
+  /**
+   * `POST /v1/photos`: a photo of a place. The meta (a `photo` submission) is
+   * the base64url `x-photo-meta` header, and the attestation covers its text.
+   * The body is the full size JPEG followed by the thumbnail, with the sizes
+   * and SHA-256 the meta gives. Both files go to the private pending bucket,
+   * and the stored item to the inbox like any other feedback.
+   */
+  async function photo(request: Request, env: Env, app: AppEntry, cors: Record<string, string>): Promise<Response> {
+    if (!env.PHOTOS_PENDING) return json(404, { error: "not_found" }, cors);
+    if (app.kinds && !app.kinds.includes("feedback")) return json(403, { error: "type_not_allowed_for_app_key" }, cors);
+    const declared = Number(request.headers.get("content-length") ?? 0);
+    if (declared > MAX_PHOTO_BODY_BYTES) return json(413, { error: "too_large" }, cors);
+    const header = request.headers.get("x-photo-meta") ?? "";
+    const metaBytes = header.length <= MAX_PHOTO_META_CHARS ? fromBase64(header) : undefined;
+    if (!metaBytes) return json(400, { error: "invalid", details: ["x-photo-meta must be base64url JSON"] }, cors);
+    const text = new TextDecoder().decode(metaBytes);
+    let meta: unknown;
+    try {
+      meta = JSON.parse(text);
+    } catch {
+      return json(400, { error: "invalid", details: ["x-photo-meta must be base64url JSON"] }, cors);
+    }
+    const nowMs = deps.now();
+    const checked = validateSubmission(meta, new Date(nowMs));
+    if (!checked.ok) return json(400, { error: "invalid", details: checked.errors }, cors);
+    if (checked.value.type !== "photo") return json(400, { error: "invalid", details: ["type must be photo"] }, cors);
+    const submission = checked.value as PhotoSubmission;
+
+    let proof: { attested: "app_attest" | "play_integrity"; keyId?: string } | undefined;
+    if (app.requires_attestation) {
+      const result = await attest(request, env, app, text);
+      if ("error" in result) return json(401, { error: result.error }, cors);
+      proof = result;
+    }
+
+    const body = new Uint8Array(await request.arrayBuffer());
+    const { full_bytes, thumb_bytes, full_sha256, thumb_sha256 } = submission.photo;
+    if (body.length > MAX_PHOTO_BODY_BYTES) return json(413, { error: "too_large" }, cors);
+    if (body.length !== full_bytes + thumb_bytes) {
+      return json(400, { error: "invalid", details: ["body length must be photo.full_bytes plus photo.thumb_bytes"] }, cors);
+    }
+    const full = body.subarray(0, full_bytes);
+    const thumb = body.subarray(full_bytes);
+    const size = jpegSize(full);
+    if (!isJpeg(full) || !isJpeg(thumb) || !size || !jpegSize(thumb)) return json(400, { error: "not_jpeg" }, cors);
+    if (hex(await sha256(full)) !== full_sha256 || hex(await sha256(thumb)) !== thumb_sha256) {
+      return json(400, { error: "sha256_mismatch" }, cors);
+    }
+
+    const received = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const day = received.slice(0, 10);
+    const device = await hashDevice(env.DEVICE_SALT, submission.device);
+    const network = networkPrefix(request.headers.get("cf-connecting-ip") ?? "");
+    const origin = network === undefined ? undefined : await hashDevice(env.DEVICE_SALT, `ip:${network}`);
+    const contributor = await hashContributor(env.DEVICE_SALT, app.app, submission.contributor!);
+    const attestKey = proof?.keyId ? `ak_${await saltedHash(env.DEVICE_SALT, `key:${proof.keyId}`)}` : undefined;
+    const limit = await checkAndCount(env.RATE_LIMIT, day, device, app.app, app.daily_limit, nowMs, "feedback", origin, [
+      { prefix: "c", id: contributor, limit: app.contributor_daily_limit ?? CONTRIBUTOR_DAILY_LIMIT },
+      { prefix: "p", id: contributor, limit: PHOTO_CONTRIBUTOR_DAILY_LIMIT },
+      ...(attestKey ? [{ prefix: "k", id: attestKey, limit: ATTEST_KEY_DAILY_LIMIT }] : []),
+    ]);
+    if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
+
+    const ulidText = ulid(nowMs, deps.randomBytes);
+    const id = `fb_${ulidText}`;
+    const photoId = `pho_${ulidText}`;
+    const keys = [`${photoId}/full.jpg`, `${photoId}/thumb.jpg`];
+    const stored = {
+      id,
+      received,
+      app: app.app,
+      type: "photo",
+      place: submission.place,
+      device,
+      ...(origin ? { origin } : {}),
+      contributor,
+      ...(proof ? { attested: proof.attested } : {}),
+      ...(attestKey ? { attest_key: attestKey } : {}),
+      app_version: submission.app_version,
+      consent: true,
+      photo: { full_sha256, full_bytes, thumb_sha256, thumb_bytes, width: size.width, height: size.height },
+    } as StoredFeedback;
+    const customMetadata = { place: submission.place, contributor };
+    try {
+      await env.PHOTOS_PENDING.put(keys[0]!, full, { httpMetadata: { contentType: "image/jpeg" }, customMetadata });
+      await env.PHOTOS_PENDING.put(keys[1]!, thumb, { httpMetadata: { contentType: "image/jpeg" }, customMetadata });
+      await github.createFile(
+        {
+          appId: env.GH_APP_ID,
+          privateKeyPem: env.GH_APP_PRIVATE_KEY,
+          installationId: env.GH_INSTALLATION_ID,
+          repo: env.INBOX_REPO,
+        },
+        env.INBOX_BRANCH ?? "main",
+        `pending/${day}/${id}.json`,
+        `${JSON.stringify(stored, null, 2)}\n`,
+        `Add ${id}`,
+      );
+    } catch {
+      // Files without an inbox item would never be reviewed, so they go too.
+      await env.PHOTOS_PENDING.delete(keys).catch(() => undefined);
+      return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
+    }
+    return json(202, { id: photoId }, cors);
+  }
+
   return async function handle(request: Request, env: Env): Promise<Response> {
     const cors = corsHeaders(request, env);
     const url = new URL(request.url);
@@ -366,13 +495,13 @@ export function createHandler(deps: Deps) {
         headers: {
           ...cors,
           "access-control-allow-methods": "POST, OPTIONS",
-          "access-control-allow-headers": "content-type, x-app-key, x-attest-platform, x-attest-key-id, x-attest-assertion, x-attest-token",
+          "access-control-allow-headers": "content-type, x-app-key, x-attest-platform, x-attest-key-id, x-attest-assertion, x-attest-token, x-photo-meta",
           "access-control-max-age": "86400",
         },
       });
     }
     const route = url.pathname;
-    if (route !== "/v1/feedback" && route !== "/v1/attest/challenge" && route !== "/v1/attest/register") {
+    if (route !== "/v1/feedback" && route !== "/v1/photos" && route !== "/v1/attest/challenge" && route !== "/v1/attest/register") {
       return json(404, { error: "not_found" }, cors);
     }
     if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
@@ -386,6 +515,7 @@ export function createHandler(deps: Deps) {
     const app = apps.get(request.headers.get("x-app-key") ?? "");
     if (!app) return json(401, { error: "invalid_app_key" }, cors);
 
+    if (route === "/v1/photos") return photo(request, env, app, cors);
     const declared = Number(request.headers.get("content-length") ?? 0);
     if (declared > MAX_BODY_BYTES) return json(413, { error: "too_large" }, cors);
     if (route === "/v1/attest/challenge") return challenge(env, app, cors);
@@ -411,6 +541,7 @@ export function createHandler(deps: Deps) {
     const origin = network === undefined ? undefined : await hashDevice(env.DEVICE_SALT, `ip:${network}`);
 
     const submission = checked.value;
+    if (submission.type === "photo") return json(400, { error: "invalid", details: ["photos are sent to /v1/photos"] }, cors);
     const isOwner = isOwnerSubmission(submission);
     const kind: SubmissionKind = isOwner ? "owner" : "feedback";
     if (app.kinds && !app.kinds.includes(kind)) return json(403, { error: "type_not_allowed_for_app_key" }, cors);
@@ -429,7 +560,7 @@ export function createHandler(deps: Deps) {
       if (feedback.contributor !== undefined) contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
       else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
       if (proof?.keyId) attestKey = `ak_${await saltedHash(env.DEVICE_SALT, `key:${proof.keyId}`)}`;
-      if (contributor === undefined && ["review", "review_report", "fee"].includes(feedback.type)) {
+      if (contributor === undefined && ["review", "review_report", "fee", "photo_report", "photo_erasure"].includes(feedback.type)) {
         return json(400, { error: "contributor_required" }, cors);
       }
       if (feedback.type === "review" && app.requires_visited_nearby && feedback.review.visited_nearby !== true) {
@@ -499,6 +630,7 @@ export function createHandler(deps: Deps) {
       ...("check" in rest ? { check: rest.check } : {}),
       ...("review_report" in rest ? { review_report: rest.review_report } : {}),
       ...("fee" in rest ? { fee: rest.fee } : {}),
+      ...("photo_report" in rest ? { photo_report: rest.photo_report } : {}),
     } as StoredFeedback;
 
     try {
