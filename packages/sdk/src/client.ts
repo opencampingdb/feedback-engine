@@ -1,6 +1,7 @@
 import type {
   AcceptedResponse,
   CheckBody,
+  FeeBody,
   FeedbackSubmission,
   LatLon,
   OwnerClaimResponse,
@@ -51,7 +52,7 @@ export interface FeedbackClientOptions {
   storagePrefix?: string;
   /**
    * Proves the install to an intake whose app key requires attestation.
-   * Called each time a report, review, check or review report is sent, with
+   * Called each time a report, review, check, review report or fee is sent, with
    * the exact body text and its SHA-256 (lower case hex). Return the
    * attestation headers: on iOS `x-attest-platform: ios`, `x-attest-key-id`
    * and `x-attest-assertion` (an App Attest assertion over the body's
@@ -85,6 +86,14 @@ export interface ReviewInput {
   place: string;
   review: ReviewBody;
   /** The signed-in traveller's opaque account id (a keyed hash, never a name or email). */
+  contributor?: string;
+  consent: boolean;
+}
+
+export interface FeeInput {
+  place: string;
+  fee: FeeBody;
+  /** The signed-in traveller's opaque account id, as for a review. */
   contributor?: string;
   consent: boolean;
 }
@@ -144,6 +153,8 @@ export interface FeedbackClient {
   report(input: ReportInput): Promise<SubmitResult>;
   review(input: ReviewInput): Promise<SubmitResult>;
   check(input: CheckInput): Promise<SubmitResult>;
+  /** Reports what the traveller paid per night. Queued and retried like a review. */
+  fee(input: FeeInput): Promise<SubmitResult>;
   /** Reports a published review. Queued and retried like the others. */
   reportReview(input: ReviewReportInput): Promise<SubmitResult>;
   /**
@@ -397,7 +408,7 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
     if (input.consent !== true) throw new ConsentRequiredError();
     const localId = await serial(async () => {
       const body = { ...input, type, device: await device(), app_version: appVersion, consent: true };
-      const checked = validateSubmission(body);
+      const checked = validateSubmission(body, new Date(now()));
       if (!checked.ok) throw new FeedbackValidationError(checked.errors);
       const queue = await readQueue();
       const item: QueueItem = {
@@ -497,6 +508,7 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
     report: (input) => submit({ ...input }, "report"),
     review: (input) => submit({ ...input }, "review"),
     check: (input) => submit({ ...input }, "check"),
+    fee: (input) => submit({ ...input }, "fee"),
     reportReview: ({ place, review, reason, contributor, consent }) =>
       submit(
         { place, review_report: { review, reason }, ...(contributor !== undefined ? { contributor } : {}), consent },

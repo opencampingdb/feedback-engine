@@ -135,6 +135,39 @@ describe("intake", () => {
     expect(JSON.stringify(stored)).not.toContain("acct_3f9a8b7c6d5e4f30");
   });
 
+  it("stores a fee with the hashed contributor", async () => {
+    const fee = { ...review, type: "fee", review: undefined, fee: { amount: 32.5, site: "powered", paid: "2026-10" } };
+    const res = await handle(post(fee), env());
+    expect(res.status).toBe(202);
+    const { id } = (await res.json()) as { id: string };
+    const stored = decodeContent(gh.calls.find((c) => c.method === "PUT")!);
+    expect(stored).toEqual({
+      id,
+      received: "2026-10-30T12:00:00Z",
+      app: "example-app",
+      type: "fee",
+      place: PLACE,
+      device: await hashDevice("pepper", DEVICE),
+      contributor: await hashContributor("pepper", "example-app", "acct_3f9a8b7c6d5e4f30"),
+      app_version: "1.0.0",
+      consent: true,
+      fee: { amount: 32.5, site: "powered", paid: "2026-10" },
+    });
+  });
+
+  it("refuses a fee without a contributor", async () => {
+    const { contributor: _, review: __, ...rest } = review;
+    const res = await handle(post({ ...rest, type: "fee", fee: { amount: 20, site: "unpowered", paid: "2026-10" } }), env());
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "contributor_required" });
+  });
+
+  it("checks a fee's month against the intake's clock", async () => {
+    const res = await handle(post({ ...review, type: "fee", review: undefined, fee: { amount: 20, site: "cabin", paid: "2026-12" } }), env());
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "invalid", details: ["fee.paid must not be in the future"] });
+  });
+
   it("asks for an installation token limited to the inbox and contents: write", async () => {
     await handle(post(review), env());
     const tokenCall = gh.calls.find((c) => c.url.endsWith("/access_tokens"))!;

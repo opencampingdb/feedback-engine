@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { StoredFeedback } from "@opencampingdb/feedback";
 import { applyEdit, applyHeldReview, applyRules, ratingOf, REPORTS_TO_HIDE, type RulesInput } from "../src/rules.js";
-import type { Place, Review } from "../src/types.js";
+import type { Fee, Place, Review } from "../src/types.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const OTHER = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZB";
@@ -62,6 +62,19 @@ const line = (n: number, who: string, stars: number, extra: Partial<Review> = {}
   contributor: ctr(who),
   ...extra,
 });
+const fee = (day: number, who: string, amount: number, site = "powered", paid = "2026-06", placeId = PLACE): StoredFeedback =>
+  ({ ...base(day, who, placeId), contributor: ctr(who), type: "fee", fee: { amount, site, paid } }) as StoredFeedback;
+const feeLine = (n: number, who: string, amount: number, extra: Partial<Fee> = {}): Fee => ({
+  id: `fee_01JA00000000000000000000${String(n).padStart(2, "0")}`,
+  place: PLACE,
+  amount,
+  site: "powered",
+  paid: "2026-01",
+  created: "2026-01-05T00:00:00Z",
+  app: "example-app",
+  contributor: ctr(who),
+  ...extra,
+});
 /** Stored items as `applied/` holds them, with the outcome a run gave them. */
 const applied = (item: StoredFeedback, result = "applied") => ({ ...item, outcome: { result, reason: "", run: at(0) } }) as unknown as StoredFeedback;
 
@@ -72,6 +85,7 @@ function run(
     history?: StoredFeedback[];
     places?: Place[];
     reviews?: Review[];
+    fees?: Fee[];
     blocked?: string[];
     reviewers?: string[];
   } = {},
@@ -83,6 +97,7 @@ function run(
     history: opts.history ?? [],
     places,
     reviews: (id) => (opts.reviews ?? []).filter((r) => r.place === id),
+    fees: (id) => (opts.fees ?? []).filter((f) => f.place === id),
     kinds: new Map([
       ["campground", "overnight"],
       ["free_camp", "overnight"],
@@ -559,6 +574,82 @@ describe("reviews", () => {
     expect(held?.lines.map((l) => l.id)).toEqual([line(2, "kim", 3).id, line(3, "sam", 1).id]);
     expect(held?.rating).toEqual({ count: 2, mean: 2 });
     expect(applyHeldReview([line(3, "sam", 1)], line(3, "sam", 1))).toBeUndefined();
+  });
+});
+
+describe("fees", () => {
+  it("publishes a fee at once, even from a new contributor, and leaves the record alone", () => {
+    const f = fee(0, "sam", 32.5, "unpowered", "2026-06");
+    const existing = [feeLine(1, "kim", 40)];
+    const out = run([f], { fees: existing });
+    expect(out.outcome(f)).toBe("applied");
+    expect(out.fees.get(PLACE)).toEqual([
+      ...existing,
+      {
+        id: `fee_${f.id.slice(3)}`,
+        place: PLACE,
+        amount: 32.5,
+        site: "unpowered",
+        paid: "2026-06",
+        created: f.received,
+        app: "example-app",
+        contributor: ctr("sam"),
+      },
+    ]);
+    expect(out.after()).toBeUndefined();
+    expect(out.edits).toEqual([]);
+    expect(out.changes).toEqual([{ place: PLACE, summary: "unpowered fee of $32.50 a night paid 2026-06", automatic: true, feedback: [f.id] }]);
+  });
+
+  it("keeps one fee per contributor per site type, the newer replacing the older", () => {
+    const a = fee(0, "sam", 45, "powered");
+    const b = fee(0, "sam", 120, "cabin");
+    const out = run([a, b], { fees: [feeLine(1, "sam", 38), feeLine(2, "sam", 30, { site: "unpowered" }), feeLine(3, "kim", 40)] });
+    expect(out.outcome(a)).toBe("applied");
+    expect(out.decisions[0]?.reason).toMatch(/replacing/);
+    const lines = out.fees.get(PLACE)!;
+    expect(lines.map((l) => [l.contributor, l.site, l.amount])).toEqual([
+      [ctr("sam"), "unpowered", 30],
+      [ctr("kim"), "powered", 40],
+      [ctr("sam"), "powered", 45],
+      [ctr("sam"), "cabin", 120],
+    ]);
+    expect(lines.map((l) => l.id)).toEqual([...lines.map((l) => l.id)].sort());
+  });
+
+  it("lets the later of two fees in one run win", () => {
+    const first = fee(0, "sam", 30);
+    const second = fee(1, "sam", 35);
+    const out = run([second, first], { now: 2 });
+    expect(out.fees.get(PLACE)?.map((l) => l.amount)).toEqual([35]);
+  });
+
+  it("refuses fees from a blocked contributor or without one", () => {
+    const blockedFee = fee(0, "spammer", 10);
+    const { contributor: _, ...anonymous } = fee(0, "sam", 20) as StoredFeedback & { contributor: string };
+    const out = run([blockedFee, anonymous as StoredFeedback], { blocked: [ctr("spammer")] });
+    expect(out.decisions.map((d) => [d.outcome, d.reason])).toEqual([
+      ["refused", "the contributor is blocked"],
+      ["refused", "fee has no contributor"],
+    ]);
+    expect(out.fees.size).toBe(0);
+  });
+
+  it("follows a merged place and refuses a place not in the data", () => {
+    const tombstone = place({ id: OTHER, status: "merged", merged_into: PLACE });
+    const moved = fee(0, "sam", 25, "powered", "2026-06", OTHER);
+    const missing = fee(0, "kim", 25, "powered", "2026-06", "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZC");
+    const out = run([moved, missing], { places: [place(), tombstone] });
+    expect(out.outcome(moved)).toBe("applied");
+    expect(out.fees.get(PLACE)?.[0]?.place).toBe(PLACE);
+    expect(out.outcome(missing)).toBe("refused");
+  });
+
+  it("does not add the same fee twice", () => {
+    const f = fee(0, "sam", 25);
+    const out = run([f], { fees: [{ ...feeLine(1, "sam", 25), id: `fee_${f.id.slice(3)}` }] });
+    expect(out.outcome(f)).toBe("applied");
+    expect(out.fees.size).toBe(0);
   });
 });
 

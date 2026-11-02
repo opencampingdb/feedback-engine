@@ -6,7 +6,7 @@
  * ensure_ascii=False)` for review lines.
  */
 
-import type { Place, Review } from "./types.js";
+import type { Fee, Place, Review } from "./types.js";
 
 /** Paths in a place record whose numbers are floats in Python, so 4 is written 4.0. */
 const PLACE_FLOATS = new Set(["location.lat", "location.lon", "rating.mean"]);
@@ -54,7 +54,16 @@ export function dumpPlace(place: Place): string {
 
 /** Canonical one-line text of a review, without the newline. */
 export function dumpReviewLine(review: Review): string {
-  const sorted = Object.fromEntries(Object.entries(review).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  return dumpSortedLine(review);
+}
+
+/** Canonical one-line text of a fee, without the newline. */
+export function dumpFeeLine(fee: Fee): string {
+  return dumpSortedLine(fee);
+}
+
+function dumpSortedLine(value: Review | Fee): string {
+  const sorted = Object.fromEntries(Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
   return JSON.stringify(sorted);
 }
 
@@ -82,4 +91,10 @@ export function roundCoord(value: number): number {
 export function reviewPath(placeId: string): string {
   checkPlaceId(placeId);
   return `reviews/${placeId}.ndjson`;
+}
+
+/** `fees/<place id>.ndjson`. Throws for an id that is not `ocdb_<ulid>`. */
+export function feePath(placeId: string): string {
+  checkPlaceId(placeId);
+  return `fees/${placeId}.ndjson`;
 }

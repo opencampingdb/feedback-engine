@@ -3,7 +3,7 @@
  * (`POST /v1/feedback`), matching SPEC.md "Feedback submission".
  */
 
-export type FeedbackType = "report" | "review" | "check" | "review_report";
+export type FeedbackType = "report" | "review" | "check" | "review_report" | "fee";
 export type OwnerType = "owner_claim" | "owner_listing" | "owner_update";
 
 export type ReportKind =
@@ -111,6 +111,18 @@ export interface CheckBody {
   still_there: boolean;
 }
 
+/** The kind of site a reported fee was for. */
+export type FeeSite = "unpowered" | "powered" | "cabin";
+
+/** What a traveller paid for one night at a place. */
+export interface FeeBody {
+  /** Australian dollars per night, more than 0 and at most 1,000, with at most 2 decimal places. */
+  amount: number;
+  site: FeeSite;
+  /** Month it was paid, `YYYY-MM`. Not in the future and not more than 24 months ago. */
+  paid: string;
+}
+
 interface SubmissionBase {
   /** Place id (`ocdb_<ulid>`), or null for a new place. */
   place: string | null;
@@ -120,9 +132,9 @@ interface SubmissionBase {
   device: string;
   /**
    * Opaque id of the traveller's account: a keyed hash made by the app, never
-   * a name or email. 16 to 128 characters of `A-Z a-z 0-9 _ -`. Reviews and
-   * review reports need it unless the app key proves the install with App
-   * Attest. The intake hashes it again (`ctr_` and 16 hex) before storage.
+   * a name or email. 16 to 128 characters of `A-Z a-z 0-9 _ -`. Reviews,
+   * review reports and fees need it unless the app key proves the install
+   * with App Attest. The intake hashes it again (`ctr_` and 16 hex) before storage.
    */
   contributor?: string;
   app_version: string;
@@ -145,6 +157,13 @@ export interface CheckSubmission extends SubmissionBase {
   type: "check";
   place: string;
   check: CheckBody;
+}
+
+/** What a traveller paid to stay at a place. */
+export interface FeeSubmission extends SubmissionBase {
+  type: "fee";
+  place: string;
+  fee: FeeBody;
 }
 
 /** A traveller's report of a published review. `place` is the review's place. */
@@ -240,7 +259,12 @@ export interface OwnerUpdate {
 export type OwnerSubmission = OwnerClaimSubmission | OwnerListingSubmission | OwnerUpdateSubmission;
 
 /** The JSON body an app sends to the intake. */
-export type FeedbackSubmission = ReportSubmission | ReviewSubmission | CheckSubmission | ReviewReportSubmission;
+export type FeedbackSubmission =
+  | ReportSubmission
+  | ReviewSubmission
+  | CheckSubmission
+  | ReviewReportSubmission
+  | FeeSubmission;
 
 /** Every body the intake accepts. */
 export type Submission = FeedbackSubmission | OwnerSubmission;

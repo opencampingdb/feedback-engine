@@ -1,6 +1,8 @@
 import { findContactDetails, findContactDetailsInHours } from "./text.js";
 import type {
   CheckBody,
+  FeeBody,
+  FeeSite,
   ReportFactName,
   FactValue,
   FeedbackSubmission,
@@ -18,7 +20,7 @@ import type {
   Submission,
 } from "./types.js";
 
-export const FEEDBACK_TYPES = ["report", "review", "check", "review_report"] as const;
+export const FEEDBACK_TYPES = ["report", "review", "check", "review_report", "fee"] as const;
 export const OWNER_TYPES = ["owner_claim", "owner_listing", "owner_update"] as const;
 const ALL_TYPES: readonly string[] = [...FEEDBACK_TYPES, ...OWNER_TYPES];
 export const REPORT_KINDS: readonly ReportKind[] = [
@@ -36,6 +38,11 @@ export const REVIEW_REPORT_REASONS: readonly ReviewReportReason[] = [
   "fake",
   "personal_details",
 ];
+export const FEE_SITES: readonly FeeSite[] = ["unpowered", "powered", "cabin"];
+/** Highest fee per night, in Australian dollars. */
+export const MAX_FEE_AMOUNT = 1000;
+/** How many months back a fee may have been paid. */
+export const MAX_FEE_AGE_MONTHS = 24;
 /** Shape of a kind code. The list itself is `data/schema/kinds.json`. */
 const KIND_CODE = /^[a-z][a-z_]{1,39}$/;
 
@@ -107,6 +114,7 @@ const TOP_LEVEL_KEYS = new Set([
   "review",
   "check",
   "review_report",
+  "fee",
   "terms_accepted",
   "token",
   "owner",
@@ -256,6 +264,45 @@ function checkReviewReport(value: unknown, errors: string[]): ReviewReportBody |
   return { review: value.review as string, reason: value.reason as ReviewReportReason };
 }
 
+/** Months since year 0, for comparing `YYYY-MM` values. */
+function monthIndex(year: number, month: number): number {
+  return year * 12 + (month - 1);
+}
+
+function checkFee(value: unknown, now: Date, errors: string[]): FeeBody | undefined {
+  if (!isObject(value)) {
+    errors.push("fee must be an object");
+    return undefined;
+  }
+  const { amount, site, paid } = value;
+  if (
+    typeof amount !== "number" ||
+    !Number.isFinite(amount) ||
+    amount <= 0 ||
+    amount > MAX_FEE_AMOUNT ||
+    Math.abs(Math.round(amount * 100) - amount * 100) > 1e-6
+  ) {
+    errors.push(`fee.amount must be more than 0 and at most ${MAX_FEE_AMOUNT} dollars, with at most 2 decimal places`);
+  }
+  if (typeof site !== "string" || !(FEE_SITES as readonly string[]).includes(site)) {
+    errors.push(`fee.site must be one of ${FEE_SITES.join(", ")}`);
+  }
+  const m = typeof paid === "string" ? YEAR_MONTH.exec(paid) : null;
+  if (!m) {
+    errors.push("fee.paid must be YYYY-MM");
+  } else {
+    // The latest month is the one already started somewhere (UTC+14), so a
+    // traveller ahead of UTC can report this month on its first day.
+    const ahead = new Date(now.getTime() + 14 * 3_600_000);
+    const latest = monthIndex(ahead.getUTCFullYear(), ahead.getUTCMonth() + 1);
+    const earliest = monthIndex(now.getUTCFullYear(), now.getUTCMonth() + 1) - MAX_FEE_AGE_MONTHS;
+    const month = monthIndex(Number(m[1]), Number(m[2]));
+    if (month > latest) errors.push("fee.paid must not be in the future");
+    else if (month < earliest) errors.push(`fee.paid must be within the last ${MAX_FEE_AGE_MONTHS} months`);
+  }
+  return { amount: amount as number, site: site as FeeSite, paid: paid as string };
+}
+
 function checkCheck(value: unknown, errors: string[]): CheckBody | undefined {
   if (!isObject(value)) {
     errors.push("check must be an object");
@@ -270,9 +317,9 @@ function checkCheck(value: unknown, errors: string[]): CheckBody | undefined {
 /**
  * Validates an incoming submission against the SPEC schema. On success the
  * returned value holds only the known fields, so anything extra an app sent
- * is never stored.
+ * is never stored. `now` is the clock a fee's `paid` month is checked against.
  */
-export function validateSubmission(input: unknown): ValidationResult {
+export function validateSubmission(input: unknown, now: Date = new Date()): ValidationResult {
   const errors: string[] = [];
   if (!isObject(input)) return { ok: false, errors: ["body must be a JSON object"] };
 
@@ -286,7 +333,7 @@ export function validateSubmission(input: unknown): ValidationResult {
     return { ok: false, errors };
   }
   if ((OWNER_TYPES as readonly string[]).includes(type)) return validateOwner(input, type as OwnerSubmission["type"]);
-  for (const other of ["report", "review", "check", "review_report", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
+  for (const other of ["report", "review", "check", "review_report", "fee", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
     if (other !== type && input[other] !== undefined) errors.push(`${other} is not allowed when type is ${type}`);
   }
 
@@ -341,6 +388,9 @@ export function validateSubmission(input: unknown): ValidationResult {
     } else if (type === "review_report") {
       const reviewReport = checkReviewReport(input.review_report, errors);
       if (reviewReport) value = { ...base, place: place as string, type: "review_report", review_report: reviewReport };
+    } else if (type === "fee") {
+      const fee = checkFee(input.fee, now, errors);
+      if (fee) value = { ...base, place: place as string, type: "fee", fee };
     } else {
       const check = checkCheck(input.check, errors);
       if (check) value = { ...base, place: place as string, type: "check", check };
@@ -462,7 +512,7 @@ const OWNER_FIELDS: Record<OwnerSubmission["type"], string[]> = {
 /** Validates the three owner submission types (SPEC "Owners"). */
 function validateOwner(input: Record<string, unknown>, type: OwnerSubmission["type"]): ValidationResult {
   const errors: string[] = [];
-  for (const key of ["report", "review", "check", "review_report", "contributor", "token", "owner", "claim", "listing", "update", "location"]) {
+  for (const key of ["report", "review", "check", "review_report", "fee", "contributor", "token", "owner", "claim", "listing", "update", "location"]) {
     if (input[key] !== undefined && !OWNER_FIELDS[type].includes(key)) errors.push(`${key} is not allowed when type is ${type}`);
   }
   if (input.terms_accepted !== true) errors.push("terms_accepted must be true");

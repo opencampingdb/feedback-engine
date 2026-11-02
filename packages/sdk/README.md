@@ -1,6 +1,6 @@
 # @opencampingdb/feedback
 
-Client for sending reports, reviews and checks about places in Open Camping DB. Works in React Native, Expo and the browser, with no dependencies.
+Client for sending reports, reviews, checks and fees about places in Open Camping DB. Works in React Native, Expo and the browser, with no dependencies.
 
 ```ts
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -14,6 +14,6 @@ await feedback.review({ place, review: { stars: 5, text: "Quiet and shady", visi
 - A random per-install device id is made once and kept in storage.
 - Nothing is sent unless `consent: true` is passed. Show `CONSENT_TEXT` first.
 - Show `ATTRIBUTION` wherever the data appears.
-- Reviews and `reportReview()` carry the signed-in traveller's opaque `contributor` id. Pass an `attest` function when the app key requires App Attest or Play Integrity; it gets the exact body and its SHA-256 at send time. A refused attestation keeps the item queued and calls `onAttestationRejected`.
+- Reviews, fees and `reportReview()` carry the signed-in traveller's opaque `contributor` id. Pass an `attest` function when the app key requires App Attest or Play Integrity; it gets the exact body and its SHA-256 at send time. A refused attestation keeps the item queued and calls `onAttestationRejected`.
 
 The full guide is [docs/integration.md](../../docs/integration.md). Licence: Apache 2.0.
