@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findContactDetails, stripContactDetails, validateSubmission } from "../src/index.js";
+import { BRANDS, MAX_NAME_LENGTH, SITE_FEATURES, findContactDetails, stripContactDetails, validateSubmission } from "../src/index.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const base = {
@@ -166,5 +166,14 @@ describe("site features and the name, description and kind reports", () => {
     expect(report({ kind: "kind" }).ok).toBe(false);
     expect(report({ kind: "kind", place_kind: "Caravan Park" }).ok).toBe(false);
     expect(report({ kind: "closed", place_kind: "caravan_park" }).ok).toBe(false);
+  });
+});
+
+describe("exports for apps", () => {
+  it("exports the site features, brands and name length from the package index", () => {
+    expect(SITE_FEATURES).toHaveLength(44);
+    expect(SITE_FEATURES).toContain("campfires");
+    expect(BRANDS).toContain("big4");
+    expect(MAX_NAME_LENGTH).toBe(300);
   });
 });
