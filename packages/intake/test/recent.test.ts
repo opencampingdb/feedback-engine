@@ -359,12 +359,18 @@ describe("recent places", () => {
   });
 
   it("leaves out new places that fail the text checks or come without attestation, which still reach the inbox", async () => {
-    await add({ note: "Call 0412 345 678 for the gate" });
-    await add({ device: otherDevice(1), note: "Bloody shit road in" });
+    await add({ note: "Bloody shit road in" });
+    await add({ device: otherDevice(1), note: "Nice spot, click here for cheap gear" });
     const unattested = env(store, { requires_attestation: false });
     expect((await handle(feedback(newPlace({ device: otherDevice(2), contributor: "acct_another_00000001" })), unattested)).status).toBe(202);
     expect(services.writes).toHaveLength(3);
     expect(await list()).toEqual([]);
+  });
+
+  it("lists a new place whose note had a contact detail, which the inbox strips", async () => {
+    const id = await add({ note: "Call 0412 345 678 for the gate" });
+    expect((await list()).map((p) => p.id)).toEqual([id]);
+    expect(JSON.stringify(services.writes[0])).not.toContain("0412");
   });
 
   it("limits the list to a bounding box", async () => {

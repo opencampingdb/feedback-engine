@@ -910,7 +910,8 @@ export function createHandler(deps: Deps) {
 
 /**
  * Keeps the recent places store up to date with an accepted item: a new place
- * from an attested install whose note passes the text checks goes in, and a
+ * from an attested install whose note passes the text checks once its contact
+ * details are stripped (as the inbox stores it) goes in, and a
  * check, removal report or withdraw on a stored place works its standing out again.
  */
 async function updateRecent(
@@ -929,7 +930,7 @@ async function updateRecent(
   const { id, received, device, contributor, attestKey, proof, target } = item;
   if (submission.type === "report" && submission.report.kind === "new_place") {
     const { note, place_kind, name } = submission.report;
-    if (!proof || !contributor || !submission.location || firstProblem(note === undefined ? undefined : tidyText(note))) return;
+    if (!proof || !contributor || !submission.location || firstProblem(note === undefined ? undefined : tidyText(stripContactDetails(note)))) return;
     const place: StoredPlace = {
       id: newPlaceId(id),
       location: submission.location,
