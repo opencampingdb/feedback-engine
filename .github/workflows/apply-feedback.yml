@@ -16,6 +16,9 @@
 #
 # Both tokens come from the deployment's bot GitHub App, never GITHUB_TOKEN,
 # so the data PRs trigger the data repository's CI.
+#
+# With intake-url and the places-token secret, each run also keeps the
+# intake's recent places store in step with the data on the base branch.
 
 name: Apply feedback
 
@@ -50,6 +53,15 @@ on:
         description: Licence id written on new photo lines
         type: string
         default: CC-BY-4.0
+      intake-url:
+        description: >-
+          Base URL of the intake that serves recent new places, for example
+          https://intake.example.org. Set it with the places-token secret and
+          each run takes places now in the data on the base branch, and
+          withdrawn ones, out of the intake's recent places store, and sends
+          it the block list.
+        type: string
+        default: ""
     secrets:
       app-client-id:
         description: Client ID of the bot GitHub App
@@ -57,6 +69,9 @@ on:
       app-private-key:
         description: Private key of the bot GitHub App
         required: true
+      places-token:
+        description: The intake's PLACES_TOKEN. Needed only with intake-url.
+        required: false
 
 permissions:
   contents: read
@@ -122,6 +137,19 @@ jobs:
           ref: ${{ inputs.data-base-branch }}
           path: data-review
           fetch-depth: 0
+          token: ${{ steps.data-token.outputs.token }}
+
+      - name: Check out data main for the recent places store
+        if: inputs.intake-url != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
+          ref: ${{ inputs.data-base-branch }}
+          path: data-main
+          sparse-checkout: |
+            places
+            moderation
+          persist-credentials: false
           token: ${{ steps.data-token.outputs.token }}
 
       - name: Check out Open Camping DB place records
@@ -210,9 +238,12 @@ jobs:
           APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
           PLACES_ARGS: ${{ inputs.places-repository != '' && '--places places' || '' }}
           PHOTO_LICENCE: ${{ inputs.photo-licence }}
+          INTAKE_URL: ${{ inputs.intake-url }}
+          PLACES_TOKEN: ${{ secrets.places-token }}
         run: >
           node engine/packages/apply/dist/cli.js
           $PLACES_ARGS
+          ${INTAKE_URL:+--main data-main --intake "$INTAKE_URL"}
           --photo-licence "$PHOTO_LICENCE"
           --inbox inbox
           --data data-auto
