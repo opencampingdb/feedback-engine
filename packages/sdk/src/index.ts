@@ -68,3 +68,5 @@ export type { ValidationResult } from "./validate.js";
 export { sha256Hex, sha256HexBytes } from "./sha256.js";
 export { REMOVED_MARKER, findContactDetails, findContactDetailsInHours, stripContactDetails } from "./text.js";
 export type { ContactDetailKind } from "./text.js";
+export { NEW_PLACE_CHECKS_TO_CONFIRM, NEW_PLACE_REPORTS_TO_HIDE, NEW_PLACE_REPORTS_TO_HIDE_CONFIRMED, newPlaceStanding } from "./standing.js";
+export type { NewPlaceCheck, NewPlaceReport, NewPlaceStanding, NewPlaceStandingInput } from "./standing.js";
