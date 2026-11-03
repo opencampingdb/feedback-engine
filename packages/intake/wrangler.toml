@@ -7,6 +7,7 @@
 #   GH_INSTALLATION_ID  installation id of the App on the inbox repository
 #   PHOTO_PASS_SECRET   signs photo passes, the same secret as the photo server's. Only for /v1/photos/pass
 #   GOOGLE_SERVICE_ACCOUNT  Google service account key file (JSON), only for app keys with "android"
+#   PLACES_TOKEN        lets the apply run remove places from RECENT_PLACES. Only with RECENT_PLACES
 
 name = "ocdb-feedback-intake"
 main = "src/index.ts"
@@ -30,6 +31,11 @@ id = "REPLACE_ME_KV_NAMESPACE_ID"
 [[kv_namespaces]]
 binding = "ATTEST"
 id = "REPLACE_ME_ATTEST_KV_NAMESPACE_ID"
+
+# New places served by GET /v1/places/recent until the apply run writes them into the data.
+[[kv_namespaces]]
+binding = "RECENT_PLACES"
+id = "REPLACE_ME_RECENT_PLACES_KV_NAMESPACE_ID"
 
 # Only when this intake is an app's own photo service (docs/photos.md): uncomment
 # and fill in. The pending bucket holds uploads until their record is merged. Give

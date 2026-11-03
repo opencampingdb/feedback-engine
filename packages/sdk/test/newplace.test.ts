@@ -72,6 +72,57 @@ describe("contact facts on a new place", () => {
   });
 });
 
+describe("the name of a new place", () => {
+  const newPlace = (report: Record<string, unknown>) =>
+    validateSubmission({ ...base, type: "report", place: null, location: { lat: -36.8, lon: 144.5 }, report: { kind: "new_place", ...report } });
+
+  it("carries the name in its own field, apart from the note", () => {
+    expect(newPlace({ name: "  Gravel Pit Rest Area ", note: "Room for three vans" })).toMatchObject({
+      ok: true,
+      value: { report: { kind: "new_place", name: "Gravel Pit Rest Area", note: "Room for three vans" } },
+    });
+    expect(newPlace({}).ok).toBe(true);
+  });
+
+  it("refuses an empty or overlong name", () => {
+    const errors = ["report.name must be the name, 1 to 300 characters"];
+    expect(newPlace({ name: "   " })).toEqual({ ok: false, errors });
+    expect(newPlace({ name: "x".repeat(301) })).toEqual({ ok: false, errors });
+    expect(newPlace({ name: 7 })).toEqual({ ok: false, errors });
+  });
+
+  it("refuses a name holding contact details", () => {
+    expect(newPlace({ name: "Camp, ring 0412 345 678" })).toEqual({
+      ok: false,
+      errors: ["report.name must not hold an email address, phone number or link"],
+    });
+  });
+
+  it("refuses a name that fails the text checks", () => {
+    expect(newPlace({ name: "Shit Creek Camp" })).toEqual({ ok: false, errors: ["report.name must pass the text checks (rude)"] });
+  });
+
+  it("refuses a name on any other report", () => {
+    const r = validateSubmission({ ...base, type: "report", place: PLACE, report: { kind: "closed", name: "Gravel Pit" } });
+    expect(r).toEqual({ ok: false, errors: ["report.name is only allowed when report.kind is new_place"] });
+  });
+});
+
+describe("nearby on a check", () => {
+  const check = (body: Record<string, unknown>) =>
+    validateSubmission({ ...base, type: "check", place: PLACE, check: { visited: "2026-11-03", still_there: true, ...body } });
+
+  it("carries nearby when the app saw the phone near the place", () => {
+    expect(check({ nearby: true })).toMatchObject({ ok: true, value: { check: { visited: "2026-11-03", still_there: true, nearby: true } } });
+  });
+
+  it("leaves nearby out otherwise", () => {
+    const r = check({});
+    expect(r.ok && r.value.type === "check" && "nearby" in r.value.check).toBe(false);
+    expect(check({ nearby: false })).toEqual({ ok: false, errors: ["check.nearby must be true, or left out"] });
+  });
+});
+
 describe("withdrawing a new place", () => {
   it("accepts a withdraw naming the new place", () => {
     const r = validateSubmission({ ...base, type: "withdraw", place: PLACE });
