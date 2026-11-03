@@ -1,4 +1,5 @@
 import { findContactDetails, findContactDetailsInHours } from "./text.js";
+import { textProblem, tidyName } from "./tidy.js";
 import type {
   BrandValue,
   CheckBody,
@@ -351,6 +352,13 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
   }
   const note = checkText(value.note, "report.note", errors, false);
   if (note !== undefined) out.note = note;
+  if (value.name !== undefined) {
+    if (kind !== "new_place") errors.push("report.name is only allowed when report.kind is new_place");
+    else {
+      const name = checkNewPlaceName(value.name, errors);
+      if (name !== undefined) out.name = name;
+    }
+  }
   if (kind === "kind" && value.place_kind === undefined) {
     errors.push("report.place_kind is required when report.kind is kind");
   }
@@ -375,6 +383,24 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
     }
   }
   return out;
+}
+
+/** A new place's name, checked as a `name` report's value is, then with the text checks. */
+function checkNewPlaceName(value: unknown, errors: string[]): string | undefined {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > MAX_NAME_LENGTH) {
+    errors.push(`report.name must be the name, 1 to ${MAX_NAME_LENGTH} characters`);
+    return undefined;
+  }
+  if (findContactDetails(value).length > 0) {
+    errors.push("report.name must not hold an email address, phone number or link");
+    return undefined;
+  }
+  const problem = textProblem(tidyName(value));
+  if (problem) {
+    errors.push(`report.name must pass the text checks (${problem})`);
+    return undefined;
+  }
+  return value.trim();
 }
 
 const CONTACT_FACTS = ["phone", "website", "email"] as const;
@@ -515,10 +541,11 @@ function checkCheck(value: unknown, errors: string[]): CheckBody | undefined {
     errors.push("check must be an object");
     return undefined;
   }
-  const { visited, still_there } = value;
+  const { visited, still_there, nearby } = value;
   if (typeof visited !== "string" || !isValidDate(visited)) errors.push("check.visited must be YYYY-MM-DD");
   if (typeof still_there !== "boolean") errors.push("check.still_there must be true or false");
-  return { visited: visited as string, still_there: still_there as boolean };
+  if (nearby !== undefined && nearby !== true) errors.push("check.nearby must be true, or left out");
+  return { visited: visited as string, still_there: still_there as boolean, ...(nearby === true ? { nearby: true as const } : {}) };
 }
 
 /**

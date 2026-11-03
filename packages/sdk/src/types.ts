@@ -175,6 +175,12 @@ export interface ReportBody {
   /** Free text, up to 2,000 characters. */
   note?: string;
   /**
+   * On `new_place` only: the place's name, 1 to 300 characters, checked as a
+   * `name` report's value is and with the text checks. The note keeps the
+   * traveller's other words.
+   */
+  name?: string;
+  /**
    * On `new_place`: the kind the user picked, a code from
    * `data/schema/kinds.json`. Apply falls back to `campground` for a code the
    * data does not know. Required on `kind`: the kind the place should be.
@@ -271,6 +277,11 @@ export interface CheckBody {
   /** Day of the visit, `YYYY-MM-DD`. */
   visited: string;
   still_there: boolean;
+  /**
+   * The app saw the phone near the place at the time. Only `true` is sent;
+   * leave it out otherwise. The location itself is never sent.
+   */
+  nearby?: true;
 }
 
 /** The kind of site a reported fee was for. */
