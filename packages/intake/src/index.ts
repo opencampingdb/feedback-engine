@@ -11,6 +11,11 @@ import {
   type SafeSearchRatings,
   type StoredFeedback,
   type StoredOwnerSubmission,
+  firstProblem,
+  isPlaceId,
+  newPlaceId,
+  tidyName,
+  tidyText,
 } from "@opencampingdb/feedback";
 import { verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
 import { fromBase64, hex, sha256, toBase64Url } from "./bytes.js";
@@ -26,6 +31,23 @@ import {
   PHOTO_CONTRIBUTOR_DAILY_LIMIT,
   type KVLike,
 } from "./ratelimit.js";
+import {
+  addEvidence,
+  addPlace,
+  getPlace,
+  listPlaces,
+  MAX_BLOCKED_CONTRIBUTORS,
+  MAX_REMOVE_IDS,
+  NEW_PLACE_DAILY_LIMIT,
+  parseBbox,
+  RECENT_CACHE_SECONDS,
+  removePlaces,
+  setBlocked,
+  snapBbox,
+  WITHDRAW_WINDOW_MS,
+  type ListableKV,
+  type StoredPlace,
+} from "./recent.js";
 import { ulid } from "./ulid.js";
 
 /** The part of an R2 bucket binding the photo upload uses. */
@@ -72,6 +94,13 @@ export interface Env {
    * adult or violent photos are refused; likely ones wait for a person.
    */
   SAFESEARCH?: string;
+  /**
+   * New places from attested installs, served by `GET /v1/places/recent`
+   * until the apply run has written them into the data.
+   */
+  RECENT_PLACES?: ListableKV;
+  /** Secret. Lets the apply run remove places from RECENT_PLACES (`POST /v1/places/recent/remove`). */
+  PLACES_TOKEN?: string;
 }
 
 /** Key in the photo server's STATE that stops one photo being served. */
@@ -127,6 +156,14 @@ export interface Deps {
   randomBytes?: (n: number) => Uint8Array;
   /** App Attest root certificate (PEM). Apple's by default; tests pass their own. */
   appAttestRoot?: string;
+  /** Edge cache for the recent places list. Workers' default cache in production; none when left out. */
+  cache?: CacheLike;
+}
+
+/** The part of the Workers Cache API the recent list uses. */
+export interface CacheLike {
+  match(request: Request): Promise<Response | undefined>;
+  put(request: Request, response: Response): Promise<void>;
 }
 
 function corsHeaders(request: Request, env: Env): Record<string, string> {
@@ -583,6 +620,92 @@ export function createHandler(deps: Deps) {
     return json(200, { pass, expires: new Date(expires * 1000).toISOString().replace(/\.\d{3}Z$/, "Z") }, cors);
   }
 
+  /**
+   * `GET /v1/places/recent`: new places that are `shown` or `confirmed`,
+   * optionally within `bbox=west,south,east,north` grown out to whole
+   * degrees. Public, like the data, and cached at the edge by that box, so the
+   * store is read at most once per cache period for each box in each location.
+   * The cached copy has no CORS headers; they are added here.
+   */
+  async function recentPlaces(request: Request, env: Env, url: URL, cors: Record<string, string>): Promise<Response> {
+    if (!env.RECENT_PLACES) return json(404, { error: "not_found" }, cors);
+    const box = url.searchParams.get("bbox");
+    const parsed = box === null ? undefined : parseBbox(box);
+    if (box !== null && !parsed) return json(400, { error: "invalid", details: ["bbox must be west,south,east,north in degrees"] }, cors);
+    const bbox = parsed && snapBbox(parsed);
+    const withCors = (response: Response) => {
+      const out = new Response(response.body, response);
+      for (const [name, value] of Object.entries(cors)) out.headers.set(name, value);
+      return out;
+    };
+    // Keyed by the snapped box alone, so other query parameters can't split the cache.
+    const cacheKey = new Request(`${url.origin}${url.pathname}${bbox ? `?bbox=${bbox.join(",")}` : ""}`, { method: "GET" });
+    const hit = await deps.cache?.match(cacheKey);
+    if (hit) return withCors(hit);
+    const places = await listPlaces(env.RECENT_PLACES, new Date(deps.now()).toISOString(), bbox);
+    const response = json(200, { places }, { "cache-control": `public, max-age=${RECENT_CACHE_SECONDS}` });
+    await deps.cache?.put(cacheKey, response.clone());
+    return withCors(response);
+  }
+
+  /**
+   * Reads the body of a call from the apply run, after checking its
+   * `authorization: Bearer <PLACES_TOKEN>`. A Response when the call is refused.
+   */
+  async function placesCall(
+    request: Request,
+    env: Env,
+    cors: Record<string, string>,
+    maxBytes: number,
+  ): Promise<{ kv: ListableKV; body: Record<string, unknown> } | Response> {
+    if (!env.RECENT_PLACES || !env.PLACES_TOKEN) return json(404, { error: "not_found" }, cors);
+    const given = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1] ?? "";
+    // Compared as hashes, so the time taken says nothing about the token.
+    if (hex(await sha256(given)) !== hex(await sha256(env.PLACES_TOKEN))) return json(401, { error: "unauthorised" }, cors);
+    const text = await request.text();
+    if (new TextEncoder().encode(text).length > maxBytes) return json(413, { error: "too_large" }, cors);
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = undefined;
+    }
+    return { kv: env.RECENT_PLACES, body: typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {} };
+  }
+
+  /**
+   * `POST /v1/places/recent/remove`, for the apply run once the places are in
+   * the data: `{ "ids": [...] }` with `authorization: Bearer <PLACES_TOKEN>`.
+   */
+  async function removeRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 4);
+    if (call instanceof Response) return call;
+    const ids = call.body.ids;
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_REMOVE_IDS || !ids.every(isPlaceId)) {
+      return json(400, { error: "invalid", details: [`ids must be 1 to ${MAX_REMOVE_IDS} place ids`] }, cors);
+    }
+    await removePlaces(call.kv, ids as string[], new Date(deps.now()).toISOString());
+    return json(200, { removed: ids.length }, cors);
+  }
+
+  /**
+   * `POST /v1/places/recent/block`, for the apply run: `{ "contributors": [...] }`,
+   * the whole block list as hashed contributor ids, with `authorization: Bearer
+   * <PLACES_TOKEN>`. It replaces the list the intake keeps.
+   */
+  async function blockRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    // Each id is 20 characters, and a little more in JSON.
+    const call = await placesCall(request, env, cors, MAX_BLOCKED_CONTRIBUTORS * 24 + 1024);
+    if (call instanceof Response) return call;
+    const contributors = call.body.contributors;
+    const isHashed = (c: unknown) => typeof c === "string" && /^ctr_[0-9a-f]{16}$/.test(c);
+    if (!Array.isArray(contributors) || contributors.length > MAX_BLOCKED_CONTRIBUTORS || !contributors.every(isHashed)) {
+      return json(400, { error: "invalid", details: [`contributors must be up to ${MAX_BLOCKED_CONTRIBUTORS} hashed contributor ids`] }, cors);
+    }
+    await setBlocked(call.kv, contributors as string[]);
+    return json(200, { blocked: new Set(contributors).size }, cors);
+  }
+
   return async function handle(request: Request, env: Env): Promise<Response> {
     const cors = corsHeaders(request, env);
     const url = new URL(request.url);
@@ -592,13 +715,25 @@ export function createHandler(deps: Deps) {
         status: 204,
         headers: {
           ...cors,
-          "access-control-allow-methods": "POST, OPTIONS",
+          "access-control-allow-methods": "GET, POST, OPTIONS",
           "access-control-allow-headers": "content-type, x-app-key, x-attest-platform, x-attest-key-id, x-attest-assertion, x-attest-token, x-photo-meta",
           "access-control-max-age": "86400",
         },
       });
     }
     const route = url.pathname;
+    if (route === "/v1/places/recent") {
+      if (request.method !== "GET") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "GET, OPTIONS" });
+      return recentPlaces(request, env, url, cors);
+    }
+    if (route === "/v1/places/recent/remove") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return removeRecent(request, env, cors);
+    }
+    if (route === "/v1/places/recent/block") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return blockRecent(request, env, cors);
+    }
     if (
       route !== "/v1/feedback" &&
       route !== "/v1/photos" &&
@@ -658,6 +793,7 @@ export function createHandler(deps: Deps) {
     let proof: { attested: "app_attest" | "play_integrity"; keyId?: string } | undefined;
     let contributor: string | undefined;
     let attestKey: string | undefined;
+    let target: StoredPlace | undefined;
     const extra: { prefix: string; id: string; limit: number }[] = [];
     if (!isOwner) {
       const feedback = submission as FeedbackSubmission;
@@ -669,6 +805,11 @@ export function createHandler(deps: Deps) {
       if (feedback.contributor !== undefined) contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
       else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
       if (proof?.keyId) attestKey = `ak_${await saltedHash(env.DEVICE_SALT, `key:${proof.keyId}`)}`;
+      // A signed-out install attested by Play Integrity has neither. Its new places still need a
+      // contributor to list and block them by, so the hashed install stands in.
+      if (contributor === undefined && proof && feedback.type === "report" && feedback.report.kind === "new_place") {
+        contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
+      }
       if (contributor === undefined && ["review", "review_report", "fee", "photo_report", "photo_erasure"].includes(feedback.type)) {
         return json(400, { error: "contributor_required" }, cors);
       }
@@ -677,6 +818,19 @@ export function createHandler(deps: Deps) {
       }
       if (contributor) extra.push({ prefix: "c", id: contributor, limit: app.contributor_daily_limit ?? CONTRIBUTOR_DAILY_LIMIT });
       if (attestKey) extra.push({ prefix: "k", id: attestKey, limit: ATTEST_KEY_DAILY_LIMIT });
+      if (feedback.type === "report" && feedback.report.kind === "new_place") {
+        extra.push({ prefix: "np", id: contributor ?? device, limit: NEW_PLACE_DAILY_LIMIT });
+      }
+      if (env.RECENT_PLACES && feedback.place !== null && ["check", "report", "withdraw"].includes(feedback.type)) {
+        target = await getPlace(env.RECENT_PLACES, feedback.place).catch(() => undefined);
+      }
+      // A withdraw is checked against the new place when the store has it. Otherwise the apply run checks it.
+      if (feedback.type === "withdraw" && target) {
+        if (target.device !== device || (target.attest_key !== undefined && target.attest_key !== attestKey)) {
+          return json(403, { error: "not_your_place" }, cors);
+        }
+        if (nowMs - Date.parse(target.added) > WITHDRAW_WINDOW_MS) return json(409, { error: "withdraw_window_closed" }, cors);
+      }
     }
     const limit = await checkAndCount(
       env.RATE_LIMIT,
@@ -747,6 +901,12 @@ export function createHandler(deps: Deps) {
     } catch {
       return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
     }
+    // The item is in the inbox already, so a failed store write still reaches the apply run.
+    if (env.RECENT_PLACES) {
+      await updateRecent(env.RECENT_PLACES, submission as FeedbackSubmission, { id, received, device, contributor, attestKey, proof, target }).catch(
+        () => undefined,
+      );
+    }
     // An illegal-content report withholds the photo before a person sees it. The
     // report is in the inbox already, so a failed write here still reaches a person.
     if (stored.type === "photo_report" && stored.photo_report.reason === "illegal" && env.PHOTO_STATE) {
@@ -757,7 +917,59 @@ export function createHandler(deps: Deps) {
   };
 }
 
-const handle = createHandler({ fetch: (input, init) => fetch(input, init), now: () => Date.now() });
+/**
+ * Keeps the recent places store up to date with an accepted item: a new place
+ * from an attested install whose note passes the text checks once its contact
+ * details are stripped (as the inbox stores it) goes in, and a check, removal
+ * report or withdraw on a stored place is added as evidence of its own.
+ */
+async function updateRecent(
+  kv: ListableKV,
+  submission: FeedbackSubmission,
+  item: {
+    id: string;
+    received: string;
+    device: string;
+    contributor: string | undefined;
+    attestKey: string | undefined;
+    proof: { attested: string } | undefined;
+    target: StoredPlace | undefined;
+  },
+): Promise<void> {
+  const { id, received, device, contributor, attestKey, proof, target } = item;
+  if (submission.type === "report" && submission.report.kind === "new_place") {
+    const { note, place_kind, name } = submission.report;
+    if (!proof || !contributor || !submission.location || firstProblem(note === undefined ? undefined : tidyText(stripContactDetails(note)))) return;
+    await addPlace(kv, {
+      id: newPlaceId(id),
+      location: submission.location,
+      kind: place_kind ?? null,
+      name: name === undefined ? null : tidyName(name),
+      added: received,
+      contributor,
+      device,
+      ...(attestKey ? { attest_key: attestKey } : {}),
+    });
+    return;
+  }
+  if (!target) return;
+  if (submission.type === "check") {
+    // A check carries no location: only the app's word that the phone was near the place.
+    const check = { device, stillThere: submission.check.still_there, nearby: submission.check.nearby === true, day: received };
+    await addEvidence(kv, target.id, id, { type: "check", check });
+  } else if (submission.type === "report" && submission.report.kind === "remove" && submission.report.reason) {
+    const report = { device, reason: submission.report.reason, day: received };
+    await addEvidence(kv, target.id, id, { type: "report", report });
+  } else if (submission.type === "withdraw") {
+    await addEvidence(kv, target.id, id, { type: "withdraw", at: received });
+  }
+}
+
+const handle = createHandler({
+  fetch: (input, init) => fetch(input, init),
+  now: () => Date.now(),
+  ...(typeof caches === "undefined" ? {} : { cache: (caches as unknown as { default: CacheLike }).default }),
+});
 
 export default {
   fetch(request: Request, env: Env): Promise<Response> {

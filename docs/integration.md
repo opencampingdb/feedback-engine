@@ -80,7 +80,7 @@ await feedback.report({ place, report: { kind: "closed", note: "Gate chained, si
 await feedback.report({
   place: null,
   location: { lat: -36.851234, lon: 144.551234 },
-  report: { kind: "new_place", note: "Free camp beside the creek" },
+  report: { kind: "new_place", name: "Creek Bend Free Camp", note: "Flat ground beside the creek" },
   consent: true,
 });
 
@@ -93,8 +93,9 @@ await feedback.review({
   consent: true,
 });
 
-// A check: the user was there and the place still exists (or not).
-await feedback.check({ place, check: { visited: "2026-10-30", still_there: true }, consent: true });
+// A check: the user was there and the place still exists (or not). nearby:
+// true when the app saw the phone near the place at the time.
+await feedback.check({ place, check: { visited: "2026-10-30", still_there: true, nearby: true }, consent: true });
 
 // A fee: what the traveller paid per night in Australian dollars, the site
 // type (FEE_SITES: unpowered, powered, cabin) and the month they paid.
@@ -113,8 +114,9 @@ Facts a report may name:
 - `brand`, one of `BRANDS` (`big4`, `discovery`, `nrma` and the other chains and clubs)
 - `access` (`2wd`, `awd`, `4wd`, `unknown`), `entry` (`public`, `customers`, `permit`, `private`), `max_stay` (such as `48h`, `2d`, `1w`), `opening_hours` (with no email address, phone number or link)
 - contacts: `website`, `facebook`, `instagram`, `tiktok` and `x` (https only), `phone`, `phone_2` and `email`
+- `address`, an object (`PlaceAddress`) with a `street` or, for a rural address, a named `place`, and any of `unit`, `housenumber`, `suburb`, `state` (one of `ADDRESS_STATES`: `NSW`, `VIC`, `QLD`, `SA`, `WA`, `TAS`, `NT`, `ACT`) and `postcode` (four digits)
 
-A fact two devices agree on within 90 days is applied. Contact changes (website, phones, email and social pages) are checked by a person, even from one report. `booking_url` comes only from the owner.
+A fact two devices agree on within 90 days is applied. Contact changes (website, phones, email and social pages) and addresses are checked by a person, even from one report. `booking_url` comes only from the owner.
 
 Three more report kinds let a traveller fix what Edit site covers on other apps. Each goes to a person, who accepts or rejects it on the review PR:
 
@@ -124,9 +126,81 @@ await feedback.report({ place, report: { kind: "description", value: "Shady rive
 await feedback.report({ place, report: { kind: "kind", place_kind: "caravan_park" }, consent: true });
 ```
 
-A name is 1 to 300 characters and a description at most 500. Neither may hold an email address, phone number or link. `place_kind` is a code from `data/schema/kinds.json`: an unknown code is refused at the next apply run. Once accepted, the new kind is kept through later OSM syncs.
+A name is 1 to 300 characters and a description at most 500. Neither may hold an email address, phone number or link. A `new_place` report carries the place's name in `report.name`, checked the same way and also refused when `textProblem` finds a problem (`report.name must pass the text checks (rude)`). Keep the name out of the note, which holds the traveller's other words. `name` is refused on every other report kind.
+
+A check's `nearby: true` says the app saw the phone near the place at the time, for example within a few hundred metres when the traveller answered. Only `true` is sent; leave it out otherwise. Like a review's `visited_nearby`, the location itself is never sent. `place_kind` is a code from `data/schema/kinds.json`: an unknown code is refused at the next apply run. Once accepted, the new kind is kept through later OSM syncs.
 
 Ask users not to put names, email addresses or phone numbers in notes or reviews. The intake removes contact details it finds, and reviews that still contain personal details, advertising or offensive language (also when spelled with spaces or symbols) are refused.
+
+**Tidy and check text before sending.** The SDK has the checks for names and notes, so the app can catch a problem while the traveller is still typing:
+
+```ts
+import { firstProblem, tidyName, tidyText } from "@opencampingdb/feedback";
+
+const name = tidyName("LAKE EPPALOCK REST AREA"); // "Lake Eppalock Rest Area"
+const note = tidyText("GREAT SPOT!!!! LOTS OF SHADE"); // "Great spot! Lots of shade"
+const problem = firstProblem(name, note); // "rude", "contact", "spam" or null
+```
+
+`tidyName` brings a shouted or all lower case name to title case and keeps states and road terms such as `NSW` and `4WD` in capitals. `tidyText` turns shouted text into sentences. Both collapse spacing and runs such as `!!!!` or `sooooo`. `textProblem` checks one text and `firstProblem` several, after tidying: `rude` for rude words and slurs, however they are spelt, `contact` for an email address, link or phone number (opening hours such as 0800-1700 are left alone), and `spam` for advertising wording, a word said over and over, or keyboard mashing. Show your own message for each.
+
+**Contacts on a new place.** A `new_place` report may carry `contacts`, with any of `phone`, `website` and `email`, each checked as the fact of that name is. Keep them out of the note. A person checks them before they are published. `contacts` is refused on every other report kind.
+
+```ts
+await feedback.report({
+  place: null,
+  location: { lat: -36.851234, lon: 144.551234 },
+  report: { kind: "new_place", note: "Caravan park by the lake", contacts: { phone: "03 5555 0100", website: "https://park.example.org" } },
+  consent: true,
+});
+```
+
+**Addresses.** An address is checked as the data's `schema/place.schema.json` has it. Each text field is 1 to 100 characters (`MAX_ADDRESS_FIELD_LENGTH`), holds no email address, phone number or link, and passes `textProblem` (a field of digits alone, such as a house number, is only checked for contact details). Fields are stored trimmed, and unknown fields such as `city` are refused. `addressProblems(value)` lists what is wrong, empty for a good address, so the app can show it before sending; `isAddress(value)` is the yes or no.
+
+```ts
+import { addressProblems } from "@opencampingdb/feedback";
+
+const address = { housenumber: "12", street: "Lake Road", suburb: "Lakeside", state: "VIC", postcode: "3999" };
+addressProblems(address); // []
+addressProblems({ suburb: "Lakeside", state: "Victoria" });
+// ["address must have a street or a place", "address.state must be one of NSW, VIC, QLD, SA, WA, TAS, NT, ACT"]
+
+await feedback.report({ place, report: { kind: "fact", fact: "address", value: address }, consent: true });
+```
+
+A `new_place` report may carry `report.address`, checked the same way and held for a person like its contacts. It still needs its `location`, so an app that lets a traveller add a place by address finds the spot first. `address` is refused on every other report kind.
+
+**Reporting a new place.** A `remove` report says a new place should come down, with a `reason` from `NEW_PLACE_REPORT_REASONS`: `not_there`, `fake`, `offensive`, `private_land` or `duplicate`. `reason` is refused on every other report kind.
+
+```ts
+await feedback.report({ place: newPlace, report: { kind: "remove", reason: "private_land" }, consent: true });
+```
+
+**Withdrawing a new place.** A new place has its id as soon as its report is sent: `newPlaceId(result.id)` when the result is `sent`, which is `ocdb_` and the feedback id without its `fb_`. Keep it. The install that sent the place can take it back:
+
+```ts
+const newPlace = newPlaceId(result.id);
+await feedback.withdraw({ place: newPlace, consent: true });
+```
+
+It is sent to `/v1/feedback` with `type: "withdraw"`, from the same install and with the same attestation as the report. Within 24 hours of the report the place is withdrawn. While the place is on the recent list, the intake answers `403 not_your_place` to any other install and `409 withdraw_window_closed` after 24 hours. After 24 hours send a `remove` report instead, which counts as one more report.
+
+**The recent places list.** A new place shows to everyone within about 30 seconds of its report, without waiting for the apply run:
+
+```sh
+curl "https://<intake>/v1/places/recent?bbox=146.5,-37.2,147.5,-36.0"
+```
+
+It needs no app key. `bbox` is optional: west, south, east and north in degrees. The intake grows the box out to whole degrees (`146.5,-37.2,147.5,-36.0` is answered as `146,-38,148,-36`) and caches the answer at the edge for 30 seconds by that box, so every map view inside the same degrees shares one cached list and the store is read once per box each 30 seconds. The list can therefore hold places a little outside the box you asked for; draw them or filter them on the phone. Other query parameters are ignored.
+
+```json
+{"places": [{"id": "ocdb_01JC...", "location": {"lat": -36.12345, "lon": 146.88765}, "kind": "free_camp",
+  "name": "Creek Bend Free Camp", "standing": "shown", "added": "2026-11-03T09:00:00Z", "contributor": "ctr_5d1c0e2a9b7f4436"}]}
+```
+
+A place is listed when its report came from an attested install (an app key with `requires_attestation`) and its note, with contact details stripped as the inbox keeps it, passes `textProblem`. A report without a `contributor` is listed under the attested key's contributor id on iOS, and on Android under one the intake makes from the hashed install, so a moderator can still block that install. Other new places reach a person through the apply run as before. `kind` is the code the traveller picked, or `null`; look its group up in `data/schema/kinds.json`. `name` is the report's `name` after `tidyName`, or `null` when it had none. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive, so a place two other devices report leaves the list on the next refresh. Only `still_there` checks with `nearby: true` count towards `confirmed`. The list never carries the note, the contacts, the address or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. The intake also keeps the block list the apply run sends: a blocked contributor's new places leave the list, and later ones are accepted to the inbox but not listed. A place leaves the list once the apply run has written it into the data, where apps find it with the rest.
+
+Each contributor (or install, without one) may send 3 new places a day. The fourth gets `429 rate_limited`.
 
 ## 6. Reviews: contributors, reports and blocking
 

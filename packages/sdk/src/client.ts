@@ -115,6 +115,13 @@ export interface CheckInput {
   consent: boolean;
 }
 
+export interface WithdrawInput {
+  /** The new place's id: `newPlaceId` of the id `report` answered with. */
+  place: string;
+  contributor?: string;
+  consent: boolean;
+}
+
 export interface ReviewReportInput {
   /** The review's place. */
   place: string;
@@ -214,6 +221,12 @@ export interface FeedbackClient {
   fee(input: FeeInput): Promise<SubmitResult>;
   /** Reports a published review. Queued and retried like the others. */
   reportReview(input: ReviewReportInput): Promise<SubmitResult>;
+  /**
+   * Takes back a new place this install sent. Within 24 hours of the report
+   * the place comes down; after that the intake counts it as a report.
+   * Queued and retried like the others.
+   */
+  withdraw(input: WithdrawInput): Promise<SubmitResult>;
   /**
    * Claims an existing place for its owner. Sent at once, never queued, because
    * the token in the answer is shown only once. Show `code` and `token` to the
@@ -755,6 +768,8 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
         { place, review_report: { review, reason }, ...(contributor !== undefined ? { contributor } : {}), consent },
         "review_report",
       ),
+    withdraw: ({ place, contributor, consent }) =>
+      submit({ place, ...(contributor !== undefined ? { contributor } : {}), consent }, "withdraw"),
     photo: sendPhoto,
     photoPass,
     reportPhoto: ({ place, photo, reason, contributor, consent }) =>

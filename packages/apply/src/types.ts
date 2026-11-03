@@ -36,6 +36,19 @@ export interface Place {
    */
   last_confirmed?: string;
   updated: string;
+  /**
+   * Only on a place a traveller added: where it stands, from the SDK's
+   * `newPlaceStanding`. `shown` is not checked yet, `confirmed` has been
+   * checked by travellers near it, `held` waits for a person (a possible
+   * duplicate) and `hidden` is left out of releases and apps.
+   */
+  standing?: "shown" | "confirmed" | "held" | "hidden";
+  /**
+   * Only on a place a traveller added: a person's latest decision on it,
+   * written on the review PR or in the data. `restore` sets aside reports up
+   * to `at` and `hide` keeps it hidden. `at` is a UTC time or `YYYY-MM-DD`.
+   */
+  moderator?: { action: "restore" | "hide"; at: string };
   /** Plain text from a verified owner, at most 500 characters. */
   description?: string;
   /** True once an owner's claim is approved. */

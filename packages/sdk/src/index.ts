@@ -35,25 +35,31 @@ export type {
   ReviewReportInput,
   StorageAdapter,
   SubmitResult,
+  WithdrawInput,
 } from "./client.js";
 export {
+  ADDRESS_STATES,
   BRANDS,
   FACTS,
   FEEDBACK_TYPES,
   FEE_SITES,
   MAX_FEE_AGE_MONTHS,
   MAX_FEE_AMOUNT,
+  MAX_ADDRESS_FIELD_LENGTH,
   MAX_DESCRIPTION_LENGTH,
   MAX_NAME_LENGTH,
   MAX_PHOTO_BYTES,
   MAX_THUMB_BYTES,
   MAX_TEXT_LENGTH,
+  NEW_PLACE_REPORT_REASONS,
   OWNER_FACTS,
   OWNER_TYPES,
   PHOTO_REPORT_REASONS,
   REPORT_KINDS,
   REVIEW_REPORT_REASONS,
   SITE_FEATURES,
+  addressProblems,
+  isAddress,
   isContributor,
   isFactName,
   isOwnerSubmission,
@@ -62,9 +68,14 @@ export {
   isPublicHttpsUrl,
   isReviewId,
   isValidFactValue,
+  newPlaceId,
   validateSubmission,
 } from "./validate.js";
 export type { ValidationResult } from "./validate.js";
 export { sha256Hex, sha256HexBytes } from "./sha256.js";
 export { REMOVED_MARKER, findContactDetails, findContactDetailsInHours, stripContactDetails } from "./text.js";
 export type { ContactDetailKind } from "./text.js";
+export { firstProblem, textProblem, tidyName, tidyText } from "./tidy.js";
+export type { TextProblem } from "./tidy.js";
+export { NEW_PLACE_CHECKS_TO_CONFIRM, NEW_PLACE_REPORTS_TO_HIDE, NEW_PLACE_REPORTS_TO_HIDE_CONFIRMED, newPlaceStanding } from "./standing.js";
+export type { NewPlaceCheck, NewPlaceReport, NewPlaceStanding, NewPlaceStandingInput } from "./standing.js";

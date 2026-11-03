@@ -3,7 +3,16 @@
  * (`POST /v1/feedback`), matching SPEC.md "Feedback submission".
  */
 
-export type FeedbackType = "report" | "review" | "check" | "review_report" | "fee" | "photo" | "photo_report" | "photo_erasure";
+export type FeedbackType =
+  | "report"
+  | "review"
+  | "check"
+  | "review_report"
+  | "fee"
+  | "photo"
+  | "photo_report"
+  | "photo_erasure"
+  | "withdraw";
 export type OwnerType = "owner_claim" | "owner_listing" | "owner_update";
 
 export type ReportKind =
@@ -18,7 +27,12 @@ export type ReportKind =
   /** A short description. `value` is the text. A person checks it. */
   | "description"
   /** What the place is. `place_kind` is the kind code. A person checks it. */
-  | "kind";
+  | "kind"
+  /** A new place should come down. `reason` says why. */
+  | "remove";
+
+/** Why a new place should come down. */
+export type NewPlaceReportReason = "not_there" | "fake" | "offensive" | "private_land" | "duplicate";
 
 /**
  * A place kind code from `data/schema/kinds.json` in the data repository (the
@@ -52,6 +66,25 @@ export type BrandValue =
 export type AccessValue = "2wd" | "awd" | "4wd" | "unknown";
 export type EntryValue = "public" | "customers" | "permit" | "private";
 export type WaterType = "tank_fill" | "fountain";
+/** An Australian state or territory, as its abbreviation. */
+export type AddressState = "NSW" | "VIC" | "QLD" | "SA" | "WA" | "TAS" | "NT" | "ACT";
+
+/**
+ * A place's street address, as `schema/place.schema.json` in the data
+ * repository has it (OSM addr:*). It has a `street` or, for a rural address,
+ * a named `place` instead. Each text field is 1 to 100 characters.
+ */
+export interface PlaceAddress {
+  unit?: string;
+  housenumber?: string;
+  street?: string;
+  /** A named rural place used instead of a street (OSM addr:place). */
+  place?: string;
+  suburb?: string;
+  state?: AddressState;
+  /** Four digits. */
+  postcode?: string;
+}
 
 /** Facts a place record can hold, with the value type of each. */
 export interface PlaceFacts {
@@ -130,6 +163,8 @@ export interface PlaceFacts {
   nudist?: boolean;
   // Brand and contacts.
   brand?: BrandValue;
+  /** A person checks it, as they check phones and links. */
+  address?: PlaceAddress;
   email?: string;
   phone_2?: string;
   /** https only. */
@@ -145,7 +180,7 @@ export interface PlaceFacts {
 export type FactName = keyof PlaceFacts;
 /** Facts an app report may name. booking_url comes only from owners. */
 export type ReportFactName = Exclude<FactName, "booking_url">;
-export type FactValue = boolean | string;
+export type FactValue = boolean | string | PlaceAddress;
 
 export interface LatLon {
   lat: number;
@@ -161,12 +196,33 @@ export interface ReportBody {
   /** Free text, up to 2,000 characters. */
   note?: string;
   /**
+   * On `new_place` only: the place's name, 1 to 300 characters, checked as a
+   * `name` report's value is and with the text checks. The note keeps the
+   * traveller's other words.
+   */
+  name?: string;
+  /**
    * On `new_place`: the kind the user picked, a code from
    * `data/schema/kinds.json`. Apply falls back to `campground` for a code the
    * data does not know. Required on `kind`: the kind the place should be.
    */
   place_kind?: string;
+  /** Required on `remove`, and allowed only there. */
+  reason?: NewPlaceReportReason;
+  /**
+   * On `new_place` only: how to reach the place, each checked as a fact
+   * report of that name is. A person checks them before they are published.
+   */
+  contacts?: NewPlaceContacts;
+  /**
+   * On `new_place` only: the place's address, checked as an `address` fact
+   * report's value is. A person checks it before it is published.
+   */
+  address?: PlaceAddress;
 }
+
+/** The contact facts a new place may carry. */
+export type NewPlaceContacts = Partial<Pick<PlaceFacts, "phone" | "website" | "email">>;
 
 export interface ReviewBody {
   stars: 1 | 2 | 3 | 4 | 5;
@@ -247,6 +303,11 @@ export interface CheckBody {
   /** Day of the visit, `YYYY-MM-DD`. */
   visited: string;
   still_there: boolean;
+  /**
+   * The app saw the phone near the place at the time. Only `true` is sent;
+   * leave it out otherwise. The location itself is never sent.
+   */
+  nearby?: true;
 }
 
 /** The kind of site a reported fee was for. */
@@ -337,6 +398,16 @@ export interface PhotoErasureSubmission extends SubmissionBase {
   place: null;
 }
 
+/**
+ * Takes back a new place the same install sent. `place` is the new place's id
+ * (`newPlaceId`). Within 24 hours of the report the place is withdrawn. After
+ * that it counts as one more report.
+ */
+export interface WithdrawSubmission extends SubmissionBase {
+  type: "withdraw";
+  place: string;
+}
+
 /** Contact details of an owner. They stay in the private inbox and are never published. */
 export interface OwnerContact {
   name: string;
@@ -416,7 +487,8 @@ export type FeedbackSubmission =
   | FeeSubmission
   | PhotoSubmission
   | PhotoReportSubmission
-  | PhotoErasureSubmission;
+  | PhotoErasureSubmission
+  | WithdrawSubmission;
 
 /** Every body the intake accepts. */
 export type Submission = FeedbackSubmission | OwnerSubmission;

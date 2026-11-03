@@ -175,7 +175,7 @@ describe("run", () => {
     expect(text).toBe(dumpPlace({ ...place, last_confirmed: "2026-10-30T00:00:00Z" }));
   });
 
-  it("writes a new place only to the review checkout", async () => {
+  it("writes a new place to the automatic checkout with its standing", async () => {
     const review = join(root, "data-review");
     await put(join(review, "places", "za", `${PLACE}.json`), dumpPlace(place));
     await put(join(inbox, "pending", "2026-10-29", `${id(9)}.json`), {
@@ -184,19 +184,98 @@ describe("run", () => {
         location: { lat: -35.5, lon: 149 },
         report: { kind: "new_place", note: "Free camp by the creek" },
       }),
+      contributor: TRUSTED,
+      attested: "app_attest",
       place: null,
+    });
+    await put(join(inbox, "applied", "2026-10-01", `${id(8)}.json`), {
+      ...item(8, "2026-10-01T00:00:00Z", "aaaa", { type: "report", location: { lat: -30, lon: 140 }, report: { kind: "new_place" } }),
+      contributor: TRUSTED,
+      place: null,
+      outcome: { result: "applied", reason: "", run: "2026-10-01T01:00:00Z" },
+    });
+    const summary = await run({ inbox, data, reviewData: review, now: NOW });
+    const newId = `ocdb_${id(9).slice(3)}`;
+    expect(summary.auto_files).toEqual([`places/${newId.slice(-2).toLowerCase()}/${newId}.json`]);
+    const record = await readFile(join(data, summary.auto_files[0]!), "utf8");
+    expect(record).toContain('"lon": 149.0');
+    expect(record).toContain('"standing": "shown"');
+    expect(record).not.toContain("creek");
+    expect(summary.review_files).toEqual([]);
+    expect(summary.auto_pr_body).toContain("published as shown");
+    expect(summary.auto_pr_body).not.toContain("creek");
+  });
+
+  /** A new place report in pending/ (or applied/ with an outcome), from TRUSTED. */
+  async function newPlace(n: number, received: string, device: string, location: { lat: number; lon: number }, folder = "pending", extra = {}) {
+    const body = {
+      ...item(n, received, device, { type: "report", location, report: { kind: "new_place", place_kind: "free_camp", ...extra } }),
+      contributor: TRUSTED,
+      attested: "app_attest",
+      place: null,
+      ...(folder === "applied" ? { outcome: { result: "applied", reason: "", run: received } } : {}),
+    };
+    await put(join(inbox, folder, received.slice(0, 10), `${id(n)}.json`), body);
+    return `ocdb_${id(n).slice(3)}`;
+  }
+  /** Every held case in a review PR body, read back the way a triage agent would. */
+  const heldCases = (body: string) =>
+    body
+      .split("\n")
+      .filter((l) => l.startsWith("- held-case "))
+      .map((l) => JSON.parse(l.slice("- held-case ".length)) as Record<string, unknown>);
+
+  it("holds a possible duplicate in the review checkout and lists it as a held case", async () => {
+    const review = join(root, "data-review");
+    await put(join(review, "places", "za", `${PLACE}.json`), dumpPlace(place));
+    await put(join(data, "schema", "kinds.json"), { kinds: [{ code: "free_camp", label: "Free camp", group: "overnight" }] });
+    const newId = await newPlace(9, "2026-10-29T00:00:00Z", "aaaa", { lat: -36.8505, lon: 144.5502 }, "pending", {
+      contacts: { email: "jo@example.com" },
     });
     const summary = await run({ inbox, data, reviewData: review, now: NOW });
     expect(summary.auto_changed).toBe(false);
-    expect(summary.review_changed).toBe(true);
-    const draftId = `ocdb_${id(9).slice(3)}`;
-    expect(summary.review_files).toEqual([`places/${draftId.slice(-2).toLowerCase()}/${draftId}.json`]);
-    const draft = await readFile(join(review, summary.review_files[0]!), "utf8");
-    expect(draft).toContain('"lon": 149.0');
-    expect(await readdir(join(data, "places"))).toEqual(["za"]);
-    expect(summary.auto_pr_body).toBe("");
-    expect(summary.review_pr_body).toContain("needs a person");
-    expect(summary.review_pr_body).toContain("Free camp by the creek");
+    expect(summary.review_files).toEqual([`places/${newId.slice(-2).toLowerCase()}/${newId}.json`]);
+    const draft = JSON.parse(await readFile(join(review, summary.review_files[0]!), "utf8")) as Place;
+    expect(draft.standing).toBe("held");
+    expect(heldCases(summary.review_pr_body)).toEqual([
+      {
+        case: "duplicate",
+        place: newId,
+        standing: "held",
+        location: { lat: -36.8505, lon: 144.5502 },
+        kind: "free_camp",
+        duplicate_of: PLACE,
+        distance_m: 58,
+        feedback: [id(9)],
+      },
+      { case: "first_place", place: newId, standing: "held", location: { lat: -36.8505, lon: 144.5502 }, kind: "free_camp", contributor: TRUSTED, feedback: [id(9)] },
+    ]);
+    expect(summary.review_pr_body).not.toContain("jo@");
+  });
+
+  it("reports the new places it wrote for the first time", async () => {
+    const newId = await newPlace(9, "2026-10-29T00:00:00Z", "aaaa", { lat: -30, lon: 140 });
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.new_places).toEqual([newId]);
+    expect((await run({ inbox, data, now: NOW })).new_places).toEqual([]);
+  });
+
+  it("deletes a withdrawn place from both checkouts", async () => {
+    const review = join(root, "data-review");
+    await put(join(review, "places", "za", `${PLACE}.json`), dumpPlace(place));
+    const newId = await newPlace(9, "2026-10-29T00:00:00Z", "aaaa", { lat: -30, lon: 140 }, "applied");
+    const path = `places/${newId.slice(-2).toLowerCase()}/${newId}.json`;
+    const record = { ...place, id: newId, name: null, osm: null, facts: {}, fact_sources: { location: "feedback" as const }, location: { lat: -30, lon: 140 }, standing: "shown" as const };
+    await put(join(data, path), dumpPlace(record));
+    await put(join(review, path), dumpPlace(record));
+    await pending(10, "2026-10-29T06:00:00Z", "aaaa", { type: "withdraw", place: newId });
+    const summary = await run({ inbox, data, reviewData: review, now: NOW });
+    expect(summary.auto_files).toEqual([path]);
+    expect(summary.review_files).toEqual([path]);
+    await expect(readFile(join(data, path), "utf8")).rejects.toThrow();
+    await expect(readFile(join(review, path), "utf8")).rejects.toThrow();
+    expect(summary.auto_pr_body).toContain("withdrawn by the person who added it");
+    expect(summary.new_places).toEqual([]);
   });
 
   it("splits automatic and review changes to one place between the checkouts", async () => {

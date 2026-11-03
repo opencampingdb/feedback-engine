@@ -1,6 +1,6 @@
 import { moderateReview } from "./moderation.js";
 import { approvalLine, type ClaimForReview } from "./owners.js";
-import type { Change, Decision } from "./rules.js";
+import type { Change, Decision, HeldCase } from "./rules.js";
 import type { Place } from "./types.js";
 
 /**
@@ -104,6 +104,7 @@ export function reviewPrBody(
   changes: readonly Change[],
   places: ReadonlyMap<string, Place>,
   claims: readonly ClaimForReview[] = [],
+  held: readonly HeldCase[] = [],
 ): string {
   const lines = [`Feedback from ${runAt}.`, ""];
   if (changes.length > 0) {
@@ -132,6 +133,28 @@ export function reviewPrBody(
       "",
     );
   }
+  if (held.length > 0) {
+    lines.push(
+      "## Held new places",
+      "",
+      "New places a person should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
+        "`contacts` or `first_place`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
+        "set its `standing` to `shown` in this PR. Contact details and addresses are in the inbox items, never here.",
+      "",
+      ...held.map(heldLine),
+      "",
+    );
+  }
   lines.push(FOOTER);
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * One held case as a line a triage agent can parse. Characters that GitHub
+ * would read as markup or a mention are written as JSON escapes, so the
+ * line still parses to the same values.
+ */
+function heldLine(c: HeldCase): string {
+  const json = JSON.stringify(c).replace(/[<>`@&]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return `- held-case ${json}`;
 }

@@ -112,9 +112,9 @@ export async function refuseMalformed(inbox: string, malformed: readonly Malform
   return malformed.length;
 }
 
-/** Items in `applied/` from day folders on or after `sinceDay`, as evidence for the rules. */
-export async function readHistory(inbox: string, sinceDay: string): Promise<StoredFeedback[]> {
-  const root = join(inbox, "applied");
+/** Items in `applied/` (or `refused/`) from day folders on or after `sinceDay`, as evidence for the rules. */
+export async function readHistory(inbox: string, sinceDay: string, folder: "applied" | "refused" = "applied"): Promise<StoredFeedback[]> {
+  const root = join(inbox, folder);
   const out: StoredFeedback[] = [];
   for (const day of await dayFolders(root)) {
     if (day < sinceDay) continue;
@@ -289,6 +289,23 @@ export class DataRepo {
       if (path) out.set(id, JSON.parse(await readFile(path, "utf8")) as Place);
     }
     return out;
+  }
+
+  /** Every place record in the checkout, for the duplicates check on new places. */
+  async allPlaces(): Promise<Place[]> {
+    const index = await this.#placeIndex();
+    return Promise.all([...index.values()].map(async (path) => JSON.parse(await readFile(path, "utf8")) as Place));
+  }
+
+  /** Deletes a place record wherever it is. Returns its path, or undefined when there is none. */
+  async removePlace(id: string): Promise<string | undefined> {
+    const index = await this.#placeIndex();
+    const path = index.get(id);
+    if (!path) return undefined;
+    this.#inside("places", relative(this.root, path));
+    await rm(path);
+    index.delete(id);
+    return relative(this.root, path).split(sep).join("/");
   }
 
   async reviews(placeId: string): Promise<Review[]> {

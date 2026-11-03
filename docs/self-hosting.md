@@ -33,6 +33,16 @@ If an app key uses App Attest, create a second namespace for registered keys and
 npx wrangler kv namespace create ATTEST
 ```
 
+To serve new places at once (`GET /v1/places/recent`, see [integration.md](integration.md) section 5), create a namespace for them and note its `id` for the `RECENT_PLACES` binding:
+
+```sh
+npx wrangler kv namespace create RECENT_PLACES
+```
+
+Each listed new place, check or report on one makes one more write. Each refresh of the list that misses the edge cache makes one list operation per 1,000 places, at most twice a minute in each Cloudflare location, which is more than the free plan's 1,000 list operations a day once many phones use it. Use the Workers paid plan for it.
+
+The apply run keeps the store in step with two calls, each with `authorization: Bearer <PLACES_TOKEN>`. `POST /v1/places/recent/remove` with `{"ids": [...]}` (1 to 500 place ids) takes places it has written into the data off the list, answering `{"removed": <count>}`. `POST /v1/places/recent/block` with `{"contributors": [...]}` (up to 5,000 hashed `ctr_` ids, `[]` for none) replaces the block list the intake keeps, answering `{"blocked": <count>}`. A blocked contributor's places leave the list and later ones aren't listed; one taken off the block list is listed again. Both answer `401` for a wrong token and `404` without `RECENT_PLACES` or `PLACES_TOKEN`.
+
 ## 3. Create the private inbox repository
 
 Create `inbox` in your organisation, private, with a `README.md` on `main` so the branch exists. The intake writes to `pending/<yyyy-mm-dd>/`, and the workflow moves files to `applied/` and `refused/`.
@@ -82,6 +92,7 @@ npx wrangler secret put GH_INSTALLATION_ID
 
   Make keys with `openssl rand -hex 16`. To revoke a key, remove it and set the secret again.
 - `DEVICE_SALT` is a long random string, for example from `openssl rand -hex 32`. Changing it makes every device look new, which resets the two-device rule for pending items, so set it once.
+- `PLACES_TOKEN`, needed only with `RECENT_PLACES`, is a long random string, for example from `openssl rand -hex 32`. The apply run sends it to take places it has written into the data off the recent list, and to send the block list. Set it with `npx wrangler secret put PLACES_TOKEN` and keep the same value for the apply workflow.
 - `GH_APP_PRIVATE_KEY` accepts the PEM GitHub gives you (PKCS#1) or PKCS#8.
 - `GOOGLE_SERVICE_ACCOUNT`, needed only for `android`, is the JSON key file of a Google Cloud service account in the project linked to the app in Play Console, allowed to decode integrity tokens. Set it with `npx wrangler secret put GOOGLE_SERVICE_ACCOUNT < key.json`.
 
@@ -94,7 +105,8 @@ npx wrangler secret put GH_INSTALLATION_ID
 ```sh
 cd packages/intake
 sed -e "s/REPLACE_ME_KV_NAMESPACE_ID/<RATE_LIMIT id>/" \
-    -e "s/REPLACE_ME_ATTEST_KV_NAMESPACE_ID/<ATTEST id>/" wrangler.toml > wrangler.deploy.toml
+    -e "s/REPLACE_ME_ATTEST_KV_NAMESPACE_ID/<ATTEST id>/" \
+    -e "s/REPLACE_ME_RECENT_PLACES_KV_NAMESPACE_ID/<RECENT_PLACES id>/" wrangler.toml > wrangler.deploy.toml
 npx wrangler deploy -c wrangler.deploy.toml
 ```
 
@@ -137,15 +149,24 @@ Install it on only `inbox` and `data`. The workflow asks for a token limited to 
 
 ## 9. Add the workflow to the inbox
 
-Copy [`packages/apply/examples/inbox-apply-feedback.yml`](../packages/apply/examples/inbox-apply-feedback.yml) to `.github/workflows/apply-feedback.yml` in `inbox`. Replace both `REPLACE_WITH_ENGINE_SHA` values with the same full commit SHA of this repository. Then add two Actions secrets in `inbox`:
+Copy [`packages/apply/examples/inbox-apply-feedback.yml`](../packages/apply/examples/inbox-apply-feedback.yml) to `.github/workflows/apply-feedback.yml` in `inbox`. Replace both `REPLACE_WITH_ENGINE_SHA` values with the same full commit SHA of this repository. Replace `REPLACE_WITH_INTAKE_URL` with the intake's base URL, for example `https://intake.example.org`, or remove the `intake-url` and `places-token` lines when the intake has no `RECENT_PLACES`. Then add the Actions secrets in `inbox`:
 
 - `OCDB_BOT_CLIENT_ID`: the bot App's Client ID.
 - `OCDB_BOT_PRIVATE_KEY`: the contents of the bot App's `.pem` file.
+- `PLACES_TOKEN`, only with `intake-url`: the same value as the Worker's `PLACES_TOKEN` (step 5). Make it once with `openssl rand -hex 32`, set it on the Worker with `npx wrangler secret put PLACES_TOKEN`, then add it to `inbox` with `gh secret set PLACES_TOKEN --repo <owner>/inbox` (or Settings, Secrets and variables, Actions). To change it, set the new value in both places.
 
 Run the workflow once by hand from the Actions tab. With items in `pending/` it commits the moved files to `inbox` and keeps up to two PRs open on `data`:
 
-- `feedback/auto`: changes from the automatic rules. It merges itself once CI passes.
-- `feedback/review`: new places, location changes, website and phone changes and other reports, labelled `needs-review`. Edit the files on the branch if needed, then merge it, or close it to refuse them.
+- `feedback/auto`: changes from the automatic rules, new places included. It merges itself once CI passes.
+- `feedback/review`: held new places, location changes, website and phone changes and other reports, labelled `needs-review`. Edit the files on the branch if needed, then merge it, or close it to refuse them.
+
+New places are written with their `standing` from the SDK's `newPlaceStanding`. A `shown` or `confirmed` place goes on `feedback/auto` when its report was attested, has a contributor and its note passes the SDK's text checks, as the intake requires to list it. Checks, `remove` reports and the adder's `withdraw` on a place added in the last 90 days work its standing out again: reports from two devices (three once confirmed) set it to `hidden`, and a place withdrawn within 24 hours is not written, or its record is deleted. A place within 150 m of another in the same group, a place hidden before it was published, and a place the intake would not list are drafted on `feedback/review` with standing `held` or `hidden`: set `standing` to `shown` to publish it, or close the PR. Contact details sent with a new place stay in the inbox for a person and never reach the record unchecked.
+
+The review PR body lists every held new place under "Held new places", one line each: `- held-case` and a JSON object with `case` (`duplicate`, `hidden`, `contacts` or `first_place`), `place`, `standing`, `location`, `kind`, the case's details (`duplicate_of` and `distance_m`, `reports` and `reasons` or `blocked`, the facts named in `contacts`, which may include `address`, the `contributor`) and the `feedback` ids to read in the inbox. A triage agent can read these lines instead of the prose.
+
+**A person's decision on a new place.** Reports set aside a place's `standing` again on later runs unless a person's decision is on its record. To restore a hidden place, set `"standing": "shown"` and `"moderator": {"action": "restore", "at": "<now>"}` on the record, on the review PR or in a PR to `main`. Reports up to `at` no longer count, and later ones count as usual. To hide one, set `"standing": "hidden"` and `"moderator": {"action": "hide", "at": "<now>"}`: it stays hidden whatever travellers send. `at` is a UTC time such as `2026-11-03T09:00:00Z` or a day such as `2026-11-03`. Only the latest decision is kept, so a new one replaces the old. The note on a place hidden before it was published gives the line to paste.
+
+With `intake-url` set, each run passes `--main <checkout of data main> --intake <intake URL>` and the `PLACES_TOKEN` secret to `ocdb-apply`. It takes new places out of the intake's recent places store once the PR that writes them is merged, and withdrawn ones at once, then sends the intake the contributors in `moderation/blocked_contributors.json` on `main`, so a blocked contributor's new places leave the recent list.
 
 When a PR from either branch is already open, later runs add a commit and a comment to it. Once a PR is merged or closed, the next run starts the branch again from `main`. With nothing to do the workflow ends without changes.
 

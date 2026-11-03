@@ -2,13 +2,14 @@
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import type { ReviewPr } from "./owners.js";
+import { intakeRecentStore, sendBlockList, settleRecentPlaces } from "./recent.js";
 import { run } from "./run.js";
 
 const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>]
                   [--auto-pr-body <file>] [--review-pr-body <file>]
                   [--review-prs <file>] [--bot-login <login>]
                   [--summary <file>] [--now <ISO time>] [--places <dir>]
-                  [--photo-licence <id>]
+                  [--photo-licence <id>] [--main <dir> --intake <url>]
 
 Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
@@ -20,6 +21,10 @@ from the data repository itself, and only comments by --bot-login, count.
 --places makes it a photo repository run for an app's own photo service:
 <data> holds only photos and moderation files, place records are read from the
 Open Camping DB data checkout in <dir>, and anything but photos is refused.
+--main and --intake take new places that are now in the data on main, and
+withdrawn ones, out of the intake's recent places store, and send it the
+contributors blocked on main, with the token in PLACES_TOKEN. <dir> is a checkout of the data repository's main branch, so a
+place leaves the store only once the PR that writes it is merged.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
 
@@ -37,6 +42,8 @@ async function main(): Promise<number> {
       now: { type: "string" },
       places: { type: "string" },
       "photo-licence": { type: "string" },
+      main: { type: "string" },
+      intake: { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -47,6 +54,12 @@ async function main(): Promise<number> {
   const now = values.now ? new Date(values.now) : undefined;
   if (now && Number.isNaN(now.getTime())) {
     console.error(`--now is not a valid time: ${values.now}`);
+    return 2;
+  }
+
+  const token = process.env.PLACES_TOKEN;
+  if ((values.main === undefined) !== (values.intake === undefined) || (values.intake && !token)) {
+    console.error("--main and --intake go together, and need PLACES_TOKEN");
     return 2;
   }
 
@@ -76,6 +89,13 @@ async function main(): Promise<number> {
       `inbox_changed=${summary.inbox_changed}`,
     ];
     await appendFile(output, `${lines.join("\n")}\n`, "utf8");
+  }
+  if (values.main && values.intake && token) {
+    const store = intakeRecentStore(values.intake, token);
+    const settled = await settleRecentPlaces({ inbox: values.inbox, main: values.main, store, ...(now ? { now } : {}) });
+    console.log(`${settled.length} new place(s) taken out of the recent places store`);
+    const blocked = await sendBlockList({ main: values.main, store });
+    console.log(`block list of ${blocked.length} contributor(s) sent to the intake`);
   }
   const c = summary.counts;
   console.log(

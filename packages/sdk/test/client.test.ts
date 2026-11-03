@@ -95,6 +95,19 @@ describe("createFeedbackClient", () => {
     });
   });
 
+  it("withdraws a new place it sent", async () => {
+    const { client, calls } = setup([202]);
+    expect(await client.withdraw({ place: PLACE, consent: true })).toEqual({ status: "sent", id: "fb_1" });
+    expect(calls[0]!.url).toBe("https://intake.example/v1/feedback");
+    expect(calls[0]!.body).toEqual({
+      type: "withdraw",
+      place: PLACE,
+      device: "00000000-0000-4000-8000-000000000001",
+      app_version: "1.2.3",
+      consent: true,
+    });
+  });
+
   it("generates one device id per install and keeps it", async () => {
     const { client, calls, storage } = setup([202]);
     await client.check(check);

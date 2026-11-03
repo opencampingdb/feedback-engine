@@ -1,5 +1,7 @@
 import { findContactDetails, findContactDetailsInHours } from "./text.js";
+import { textProblem, tidyName } from "./tidy.js";
 import type {
+  AddressState,
   BrandValue,
   CheckBody,
   FactName,
@@ -9,12 +11,15 @@ import type {
   FactValue,
   FeedbackSubmission,
   LatLon,
+  NewPlaceContacts,
+  NewPlaceReportReason,
   OwnerContact,
   OwnerFactName,
   OwnerFacts,
   OwnerSubmission,
   OwnerUpdate,
   PhotoFiles,
+  PlaceAddress,
   PhotoReportBody,
   PhotoReportReason,
   ReportBody,
@@ -25,7 +30,17 @@ import type {
   Submission,
 } from "./types.js";
 
-export const FEEDBACK_TYPES = ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "photo_erasure"] as const;
+export const FEEDBACK_TYPES = [
+  "report",
+  "review",
+  "check",
+  "review_report",
+  "fee",
+  "photo",
+  "photo_report",
+  "photo_erasure",
+  "withdraw",
+] as const;
 export const OWNER_TYPES = ["owner_claim", "owner_listing", "owner_update"] as const;
 const ALL_TYPES: readonly string[] = [...FEEDBACK_TYPES, ...OWNER_TYPES];
 export const REPORT_KINDS: readonly ReportKind[] = [
@@ -38,6 +53,14 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   "name",
   "description",
   "kind",
+  "remove",
+];
+export const NEW_PLACE_REPORT_REASONS: readonly NewPlaceReportReason[] = [
+  "not_there",
+  "fake",
+  "offensive",
+  "private_land",
+  "duplicate",
 ];
 /** Longest name a `name` report may propose. */
 export const MAX_NAME_LENGTH = 300;
@@ -134,6 +157,61 @@ export const MAX_TEXT_LENGTH = 2000;
 export const MAX_DESCRIPTION_LENGTH = 500;
 export const MAX_APP_VERSION_LENGTH = 32;
 
+/** States and territories an address may name, as their abbreviations. */
+export const ADDRESS_STATES: readonly AddressState[] = ["NSW", "VIC", "QLD", "SA", "WA", "TAS", "NT", "ACT"];
+/** Longest text field in an address. */
+export const MAX_ADDRESS_FIELD_LENGTH = 100;
+const ADDRESS_TEXT_FIELDS = ["unit", "housenumber", "street", "place", "suburb"] as const;
+const ADDRESS_FIELDS: readonly string[] = [...ADDRESS_TEXT_FIELDS, "state", "postcode"];
+
+/**
+ * What is wrong with an address, as `schema/place.schema.json` in the data
+ * repository has it: a street or a place, a state abbreviation, a four digit
+ * postcode, and text fields of 1 to 100 characters that hold no contact
+ * details and pass the text checks. Empty when it is a good address. `field`
+ * starts each message.
+ */
+export function addressProblems(value: unknown, field = "address"): string[] {
+  if (!isObject(value)) return [`${field} must be an object`];
+  const problems: string[] = [];
+  for (const key of Object.keys(value)) if (!ADDRESS_FIELDS.includes(key)) problems.push(`unknown field ${field}.${key}`);
+  if (value.street === undefined && value.place === undefined) problems.push(`${field} must have a street or a place`);
+  for (const name of ADDRESS_TEXT_FIELDS) {
+    const text = value[name];
+    if (text === undefined) continue;
+    if (typeof text !== "string" || text.trim().length === 0 || text.length > MAX_ADDRESS_FIELD_LENGTH) {
+      problems.push(`${field}.${name} must be 1 to ${MAX_ADDRESS_FIELD_LENGTH} characters`);
+    } else if (findContactDetails(text).length > 0) {
+      problems.push(`${field}.${name} must not hold an email address, phone number or link`);
+    } else {
+      // A house number or unit of digits alone is not text to check: it would read as keyboard mashing.
+      const problem = /\p{L}/u.test(text) ? textProblem(tidyName(text)) : null;
+      if (problem) problems.push(`${field}.${name} must pass the text checks (${problem})`);
+    }
+  }
+  if (value.state !== undefined && !(ADDRESS_STATES as readonly unknown[]).includes(value.state)) {
+    problems.push(`${field}.state must be one of ${ADDRESS_STATES.join(", ")}`);
+  }
+  if (value.postcode !== undefined && (typeof value.postcode !== "string" || !/^\d{4}$/.test(value.postcode))) {
+    problems.push(`${field}.postcode must be four digits`);
+  }
+  return problems;
+}
+
+/** A good address: `addressProblems` finds nothing. */
+export function isAddress(value: unknown): value is PlaceAddress {
+  return addressProblems(value).length === 0;
+}
+
+/** A good address with each text field trimmed, as it is stored. */
+function trimmedAddress(value: PlaceAddress): PlaceAddress {
+  const out: PlaceAddress = {};
+  for (const name of ADDRESS_TEXT_FIELDS) if (value[name] !== undefined) out[name] = value[name]!.trim();
+  if (value.state !== undefined) out.state = value.state;
+  if (value.postcode !== undefined) out.postcode = value.postcode;
+  return out;
+}
+
 const isBoolean = (v: unknown): boolean => typeof v === "boolean";
 /** An https link to a page, as for the website and social pages. */
 const isHttpsPage = (max: number) => (v: unknown): boolean =>
@@ -163,6 +241,7 @@ export const FACTS: Readonly<Record<ReportFactName, (value: unknown) => boolean>
   booking_required: isBoolean,
   ...(Object.fromEntries(SITE_FEATURES.map((f) => [f, isBoolean])) as Record<(typeof SITE_FEATURES)[number], (v: unknown) => boolean>),
   brand: (v) => typeof v === "string" && (BRANDS as readonly string[]).includes(v),
+  address: isAddress,
   email: (v) => typeof v === "string" && v.length <= 254 && EMAIL.test(v),
   phone_2: isPhone,
   facebook: isHttpsPage(500),
@@ -238,6 +317,14 @@ export function isPlaceId(value: unknown): value is string {
 }
 
 /** A published review id, `rev_<ulid>`. */
+/**
+ * The id a new place has once its `new_place` report is sent: `ocdb_` and the
+ * feedback id (`fb_<ulid>`) the intake answered with, as the apply run makes it.
+ */
+export function newPlaceId(feedbackId: string): string {
+  return `ocdb_${feedbackId.replace(/^fb_/, "")}`;
+}
+
 export function isReviewId(value: unknown): value is string {
   return typeof value === "string" && REVIEW_ID.test(value);
 }
@@ -301,6 +388,13 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
   if (kind === "fact") {
     if (!isFactName(value.fact)) {
       errors.push(`report.fact must be one of ${Object.keys(FACTS).join(", ")}`);
+    } else if (value.fact === "address") {
+      const problems = addressProblems(value.value, "report.value");
+      if (problems.length > 0) errors.push(...problems);
+      else {
+        out.fact = "address";
+        out.value = trimmedAddress(value.value as PlaceAddress);
+      }
     } else if (!isValidFactValue(value.fact, value.value)) {
       errors.push(`report.value is not a valid value for ${value.fact}`);
     } else {
@@ -323,6 +417,13 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
   }
   const note = checkText(value.note, "report.note", errors, false);
   if (note !== undefined) out.note = note;
+  if (value.name !== undefined) {
+    if (kind !== "new_place") errors.push("report.name is only allowed when report.kind is new_place");
+    else {
+      const name = checkNewPlaceName(value.name, errors);
+      if (name !== undefined) out.name = name;
+    }
+  }
   if (kind === "kind" && value.place_kind === undefined) {
     errors.push("report.place_kind is required when report.kind is kind");
   }
@@ -331,6 +432,67 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
     else if (typeof value.place_kind !== "string" || !KIND_CODE.test(value.place_kind)) {
       errors.push("report.place_kind must be a kind code from data/schema/kinds.json");
     } else out.place_kind = value.place_kind;
+  }
+  if (kind === "remove") {
+    if (typeof value.reason !== "string" || !(NEW_PLACE_REPORT_REASONS as readonly string[]).includes(value.reason)) {
+      errors.push(`report.reason must be one of ${NEW_PLACE_REPORT_REASONS.join(", ")}`);
+    } else out.reason = value.reason as NewPlaceReportReason;
+  } else if (value.reason !== undefined) {
+    errors.push("report.reason is only allowed when report.kind is remove");
+  }
+  if (value.contacts !== undefined) {
+    if (kind !== "new_place") errors.push("report.contacts is only allowed when report.kind is new_place");
+    else {
+      const contacts = checkContacts(value.contacts, errors);
+      if (contacts) out.contacts = contacts;
+    }
+  }
+  if (value.address !== undefined) {
+    if (kind !== "new_place") errors.push("report.address is only allowed when report.kind is new_place");
+    else {
+      const problems = addressProblems(value.address, "report.address");
+      if (problems.length > 0) errors.push(...problems);
+      else out.address = trimmedAddress(value.address as PlaceAddress);
+    }
+  }
+  return out;
+}
+
+/** A new place's name, checked as a `name` report's value is, then with the text checks. */
+function checkNewPlaceName(value: unknown, errors: string[]): string | undefined {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > MAX_NAME_LENGTH) {
+    errors.push(`report.name must be the name, 1 to ${MAX_NAME_LENGTH} characters`);
+    return undefined;
+  }
+  if (findContactDetails(value).length > 0) {
+    errors.push("report.name must not hold an email address, phone number or link");
+    return undefined;
+  }
+  const problem = textProblem(tidyName(value));
+  if (problem) {
+    errors.push(`report.name must pass the text checks (${problem})`);
+    return undefined;
+  }
+  return value.trim();
+}
+
+const CONTACT_FACTS = ["phone", "website", "email"] as const;
+
+function checkContacts(value: unknown, errors: string[]): NewPlaceContacts | undefined {
+  const names = isObject(value) ? Object.keys(value) : [];
+  if (!isObject(value) || names.some((name) => !(CONTACT_FACTS as readonly string[]).includes(name))) {
+    errors.push("report.contacts may hold only phone, website and email");
+    return undefined;
+  }
+  if (names.length === 0) {
+    errors.push("report.contacts must hold at least one of phone, website and email");
+    return undefined;
+  }
+  const out: NewPlaceContacts = {};
+  for (const name of CONTACT_FACTS) {
+    if (value[name] === undefined) continue;
+    if (!FACTS[name](value[name])) errors.push(`report.contacts.${name} is not a valid value for ${name}`);
+    else out[name] = value[name] as string;
   }
   return out;
 }
@@ -452,10 +614,11 @@ function checkCheck(value: unknown, errors: string[]): CheckBody | undefined {
     errors.push("check must be an object");
     return undefined;
   }
-  const { visited, still_there } = value;
+  const { visited, still_there, nearby } = value;
   if (typeof visited !== "string" || !isValidDate(visited)) errors.push("check.visited must be YYYY-MM-DD");
   if (typeof still_there !== "boolean") errors.push("check.still_there must be true or false");
-  return { visited: visited as string, still_there: still_there as boolean };
+  if (nearby !== undefined && nearby !== true) errors.push("check.nearby must be true, or left out");
+  return { visited: visited as string, still_there: still_there as boolean, ...(nearby === true ? { nearby: true as const } : {}) };
 }
 
 /**
@@ -545,6 +708,8 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     } else if (type === "photo_report") {
       const photoReport = checkPhotoReport(input.photo_report, errors);
       if (photoReport) value = { ...base, place: place as string, type: "photo_report", photo_report: photoReport };
+    } else if (type === "withdraw") {
+      value = { ...base, place: place as string, type: "withdraw" };
     } else if (type === "fee") {
       const fee = checkFee(input.fee, now, errors);
       if (fee) value = { ...base, place: place as string, type: "fee", fee };
