@@ -219,6 +219,16 @@ describe("fact reports", () => {
     expect(out.edits).toEqual([{ kind: "fact", place: PLACE, fact: "website", value: "https://example.org", feedback: a.id }]);
     expect(out.needsReview).toBe(true);
   });
+
+  it("sends an address to a person from one report", () => {
+    const value = { housenumber: "12", street: "Lake Road", suburb: "Lakeside", state: "VIC" as const, postcode: "3999" };
+    const a = { ...base(0, "dev-a"), type: "report", report: { kind: "fact", fact: "address", value } } as StoredFeedback;
+    const out = run([a]);
+    expect(out.outcome(a)).toBe("needs_review");
+    expect(out.after()).toBeUndefined();
+    expect(out.edits).toEqual([{ kind: "fact", place: PLACE, fact: "address", value, feedback: a.id }]);
+    expect(applyEdit(place(), { kind: "fact", place: PLACE, fact: "address", value, feedback: a.id }, at(1))?.facts.address).toEqual(value);
+  });
 });
 
 describe("closed and reopened", () => {
@@ -1066,6 +1076,24 @@ describe("new places", () => {
       { case: "contacts", place: idOf(item), standing: "shown", location: SPOT, kind: "free_camp", contacts: ["phone", "website"], feedback: [item.id] },
     ]);
     expect(JSON.stringify(out.held)).not.toContain("5555");
+  });
+
+  it("publishes a place with an address but leaves the address for a person", () => {
+    const address = { street: "Lake Road", suburb: "Lakeside", state: "VIC" };
+    const item = added(0, "dev-a", { address, contacts: { phone: "03 5555 0100" } });
+    const history = [applied(added(-5, "dev-a", {}, { lat: -30, lon: 140 }))];
+    const out = run([item], { history });
+    expect(out.after(idOf(item))?.facts).toEqual({});
+    expect(out.held).toEqual([expect.objectContaining({ case: "contacts", place: idOf(item), contacts: ["phone", "address"] })]);
+    expect(JSON.stringify(out.held)).not.toContain("Lake Road");
+  });
+
+  it("drafts a held place for a person with its address", () => {
+    const address = { place: "Lake Station", postcode: "3999" };
+    const item = added(0, "dev-a", { address });
+    const out = run([item, remove(0.1, "dev-b", item), remove(0.2, "dev-c", item)]);
+    const edit = out.edits[0];
+    expect(edit?.kind === "new_place" && edit.record).toMatchObject({ standing: "hidden", facts: { address }, fact_sources: { address: "feedback" } });
   });
 
   it("lists a contributor's first place, published, and not their second", () => {

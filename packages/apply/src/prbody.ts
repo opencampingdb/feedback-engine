@@ -139,7 +139,7 @@ export function reviewPrBody(
       "",
       "New places a person should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
         "`contacts` or `first_place`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
-        "set its `standing` to `shown` in this PR. Contact details are in the inbox items, never here.",
+        "set its `standing` to `shown` in this PR. Contact details and addresses are in the inbox items, never here.",
       "",
       ...held.map(heldLine),
       "",

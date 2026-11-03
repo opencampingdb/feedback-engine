@@ -43,6 +43,7 @@ export const REVIEWED_FACTS: ReadonlySet<FactName> = new Set<FactName>([
   "instagram",
   "tiktok",
   "x",
+  "address",
 ]);
 
 /** Kind given to a draft record for a `new_place` report until a person sets it. */
@@ -175,7 +176,7 @@ export interface RulesOutput {
  * review PR body as JSON. `duplicate`: held as a possible duplicate of
  * `duplicate_of`. `hidden`: hidden by `reports` reports for `reasons`, or
  * because its contributor is `blocked`. `contacts`: published, with the
- * contact facts named in `contacts` waiting in the inbox for a person.
+ * contact facts and address named in `contacts` waiting in the inbox for a person.
  * `first_place`: the first place from its contributor, published. Contact
  * values, notes and device ids are never in it.
  */
@@ -990,7 +991,9 @@ export function applyRules(input: RulesInput): RulesOutput {
       // The intake lists a new place only when it passes these, so apply publishes no other.
       const unlisted = existing ? undefined : whyNotListed(origin);
       const published = (standing === "shown" || standing === "confirmed") && unlisted === undefined;
-      const contacts = Object.keys(origin.report.contacts ?? {}) as (keyof NewPlaceContacts)[];
+      // Contact facts and the address wait for a person, so they are held alike.
+      const heldFacts: Partial<Record<keyof NewPlaceContacts | "address", FactValue>> = { ...origin.report.contacts, ...(origin.report.address ? { address: origin.report.address } : {}) };
+      const contacts = Object.keys(heldFacts) as (keyof typeof heldFacts)[];
       const where = `${origin.location!.lat}, ${origin.location!.lon}`;
       const against = [...earlier, ...mine].filter((i) => i.type === "report" || (i.type === "check" && !i.check.still_there));
       const reasons = [...new Set(against.map((i) => (i.type === "report" ? i.report.reason! : "not_there")))].sort();
@@ -1022,7 +1025,7 @@ export function applyRules(input: RulesInput): RulesOutput {
         // Held or hidden before it was ever published: a person decides, with the contacts in the draft.
         const draft: Place = { ...draftOf(origin), standing };
         for (const fact of contacts) {
-          (draft.facts as Record<string, FactValue>)[fact] = origin.report.contacts![fact]!;
+          (draft.facts as Record<string, FactValue>)[fact] = heldFacts[fact]!;
           setSource(draft, fact, "feedback", nowIso);
         }
         edits.push({ kind: "new_place", record: draft, feedback: origin.id });
