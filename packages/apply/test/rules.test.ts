@@ -1123,6 +1123,57 @@ describe("new places", () => {
     expect(out.places.size).toBe(0);
   });
 
+  describe("a moderator's decision", () => {
+    /** A place hidden by two reports, which a person has since restored or hidden on its record. */
+    const decided = (moderator: Place["moderator"], standing: Place["standing"]) => {
+      const item = added(0);
+      const reports = [remove(1, "dev-b", item), remove(1, "dev-c", item)];
+      return {
+        item,
+        input: { history: [applied(item), ...reports.map((r) => applied(r))], places: [place(), { ...written(item, standing), moderator }] },
+      };
+    };
+
+    it("keeps a restored place shown, setting aside the reports before the restore", () => {
+      const { item, input } = decided({ action: "restore", at: at(2) }, "shown");
+      const out = run([visit(3, "dev-d", item, true)], { ...input, now: 4 });
+      expect(out.places.get(idOf(item))?.standing ?? "shown").toBe("shown");
+      expect(out.held).toEqual([]);
+    });
+
+    it("hides a restored place again on two reports after the restore", () => {
+      const { item, input } = decided({ action: "restore", at: at(2) }, "shown");
+      const out = run([remove(3, "dev-d", item), remove(3, "dev-e", item)], { ...input, now: 4 });
+      expect(out.after(idOf(item))?.standing).toBe("hidden");
+    });
+
+    it("keeps a place a person hid hidden, whatever travellers find", () => {
+      const { item, input } = decided({ action: "hide", at: at(2) }, "hidden");
+      const out = run([visit(3, "dev-d", item, true), visit(3, "dev-e", item, true)], { ...input, now: 4 });
+      expect(out.places.get(idOf(item))?.standing ?? "hidden").toBe("hidden");
+    });
+
+    it("sets a place's standing to match a decision made without it", () => {
+      const { item, input } = decided({ action: "restore", at: at(2) }, "hidden");
+      const out = run([visit(3, "dev-d", item, true)], { ...input, now: 4 });
+      expect(out.after(idOf(item))?.standing).toBe("shown");
+    });
+
+    it("leaves out a decision it can't read", () => {
+      const { item, input } = decided({ action: "keep", at: "soon" } as unknown as Place["moderator"], "shown");
+      const out = run([visit(3, "dev-d", item, true)], { ...input, now: 4 });
+      expect(out.after(idOf(item))?.standing).toBe("hidden");
+    });
+
+    it("tells the person how to restore a place hidden before it was published", () => {
+      const item = added(0);
+      const out = run([item, remove(0.1, "dev-b", item), remove(0.2, "dev-c", item)]);
+      expect(out.changes.find((c) => c.place === idOf(item) && !c.automatic)?.summary).toContain(
+        `set standing to shown and moderator to {"action": "restore", "at": "${at(1)}"}`,
+      );
+    });
+  });
+
   it("names a new place with the name its report carries", () => {
     const item = added(0, "dev-a", { name: "Gravel Pit Rest Area" });
     expect(run([item]).after(idOf(item))).toMatchObject({
