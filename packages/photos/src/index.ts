@@ -5,7 +5,8 @@
  * key in `x-app-key` (servers, which can keep a key secret). Answers come from the edge cache when they can.
  * Reads that reach R2 are counted per app per day, and above the app's
  * `daily_limit` or the server's `DAILY_READ_CAP` the server answers 503 until
- * midnight UTC. Putting `off` in STATE stops all serving within a minute.
+ * midnight UTC. Putting `off` in STATE stops all serving within a minute, and
+ * a `withheld:<photo id>` key stops one photo, cache or not.
  */
 
 import { verifyPass } from "../../intake/src/pass.js";
@@ -19,7 +20,11 @@ export interface BucketLike {
 export interface KVLike {
   get(key: string): Promise<string | null>;
   put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  list(options: { prefix: string; cursor?: string }): Promise<{ keys: { name: string }[]; list_complete: boolean; cursor?: string }>;
 }
+
+/** Prefix of the STATE keys that withhold one photo each (set by the intake or a person). */
+export const WITHHELD_PREFIX = "withheld:";
 
 /** A Workers rate limiting binding. */
 export interface RateLimiterLike {
@@ -94,6 +99,18 @@ function answer(status: number, error: string, extra: Record<string, string> = {
   });
 }
 
+/** Photo ids with a `withheld:` key in STATE. */
+async function withheldPhotos(state: KVLike): Promise<Set<string>> {
+  const out = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const page = await state.list({ prefix: WITHHELD_PREFIX, ...(cursor ? { cursor } : {}) });
+    for (const { name } of page.keys) out.add(name.slice(WITHHELD_PREFIX.length));
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return out;
+}
+
 function secondsToMidnightUtc(nowMs: number): number {
   const d = new Date(nowMs);
   return Math.max(1, Math.ceil((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) - nowMs) / 1000));
@@ -105,6 +122,7 @@ export function createHandler(deps: Deps) {
   let checkedAt = -Infinity;
   let day = "";
   let off = false;
+  let withheld = new Set<string>();
   let totals = new Map<string, number>();
   // Reads this isolate made that are not written to KV yet, per app.
   const unsent = new Map<string, number>();
@@ -130,6 +148,7 @@ export function createHandler(deps: Deps) {
     if (nowMs - checkedAt < STATE_TTL_MS) return;
     checkedAt = nowMs;
     off = (await env.STATE.get("off")) !== null;
+    withheld = await withheldPhotos(env.STATE);
     const next = new Map<string, number>();
     for (const app of new Set(apps)) {
       const counts = await Promise.all(Array.from({ length: SHARDS }, (_, s) => env.STATE.get(counterKey(day, app, s))));
@@ -182,6 +201,8 @@ export function createHandler(deps: Deps) {
     const apps = [...keys.values()].map((k) => k.app);
     await refresh(env, apps, nowMs);
     if (off) return answer(503, "paused", { "retry-after": "3600" });
+    // Checked before the cache, so a withheld photo stops at once, not when its cache entry ends.
+    if (withheld.has(match[1]!)) return answer(404, "not_found");
 
     // The cache key is the photo alone: no app key, no query string.
     const cacheKey = new Request(`${url.origin}${url.pathname}`, { method: "GET" });

@@ -46,8 +46,8 @@ const upload = (who: string, n = 1, placeId = PLACE): StoredFeedback =>
     type: "photo",
     photo: { full_sha256: sha(n), full_bytes: 400_000, thumb_sha256: "f".repeat(64), thumb_bytes: 40_000, width: 1600, height: 1200 },
   }) as StoredFeedback;
-const report = (who: string, photo: string): StoredFeedback =>
-  ({ ...base(who), type: "photo_report", photo_report: { photo, reason: "offensive" } }) as StoredFeedback;
+const report = (who: string, photo: string, reason = "offensive"): StoredFeedback =>
+  ({ ...base(who), type: "photo_report", photo_report: { photo, reason } }) as StoredFeedback;
 const erasure = (who: string): StoredFeedback => ({ ...base(who, null), type: "photo_erasure" }) as StoredFeedback;
 const photoLine = (n: number, who: string, extra: Partial<Photo> = {}): Photo => ({
   id: `pho_01JA00000000000000000000${String(n).padStart(2, "0")}`,
@@ -131,6 +131,15 @@ describe("photo rules", () => {
     expect(reports.map((r) => out.outcome(r))).toEqual(["needs_review", "needs_review", "needs_review"]);
     expect(out.photos.get(PLACE)![0]!.hidden).toBe("reported");
     expect(rules(reports.slice(0, 2), { photos: [target] }).photos.get(PLACE)![0]!.hidden).toBeUndefined();
+  });
+
+  it("hides a photo at once after one illegal-content report, and flags it urgent", () => {
+    const target = photoLine(1, "sam");
+    const one = report("a", target.id, "illegal");
+    const out = rules([one], { photos: [target] });
+    expect(out.outcome(one)).toBe("needs_review");
+    expect(out.photos.get(PLACE)![0]!.hidden).toBe("reported");
+    expect(out.needsReview).toBe(true);
   });
 
   it("refuses a report of a photo not in the data, or of the reporter's own photo", () => {

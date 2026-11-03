@@ -570,6 +570,19 @@ export function applyRules(input: RulesInput): RulesOutput {
       }
       reportsSent.push(item);
       edits.push({ kind: "note", place: item.place, feedback: item.id });
+      if (reason === "illegal") {
+        // One report is enough: the intake has already withheld the photo at the photo server.
+        if (target.hidden === undefined) target.hidden = "reported";
+        note(
+          item.place,
+          `URGENT: photo ${photoId} reported as illegal (child abuse, an intimate image shared without consent, or terrorist material). ` +
+            "Hidden and withheld until a person decides. Follow the safety procedure: remove it, and report it where the procedure says",
+          false,
+          [item],
+        );
+        decide(item, "needs_review", "an illegal-content report hides the photo at once and is read by a person");
+        continue;
+      }
       note(item.place, `photo ${photoId} reported as ${reason} (decide: keep, hide, remove or block the contributor)`, false, [item]);
       decide(item, "needs_review", "photo reports are read by a person");
       const reporters = new Set(

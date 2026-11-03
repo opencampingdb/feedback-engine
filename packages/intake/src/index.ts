@@ -59,7 +59,15 @@ export interface Env {
   PHOTOS_PENDING?: BucketLike;
   /** Secret, shared with the photo server. Signs photo passes. Needed for `/v1/photos/pass`. */
   PHOTO_PASS_SECRET?: string;
+  /**
+   * The photo server's STATE namespace. A photo reported as `illegal` gets a
+   * `withheld:<photo id>` key there, and the photo server stops serving it.
+   */
+  PHOTO_STATE?: KVLike;
 }
+
+/** Key in the photo server's STATE that stops one photo being served. */
+export const withheldKey = (photo: string) => `withheld:${photo}`;
 
 type SubmissionKind = "feedback" | "owner";
 
@@ -712,6 +720,12 @@ export function createHandler(deps: Deps) {
       await write(stored);
     } catch {
       return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
+    }
+    // An illegal-content report withholds the photo before a person sees it. The
+    // report is in the inbox already, so a failed write here still reaches a person.
+    if (stored.type === "photo_report" && stored.photo_report.reason === "illegal" && env.PHOTO_STATE) {
+      const value = JSON.stringify({ feedback: id, at: received });
+      await env.PHOTO_STATE.put(withheldKey(stored.photo_report.photo), value).catch(() => undefined);
     }
     return json(202, { id }, cors);
   };
