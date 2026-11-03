@@ -268,7 +268,7 @@ export type PhotoClientOptions = FeedbackClientOptions;
 
 export class ConsentRequiredError extends Error {
   constructor() {
-    super("Feedback needs consent: true, given after the user agreed to CONSENT_TEXT");
+    super("Sending needs consent: true, given after the user agreed to CONSENT_TEXT, or to the app's own photo terms for photos");
     this.name = "ConsentRequiredError";
   }
 }

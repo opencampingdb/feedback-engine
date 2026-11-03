@@ -249,7 +249,7 @@ describe("photo run", () => {
   });
 
   it("runs an app's own photo repository: places from a separate checkout, everything else refused", async () => {
-    // The photo repository holds no places; Open Camping DB's data does.
+    // The photo repository holds no places. Open Camping DB's data does.
     const photosRepo = join(root, "app-photos");
     const ocdb = join(root, "ocdb-data");
     await put(join(ocdb, "places", "za", `${PLACE}.json`), dumpPlace(place()));

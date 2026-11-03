@@ -32,7 +32,7 @@ binding = "ATTEST"
 id = "REPLACE_ME_ATTEST_KV_NAMESPACE_ID"
 
 # Only when this intake is an app's own photo service (docs/photos.md): uncomment
-# and fill in. The pending bucket holds uploads until their record is merged; give
+# and fill in. The pending bucket holds uploads until their record is merged. Give
 # it a lifecycle rule that deletes objects 180 days after upload. PHOTO_STATE is
 # the photo server's state namespace, where illegal-content reports withhold a photo.
 # [[r2_buckets]]

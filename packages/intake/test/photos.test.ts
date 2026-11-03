@@ -212,6 +212,24 @@ describe("photo reports and erasure", () => {
     expect((await send({ ...noContributor, type: "photo_report", place: PLACE, photo_report: { photo: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB", reason: "offensive" } })).status).toBe(400);
   });
 
+  it("turns photo reports, erasures and passes away from an intake with no photo bucket", async () => {
+    const gh = fakeGitHub();
+    const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
+    const { PHOTOS_PENDING: _bucket, ...noPhotos } = env();
+    const post = (path: string, body: unknown) =>
+      handle(new Request(`https://intake.example${path}`, { method: "POST", headers: { "x-app-key": APP_KEY }, body: JSON.stringify(body) }), {
+        ...noPhotos,
+        PHOTO_PASS_SECRET: "pass-secret",
+      });
+    const base = { device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true };
+    const report = await post("/v1/feedback", { ...base, type: "photo_report", place: PLACE, photo_report: { photo: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB", reason: "offensive" } });
+    expect(report.status).toBe(404);
+    expect(await report.json()).toEqual({ error: "photos_not_served_here" });
+    expect((await post("/v1/feedback", { ...base, type: "photo_erasure", place: null })).status).toBe(404);
+    expect((await post("/v1/photos/pass", { type: "photo_pass", device: DEVICE, app_version: "1", time: new Date(NOW).toISOString() })).status).toBe(404);
+    expect(gh.puts).toHaveLength(0);
+  });
+
   it("withholds a photo reported as illegal in the photo server's state, and only then", async () => {
     const gh = fakeGitHub();
     const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
