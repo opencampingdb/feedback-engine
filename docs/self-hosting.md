@@ -33,15 +33,18 @@ If an app key uses App Attest, create a second namespace for registered keys and
 npx wrangler kv namespace create ATTEST
 ```
 
-To serve new places at once (`GET /v1/places/recent`, see [integration.md](integration.md) section 5), create a namespace for them and note its `id` for the `RECENT_PLACES` binding:
+To serve new places at once (`GET /v1/places/recent`, see [integration.md](integration.md) section 5), create a D1 database for the recent list, note its `database_id` for the `RECENT_LIST` binding, and apply its schema once the deploy copy of `wrangler.toml` holds that id (step 6):
 
 ```sh
-npx wrangler kv namespace create RECENT_PLACES
+npx wrangler d1 create ocdb-recent-list
+npx wrangler d1 migrations apply RECENT_LIST --remote -c wrangler.deploy.toml
 ```
 
-Each listed new place, check or report on one makes one more write. Each refresh of the list that misses the edge cache makes one list operation per 1,000 places, at most twice a minute in each Cloudflare location, which is more than the free plan's 1,000 list operations a day once many phones use it. Use the Workers paid plan for it.
+The schema is kept as numbered migrations in `packages/intake/migrations`. After updating to a release that adds one, run the same `migrations apply` command before deploying. Without `RECENT_LIST` the recent-list routes answer `404` and feedback still reaches the inbox.
 
-The apply run keeps the store in step with two calls, each with `authorization: Bearer <PLACES_TOKEN>`. `POST /v1/places/recent/remove` with `{"ids": [...]}` (1 to 500 place ids) takes places it has written into the data off the list, answering `{"removed": <count>}`. `POST /v1/places/recent/block` with `{"contributors": [...]}` (up to 5,000 hashed `ctr_` ids, `[]` for none) replaces the block list the intake keeps, answering `{"blocked": <count>}`. A blocked contributor's places leave the list and later ones aren't listed; one taken off the block list is listed again. Both answer `401` for a wrong token and `404` without `RECENT_PLACES` or `PLACES_TOKEN`.
+Each new place, check, removal report or withdraw is one row written. Each refresh of the list that misses the edge cache is one query. The box a request names is grown out to whole degrees before the query and the cache, so map views in the same degrees share one cached answer for 30 seconds. This fits the D1 free plan.
+
+The apply run keeps the store in step with two calls, each with `authorization: Bearer <PLACES_TOKEN>`. `POST /v1/places/recent/remove` with `{"ids": [...]}` (1 to 500 place ids) takes places it has written into the data off the list, answering `{"removed": <count>}`. `POST /v1/places/recent/block` with `{"contributors": [...]}` (up to 5,000 hashed `ctr_` ids, `[]` for none) replaces the block list the intake keeps, answering `{"blocked": <count>}`. A blocked contributor's places leave the list and later ones aren't listed; one taken off the block list is listed again. Both answer `401` for a wrong token and `404` without `RECENT_LIST` or `PLACES_TOKEN`.
 
 ## 3. Create the private inbox repository
 
@@ -92,7 +95,7 @@ npx wrangler secret put GH_INSTALLATION_ID
 
   Make keys with `openssl rand -hex 16`. To revoke a key, remove it and set the secret again.
 - `DEVICE_SALT` is a long random string, for example from `openssl rand -hex 32`. Changing it makes every device look new, which resets the two-device rule for pending items, so set it once.
-- `PLACES_TOKEN`, needed only with `RECENT_PLACES`, is a long random string, for example from `openssl rand -hex 32`. The apply run sends it to take places it has written into the data off the recent list, and to send the block list. Set it with `npx wrangler secret put PLACES_TOKEN` and keep the same value for the apply workflow.
+- `PLACES_TOKEN`, needed only with `RECENT_LIST`, is a long random string, for example from `openssl rand -hex 32`. The apply run sends it to take places it has written into the data off the recent list, and to send the block list. Set it with `npx wrangler secret put PLACES_TOKEN` and keep the same value for the apply workflow.
 - `GH_APP_PRIVATE_KEY` accepts the PEM GitHub gives you (PKCS#1) or PKCS#8.
 - `GOOGLE_SERVICE_ACCOUNT`, needed only for `android`, is the JSON key file of a Google Cloud service account in the project linked to the app in Play Console, allowed to decode integrity tokens. Set it with `npx wrangler secret put GOOGLE_SERVICE_ACCOUNT < key.json`.
 
@@ -100,13 +103,13 @@ npx wrangler secret put GH_INSTALLATION_ID
 
 ## 6. Deploy
 
-`wrangler.toml` holds placeholders for the namespace ids. Keep your ids in a copy that git does not track, so updating your checkout never resets them, and deploy with that copy:
+`wrangler.toml` holds placeholders for the namespace and database ids. Keep your ids in a copy that git does not track, so updating your checkout never resets them, and deploy with that copy:
 
 ```sh
 cd packages/intake
 sed -e "s/REPLACE_ME_KV_NAMESPACE_ID/<RATE_LIMIT id>/" \
     -e "s/REPLACE_ME_ATTEST_KV_NAMESPACE_ID/<ATTEST id>/" \
-    -e "s/REPLACE_ME_RECENT_PLACES_KV_NAMESPACE_ID/<RECENT_PLACES id>/" wrangler.toml > wrangler.deploy.toml
+    -e "s/REPLACE_ME_RECENT_LIST_D1_DATABASE_ID/<RECENT_LIST database_id>/" wrangler.toml > wrangler.deploy.toml
 npx wrangler deploy -c wrangler.deploy.toml
 ```
 
@@ -149,7 +152,7 @@ Install it on only `inbox` and `data`. The workflow asks for a token limited to 
 
 ## 9. Add the workflow to the inbox
 
-Copy [`packages/apply/examples/inbox-apply-feedback.yml`](../packages/apply/examples/inbox-apply-feedback.yml) to `.github/workflows/apply-feedback.yml` in `inbox`. Replace both `REPLACE_WITH_ENGINE_SHA` values with the same full commit SHA of this repository. Replace `REPLACE_WITH_INTAKE_URL` with the intake's base URL, for example `https://intake.example.org`, or remove the `intake-url` and `places-token` lines when the intake has no `RECENT_PLACES`. Then add the Actions secrets in `inbox`:
+Copy [`packages/apply/examples/inbox-apply-feedback.yml`](../packages/apply/examples/inbox-apply-feedback.yml) to `.github/workflows/apply-feedback.yml` in `inbox`. Replace both `REPLACE_WITH_ENGINE_SHA` values with the same full commit SHA of this repository. Replace `REPLACE_WITH_INTAKE_URL` with the intake's base URL, for example `https://intake.example.org`, or remove the `intake-url` and `places-token` lines when the intake has no `RECENT_LIST`. Then add the Actions secrets in `inbox`:
 
 - `OCDB_BOT_CLIENT_ID`: the bot App's Client ID.
 - `OCDB_BOT_PRIVATE_KEY`: the contents of the bot App's `.pem` file.
@@ -166,7 +169,7 @@ The review PR body lists every held new place under "Held new places", one line 
 
 **A person's decision on a new place.** Reports set aside a place's `standing` again on later runs unless a person's decision is on its record. To restore a hidden place, set `"standing": "shown"` and `"moderator": {"action": "restore", "at": "<now>"}` on the record, on the review PR or in a PR to `main`. Reports up to `at` no longer count, and later ones count as usual. To hide one, set `"standing": "hidden"` and `"moderator": {"action": "hide", "at": "<now>"}`: it stays hidden whatever travellers send. `at` is a UTC time such as `2026-11-03T09:00:00Z` or a day such as `2026-11-03`. Only the latest decision is kept, so a new one replaces the old. The note on a place hidden before it was published gives the line to paste.
 
-With `intake-url` set, each run passes `--main <checkout of data main> --intake <intake URL>` and the `PLACES_TOKEN` secret to `ocdb-apply`. It takes new places out of the intake's recent places store once the PR that writes them is merged, and withdrawn ones at once, then sends the intake the contributors in `moderation/blocked_contributors.json` on `main`, so a blocked contributor's new places leave the recent list.
+With `intake-url` set, each run passes `--main <checkout of data main> --intake <intake URL>` and the `PLACES_TOKEN` secret to `ocdb-apply`. It takes new places off the intake's recent list once the PR that writes them is merged, and withdrawn ones at once, then sends the intake the contributors in `moderation/blocked_contributors.json` on `main`, so a blocked contributor's new places leave the recent list.
 
 When a PR from either branch is already open, later runs add a commit and a comment to it. Once a PR is merged or closed, the next run starts the branch again from `main`. With nothing to do the workflow ends without changes.
 

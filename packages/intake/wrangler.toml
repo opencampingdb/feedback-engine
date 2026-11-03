@@ -7,7 +7,7 @@
 #   GH_INSTALLATION_ID  installation id of the App on the inbox repository
 #   PHOTO_PASS_SECRET   signs photo passes, the same secret as the photo server's. Only for /v1/photos/pass
 #   GOOGLE_SERVICE_ACCOUNT  Google service account key file (JSON), only for app keys with "android"
-#   PLACES_TOKEN        lets the apply run remove places from RECENT_PLACES. Only with RECENT_PLACES
+#   PLACES_TOKEN        lets the apply run remove places from RECENT_LIST and send the block list. Only with RECENT_LIST
 
 name = "ocdb-feedback-intake"
 main = "src/index.ts"
@@ -32,10 +32,14 @@ id = "REPLACE_ME_KV_NAMESPACE_ID"
 binding = "ATTEST"
 id = "REPLACE_ME_ATTEST_KV_NAMESPACE_ID"
 
-# New places served by GET /v1/places/recent until the apply run writes them into the data.
-[[kv_namespaces]]
-binding = "RECENT_PLACES"
-id = "REPLACE_ME_RECENT_PLACES_KV_NAMESPACE_ID"
+# The recent list: new places served by GET /v1/places/recent until the apply
+# run writes them into the data, with their evidence and the block list. Apply
+# the schema with `npx wrangler d1 migrations apply RECENT_LIST --remote`.
+[[d1_databases]]
+binding = "RECENT_LIST"
+database_name = "ocdb-recent-list"
+database_id = "REPLACE_ME_RECENT_LIST_D1_DATABASE_ID"
+migrations_dir = "migrations"
 
 # Only when this intake is an app's own photo service (docs/photos.md): uncomment
 # and fill in. The pending bucket holds uploads until their record is merged. Give
