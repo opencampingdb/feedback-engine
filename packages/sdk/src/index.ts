@@ -35,6 +35,7 @@ export type {
   ReviewReportInput,
   StorageAdapter,
   SubmitResult,
+  WithdrawInput,
 } from "./client.js";
 export {
   BRANDS,

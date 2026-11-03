@@ -71,3 +71,22 @@ describe("contact facts on a new place", () => {
     expect(r).toEqual({ ok: false, errors: ["report.contacts is only allowed when report.kind is new_place"] });
   });
 });
+
+describe("withdrawing a new place", () => {
+  it("accepts a withdraw naming the new place", () => {
+    const r = validateSubmission({ ...base, type: "withdraw", place: PLACE });
+    expect(r).toEqual({ ok: true, value: { ...base, type: "withdraw", place: PLACE } });
+  });
+
+  it("needs the place and takes nothing else", () => {
+    expect(validateSubmission({ ...base, type: "withdraw", place: null })).toEqual({ ok: false, errors: ["place is required for a withdraw"] });
+    expect(validateSubmission({ ...base, type: "withdraw", place: PLACE, location: { lat: -36.8, lon: 144.5 } })).toEqual({
+      ok: false,
+      errors: ["location is not allowed on a withdraw"],
+    });
+    expect(validateSubmission({ ...base, type: "withdraw", place: PLACE, report: { kind: "remove", reason: "fake" } })).toEqual({
+      ok: false,
+      errors: ["report is not allowed when type is withdraw"],
+    });
+  });
+});

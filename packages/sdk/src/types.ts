@@ -3,7 +3,16 @@
  * (`POST /v1/feedback`), matching SPEC.md "Feedback submission".
  */
 
-export type FeedbackType = "report" | "review" | "check" | "review_report" | "fee" | "photo" | "photo_report" | "photo_erasure";
+export type FeedbackType =
+  | "report"
+  | "review"
+  | "check"
+  | "review_report"
+  | "fee"
+  | "photo"
+  | "photo_report"
+  | "photo_erasure"
+  | "withdraw";
 export type OwnerType = "owner_claim" | "owner_listing" | "owner_update";
 
 export type ReportKind =
@@ -352,6 +361,16 @@ export interface PhotoErasureSubmission extends SubmissionBase {
   place: null;
 }
 
+/**
+ * Takes back a new place the same install sent. `place` is the new place's id,
+ * `ocdb_` and the id the intake answered with. Within 24 hours of the report
+ * the place is withdrawn; after that it counts as one more report.
+ */
+export interface WithdrawSubmission extends SubmissionBase {
+  type: "withdraw";
+  place: string;
+}
+
 /** Contact details of an owner. They stay in the private inbox and are never published. */
 export interface OwnerContact {
   name: string;
@@ -431,7 +450,8 @@ export type FeedbackSubmission =
   | FeeSubmission
   | PhotoSubmission
   | PhotoReportSubmission
-  | PhotoErasureSubmission;
+  | PhotoErasureSubmission
+  | WithdrawSubmission;
 
 /** Every body the intake accepts. */
 export type Submission = FeedbackSubmission | OwnerSubmission;

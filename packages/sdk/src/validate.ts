@@ -27,7 +27,17 @@ import type {
   Submission,
 } from "./types.js";
 
-export const FEEDBACK_TYPES = ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "photo_erasure"] as const;
+export const FEEDBACK_TYPES = [
+  "report",
+  "review",
+  "check",
+  "review_report",
+  "fee",
+  "photo",
+  "photo_report",
+  "photo_erasure",
+  "withdraw",
+] as const;
 export const OWNER_TYPES = ["owner_claim", "owner_listing", "owner_update"] as const;
 const ALL_TYPES: readonly string[] = [...FEEDBACK_TYPES, ...OWNER_TYPES];
 export const REPORT_KINDS: readonly ReportKind[] = [
@@ -590,6 +600,8 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     } else if (type === "photo_report") {
       const photoReport = checkPhotoReport(input.photo_report, errors);
       if (photoReport) value = { ...base, place: place as string, type: "photo_report", photo_report: photoReport };
+    } else if (type === "withdraw") {
+      value = { ...base, place: place as string, type: "withdraw" };
     } else if (type === "fee") {
       const fee = checkFee(input.fee, now, errors);
       if (fee) value = { ...base, place: place as string, type: "fee", fee };
