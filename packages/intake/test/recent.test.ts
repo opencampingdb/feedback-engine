@@ -133,7 +133,7 @@ function feedback(body: Record<string, unknown>, headers: Record<string, string>
   });
 }
 
-const newPlace = (extra: { device?: string; contributor?: string; note?: string; contacts?: Record<string, string> } = {}) => ({
+const newPlace = (extra: { device?: string; contributor?: string; note?: string; name?: string; contacts?: Record<string, string> } = {}) => ({
   type: "report",
   place: null,
   location: { lat: -36.12345, lon: 146.88765 },
@@ -145,6 +145,7 @@ const newPlace = (extra: { device?: string; contributor?: string; note?: string;
     kind: "new_place",
     place_kind: "free_camp",
     note: extra.note ?? "Gravel pit off the highway, room for three vans",
+    ...(extra.name !== undefined ? { name: extra.name } : {}),
     ...(extra.contacts ? { contacts: extra.contacts } : {}),
   },
 });
@@ -157,6 +158,7 @@ interface Listed {
   id: string;
   location: { lat: number; lon: number };
   kind: string | null;
+  name: string | null;
   standing: string;
   added: string;
   contributor: string;
@@ -189,14 +191,15 @@ describe("recent places", () => {
     return ((await res.json()) as { places: Listed[] }).places;
   }
 
-  it("lists an accepted new place with its id, location, kind, standing, time and contributor", async () => {
-    const id = await add();
+  it("lists an accepted new place with its id, location, kind, name, standing, time and contributor", async () => {
+    const id = await add({ name: "Gravel Pit Rest Area" });
     const places = await list();
     expect(places).toHaveLength(1);
     expect(places[0]).toEqual({
       id,
       location: { lat: -36.12345, lon: 146.88765 },
       kind: "free_camp",
+      name: "Gravel Pit Rest Area",
       standing: "shown",
       added: "2026-11-03T09:00:00Z",
       contributor: services.writes[0]!.contributor,
@@ -223,8 +226,13 @@ describe("recent places", () => {
     expect(text).not.toContain("park@example.org");
     expect(text).not.toContain(ADDER);
     expect(Object.keys((JSON.parse(text) as { places: Listed[] }).places[0]!).sort()).toEqual(
-      ["added", "contributor", "id", "kind", "location", "standing"],
+      ["added", "contributor", "id", "kind", "location", "name", "standing"],
     );
+  });
+
+  it("lists a new place sent without a name with a null name", async () => {
+    await add();
+    expect((await list())[0]!.name).toBeNull();
   });
 
   it("is cached at the edge for 30 seconds", async () => {
@@ -267,15 +275,35 @@ describe("recent places", () => {
     expect(await list()).toEqual([]);
   });
 
-  it("confirms a place two other devices found still there", async () => {
+  it("confirms a place two other devices found still there while nearby", async () => {
     const id = await add();
-    const check = (device: string) =>
-      feedback({ type: "check", place: id, device, app_version: "1.0.0", consent: true, check: { visited: "2026-11-03", still_there: true } });
+    const check = (device: string, nearby = true) =>
+      feedback({
+        type: "check",
+        place: id,
+        device,
+        app_version: "1.0.0",
+        consent: true,
+        check: { visited: "2026-11-03", still_there: true, ...(nearby ? { nearby: true } : {}) },
+      });
     await handle(check(ADDER), e);
     await handle(check(otherDevice(1)), e);
+    await handle(check(otherDevice(3), false), e);
     expect((await list())[0]!.standing).toBe("shown");
     await handle(check(otherDevice(2)), e);
     expect((await list())[0]!.standing).toBe("confirmed");
+  });
+
+  it("doesn't confirm a place on still there checks from away from it", async () => {
+    const id = await add();
+    for (const i of [1, 2, 3]) {
+      const res = await handle(
+        feedback({ type: "check", place: id, device: otherDevice(i), app_version: "1.0.0", consent: true, check: { visited: "2026-11-03", still_there: true } }),
+        e,
+      );
+      expect(res.status).toBe(202);
+    }
+    expect((await list())[0]!.standing).toBe("shown");
   });
 
   describe("withdraw", () => {

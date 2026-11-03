@@ -17,6 +17,8 @@ export interface RecentPlace {
   id: string;
   location: LatLon;
   kind: string | null;
+  /** The name the traveller gave, or null when the report carried none. */
+  name: string | null;
   standing: NewPlaceStanding;
   added: string;
   /** The hashed contributor id, so apps can hide what a hidden contributor added. */
@@ -49,6 +51,7 @@ const listed = (place: StoredPlace): RecentPlace => ({
   id: place.id,
   location: place.location,
   kind: place.kind,
+  name: place.name ?? null,
   standing: place.standing,
   added: place.added,
   contributor: place.contributor,
@@ -100,7 +103,8 @@ export async function listPlaces(kv: ListableKV, bbox?: Bbox): Promise<RecentPla
         const { lat, lon } = place.location;
         if (lat < south || lat > north || lon < west || lon > east) continue;
       }
-      out.push(place);
+      // Places stored before names were kept have none.
+      out.push({ ...place, name: place.name ?? null });
     }
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);

@@ -886,12 +886,13 @@ async function updateRecent(
 ): Promise<void> {
   const { id, received, device, contributor, attestKey, proof, target } = item;
   if (submission.type === "report" && submission.report.kind === "new_place") {
-    const { note, place_kind } = submission.report;
+    const { note, place_kind, name } = submission.report;
     if (!proof || !contributor || !submission.location || firstProblem(note === undefined ? undefined : tidyText(note))) return;
     const place: StoredPlace = {
       id: newPlaceId(id),
       location: submission.location,
       kind: place_kind ?? null,
+      name: name ?? null,
       standing: "shown",
       added: received,
       contributor,
@@ -906,8 +907,8 @@ async function updateRecent(
   }
   if (!target) return;
   if (submission.type === "check") {
-    // A check carries no location, so it is taken to be from near the place.
-    const check = { device, stillThere: submission.check.still_there, nearby: true, day: received };
+    // A check carries no location: only the app's word that the phone was near the place.
+    const check = { device, stillThere: submission.check.still_there, nearby: submission.check.nearby === true, day: received };
     await savePlace(kv, { ...target, checks: [...target.checks, check] }, received);
   } else if (submission.type === "report" && submission.report.kind === "remove" && submission.report.reason) {
     const report = { device, reason: submission.report.reason, day: received };
