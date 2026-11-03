@@ -1125,7 +1125,7 @@ describe("new places", () => {
 
   describe("a moderator's decision", () => {
     /** A place hidden by two reports, which a person has since restored or hidden on its record. */
-    const decided = (moderator: Place["moderator"], standing: Place["standing"]) => {
+    const decided = (moderator: NonNullable<Place["moderator"]>, standing: Place["standing"]) => {
       const item = added(0);
       const reports = [remove(1, "dev-b", item), remove(1, "dev-c", item)];
       return {
@@ -1160,7 +1160,7 @@ describe("new places", () => {
     });
 
     it("leaves out a decision it can't read", () => {
-      const { item, input } = decided({ action: "keep", at: "soon" } as unknown as Place["moderator"], "shown");
+      const { item, input } = decided({ action: "keep", at: "soon" } as unknown as NonNullable<Place["moderator"]>, "shown");
       const out = run([visit(3, "dev-d", item, true)], { ...input, now: 4 });
       expect(out.after(idOf(item))?.standing).toBe("hidden");
     });
