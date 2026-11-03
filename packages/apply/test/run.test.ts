@@ -51,12 +51,12 @@ const NEWCOMER = "ctr_5e5e5e5e5e5e5e5e";
 async function trustContributor(): Promise<void> {
   await put(
     join(data, "reviews", `${OTHER}.ndjson`),
-    `{"app":"camporacle","contributor":"${TRUSTED}","created":"2026-09-01T00:00:00Z","id":"rev_01JB0000000000000000000001","place":"${OTHER}","stars":5,"text":"","visited":"2026-08"}\n`,
+    `{"app":"example-app","contributor":"${TRUSTED}","created":"2026-09-01T00:00:00Z","id":"rev_01JB0000000000000000000001","place":"${OTHER}","stars":5,"text":"","visited":"2026-08"}\n`,
   );
 }
 
 function item(n: number, received: string, device: string, extra: Record<string, unknown>) {
-  return { id: id(n), received, app: "camporacle", place: PLACE, device, app_version: "1.0.0", consent: true, ...extra };
+  return { id: id(n), received, app: "example-app", place: PLACE, device, app_version: "1.0.0", consent: true, ...extra };
 }
 
 async function pending(n: number, received: string, device: string, extra: Record<string, unknown>) {
@@ -79,7 +79,7 @@ describe("run", () => {
     const day = "2026-10-29";
     await put(
       join(data, "fees", `${PLACE}.ndjson`),
-      `{"amount":30,"app":"camporacle","contributor":"${TRUSTED}","created":"2026-09-01T00:00:00Z","id":"fee_01JB0000000000000000000001","paid":"2026-08","place":"${PLACE}","site":"powered"}\n`,
+      `{"amount":30,"app":"example-app","contributor":"${TRUSTED}","created":"2026-09-01T00:00:00Z","id":"fee_01JB0000000000000000000001","paid":"2026-08","place":"${PLACE}","site":"powered"}\n`,
     );
     await pending(1, `${day}T01:00:00Z`, "aaaa", { type: "fee", contributor: TRUSTED, fee: { amount: 36.5, site: "powered", paid: "2026-10" } });
     await pending(2, `${day}T02:00:00Z`, "bbbb", { type: "fee", contributor: NEWCOMER, fee: { amount: 120, site: "cabin", paid: "2026-09" } });
@@ -89,8 +89,8 @@ describe("run", () => {
     expect(summary.counts).toEqual({ applied: 2, refused: 0, needs_review: 0, waiting: 0, awaiting_approval: 0 });
     expect(summary.auto_files).toEqual([`fees/${PLACE}.ndjson`]);
     expect(await readFile(join(data, "fees", `${PLACE}.ndjson`), "utf8")).toBe(
-      `{"amount":36.5,"app":"camporacle","contributor":"${TRUSTED}","created":"${day}T01:00:00Z","id":"fee_01JC0000000000000000000001","paid":"2026-10","place":"${PLACE}","site":"powered"}\n` +
-        `{"amount":120,"app":"camporacle","contributor":"${NEWCOMER}","created":"${day}T02:00:00Z","id":"fee_01JC0000000000000000000002","paid":"2026-09","place":"${PLACE}","site":"cabin"}\n`,
+      `{"amount":36.5,"app":"example-app","contributor":"${TRUSTED}","created":"${day}T01:00:00Z","id":"fee_01JC0000000000000000000001","paid":"2026-10","place":"${PLACE}","site":"powered"}\n` +
+        `{"amount":120,"app":"example-app","contributor":"${NEWCOMER}","created":"${day}T02:00:00Z","id":"fee_01JC0000000000000000000002","paid":"2026-09","place":"${PLACE}","site":"cabin"}\n`,
     );
     expect(summary.auto_pr_body).toContain("powered fee of $36.50 a night paid 2026-10, replacing fee_01JB0000000000000000000001");
     expect(summary.review_changed).toBe(false);
@@ -131,7 +131,7 @@ describe("run", () => {
 
     const reviews = await readFile(join(data, "reviews", `${PLACE}.ndjson`), "utf8");
     expect(reviews).toBe(
-      `{"app":"camporacle","contributor":"${TRUSTED}","created":"${day}T03:00:00Z","id":"rev_01JC0000000000000000000003","place":"${PLACE}",` +
+      `{"app":"example-app","contributor":"${TRUSTED}","created":"${day}T03:00:00Z","id":"rev_01JC0000000000000000000003","place":"${PLACE}",` +
         `"stars":4,"text":"Flat sites and clean toilets.","visited":"2026-10"}\n`,
     );
 
@@ -280,7 +280,7 @@ describe("run", () => {
   });
 
   it("keeps review lines sorted by id", async () => {
-    const later = `{"app":"camporacle","contributor":"${NEWCOMER}","created":"2026-11-01T00:00:00Z","id":"rev_01JZ0000000000000000000000","place":"${PLACE}","stars":5,"text":"","visited":"2026-10"}`;
+    const later = `{"app":"example-app","contributor":"${NEWCOMER}","created":"2026-11-01T00:00:00Z","id":"rev_01JZ0000000000000000000000","place":"${PLACE}","stars":5,"text":"","visited":"2026-10"}`;
     await put(join(data, "reviews", `${PLACE}.ndjson`), `${later}\n`);
     await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace({ ...place, rating: { count: 1, mean: 5 } }));
     await trustContributor();
@@ -310,7 +310,7 @@ describe("run", () => {
   });
 
   it("hides a review reported by three contributors and refuses a blocked contributor", async () => {
-    const target = `{"app":"camporacle","contributor":"${NEWCOMER}","created":"2026-10-01T00:00:00Z","id":"rev_01JB0000000000000000000009","place":"${PLACE}","stars":1,"text":"","visited":"2026-09"}`;
+    const target = `{"app":"example-app","contributor":"${NEWCOMER}","created":"2026-10-01T00:00:00Z","id":"rev_01JB0000000000000000000009","place":"${PLACE}","stars":1,"text":"","visited":"2026-09"}`;
     await put(join(data, "reviews", `${PLACE}.ndjson`), `${target}\n`);
     await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace({ ...place, rating: { count: 1, mean: 1 } }));
     await put(join(data, "moderation", "blocked_contributors.json"), {

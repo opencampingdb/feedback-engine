@@ -64,7 +64,7 @@ npx wrangler secret put GH_INSTALLATION_ID
 - `APP_KEYS` is a JSON map from app key to app name and daily limit. Keys must be at least 16 characters, and app names lower case letters, digits and dashes:
 
   ```json
-  {"9f3c1d0e7b2a4c5d8e6f": {"app": "camporacle", "daily_limit": 5000}}
+  {"9f3c1d0e7b2a4c5d8e6f": {"app": "example-app", "daily_limit": 5000}}
   ```
 
   Two optional fields limit what a key may do. `owner_daily_limit` is the key's daily limit for owner claims, listings and updates, counted apart from its other feedback so that feedback cannot use up the owners' share. It defaults to `daily_limit`. `kinds` lists what the key may send: `["feedback"]` for reports, reviews and checks, `["owner"]` for owner submissions, or both. A key without `kinds` may send everything, and any other submission gets `403`. The owner page's key ships in a public web page, so give it `"kinds": ["owner"]`:
@@ -76,8 +76,8 @@ npx wrangler secret put GH_INSTALLATION_ID
   For reviews, `contributor_daily_limit` sets how many submissions one contributor may send a day (20 when left out), and `requires_visited_nearby: true` refuses reviews without `visited_nearby`. To take feedback only from genuine copies of an app, add `"requires_attestation": true` with `ios` (`app_id`, your team id, a dot and the bundle id; `environment` `production` or `development`), `android` (`package`, and optionally `certificate_sha256`, the signing certificate digests Play reports), or both:
 
   ```json
-  {"9f3c1d0e7b2a4c5d8e6f": {"app": "camporacle", "daily_limit": 5000, "requires_attestation": true,
-    "ios": {"app_id": "ABCDE12345.app.camporacle"}, "android": {"package": "app.camporacle"}}}
+  {"9f3c1d0e7b2a4c5d8e6f": {"app": "example-app", "daily_limit": 5000, "requires_attestation": true,
+    "ios": {"app_id": "ABCDE12345.com.example.app"}, "android": {"package": "com.example.app"}}}
   ```
 
   Make keys with `openssl rand -hex 16`. To revoke a key, remove it and set the secret again.
@@ -167,4 +167,4 @@ With no `--review-data`, automatic and review changes land in the same checkout.
 
 ## Abuse
 
-Report abuse of a public intake, or a leaked app key, to abuse@camporacle.com.au.
+Report abuse of a public intake, or a leaked app key, with **Report a vulnerability** on this repository's Security tab.

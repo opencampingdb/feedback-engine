@@ -32,7 +32,7 @@ const fbId = () => `fb_01JC${String(++seq).padStart(22, "0")}`;
 const base = (who: string, placeId: string | null = PLACE) => ({
   id: fbId(),
   received: "2026-11-02T10:00:00Z",
-  app: "camporacle",
+  app: "example-app",
   place: placeId,
   device: who,
   contributor: ctr(who),
@@ -54,7 +54,7 @@ const photoLine = (n: number, who: string, extra: Partial<Photo> = {}): Photo =>
   place: PLACE,
   contributor: ctr(who),
   created: "2026-10-01T00:00:00Z",
-  app: "camporacle",
+  app: "example-app",
   licence: "CC-BY-4.0",
   width: 1600,
   height: 1200,
@@ -91,7 +91,7 @@ describe("photo rules", () => {
           place: PLACE,
           contributor: ctr("kim"),
           created: p.received,
-          app: "camporacle",
+          app: "example-app",
           licence: "CC-BY-4.0",
           width: 1600,
           height: 1200,
@@ -100,6 +100,21 @@ describe("photo rules", () => {
       },
     ]);
     expect(out.photos.get(PLACE) ?? []).toEqual([]);
+  });
+
+  it("writes the licence the photo service sets", () => {
+    const p = upload("sam", 7);
+    const out = applyRules({
+      now: NOW,
+      pending: [p],
+      history: [],
+      places: new Map([[PLACE, place()]]),
+      reviews: () => [],
+      blocked: new Set(),
+      photos: [photoLine(1, "sam")],
+      photoLicence: "CC-BY-SA-4.0",
+    });
+    expect(out.photos.get(PLACE)!.find((l) => l.id === p.id.replace("fb_", "pho_"))!.licence).toBe("CC-BY-SA-4.0");
   });
 
   it("publishes a photo from a contributor with a visible photo", () => {
@@ -195,7 +210,7 @@ describe("photo run", () => {
   }
 
   beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), "ocdb-photos-"));
+    root = await mkdtemp(join(tmpdir(), "photo-run-"));
     inbox = join(root, "inbox");
     data = join(root, "data");
     review = join(root, "review");
@@ -231,5 +246,23 @@ describe("photo run", () => {
     expect(await readFile(join(data, "moderation", "removed_photos.json"), "utf8")).toBe(
       `${JSON.stringify({ photos: [{ photo: photoLine(1, "sam").id, reason: "erased", removed: NOW }] }, null, 2)}\n`,
     );
+  });
+
+  it("runs an app's own photo repository: places from a separate checkout, everything else refused", async () => {
+    // The photo repository holds no places; Open Camping DB's data does.
+    const photosRepo = join(root, "app-photos");
+    const ocdb = join(root, "ocdb-data");
+    await put(join(ocdb, "places", "za", `${PLACE}.json`), dumpPlace(place()));
+    await put(join(photosRepo, "moderation", "blocked_contributors.json"), '{"contributors":[]}\n');
+    const held = upload("kim", 6);
+    const review = { ...base("kim"), type: "review", review: { stars: 4, text: "Good camp.", visited: "2026-10" } } as StoredFeedback;
+    for (const item of [held, review]) await put(join(inbox, "pending", "2026-11-02", `${item.id}.json`), JSON.stringify(item));
+    const summary = await run({ inbox, data: photosRepo, places: ocdb, now: new Date(NOW) });
+    expect(summary.counts).toMatchObject({ needs_review: 1, refused: 1, applied: 0 });
+    const lines = (await readFile(join(photosRepo, "photos", `${PLACE}.ndjson`), "utf8")).trim().split("\n");
+    expect(lines.map((l) => JSON.parse(l).id)).toEqual([held.id.replace("fb_", "pho_")]);
+    const refused = JSON.parse(await readFile(join(inbox, "refused", "2026-11-02", `${review.id}.json`), "utf8"));
+    expect(refused.outcome).toMatchObject({ result: "refused", reason: "this repository takes photos only" });
+    await expect(readFile(join(photosRepo, "places", "za", `${PLACE}.json`), "utf8")).rejects.toThrow();
   });
 });

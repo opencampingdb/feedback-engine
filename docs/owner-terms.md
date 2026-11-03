@@ -13,4 +13,4 @@ When you tick the box, you agree that:
 7. **Your token is like a key.** Anyone who has it can change your place's details, so keep it private. If you lose it, claim the place again. The new claim replaces the old one once it is approved.
 8. **Reviews belong to travellers.** You cannot change or remove reviews, ratings or check-ins.
 
-Questions, corrections and takedown requests: abuse@camporacle.com.au.
+Questions and corrections: open an issue in [opencampingdb/data](https://github.com/opencampingdb/data/issues/new/choose). Takedown requests: use the **Takedown** form there, or **Report a vulnerability** on its Security tab for anything you need to keep private.

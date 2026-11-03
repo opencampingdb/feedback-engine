@@ -131,7 +131,7 @@ try {
     n += 1;
     const id = `fb_01JC${String(n).padStart(22, "0")}`;
     const received = `${day}T00:${String(minute).padStart(2, "0")}:00Z`;
-    const item = { id, received, app: "camporacle", place, device, app_version: "1.0.0", consent: true, ...body };
+    const item = { id, received, app: "example-app", place, device, app_version: "1.0.0", consent: true, ...body };
     await mkdir(join(inbox, "pending", day), { recursive: true });
     await writeFile(join(inbox, "pending", day, `${id}.json`), `${JSON.stringify(item, null, 2)}\n`);
     return id;

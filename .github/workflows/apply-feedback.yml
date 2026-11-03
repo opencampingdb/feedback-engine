@@ -1,5 +1,6 @@
 # Reusable workflow: applies feedback from the calling repository (the private
-# inbox) to opencampingdb/data. Call it from the inbox repository on a
+# inbox) to opencampingdb/data, or, with places-repository set, photos to an
+# app's own photo repository. Call it from the inbox repository on a
 # schedule; see packages/apply/examples/inbox-apply-feedback.yml.
 # The data repository must sit in the same organisation as the inbox.
 #
@@ -13,7 +14,7 @@
 # onto any files the intake wrote meanwhile, so a failed run is simply
 # repeated: the apply script writes nothing it has already written.
 #
-# Both tokens come from the opencampingdb-bot GitHub App, never GITHUB_TOKEN,
+# Both tokens come from the deployment's bot GitHub App, never GITHUB_TOKEN,
 # so the data PRs trigger the data repository's CI.
 
 name: Apply feedback
@@ -37,12 +38,24 @@ on:
         description: Commit of feedback-engine to run. Use the same SHA the caller pins this workflow to.
         type: string
         required: true
+      places-repository:
+        description: >-
+          For an app's own photo repository: owner/name of the Open Camping DB
+          data repository to read place records from (opencampingdb/data). Set
+          it and the run takes photos only, writing photo lines to the data
+          repository named above.
+        type: string
+        default: ""
+      photo-licence:
+        description: Licence id written on new photo lines
+        type: string
+        default: CC-BY-4.0
     secrets:
       app-client-id:
-        description: Client ID of the opencampingdb-bot GitHub App
+        description: Client ID of the bot GitHub App
         required: true
       app-private-key:
-        description: Private key of the opencampingdb-bot GitHub App
+        description: Private key of the bot GitHub App
         required: true
 
 permissions:
@@ -110,6 +123,17 @@ jobs:
           path: data-review
           fetch-depth: 0
           token: ${{ steps.data-token.outputs.token }}
+
+      - name: Check out Open Camping DB place records
+        if: inputs.places-repository != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.places-repository }}
+          path: places
+          sparse-checkout: |
+            places
+            schema
+          persist-credentials: false
 
       - name: Set up Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -184,8 +208,12 @@ jobs:
         id: apply
         env:
           APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
+          PLACES_ARGS: ${{ inputs.places-repository != '' && '--places places' || '' }}
+          PHOTO_LICENCE: ${{ inputs.photo-licence }}
         run: >
           node engine/packages/apply/dist/cli.js
+          $PLACES_ARGS
+          --photo-licence "$PHOTO_LICENCE"
           --inbox inbox
           --data data-auto
           --review-data data-review

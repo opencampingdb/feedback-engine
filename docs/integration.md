@@ -4,7 +4,7 @@ This guide adds Open Camping DB feedback to an Expo (React Native) app. The same
 
 ## 1. Get an app key
 
-Email dev@camporacle.com.au with your app's name and roughly how many submissions a day you expect. You get an app key and the intake URL. The key ships inside your app, so it is an identifier with a daily limit, not a secret.
+Open an issue with the **App key** form in [opencampingdb/feedback-engine](https://github.com/opencampingdb/feedback-engine/issues/new/choose), giving your app's name and roughly how many submissions a day you expect. You get an app key and the intake URL. The key ships inside your app, so it is an identifier with a daily limit, not a secret.
 
 ## 2. Install
 
@@ -158,7 +158,7 @@ Every report goes to a person on the `feedback/review` PR, who looks at reported
 
 Hide a review the traveller reported straight away on their phone as well. The data catches up at the next release.
 
-**Photos.** Photos, photo reports and photo erasures follow the same pattern as reviews. [photos.md](photos.md) covers them.
+**Photos.** Open Camping DB takes no photos. To add photos to your app, run your own photo service with the photo kit: [photos.md](photos.md).
 
 ## 7. Prove the app with App Attest or Play Integrity
 

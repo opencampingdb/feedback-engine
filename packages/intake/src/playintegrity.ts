@@ -9,7 +9,7 @@ import type { Fetch } from "./github.js";
 import { GoogleToken, type ServiceAccount } from "./googleauth.js";
 
 export interface AndroidConfig {
-  /** Package name, for example `app.camporacle`. */
+  /** Package name, for example `com.example.app`. */
   package: string;
   /**
    * SHA-256 digests of the app signing certificates to accept, as Play

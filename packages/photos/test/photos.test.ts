@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { signPass } from "../../intake/src/pass.js";
 import { createHandler, FLUSH_EVERY, STATE_TTL_MS, type BucketLike, type CacheLike, type Ctx, type Env, type KVLike, WITHHELD_PREFIX } from "../src/index.js";
 
-const KEY = "camporacle-photo-key-0001";
+const KEY = "example-app-photo-key-0001";
 const OTHER_KEY = "other-app-photo-key-0002";
 const PHOTO = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB";
 const NOW = Date.parse("2026-11-03T01:00:00Z");
@@ -57,7 +57,7 @@ describe("photo server", () => {
     cache = fakeCache();
     env = {
       PHOTOS: fakeBucket([`${PHOTO}/full.jpg`, `${PHOTO}/thumb.jpg`]),
-      PHOTO_KEYS: JSON.stringify({ [KEY]: { app: "camporacle", daily_limit: 1000 }, [OTHER_KEY]: { app: "other", daily_limit: 2 } }),
+      PHOTO_KEYS: JSON.stringify({ [KEY]: { app: "example-app", daily_limit: 1000 }, [OTHER_KEY]: { app: "other", daily_limit: 2 } }),
       STATE: fakeKv(),
       DAILY_READ_CAP: "100",
     };
@@ -76,6 +76,25 @@ describe("photo server", () => {
     expect([...cache.store.keys()]).toEqual([`https://photos.example/v1/photos/${PHOTO}/full.jpg`]);
     expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(200);
     expect(env.PHOTOS.reads).toBe(1);
+  });
+
+  it("serves a place's photo records for five minutes, and an empty list for a place without photos", async () => {
+    const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
+    const line = `{"id":"${PHOTO}","place":"${PLACE}"}\n`;
+    env.PHOTOS = Object.assign(fakeBucket([]), {
+      get: async (key: string) =>
+        key === `records/${PLACE}.ndjson` ? { body: new Response(line).body!, httpEtag: '"r1"', size: line.length } : null,
+    }) as typeof env.PHOTOS;
+    const res = await handle(get(`/v1/places/${PLACE}/photos.ndjson`), env, ctx());
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/x-ndjson; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(await res.text()).toBe(line);
+    const none = await handle(get("/v1/places/ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZC/photos.ndjson"), env, ctx());
+    expect(none.status).toBe(200);
+    expect(await none.text()).toBe("");
+    expect((await handle(get("/v1/places/not-a-place/photos.ndjson"), env, ctx())).status).toBe(404);
+    expect((await handle(get(`/v1/places/${PLACE}/photos.ndjson`, "nope"), env, ctx())).status).toBe(401);
   });
 
   it("needs a known app key", async () => {
@@ -127,12 +146,12 @@ describe("photo server", () => {
   });
 
   it("writes its count to its own shard and reads every shard's count", async () => {
-    env.STATE.data.set("reads:2026-11-03:camporacle:0", "99");
+    env.STATE.data.set("reads:2026-11-03:example-app:0", "99");
     clock += 1;
     const c = ctx();
     expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, c)).status).toBe(200);
     await c.done();
-    expect(env.STATE.data.get("reads:2026-11-03:camporacle:3")).toBe("1");
+    expect(env.STATE.data.get("reads:2026-11-03:example-app:3")).toBe("1");
     cache.store.clear();
     clock += STATE_TTL_MS;
     expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(503);
@@ -146,14 +165,14 @@ describe("photo server", () => {
       await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, c);
       await c.done();
     }
-    expect(Number(env.STATE.data.get("reads:2026-11-03:camporacle:3"))).toBe(FLUSH_EVERY + 1);
+    expect(Number(env.STATE.data.get("reads:2026-11-03:example-app:3"))).toBe(FLUSH_EVERY + 1);
   });
 
   it("serves to a good photo pass and refuses a bad or expired one", async () => {
     env.PHOTO_PASS_SECRET = "pass-secret";
     const withPass = (pass: string) =>
       new Request(`https://photos.example/v1/photos/${PHOTO}/thumb.jpg`, { headers: { "x-photo-pass": pass } });
-    const pass = await signPass("pass-secret", "camporacle", NOW / 1000 + 3600);
+    const pass = await signPass("pass-secret", "example-app", NOW / 1000 + 3600);
     expect((await handle(withPass(pass), env, ctx())).status).toBe(200);
     expect(await (await handle(withPass(pass.slice(0, -2) + "AA"), env, ctx())).json()).toEqual({ error: "invalid_pass" });
     clock += 3600_000;

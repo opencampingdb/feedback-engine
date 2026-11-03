@@ -22,11 +22,11 @@ function fakeKv(): KVLike {
 describe("signPass and verifyPass", () => {
   it("round trips, and refuses an expired, altered or foreign pass", async () => {
     const expires = NOW / 1000 + 60;
-    const pass = await signPass(SECRET, "camporacle", expires);
-    expect(pass).toMatch(/^p1\.camporacle\.\d{10}\.[A-Za-z0-9_-]{43}$/);
-    expect(await verifyPass(SECRET, pass, NOW)).toEqual({ app: "camporacle", expires });
+    const pass = await signPass(SECRET, "example-app", expires);
+    expect(pass).toMatch(/^p1\.example-app\.\d{10}\.[A-Za-z0-9_-]{43}$/);
+    expect(await verifyPass(SECRET, pass, NOW)).toEqual({ app: "example-app", expires });
     expect(await verifyPass(SECRET, pass, NOW + 60_000)).toBeUndefined();
-    expect(await verifyPass(SECRET, pass.replace("camporacle", "otherapp00"), NOW)).toBeUndefined();
+    expect(await verifyPass(SECRET, pass.replace("example-app", "otherapp00"), NOW)).toBeUndefined();
     expect(await verifyPass("another-secret", pass, NOW)).toBeUndefined();
     expect(await verifyPass(SECRET, "nonsense", NOW)).toBeUndefined();
   });
@@ -44,7 +44,7 @@ describe("photo pass route", () => {
   function env(extra: Partial<Env> = {}, requiresAttestation = true): Env {
     return {
       APP_KEYS: JSON.stringify({
-        [APP_KEY]: { app: "camporacle", daily_limit: 100, ...(requiresAttestation ? { requires_attestation: true, android: { package: "app.camporacle" } } : {}) },
+        [APP_KEY]: { app: "example-app", daily_limit: 100, ...(requiresAttestation ? { requires_attestation: true, android: { package: "com.example.app" } } : {}) },
       }),
       DEVICE_SALT: "pepper",
       GH_APP_ID: "1",
@@ -71,11 +71,11 @@ describe("photo pass route", () => {
 
   it("gives a development key with photo_pass_unattested a pass without attestation", async () => {
     const e = env();
-    e.APP_KEYS = JSON.stringify({ [APP_KEY]: { app: "camporacle-dev", daily_limit: 100, photo_pass_unattested: true } });
+    e.APP_KEYS = JSON.stringify({ [APP_KEY]: { app: "example-app-dev", daily_limit: 100, photo_pass_unattested: true } });
     const res = await handle(post(good), e);
     expect(res.status).toBe(200);
     const { pass } = (await res.json()) as { pass: string };
-    expect((await verifyPass(SECRET, pass, NOW))?.app).toBe("camporacle-dev");
+    expect((await verifyPass(SECRET, pass, NOW))?.app).toBe("example-app-dev");
   });
 
   it("answers 404 when the intake has no pass secret", async () => {

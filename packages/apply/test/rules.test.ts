@@ -34,7 +34,7 @@ function fbId(): string {
 }
 
 function base(day: number, device: string, placeId: string | null = PLACE) {
-  return { id: fbId(), received: at(day), app: "camporacle", place: placeId, device, app_version: "1.0.0", consent: true as const };
+  return { id: fbId(), received: at(day), app: "example-app", place: placeId, device, app_version: "1.0.0", consent: true as const };
 }
 
 const fact = (day: number, device: string, name: string, value: boolean | string, placeId = PLACE): StoredFeedback =>
@@ -58,7 +58,7 @@ const line = (n: number, who: string, stars: number, extra: Partial<Review> = {}
   text: "",
   visited: "2026-01",
   created: "2026-01-05T00:00:00Z",
-  app: "camporacle",
+  app: "example-app",
   contributor: ctr(who),
   ...extra,
 });
@@ -71,7 +71,7 @@ const feeLine = (n: number, who: string, amount: number, extra: Partial<Fee> = {
   site: "powered",
   paid: "2026-01",
   created: "2026-01-05T00:00:00Z",
-  app: "camporacle",
+  app: "example-app",
   contributor: ctr(who),
   ...extra,
 });
@@ -452,7 +452,7 @@ describe("reviews", () => {
         text: "Shady, flat sites near the water.",
         visited: "2026-06",
         created: r.received,
-        app: "camporacle",
+        app: "example-app",
         contributor: ctr("sam"),
       },
     ]);
@@ -592,7 +592,7 @@ describe("fees", () => {
         site: "unpowered",
         paid: "2026-06",
         created: f.received,
-        app: "camporacle",
+        app: "example-app",
         contributor: ctr("sam"),
       },
     ]);

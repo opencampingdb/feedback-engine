@@ -95,11 +95,11 @@ describe("dumpReviewLine", () => {
         text: 'Quiet "spot"',
         visited: "2026-10",
         created: "2026-10-30T00:00:00Z",
-        app: "camporacle",
+        app: "example-app",
         contributor: "ctr_0123456789abcdef",
       }),
     ).toBe(
-      '{"app":"camporacle","contributor":"ctr_0123456789abcdef","created":"2026-10-30T00:00:00Z","id":"rev_1","place":"ocdb_1","stars":4,"text":"Quiet \\"spot\\"","visited":"2026-10"}',
+      '{"app":"example-app","contributor":"ctr_0123456789abcdef","created":"2026-10-30T00:00:00Z","id":"rev_1","place":"ocdb_1","stars":4,"text":"Quiet \\"spot\\"","visited":"2026-10"}',
     );
   });
 });
@@ -114,11 +114,11 @@ describe("dumpFeeLine", () => {
         site: "powered",
         paid: "2026-10",
         created: "2026-10-30T00:00:00Z",
-        app: "camporacle",
+        app: "example-app",
         contributor: "ctr_0123456789abcdef",
       }),
     ).toBe(
-      '{"amount":32.5,"app":"camporacle","contributor":"ctr_0123456789abcdef","created":"2026-10-30T00:00:00Z","id":"fee_1","paid":"2026-10","place":"ocdb_1","site":"powered"}',
+      '{"amount":32.5,"app":"example-app","contributor":"ctr_0123456789abcdef","created":"2026-10-30T00:00:00Z","id":"fee_1","paid":"2026-10","place":"ocdb_1","site":"powered"}',
     );
   });
 });

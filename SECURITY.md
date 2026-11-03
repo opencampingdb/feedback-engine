@@ -2,9 +2,9 @@
 
 ## Reporting a problem
 
-Email abuse@camporacle.com.au with a description of the problem and how to reproduce it. Please do not open a public issue for a security problem. We aim to reply within five working days.
+Use **Report a vulnerability** on this repository's Security tab (GitHub private vulnerability reporting), with a description of the problem and how to reproduce it. Please do not open a public issue for a security problem. We aim to reply within five working days.
 
-Use the same address to report abuse of the feedback intake, such as a flood of fake reports or a leaked app key.
+Report abuse of the feedback intake the same way, such as a flood of fake reports or a leaked app key.
 
 ## What this repository handles
 

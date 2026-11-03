@@ -74,7 +74,7 @@ async function applied(n: number, received: string, device: string, body: Record
   await mkdir(dirname(path), { recursive: true });
   await writeFile(
     path,
-    JSON.stringify({ id: `fb_${n}`, received, device, app: "camporacle", outcome: { result: "applied" }, ...body }),
+    JSON.stringify({ id: `fb_${n}`, received, device, app: "example-app", outcome: { result: "applied" }, ...body }),
   );
 }
 
@@ -156,7 +156,7 @@ describe("run", () => {
     expect(text).toContain("- Travellers report there are toilets (toilets=yes).\n");
     expect(text).toContain(`https://github.com/opencampingdb/data/blob/main/${pathOf(placeId(1))}`);
     expect(text).not.toContain("aaaa");
-    expect(text).not.toContain("camporacle");
+    expect(text).not.toContain("example-app");
     expect(await cursor()).toBe(head);
     expect(await sentLines()).toEqual([
       { field: "fee", note: 9001, place: placeId(1), sent: NOW.toISOString(), value: false },

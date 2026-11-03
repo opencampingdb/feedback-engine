@@ -1,26 +1,46 @@
-# Photos
+# Run a photo service for your app
 
-Travellers can add photos of a place. Each photo is the traveller's own work, licensed to everyone under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Its record goes into `opencampingdb/data` like a review, and the files are served by the photo server to apps with a key.
+Open Camping DB holds no photos. This kit lets an app run its own photo service, so its travellers can add photos of Open Camping DB places, on the app's own Cloudflare account and GitHub repositories, under the app's own terms and licence:
+
+| Part | What it does |
+|---|---|
+| `createPhotoClient` in the SDK | Uploads photos, gets photo passes, reports photos and erases a traveller's photos. Kept apart from the feedback client. |
+| The intake (`packages/intake`) with a photo bucket | `POST /v1/photos` takes uploads into a private pending bucket, and `POST /v1/photos/pass` gives attested installs an hour-long photo pass. Optional SafeSearch checks. |
+| The photo server (`packages/photos`) | Serves published photos and each place's photo records to installs with a pass and servers with a key, behind the edge cache, with daily caps and an off switch. |
+| The apply rules, photos only (`ocdb-apply --places`) | Turn the inbox into photo lines in the app's records repository. A contributor's first photo goes to a person on a review PR. |
+| `ocdb-photos` and the Photo sync workflow | Check the records repository's photo lines, and keep the two buckets and the per-place records in step with them. |
+
+The app's photo service runs separately from the Open Camping DB intake. The app keeps using `createFeedbackClient` with Open Camping DB's intake for reports, reviews, checks and fees.
 
 ## How a photo travels
 
-1. The app sends the photo to the intake at `POST /v1/photos`. The intake checks the app key, the attestation, the contributor, the rate limits and the files, puts the files in the private `ocdb-photos-pending` bucket and writes the item to the inbox.
-2. The apply rules add a line to `photos/<place id>.ndjson`. A contributor's first photo, or a file also sent for another place, goes to a person on the review PR. Once a contributor has a visible photo, their later photos are published at the next apply run.
-3. When the PR with the line merges, the data repository's Photos workflow copies the files to the `ocdb-photos` bucket.
-4. The next release lists the photo in `photos.ndjson.gz`, and the photo server serves it.
+1. The app sends the photo to its own intake at `POST /v1/photos`. The intake checks the app key, the attestation, the contributor, the rate limits and the files (and SafeSearch, when on), puts the files in the pending bucket and writes the item to the app's private inbox repository.
+2. The hourly apply run adds a line to `photos/<place id>.ndjson` in the app's records repository. A contributor's first photo, a file also sent for another place, and anything SafeSearch flags go to a person on the review PR. Once a contributor has a visible photo, their later photos are published at the next run.
+3. When the PR merges, the Photo sync workflow copies the files to the serving bucket and writes `records/<place id>.ndjson`.
+4. The photo server serves the photo and lists it in the place's records.
 
 Nothing about a photo is public until step 3. A refused photo's files are deleted.
 
 ## Send a photo
 
-Make two JPEGs on the phone, with the EXIF data (location, camera, time) removed: a full size one about 1600 pixels on the long side (at most 1.5 MB, about 400 KB is typical) and a thumbnail about 400 pixels (at most 200 KB). Photos need the signed-in traveller's contributor id.
-
 ```ts
-import { PHOTO_CONSENT_TEXT } from "@opencampingdb/feedback";
+import { createPhotoClient } from "@opencampingdb/feedback";
 
-// After the traveller agrees to CONSENT_TEXT and PHOTO_CONSENT_TEXT:
-const result = await feedback.photo({ place, contributor, consent: true, full, thumb });
+const photos = createPhotoClient({
+  endpoint: "https://photos-upload.example.com", // your photo intake
+  appKey: "your-photo-app-key",
+  appVersion: "1.4.0",
+  storage: AsyncStorage,
+  attest, // App Attest or Play Integrity, as for feedback
+});
+
+// After the traveller agrees to your photo terms:
+const result = await photos.photo({ place, contributor, consent: true, full, thumb });
 ```
+
+Write your own photo terms and show them, with an agree button, before the first photo is sent. Say who took the photo, who appears in it, which licence it is shared under, how it is credited and how a traveller removes their photos. For example: "You took this photo yourself. It shows the place: people's faces and number plates are not its subject, and anyone you can recognise in it agreed to it being shared. You keep the copyright and share it under CC BY 4.0. Delete your account to remove all your photos."
+
+Make two JPEGs on the phone, with the EXIF data (location, camera, time) removed: a full size one about 1600 pixels on the long side (at most 1.5 MB, about 400 KB is typical) and a thumbnail about 400 pixels (at most 200 KB). Photos need the signed-in traveller's contributor id.
 
 `full` and `thumb` are the file bytes, as an `ArrayBuffer` or `Uint8Array`. The result is one of:
 
@@ -38,7 +58,7 @@ Each contributor may send 10 photos a day, as well as the usual limits per devic
 
 ### SafeSearch
 
-With `SAFESEARCH = "on"`, the intake sends each full size file to Google Cloud Vision SafeSearch before keeping it, after the rate limits. SafeSearch rates five kinds of content from `VERY_UNLIKELY` to `VERY_LIKELY`: adult, violence, racy, medical and spoof. It has no self-harm rating, so that stays with the person who checks first photos, and with reports.
+With `SAFESEARCH = "on"`, the intake sends each full size file to Google Cloud Vision SafeSearch before keeping it, after the rate limits, as the service account in its `GOOGLE_SERVICE_ACCOUNT` secret. SafeSearch rates five kinds of content from `VERY_UNLIKELY` to `VERY_LIKELY`: adult, violence, racy, medical and spoof. It has no self-harm rating, so that stays with the person who checks first photos, and with reports.
 
 | Ratings | What happens |
 |---|---|
@@ -47,9 +67,9 @@ With `SAFESEARCH = "on"`, the intake sends each full size file to Google Cloud V
 | Google can't be asked, or answers with an error | Kept as `"unchecked"`, and held for a person. |
 | Anything else | The usual rules. |
 
-The stored item carries the ratings in `photo.safesearch`, and the review PR note says why a photo was held. The rule is `safeSearchVerdict` in the SDK, shared by the intake and apply. The check works the same for every app and platform, since it runs on the intake.
+The stored item carries the ratings in `photo.safesearch`, and the review PR note says why a photo was held. The rule is `safeSearchVerdict` in the SDK, shared by the intake and apply.
 
-Google processes these requests in memory, doesn't keep the images, and doesn't train on them ([Cloud Vision data usage](https://cloud.google.com/vision/docs/data-usage)). Name Google Cloud Vision as a processor in the privacy policy before turning it on. The [pricing page](https://cloud.google.com/vision/pricing) lists SafeSearch at the first 1,000 images a month free, then $1.50 per 1,000.
+Google processes these requests in memory, doesn't keep the images, and doesn't train on them ([Cloud Vision data usage](https://cloud.google.com/vision/docs/data-usage)). Name Google Cloud Vision as a processor in your privacy policy before turning it on. The [pricing page](https://cloud.google.com/vision/pricing) lists SafeSearch at the first 1,000 images a month free, then $1.50 per 1,000.
 
 ## Report and remove
 
@@ -59,41 +79,39 @@ Give each photo a Report action:
 import { PHOTO_REPORT_REASONS } from "@opencampingdb/feedback";
 // spam_ad, offensive, off_topic, not_this_place, personal_details, copyright, illegal
 
-await feedback.reportPhoto({ place, photo: "pho_01JC...", reason: "personal_details", contributor, consent: true });
+await photos.reportPhoto({ place, photo: "pho_01JC...", reason: "personal_details", contributor, consent: true });
 ```
 
 Every report goes to a person on the review PR. Reports from three different contributors hide the photo at the next apply run, until the person decides. Hide a photo the traveller reported on their own phone straight away.
 
 `illegal` is for child sexual abuse material, an intimate image shared without consent, or terrorist or violent extremist material. One such report is enough:
 
-- The intake puts `withheld:<photo id>` in the photo server's STATE namespace (bound to the intake as `PHOTO_STATE`). The photo server checks that list before its cache, so the photo stops being served within about two minutes, everywhere.
+- The intake puts `withheld:<photo id>` in the photo server's state namespace (bound to the intake as `PHOTO_STATE`). The photo server checks that list before its cache, so the photo stops being served within about two minutes, everywhere.
 - The next apply run hides the photo's line and marks the note on the review PR URGENT.
-- A person then follows the operator's safety procedure. Deleting the `withheld:` key serves the photo again if the report was wrong.
+- A person then follows your safety procedure. Deleting the `withheld:` key serves the photo again if the report was wrong.
 
 Before deleting a traveller's account, remove their photos:
 
 ```ts
-await feedback.erasePhotos({ contributor, consent: true });
+await photos.erasePhotos({ contributor, consent: true });
 ```
 
-The next apply run takes every photo from that contributor out of the data, and the Photos workflow deletes their files from both buckets. Photos they send later in the same run are refused.
+The next apply run takes every photo from that contributor out of the records, and the Photo sync workflow deletes their files from both buckets. Photos they send later in the same run are refused.
 
-A person can hide a photo by setting `"hidden": "moderator"` on its line, or delete it for good by taking the line out and adding its id to `moderation/removed_photos.json` with the reason `moderator`. Use this for a copyright complaint or a photo showing a person who did not agree to it. A photo leaves the photo server's cache within 24 hours of leaving the bucket.
-
-To stop serving one photo at once, for example on an eSafety removal notice, withhold it first and then remove it as above:
+A person can hide a photo by setting `"hidden": "moderator"` on its line, or delete it for good by taking the line out and adding its id to `moderation/removed_photos.json` with the reason `moderator`. Use this for a copyright complaint or a photo showing a person who did not agree to it. A photo leaves the edge cache within 24 hours of leaving the bucket, so withhold it first when it must stop sooner, for example on a regulator's removal notice:
 
 ```bash
-npx wrangler kv key put --binding STATE "withheld:pho_01JC..." '{"by":"moderator","reason":"esafety notice"}'
+npx wrangler kv key put --binding STATE "withheld:pho_01JC..." '{"by":"moderator","reason":"removal notice"}'
 ```
 
-Run it in `packages/photos`. The photo stops within about two minutes, cache or not.
+Run it with your photo server's configuration. The photo stops within about two minutes, cache or not.
 
-## Show a photo
+## Show photos
 
-An app on a phone shows photos with a photo pass, never with a fixed key: anything built into an app can be read out of it. The intake gives a pass only to an install that proves itself with App Attest or Play Integrity, and a pass works for an hour.
+An app on a phone loads photos with a photo pass, never with a fixed key: anything built into an app can be read out of it. The intake gives a pass only to an install that proves itself with App Attest or Play Integrity, and a pass works for an hour.
 
 ```ts
-const pass = await feedback.photoPass();
+const pass = await photos.photoPass();
 if (pass.status === "ok") {
   // Send pass.pass in the x-photo-pass header of every photo request.
 }
@@ -101,21 +119,22 @@ if (pass.status === "ok") {
 
 `photoPass` keeps the pass in memory and asks for a new one when less than five minutes are left, so call it before each photo request. After `401 invalid_pass`, call `photoPass({ renew: true })` and try once more. It needs an app key with `requires_attestation`. Otherwise the intake answers `403 attestation_not_required_for_app_key`.
 
-Simulators cannot attest. For development builds, set `photo_pass_unattested: true` on the development app key, give that key an app name of its own (for example `camporacle-dev`), and give that name a small `daily_limit` in `PHOTO_KEYS`, such as 2000. Anyone who reads the development key out of a development build can then use at most that much. Never put the development key in a store build. On `offline`, show placeholders and try again later.
+Simulators cannot attest. For development builds, set `photo_pass_unattested: true` on a separate development app key, give that key an app name of its own (for example `example-app-dev`), and give that name a small `daily_limit` in `PHOTO_KEYS`, such as 2000. Anyone who reads the development key out of a development build can then use at most that much. Never put the development key in a store build.
 
 ```
-GET https://photos.camporacle.com.au/v1/photos/<id>/full.jpg
-GET https://photos.camporacle.com.au/v1/photos/<id>/thumb.jpg
+GET https://photos.example.com/v1/places/<place id>/photos.ndjson
+GET https://photos.example.com/v1/photos/<id>/full.jpg
+GET https://photos.example.com/v1/photos/<id>/thumb.jpg
 X-Photo-Pass: <pass>
 ```
 
-A server that shows photos can use a photo key in `X-App-Key` instead, since it can keep the key secret. Never put a photo key in an app.
+A place's records list its visible photos, one JSON line each: `id`, `place`, `contributor`, `created`, `app`, `licence`, `width`, `height` and `sha256`. A place without photos answers an empty list. Records are cached for five minutes and photos for a day, at the edge and on the phone.
 
-Answers are cached for a day, at the edge and on the phone. Credit each photo shown, for example "Photo: Open Camping DB traveller, CC BY 4.0".
+A server that shows photos can use a photo key in `X-App-Key` instead, since it can keep the key secret. Never put a photo key in an app. Credit each photo shown in the way your photo terms say.
 
 | Status | Meaning |
 |---|---|
-| `200` | the JPEG |
+| `200` | the JPEG, or the records |
 | `401 invalid_pass` | the pass is altered or has expired. Get a new one with `photoPass({ renew: true })` |
 | `401 invalid_app_key` | no pass, and a missing or unknown photo key |
 | `404 not_found` | no such photo, it is no longer published, or it is withheld |
@@ -123,19 +142,20 @@ Answers are cached for a day, at the edge and on the phone. Credit each photo sh
 | `503 daily_read_cap` | the app's daily read limit, or the server's, is reached. `retry-after` says when it resets, at midnight UTC |
 | `503 paused` | serving is switched off |
 
-## Run the photo storage and server
+## Set it up
 
-These steps need the Cloudflare account that runs the intake.
+You need a Cloudflare account with a zone for the photo hosts, a GitHub account or organisation, and this repository cloned. Name every resource with one prefix for your app, so it is clear what belongs to the service.
 
-1. **Buckets.** In R2, create `ocdb-photos-pending` and `ocdb-photos`. Leave both private: neither gets public access or an r2.dev address. On `ocdb-photos-pending`, add a lifecycle rule that deletes objects with the prefix `pho_` 180 days after upload. Files under `kept/` are kept.
-2. **Intake.** The intake's `wrangler.toml` binds `ocdb-photos-pending` as `PHOTOS_PENDING`. Deploy the intake again (see [self-hosting.md](self-hosting.md)). Without the binding, `/v1/photos` answers 404.
-3. **KV for the photo server.** Create a namespace, for example `npx wrangler kv namespace create ocdb-photos-state`, and put its id in `packages/photos/wrangler.toml` (or an untracked `wrangler.deploy.toml`, as for the intake). Put the same id on the intake's `PHOTO_STATE` binding, so illegal-content reports withhold photos at once.
-4. **Pass secret and photo keys.** Make one long random secret, for example with `openssl rand -base64 48`, and set it as `PHOTO_PASS_SECRET` on both Workers: `npx wrangler secret put PHOTO_PASS_SECRET` in `packages/intake` and again in `packages/photos`. Then set `PHOTO_KEYS` in `packages/photos`, with JSON such as `{"<random key, 32 characters>": {"app": "camporacle", "daily_limit": 100000}}`. The entry gives the app's daily limit to its passes as well. Its key is only for servers, so CampOracle never ships it. `daily_limit` counts the reads that reach R2, not those served from the cache. `DAILY_READ_CAP` in `wrangler.toml` caps all apps together. Changing `PHOTO_PASS_SECRET` on both Workers ends every pass at once.
-5. **Custom domain.** The `routes` line in `packages/photos/wrangler.toml` names the photo server's host, `photos.camporacle.com.au`. Its zone, `camporacle.com.au`, must be in the same Cloudflare account. Wrangler adds the DNS record and certificate on deploy. Change the line to run the server on another host. The photo server is served only there, so the edge cache sits in front of R2.
-6. **Deploy** the photo server: `npx wrangler deploy` in `packages/photos`.
-7. **SafeSearch (optional).** Turn on the Cloud Vision API in the Google Cloud project of the service account in `GOOGLE_SERVICE_ACCOUNT` (the one the intake uses for Play Integrity), with billing on, and set `SAFESEARCH = "on"` in the intake's `wrangler.toml`. Without the service account, every photo is held as `"unchecked"`.
-8. **Data repository secrets.** Create an R2 API token with Object Read and Write on both buckets, and add `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` as Actions secrets in `opencampingdb/data`. The Photos workflow does nothing without them.
+1. **Repositories.** Create two private repositories under one owner: a records repository (for example `example-app-photos`) and an inbox repository (`example-app-photos-inbox`), each with a `README.md` on `main`. Add `moderation/blocked_contributors.json` holding `{"contributors": []}` to the records repository.
+2. **GitHub App.** Create a GitHub App for the service with repository permissions Contents (read and write) and Pull requests (read and write), no webhook, installable only on your account. Install it on the two repositories only. Its key goes in the inbox repository's Actions secrets and in the intake's `GH_APP_PRIVATE_KEY` secret.
+3. **Buckets.** In R2, create a serving bucket and a pending bucket. Leave both private: neither gets public access or an r2.dev address. On the pending bucket, add a lifecycle rule that deletes objects with the prefix `pho_` 180 days after upload. Files under `kept/` are kept.
+4. **KV.** Create a namespace for the photo server's state (the off switch, read counters and withheld photos), and the intake's rate limit and attestation namespaces as in [self-hosting.md](self-hosting.md).
+5. **Intake.** Deploy `packages/intake` under its own Worker name with its own configuration, as [self-hosting.md](self-hosting.md) describes, plus: the pending bucket as `PHOTOS_PENDING`, the photo server's state namespace as `PHOTO_STATE`, `INBOX_REPO` set to your inbox repository, a custom domain for uploads, and optionally `SAFESEARCH = "on"` with a `GOOGLE_SERVICE_ACCOUNT` that has the Cloud Vision API.
+6. **Pass secret and photo keys.** Make one long random secret, for example with `openssl rand -base64 48`, and set it as `PHOTO_PASS_SECRET` on both Workers. Set `PHOTO_KEYS` on the photo server, with JSON such as `{"<random key, 32 characters>": {"app": "example-app", "daily_limit": 100000}}`. The entry gives the app's daily limit to its passes as well. `daily_limit` counts the reads that reach R2, not those served from the cache. `DAILY_READ_CAP` caps all apps together. Changing `PHOTO_PASS_SECRET` on both Workers ends every pass at once.
+7. **Photo server.** Set `routes` in `packages/photos/wrangler.toml` (or an untracked deploy copy) to your photo host on a custom domain, bind the serving bucket as `PHOTOS` and the state namespace as `STATE`, and deploy. Serving only on the custom domain puts the edge cache in front of R2.
+8. **Workflows.** In the inbox repository, call the Apply feedback workflow hourly with `data-repository-name` set to your records repository, `places-repository: opencampingdb/data` and your `photo-licence`, passing the GitHub App's client id and key. In the records repository, call the Photo sync workflow on each push to `main` and once a day, with your bucket names and an R2 API token (Object Read and Write on both buckets) as `r2-account-id`, `r2-access-key-id` and `r2-secret-access-key`. Pin both to a feedback-engine commit.
+9. **Check it.** Upload a test photo from a development build, merge the review PR, wait for the sync, then load the place's records and the photo with a pass. Report it as `illegal` and see it withheld, then erase it and see it gone.
 
-To stop serving at once, run `npx wrangler kv key put --binding STATE off 1` in `packages/photos`: the server answers `503 paused` within a minute. Delete the key to start again. Removing the custom domain also stops all serving.
+To stop serving at once, put the key `off` in the photo server's state namespace: the server answers `503 paused` within a minute. Delete the key to start again. Removing the custom domain also stops all serving.
 
 R2 bills each read that reaches it. The edge cache, the per-address limit, the daily caps and the off switch keep that bill bounded. Cloudflare's budget alerts only warn and never stop anything, so set the caps to what you are willing to pay for.

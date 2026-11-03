@@ -456,7 +456,7 @@ interface StoredFields {
   origin?: string;
   /** ISO 8601 UTC time the intake accepted it. */
   received: string;
-  /** App name from the app key list, for example `camporacle`. */
+  /** App name from the app key list, for example `example-app`. */
   app: string;
   /**
    * In place of the app's own value: `ctr_` and the first 16 hex characters of

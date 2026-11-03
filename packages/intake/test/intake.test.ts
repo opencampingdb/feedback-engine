@@ -61,7 +61,7 @@ function fakeGitHub(options: { putStatus?: number[] } = {}) {
 
 function env(kv = fakeKv()): Env {
   return {
-    APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "camporacle", daily_limit: 3 }, short: { app: "x", daily_limit: 5 } }),
+    APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 3 }, short: { app: "x", daily_limit: 5 } }),
     DEVICE_SALT: "pepper",
     GH_APP_ID: "12345",
     GH_APP_PRIVATE_KEY: privateKey,
@@ -120,11 +120,11 @@ describe("intake", () => {
     expect(stored).toEqual({
       id,
       received: "2026-10-30T12:00:00Z",
-      app: "camporacle",
+      app: "example-app",
       type: "review",
       place: PLACE,
       device: await hashDevice("pepper", DEVICE),
-      contributor: await hashContributor("pepper", "camporacle", "acct_3f9a8b7c6d5e4f30"),
+      contributor: await hashContributor("pepper", "example-app", "acct_3f9a8b7c6d5e4f30"),
       app_version: "1.0.0",
       consent: true,
       review: { stars: 4, text: "Lovely spot. Call [removed] or email [removed]", visited: "2026-10" },
@@ -144,11 +144,11 @@ describe("intake", () => {
     expect(stored).toEqual({
       id,
       received: "2026-10-30T12:00:00Z",
-      app: "camporacle",
+      app: "example-app",
       type: "fee",
       place: PLACE,
       device: await hashDevice("pepper", DEVICE),
-      contributor: await hashContributor("pepper", "camporacle", "acct_3f9a8b7c6d5e4f30"),
+      contributor: await hashContributor("pepper", "example-app", "acct_3f9a8b7c6d5e4f30"),
       app_version: "1.0.0",
       consent: true,
       fee: { amount: 32.5, site: "powered", paid: "2026-10" },
@@ -230,7 +230,7 @@ describe("intake", () => {
 
   it("limits each device to 20 a day", async () => {
     const kv = fakeKv();
-    const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "camporacle", daily_limit: 1000 } }) };
+    const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 1000 } }) };
     for (let i = 0; i < 20; i++) expect((await handle(post(review), e)).status).toBe(202);
     const res = await handle(post(review), e);
     expect(res.status).toBe(429);
@@ -274,7 +274,7 @@ describe("intake", () => {
 
   it("limits each client network to 100 a day, whatever device ids it sends", async () => {
     const kv = fakeKv();
-    const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "camporacle", daily_limit: 1000 } }) };
+    const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 1000 } }) };
     const from = (ip: string, i: number) =>
       post(
         { ...review, device: `${String(i).padStart(8, "0")}-e2bb-4255-8caf-4136c566a962`, contributor: `acct_${String(i).padStart(16, "0")}` },
@@ -287,7 +287,7 @@ describe("intake", () => {
   });
 
   it("refuses owner submissions with 403 for a key limited to feedback", async () => {
-    const e = { ...env(), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "camporacle", daily_limit: 3, kinds: ["feedback"] } }) };
+    const e = { ...env(), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 3, kinds: ["feedback"] } }) };
     const claim = {
       type: "owner_claim",
       place: PLACE,
@@ -302,7 +302,7 @@ describe("intake", () => {
   });
 
   it("ignores an app key whose kinds are not feedback or owner", async () => {
-    const e = { ...env(), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "camporacle", daily_limit: 3, kinds: ["everything"] } }) };
+    const e = { ...env(), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 3, kinds: ["everything"] } }) };
     expect((await handle(post(review), e)).status).toBe(401);
   });
 

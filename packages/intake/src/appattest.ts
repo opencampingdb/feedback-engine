@@ -12,7 +12,7 @@ import { ecdsaDerToRaw, firstOctetString, parseCertificate, type Certificate } f
 export type AppAttestEnvironment = "production" | "development";
 
 export interface IosConfig {
-  /** Team id, a dot and the bundle id, for example `ABCDE12345.app.camporacle`. */
+  /** Team id, a dot and the bundle id, for example `ABCDE12345.com.example.app`. */
   app_id: string;
   /** Which App Attest environment's keys to accept. Default `production`. */
   environment?: AppAttestEnvironment;

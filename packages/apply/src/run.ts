@@ -40,6 +40,15 @@ export interface RunOptions {
   proofBudget?: { ms: number; concurrency: number };
   /** Time of the run. Defaults to now. */
   now?: Date;
+  /**
+   * A checkout of Open Camping DB's data, read only, for an app's own photo
+   * repository. When set, `data` and `reviewData` hold only photos and
+   * moderation files, places come from here, and anything in the inbox that
+   * isn't a photo, photo report or photo erasure is refused.
+   */
+  places?: string;
+  /** Licence id for new photo lines. Defaults to CC-BY-4.0. */
+  photoLicence?: string;
 }
 
 export interface RunSummary {
@@ -78,15 +87,28 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const checkProof = options.checkProof ?? ((url: string, code: string) => realCheckProof(url, code));
 
   const { files: pendingFiles, malformed } = await readPending(options.inbox);
-  const crowd = pendingFiles.map((f) => f.item).filter((i): i is StoredFeedback => !isOwnerSubmission(i));
-  const ownerItems = pendingFiles.map((f) => f.item).filter((i): i is StoredOwnerSubmission => isOwnerSubmission(i));
+  const photoTypes = new Set(["photo", "photo_report", "photo_erasure"]);
+  const photosOnly = options.places !== undefined;
+  // A photo repository takes photos only: everything else is refused here.
+  const notPhotos: Decision[] = photosOnly
+    ? pendingFiles
+        .map((f) => f.item)
+        .filter((i) => isOwnerSubmission(i) || !photoTypes.has(i.type))
+        .map((i) => ({ id: i.id, place: (i.place as string | null) ?? null, outcome: "refused" as const, reason: "this repository takes photos only" }))
+    : [];
+  const refusedIds = new Set(notPhotos.map((d) => d.id));
+  const items = pendingFiles.map((f) => f.item).filter((i) => !refusedIds.has(i.id));
+  const crowd = items.filter((i): i is StoredFeedback => !isOwnerSubmission(i));
+  const ownerItems = items.filter((i): i is StoredOwnerSubmission => isOwnerSubmission(i));
   const history = await readHistory(options.inbox, sinceDay);
   const owners = await readOwners(options.inbox);
   const awaitingClaims = await readAwaiting(options.inbox);
   const auto = new DataRepo(options.data);
   const sameTree = !options.reviewData || resolve(options.reviewData) === resolve(options.data);
   const review = sameTree ? auto : new DataRepo(options.reviewData!);
-  const kinds = await auto.kinds();
+  // Where place records are read: Open Camping DB's data, or the photo repository's own checkout.
+  const placeSource = photosOnly ? new DataRepo(options.places!) : auto;
+  const kinds = await placeSource.kinds();
 
   // Every record the rules may read, following merged ids to their targets.
   const wanted = new Set<string>([
@@ -97,7 +119,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   ].filter((p): p is string => typeof p === "string"));
   const places = new Map<string, Place>();
   for (let round = 0; round < 10 && wanted.size > 0; round++) {
-    const loaded = await auto.places(wanted);
+    const loaded = await placeSource.places(wanted);
     wanted.clear();
     for (const [id, record] of loaded) {
       places.set(id, record);
@@ -126,7 +148,6 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const blocked = await auto.blocked();
   const reviewers = await auto.reviewers(blocked);
   // Every photo line, when anything in this run is about photos.
-  const photoTypes = new Set(["photo", "photo_report", "photo_erasure"]);
   const photos = crowd.some((p) => photoTypes.has(p.type)) ? await auto.allPhotos() : [];
 
   const crowdResult = applyRules({
@@ -140,6 +161,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     blocked,
     reviewers,
     photos,
+    ...(options.photoLicence ? { photoLicence: options.photoLicence } : {}),
   });
 
   // Proof pages for claims and listings still in pending/, oldest first, within
@@ -208,7 +230,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     }
     if (edit.kind === "photo") {
       // A held photo: its line waits in the review checkout.
-      const current = (await review.places([edit.place])).get(edit.place);
+      const current = (await (photosOnly ? placeSource : review).places([edit.place])).get(edit.place);
       const lines = await review.photos(edit.place);
       if (!current || current.status === "merged" || lines.some((p) => p.id === edit.photo.id)) continue;
       const written = await review.writePhotos(edit.place, [...lines, edit.photo]);
@@ -247,7 +269,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     effective.add(edit.feedback);
   }
 
-  const decisions = [...crowdResult.decisions, ...ownerResult.decisions] as Decision[];
+  const decisions = [...notPhotos, ...crowdResult.decisions, ...ownerResult.decisions] as Decision[];
   const refusedMalformed = await refuseMalformed(options.inbox, malformed, runAt);
   const moved = await moveDecided(options.inbox, pendingFiles, decisions, runAt, ownerResult.awaiting);
   const ownersWritten = await writeOwners(options.inbox, ownerResult.owners.values());

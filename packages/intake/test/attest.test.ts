@@ -10,7 +10,7 @@ const NOW = Date.parse("2026-11-02T09:00:00Z");
 const APP_KEY = "test-app-key-0123456789";
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const REVIEW_ID = "rev_01JBXK3M8Q4R5S6T7V8W9X0YZB";
-const PACKAGE = "app.camporacle";
+const PACKAGE = "com.example.app";
 
 const { privateKey } = generateKeyPairSync("rsa", {
   modulusLength: 2048,
@@ -82,7 +82,7 @@ function fakeServices(verdicts: Map<string, Verdict>) {
 
 function env(attestKv: KVLike, appKey: Record<string, unknown>): Env {
   return {
-    APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "camporacle", daily_limit: 100, ...appKey } }),
+    APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 100, ...appKey } }),
     DEVICE_SALT: "pepper",
     GH_APP_ID: "1",
     GH_APP_PRIVATE_KEY: privateKey,
@@ -155,7 +155,7 @@ describe("App Attest", () => {
     expect(stored).toMatchObject({ attested: "app_attest", review: { visited_nearby: true } });
     expect(stored.attest_key).toMatch(/^ak_[0-9a-f]{16}$/);
     expect(stored.contributor).toMatch(/^ctr_[0-9a-f]{16}$/);
-    expect(JSON.parse(kv.data.get(`aa:${device.keyId}`)!)).toMatchObject({ app: "camporacle", counter: 1 });
+    expect(JSON.parse(kv.data.get(`aa:${device.keyId}`)!)).toMatchObject({ app: "example-app", counter: 1 });
   });
 
   it("gives an attested install a photo pass the photo server accepts", async () => {
@@ -172,7 +172,7 @@ describe("App Attest", () => {
     expect(res.status).toBe(200);
     const { pass, expires } = (await res.json()) as { pass: string; expires: string };
     expect(expires).toBe("2026-11-02T10:00:00Z");
-    expect(await verifyPass("pass-secret", pass, NOW)).toEqual({ app: "camporacle", expires: NOW / 1000 + 3600 });
+    expect(await verifyPass("pass-secret", pass, NOW)).toEqual({ app: "example-app", expires: NOW / 1000 + 3600 });
   });
 
   it("refuses a replayed or older assertion", async () => {
@@ -340,7 +340,7 @@ describe("contributors and review reports", () => {
 
   it("gives the same account different ids in different apps", async () => {
     const { hashContributor } = await import("../src/index.js");
-    expect(await hashContributor("pepper", "camporacle", "acct_3f9a8b7c6d5e4f30")).not.toBe(
+    expect(await hashContributor("pepper", "example-app", "acct_3f9a8b7c6d5e4f30")).not.toBe(
       await hashContributor("pepper", "otherapp", "acct_3f9a8b7c6d5e4f30"),
     );
   });

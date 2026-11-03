@@ -63,7 +63,7 @@ const sha = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
 
 function env(bucket = fakeBucket(), kv = fakeKv()): Env {
   return {
-    APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "camporacle", daily_limit: 100 } }),
+    APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 100 } }),
     DEVICE_SALT: "pepper",
     GH_APP_ID: "12345",
     GH_APP_PRIVATE_KEY: privateKey,
@@ -133,8 +133,8 @@ describe("photo upload", () => {
       id: fb,
       type: "photo",
       place: PLACE,
-      app: "camporacle",
-      contributor: await hashContributor("pepper", "camporacle", CONTRIBUTOR),
+      app: "example-app",
+      contributor: await hashContributor("pepper", "example-app", CONTRIBUTOR),
       photo: { full_sha256: sha(full), full_bytes: full.length, thumb_sha256: sha(thumb), width: 1600, height: 1200 },
     });
     expect(JSON.stringify(gh.puts[0]!.content)).not.toContain(CONTRIBUTOR);
@@ -175,7 +175,7 @@ describe("photo upload", () => {
 
   it("needs attestation when the app key requires it, over the meta text", async () => {
     const e = env();
-    e.APP_KEYS = JSON.stringify({ [APP_KEY]: { app: "camporacle", daily_limit: 100, requires_attestation: true, android: { package: "app.camporacle" } } });
+    e.APP_KEYS = JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 100, requires_attestation: true, android: { package: "com.example.app" } } });
     const res = await handle(upload(jpeg(4, 3), jpeg(4, 3)), e);
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: "attestation_required" });
@@ -207,7 +207,7 @@ describe("photo reports and erasure", () => {
     expect((await send({ ...base, type: "photo_report", place: PLACE, photo_report: { photo: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB", reason: "offensive" } })).status).toBe(202);
     expect((await send({ ...base, type: "photo_erasure", place: null })).status).toBe(202);
     expect(gh.puts[0]!.content).toMatchObject({ type: "photo_report", photo_report: { reason: "offensive" } });
-    expect(gh.puts[1]!.content).toMatchObject({ type: "photo_erasure", place: null, contributor: await hashContributor("pepper", "camporacle", CONTRIBUTOR) });
+    expect(gh.puts[1]!.content).toMatchObject({ type: "photo_erasure", place: null, contributor: await hashContributor("pepper", "example-app", CONTRIBUTOR) });
     const { contributor: _c, ...noContributor } = base;
     expect((await send({ ...noContributor, type: "photo_report", place: PLACE, photo_report: { photo: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB", reason: "offensive" } })).status).toBe(400);
   });

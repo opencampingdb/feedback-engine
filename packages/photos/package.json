@@ -2,7 +2,7 @@
   "name": "@opencampingdb/photos",
   "version": "0.1.0",
   "private": true,
-  "description": "Cloudflare Worker that serves published Open Camping DB photos to apps with a key.",
+  "description": "Cloudflare Worker that serves an app's published photos and photo records to its attested installs and keyed servers.",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
@@ -11,5 +11,8 @@
   },
   "devDependencies": {
     "wrangler": "4.156.2"
+  },
+  "dependencies": {
+    "@opencampingdb/feedback": "0.6.0"
   }
 }

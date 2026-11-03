@@ -90,7 +90,7 @@ export function cbor(value: unknown): Uint8Array {
   return new Uint8Array([...head(5, entries.length), ...entries.flatMap(([k, v]) => [...cbor(k), ...cbor(v)])]);
 }
 
-export const APP_ID = "ABCDE12345.app.camporacle";
+export const APP_ID = "ABCDE12345.com.example.app";
 
 export interface Device {
   rootPem: string;
