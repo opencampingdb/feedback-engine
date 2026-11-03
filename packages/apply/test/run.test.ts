@@ -175,7 +175,7 @@ describe("run", () => {
     expect(text).toBe(dumpPlace({ ...place, last_confirmed: "2026-10-30T00:00:00Z" }));
   });
 
-  it("writes a new place only to the review checkout", async () => {
+  it("writes a new place to the automatic checkout with its standing", async () => {
     const review = join(root, "data-review");
     await put(join(review, "places", "za", `${PLACE}.json`), dumpPlace(place));
     await put(join(inbox, "pending", "2026-10-29", `${id(9)}.json`), {
@@ -184,19 +184,25 @@ describe("run", () => {
         location: { lat: -35.5, lon: 149 },
         report: { kind: "new_place", note: "Free camp by the creek" },
       }),
+      contributor: TRUSTED,
       place: null,
     });
+    await put(join(inbox, "applied", "2026-10-01", `${id(8)}.json`), {
+      ...item(8, "2026-10-01T00:00:00Z", "aaaa", { type: "report", location: { lat: -30, lon: 140 }, report: { kind: "new_place" } }),
+      contributor: TRUSTED,
+      place: null,
+      outcome: { result: "applied", reason: "", run: "2026-10-01T01:00:00Z" },
+    });
     const summary = await run({ inbox, data, reviewData: review, now: NOW });
-    expect(summary.auto_changed).toBe(false);
-    expect(summary.review_changed).toBe(true);
-    const draftId = `ocdb_${id(9).slice(3)}`;
-    expect(summary.review_files).toEqual([`places/${draftId.slice(-2).toLowerCase()}/${draftId}.json`]);
-    const draft = await readFile(join(review, summary.review_files[0]!), "utf8");
-    expect(draft).toContain('"lon": 149.0');
-    expect(await readdir(join(data, "places"))).toEqual(["za"]);
-    expect(summary.auto_pr_body).toBe("");
-    expect(summary.review_pr_body).toContain("needs a person");
-    expect(summary.review_pr_body).toContain("Free camp by the creek");
+    const newId = `ocdb_${id(9).slice(3)}`;
+    expect(summary.auto_files).toEqual([`places/${newId.slice(-2).toLowerCase()}/${newId}.json`]);
+    const record = await readFile(join(data, summary.auto_files[0]!), "utf8");
+    expect(record).toContain('"lon": 149.0');
+    expect(record).toContain('"standing": "shown"');
+    expect(record).not.toContain("creek");
+    expect(summary.review_files).toEqual([]);
+    expect(summary.auto_pr_body).toContain("published as shown");
+    expect(summary.auto_pr_body).not.toContain("creek");
   });
 
   it("splits automatic and review changes to one place between the checkouts", async () => {

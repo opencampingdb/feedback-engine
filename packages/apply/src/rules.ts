@@ -1,9 +1,11 @@
 import {
   isFactName,
   isValidFactValue,
+  newPlaceStanding,
   safeSearchVerdict,
   type FactName,
   type FactValue,
+  type NewPlaceContacts,
   type StoredFeedback,
 } from "@opencampingdb/feedback";
 import { moderateReview } from "./moderation.js";
@@ -50,6 +52,9 @@ const DRAFT_GROUP = "overnight";
  * record whose target was itself merged later). Returns undefined when the id
  * is not in `places`, the chain is broken or it loops. Never returns a tombstone.
  */
+/** The id a new place gets from its `new_place` report: `ocdb_` and the report's ulid, as the SDK's `newPlaceId` makes it. */
+export const newPlaceIdOf = (item: { id: string }) => `ocdb_${item.id.replace(/^fb_/, "")}`;
+
 export function resolvePlace(id: string | null, places: ReadonlyMap<string, Place>): string | undefined {
   let current = id ?? undefined;
   for (let hops = 0; current !== undefined && hops < 10; hops++) {
@@ -98,6 +103,8 @@ export interface RulesInput {
   photos?: readonly Photo[];
   /** Licence id written on new photo lines. Defaults to CC-BY-4.0. */
   photoLicence?: string;
+  /** Every record in the data, for the duplicates check on new places. None when left out. */
+  everyPlace?: readonly Place[];
 }
 
 /**
@@ -151,7 +158,37 @@ export interface RulesOutput {
   /** Changes for a person, in the order they arrived. */
   edits: ReviewEdit[];
   changes: Change[];
+  /** New places a person, or a triage agent, should look at, in the order they were decided. */
+  held: HeldCase[];
+  /** New places withdrawn by their adder whose records are to be deleted from the data. */
+  removed: string[];
   needsReview: boolean;
+}
+
+/**
+ * One new place for a person or a triage agent to look at, listed in the
+ * review PR body as JSON. `duplicate`: held as a possible duplicate of
+ * `duplicate_of`. `hidden`: hidden by `reports` reports for `reasons`, or
+ * because its contributor is `blocked`. `contacts`: published, with the
+ * contact facts named in `contacts` waiting in the inbox for a person.
+ * `first_place`: the first place from its contributor, published. Contact
+ * values, notes and device ids are never in it.
+ */
+export interface HeldCase {
+  case: "duplicate" | "hidden" | "contacts" | "first_place";
+  place: string;
+  standing: "shown" | "confirmed" | "held" | "hidden";
+  location: { lat: number; lon: number };
+  kind: string;
+  duplicate_of?: string;
+  distance_m?: number;
+  reports?: number;
+  reasons?: string[];
+  blocked?: true;
+  contacts?: string[];
+  contributor?: string;
+  /** The feedback ids the case comes from, to read in the inbox. */
+  feedback: string[];
 }
 
 type ReportItem = Extract<StoredFeedback, { type: "report" }>;
@@ -239,6 +276,30 @@ function withoutConfirmed(place: Place): Omit<Place, "last_confirmed"> {
   return rest;
 }
 
+const isNewPlaceReport = (item: StoredFeedback): item is ReportItem => item.type === "report" && item.report.kind === "new_place";
+
+/** What can be sent about a new place once it is added: a check, a removal report or its adder's withdrawal. */
+const isNewPlaceEvidence = (item: StoredFeedback) =>
+  item.type === "withdraw" || item.type === "check" || (item.type === "report" && item.report.kind === "remove");
+
+/**
+ * Whether a check was sent near the place. Checks carry no such signal yet,
+ * so a check counts as near only when the stored item says `nearby: true`.
+ */
+const wasNearby = (item: CheckItem) => (item.check as { nearby?: unknown }).nearby === true;
+
+/** A new place this close to a place in the same group is a possible duplicate. */
+export const DUPLICATE_DISTANCE_M = 150;
+
+/** Great-circle distance in metres, as the data repository's duplicates check works it out. */
+function distanceM(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
+  const rad = Math.PI / 180;
+  const h =
+    Math.sin(((b.lat - a.lat) * rad) / 2) ** 2 +
+    Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(((b.lon - a.lon) * rad) / 2) ** 2;
+  return 2 * 6_371_008.8 * Math.asin(Math.sqrt(h));
+}
+
 const quote = (text: string | undefined) => (text ? `: "${text}"` : "");
 
 export function applyRules(input: RulesInput): RulesOutput {
@@ -250,6 +311,8 @@ export function applyRules(input: RulesInput): RulesOutput {
   const newFees = new Map<string, Fee[]>();
   const changes: Change[] = [];
   const edits: ReviewEdit[] = [];
+  const held: HeldCase[] = [];
+  const removed: string[] = [];
 
   const decide = (item: StoredFeedback, outcome: Outcome, reason: string) => {
     decisions.set(item.id, { id: item.id, place: item.place, outcome, reason });
@@ -276,10 +339,25 @@ export function applyRules(input: RulesInput): RulesOutput {
   // Feedback for a merged id goes to the record it was merged into. Feedback
   // about a place that is not in the data is refused, except new places.
   // Everything from a blocked contributor is refused.
+  // New places added in this run or in the last 90 days, by id, and what
+  // has been sent about them since.
+  const origins = new Map<string, ReportItem>();
+  for (const item of [...input.history, ...pending]) {
+    if (isNewPlaceReport(item) && item.location) origins.set(newPlaceIdOf(item), item);
+  }
+  const newPlaceEvidence: StoredFeedback[] = [];
   const known: StoredFeedback[] = [];
   for (const item of pending) {
     if (item.contributor !== undefined && blocked.has(item.contributor)) {
       decide(item, "refused", "the contributor is blocked");
+      continue;
+    }
+    if (isNewPlaceEvidence(item) && item.place !== null && origins.has(item.place)) {
+      newPlaceEvidence.push(item);
+      continue;
+    }
+    if (item.type === "withdraw") {
+      decide(item, "refused", `no new place ${item.place} was added in the last ${WINDOW_DAYS} days`);
       continue;
     }
     const isNewPlace = (item.type === "report" && item.report.kind === "new_place") || item.type === "photo_erasure";
@@ -328,6 +406,7 @@ export function applyRules(input: RulesInput): RulesOutput {
     ),
   );
   applyFacts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
+  applyNewPlaces(known.filter((i): i is ReportItem => isNewPlaceReport(i)), newPlaceEvidence);
   routeToPerson(known.filter((i): i is ReportItem => i.type === "report"));
 
   // Anything still waiting past the window can no longer be confirmed.
@@ -365,6 +444,8 @@ export function applyRules(input: RulesInput): RulesOutput {
     removedPhotos,
     edits,
     changes,
+    held,
+    removed,
     needsReview: ordered.some((d) => d.outcome === "needs_review"),
   };
 
@@ -847,33 +928,163 @@ export function applyRules(input: RulesInput): RulesOutput {
     }
   }
 
+  /**
+   * New places from travellers, and the checks, removal reports and
+   * withdrawals sent about them. Each is written with its standing from
+   * `newPlaceStanding`: `shown` and `confirmed` places go straight into the
+   * data, much as trusted reviews do. A `held` or `hidden` place that is not
+   * in the data yet is drafted for a person instead, a `withdrawn` one is
+   * not written and is removed if it was. Every case a person should look
+   * at is listed in `held`.
+   */
+  function applyNewPlaces(pendingNew: ReportItem[], evidence: StoredFeedback[]): void {
+    const ids = new Set([...pendingNew.filter((i) => i.location).map(newPlaceIdOf), ...evidence.map((e) => e.place as string)]);
+    for (const id of ids) {
+      const origin = origins.get(id)!;
+      const isPending = pendingNew.includes(origin);
+      const mine = evidence.filter((e) => e.place === id);
+      const earlier = input.history.filter((h) => h.place === id && isNewPlaceEvidence(h));
+      const existing = input.places.get(id);
+      const key = origin.contributor ?? origin.device;
+      const firstPlace = !input.history.some((h) => h.id !== origin.id && isNewPlaceReport(h) && (h.contributor ?? h.device) === key);
+      const isBlocked = origin.contributor !== undefined && blocked.has(origin.contributor);
+      // Once a person has let a place into the data as anything but held, it is no longer a possible duplicate.
+      const duplicate = existing && existing.standing !== "held" ? undefined : nearestDuplicate(id, origin);
+      const standingFrom = (items: readonly StoredFeedback[]) =>
+        newPlaceStanding({
+          added: origin.received,
+          contributor: { device: origin.device, blocked: isBlocked, firstPlace },
+          checks: items
+            .filter((i): i is CheckItem => i.type === "check")
+            .map((c) => ({ device: c.device, stillThere: c.check.still_there, nearby: wasNearby(c), day: c.received })),
+          reports: items
+            .filter((i): i is ReportItem => i.type === "report")
+            .map((r) => ({ device: r.device, reason: r.report.reason!, day: r.received })),
+          withdrawnAt: items.filter((i) => i.type === "withdraw" && i.device === origin.device).map((i) => i.received).sort()[0] ?? null,
+          duplicateOf: duplicate?.place ?? null,
+          moderator: null,
+          now: nowIso,
+        });
+      const standing = standingFrom([...earlier, ...mine]);
+      const before = existing ? existing.standing : isPending ? undefined : standingFrom(earlier);
+
+      for (const e of mine) {
+        if (e.type === "withdraw") {
+          if (e.device !== origin.device) decide(e, "refused", "only the install that added a place can withdraw it");
+          else if (standing === "withdrawn") decide(e, "applied", "new place withdrawn");
+          else decide(e, "applied", "withdrawn more than 24 hours after it was added, so it counts as a report");
+        } else {
+          decide(e, "applied", e.type === "check" ? "check recorded" : "report recorded");
+        }
+      }
+
+      if (standing === "withdrawn") {
+        const by = mine.filter((e) => e.type === "withdraw" && e.device === origin.device);
+        if (existing) {
+          removed.push(id);
+          note(id, "new place withdrawn by the person who added it, so its record is removed", true, by);
+        }
+        if (isPending) decide(origin, "refused", "the person who added it withdrew it");
+        continue;
+      }
+
+      const published = standing === "shown" || standing === "confirmed";
+      const contacts = Object.keys(origin.report.contacts ?? {}) as (keyof NewPlaceContacts)[];
+      const where = `${origin.location!.lat}, ${origin.location!.lon}`;
+      const against = [...earlier, ...mine].filter((i) => i.type === "report" || (i.type === "check" && !i.check.still_there));
+      const reasons = [...new Set(against.map((i) => (i.type === "report" ? i.report.reason! : "not_there")))].sort();
+      const caseFor = (kind: HeldCase["case"], feedback: readonly StoredFeedback[]): HeldCase => ({
+        case: kind,
+        place: id,
+        standing: standing as HeldCase["standing"],
+        location: { lat: roundCoord(origin.location!.lat), lon: roundCoord(origin.location!.lon) },
+        kind: (existing ?? draftOf(origin)).kind,
+        ...(kind === "duplicate" && duplicate ? { duplicate_of: duplicate.place, distance_m: duplicate.distance } : {}),
+        ...(kind === "hidden" ? (isBlocked ? { blocked: true as const } : { reports: new Set(against.map((i) => i.device)).size, reasons }) : {}),
+        ...(kind === "contacts" ? { contacts } : {}),
+        ...(kind === "first_place" && origin.contributor ? { contributor: origin.contributor } : {}),
+        feedback: feedback.map((f) => f.id),
+      });
+
+      if (existing || published) {
+        if (existing) {
+          const place = record(id);
+          place.standing = standing;
+          if (before !== standing) note(id, `standing ${before ?? "(none)"} to ${standing}`, true, mine);
+          if (isPending) decide(origin, "applied", `new place is already in the data, ${standing}`);
+        } else {
+          working.set(id, { ...draftOf(origin), standing });
+          note(id, `new place at ${where}, published as ${standing}`, true, [origin]);
+          decide(origin, "applied", `new place published as ${standing}`);
+        }
+      } else if (isPending) {
+        // Held or hidden before it was ever published: a person decides, with the contacts in the draft.
+        const draft: Place = { ...draftOf(origin), standing };
+        for (const fact of contacts) {
+          (draft.facts as Record<string, FactValue>)[fact] = origin.report.contacts![fact]!;
+          setSource(draft, fact, "feedback", nowIso);
+        }
+        edits.push({ kind: "new_place", record: draft, feedback: origin.id });
+        const why =
+          standing === "held"
+            ? `possible duplicate of ${duplicate!.place}, ${duplicate!.distance} m away (keep it: set standing to shown; the same place: merge it into ${duplicate!.place})`
+            : "hidden before it was published (keep it: set standing to shown)";
+        note(id, `new place at ${where}, ${why}`, false, [origin]);
+        decide(origin, "needs_review", standing === "held" ? "possible duplicate, so a person checks it" : "hidden by reports, so a person checks it");
+      } else if (before !== standing) {
+        // Not in the data and already with a person: only the listing changes.
+        edits.push({ kind: "note", place: id, feedback: mine[0]!.id });
+        note(id, `standing ${before} to ${standing}`, false, mine);
+      }
+
+      if (standing === "held" && (isPending || before !== "held")) held.push(caseFor("duplicate", isPending ? [origin] : mine));
+      if (standing === "hidden" && (isPending || before !== "hidden")) held.push(caseFor("hidden", isPending ? [origin, ...mine] : mine));
+      if (isPending && published && contacts.length > 0) held.push(caseFor("contacts", [origin]));
+      if (isPending && firstPlace) held.push(caseFor("first_place", [origin]));
+    }
+  }
+
+  /** A new place's record as its report describes it, with no standing yet. */
+  function draftOf(item: ReportItem): Place {
+    const picked = item.report.place_kind;
+    const pickedGroup = picked === undefined ? undefined : input.kinds?.get(picked);
+    return {
+      id: newPlaceIdOf(item),
+      name: null,
+      kind: pickedGroup ? picked! : DRAFT_KIND,
+      group: pickedGroup ?? input.kinds?.get(DRAFT_KIND) ?? DRAFT_GROUP,
+      location: { lat: roundCoord(item.location!.lat), lon: roundCoord(item.location!.lon) },
+      osm: null,
+      facts: {},
+      status: "open",
+      rating: null,
+      fact_sources: { location: "feedback" },
+      fact_dates: { location: nowIso },
+      updated: nowIso,
+    };
+  }
+
+  /**
+   * The nearest place in the same group within 150 m of a new place: every
+   * record in the data and the new places published earlier in this run.
+   * Merged and hidden records do not count.
+   */
+  function nearestDuplicate(id: string, item: ReportItem): { place: string; distance: number } | undefined {
+    const group = draftOf(item).group;
+    let best: { place: string; distance: number } | undefined;
+    const candidates = [...(input.everyPlace ?? []), ...[...working.values()].filter((p) => p.standing !== undefined)];
+    for (const other of candidates) {
+      if (other.id === id || other.group !== group || other.status === "merged" || other.standing === "hidden") continue;
+      const distance = Math.round(distanceM(item.location!, other.location));
+      if (distance <= DUPLICATE_DISTANCE_M && (!best || distance < best.distance)) best = { place: other.id, distance };
+    }
+    return best;
+  }
+
   function routeToPerson(items: ReportItem[]): void {
     for (const item of items) {
       const { kind, note: text } = item.report;
-      if (kind === "new_place" && item.location) {
-        // The id comes from the feedback id, so running the same item again writes the same file.
-        const id = `ocdb_${item.id.replace(/^fb_/, "")}`;
-        const picked = item.report.place_kind;
-        const pickedGroup = picked === undefined ? undefined : input.kinds?.get(picked);
-        const draft: Place = {
-          id,
-          name: null,
-          kind: pickedGroup ? picked! : DRAFT_KIND,
-          group: pickedGroup ?? input.kinds?.get(DRAFT_KIND) ?? DRAFT_GROUP,
-          location: { lat: roundCoord(item.location.lat), lon: roundCoord(item.location.lon) },
-          osm: null,
-          facts: {},
-          status: "open",
-          rating: null,
-          fact_sources: { location: "feedback" },
-          fact_dates: { location: nowIso },
-          updated: nowIso,
-        };
-        edits.push({ kind: "new_place", record: draft, feedback: item.id });
-        const where = `${item.location.lat}, ${item.location.lon}`;
-        note(id, `new place at ${where}${quote(text)} (set kind and name before merging)`, false, [item]);
-        decide(item, "needs_review", "new place drafted for a person to check");
-      } else if (kind === "wrong_location" && item.place) {
+      if (kind === "wrong_location" && item.place) {
         if (item.location) {
           const location = { lat: roundCoord(item.location.lat), lon: roundCoord(item.location.lon) };
           edits.push({ kind: "location", place: item.place, location, feedback: item.id });
@@ -902,6 +1113,11 @@ export function applyRules(input: RulesInput): RulesOutput {
         edits.push({ kind: "kind", place: item.place, placeKind: picked, group, feedback: item.id });
         note(item.place, `kind changed to ${picked}${quote(text)} (check before merging)`, false, [item]);
         decide(item, "needs_review", "kind changes are checked by a person");
+      } else if (kind === "remove" && item.place) {
+        // Only places added in the last 90 days come down on reports. On any other place a person decides.
+        edits.push({ kind: "note", place: item.place, feedback: item.id });
+        note(item.place, `removal reported as ${item.report.reason}${quote(text)} (decide: keep it, close it or hide it)`, false, [item]);
+        decide(item, "needs_review", "removal reports on places that are not new are read by a person");
       } else if (kind === "other" && item.place) {
         edits.push({ kind: "note", place: item.place, feedback: item.id });
         note(item.place, `report${quote(text) || " with no note"}`, false, [item]);

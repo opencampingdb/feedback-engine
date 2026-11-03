@@ -92,6 +92,7 @@ function run(
 ) {
   const places = new Map((opts.places ?? [place()]).map((p) => [p.id, p]));
   const input: RulesInput = {
+    everyPlace: [...places.values()],
     now: at(opts.now ?? 1),
     pending,
     history: opts.history ?? [],
@@ -696,34 +697,12 @@ describe("items for a person", () => {
       report: { kind: "new_place", ...(note ? { note } : {}) },
     }) as StoredFeedback;
 
-  it("a new place becomes a draft edit, never an automatic change", () => {
-    const item = newPlace("Free camp beside the creek");
-    const out = run([item]);
-    expect(out.outcome(item)).toBe("needs_review");
-    expect(out.needsReview).toBe(true);
-    expect(out.places.size).toBe(0);
-    expect(out.edits).toHaveLength(1);
-    const edit = out.edits[0]!;
-    expect(edit.kind).toBe("new_place");
-    if (edit.kind !== "new_place") return;
-    // The id comes from the feedback id, so a second run writes the same file.
-    expect(edit.record.id).toBe(`ocdb_${item.id.slice(3)}`);
-    expect(edit.record).toMatchObject({
-      name: null,
-      location: { lat: -35.1, lon: 149.2 },
-      osm: null,
-      status: "open",
-      facts: {},
-      fact_sources: { location: "feedback" },
-      fact_dates: { location: at(1) },
-    });
-  });
-
-  it("gives the same draft id when the same item is run again", () => {
+  it("gives a new place the same id when the same item is run again", () => {
     const item = newPlace();
-    const first = run([item]).edits[0];
-    const second = run([item], { now: 2 }).edits[0];
-    expect(first?.kind === "new_place" && second?.kind === "new_place" && first.record.id === second.record.id).toBe(true);
+    const first = run([item]).places.keys().next().value;
+    const second = run([item], { now: 2 }).places.keys().next().value;
+    expect(first).toBe(`ocdb_${item.id.slice(3)}`);
+    expect(second).toBe(first);
   });
 
   it("wrong_location with a location becomes a location edit", () => {
@@ -891,10 +870,7 @@ describe("new place kind", () => {
       location: { lat: -35.1, lon: 149.2 },
       report: { kind: "new_place", ...(placeKind ? { place_kind: placeKind } : {}) },
     }) as StoredFeedback;
-  const draftOf = (out: ReturnType<typeof run>) => {
-    const edit = out.edits[0];
-    return edit?.kind === "new_place" ? edit.record : undefined;
-  };
+  const draftOf = (out: ReturnType<typeof run>) => [...out.places.values()].find((p) => p.osm === null);
 
   it("uses the kind the user picked, with its group from kinds.json", () => {
     expect(draftOf(run([newPlace("picnic_site")]))).toMatchObject({ kind: "picnic_site", group: "utility" });
@@ -903,5 +879,217 @@ describe("new place kind", () => {
   it("falls back to campground for a kind the data does not know", () => {
     expect(draftOf(run([newPlace("spaceport")]))).toMatchObject({ kind: "campground", group: "overnight" });
     expect(draftOf(run([newPlace()]))).toMatchObject({ kind: "campground", group: "overnight" });
+  });
+});
+
+describe("new places", () => {
+  const SPOT = { lat: -35.1, lon: 149.2 };
+  const added = (day = 0, device = "dev-a", extra: Record<string, unknown> = {}, location = SPOT) =>
+    ({
+      ...base(day, device, null),
+      contributor: ctr(device),
+      type: "report",
+      location,
+      report: { kind: "new_place", place_kind: "free_camp", note: "Gravel pit off the highway", ...extra },
+    }) as StoredFeedback;
+  const idOf = (item: StoredFeedback) => `ocdb_${item.id.slice(3)}`;
+
+  it("publishes a new place at once, marked shown", () => {
+    const item = added();
+    const out = run([item]);
+    expect(out.outcome(item)).toBe("applied");
+    expect(out.after(idOf(item))).toEqual({
+      id: idOf(item),
+      name: null,
+      kind: "free_camp",
+      group: "overnight",
+      location: SPOT,
+      osm: null,
+      facts: {},
+      status: "open",
+      rating: null,
+      standing: "shown",
+      fact_sources: { location: "feedback" },
+      fact_dates: { location: at(1) },
+      updated: at(1),
+    });
+    expect(out.changes).toEqual([expect.objectContaining({ place: idOf(item), automatic: true })]);
+    expect(out.edits).toEqual([]);
+  });
+
+  const withdraw = (day: number, device: string, target: StoredFeedback) =>
+    ({ ...base(day, device, idOf(target)), type: "withdraw" }) as StoredFeedback;
+
+  it("does not write a place its adder withdrew within 24 hours", () => {
+    const item = added(0);
+    const back = withdraw(0.5, "dev-a", item);
+    const out = run([item, back]);
+    expect(out.outcome(item)).toBe("refused");
+    expect(out.outcome(back)).toBe("applied");
+    expect(out.places.size).toBe(0);
+    expect(out.removed).toEqual([]);
+  });
+
+  const remove = (day: number, device: string, target: StoredFeedback, reason = "fake") =>
+    ({ ...base(day, device, idOf(target)), type: "report", report: { kind: "remove", reason } }) as StoredFeedback;
+  const visit = (day: number, device: string, target: StoredFeedback, stillThere: boolean, nearby = true) =>
+    ({ ...base(day, device, idOf(target)), type: "check", check: { visited: at(day).slice(0, 10), still_there: stillThere, nearby } }) as unknown as StoredFeedback;
+  /** The new place's record as an earlier run wrote it. */
+  const written = (item: StoredFeedback, standing: Place["standing"] = "shown") =>
+    place({ id: idOf(item), name: null, osm: null, facts: {}, fact_sources: { location: "feedback" }, location: SPOT, standing });
+  const inData = (item: StoredFeedback, standing: Place["standing"] = "shown") => ({ history: [applied(item)], places: [place(), written(item, standing)] });
+
+  it("removes a published place its adder withdrew within 24 hours", () => {
+    const item = added(0);
+    const back = withdraw(0.9, "dev-a", item);
+    const out = run([back], { ...inData(item), now: 1 });
+    expect(out.outcome(back)).toBe("applied");
+    expect(out.removed).toEqual([idOf(item)]);
+    expect(out.changes).toEqual([expect.objectContaining({ place: idOf(item), automatic: true, feedback: [back.id] })]);
+  });
+
+  it("refuses a withdrawal from another install", () => {
+    const item = added(0);
+    const back = withdraw(0.5, "dev-b", item);
+    const out = run([back], inData(item));
+    expect(out.outcome(back)).toBe("refused");
+    expect(out.removed).toEqual([]);
+    expect(out.places.size).toBe(0);
+  });
+
+  it("refuses a withdrawal for a place nobody added", () => {
+    const back = { ...base(0, "dev-a", OTHER), type: "withdraw" } as StoredFeedback;
+    expect(run([back]).outcome(back)).toBe("refused");
+  });
+
+  it("counts a withdrawal after 24 hours as one more report", () => {
+    const item = added(0);
+    const out = run([withdraw(3, "dev-a", item), remove(3, "dev-b", item)], { ...inData(item), now: 4 });
+    expect(out.removed).toEqual([]);
+    expect(out.after(idOf(item))?.standing).toBe("hidden");
+  });
+
+  it("hides a published place reported by two devices and lists it for a person", () => {
+    const item = added(0);
+    const first = remove(1, "dev-b", item, "private_land");
+    const second = visit(1, "dev-c", item, false);
+    const out = run([first, second], { ...inData(item), now: 2 });
+    expect(out.outcome(first)).toBe("applied");
+    expect(out.outcome(second)).toBe("applied");
+    expect(out.after(idOf(item))?.standing).toBe("hidden");
+    expect(out.held).toEqual([
+      {
+        case: "hidden",
+        place: idOf(item),
+        standing: "hidden",
+        location: SPOT,
+        kind: "free_camp",
+        reports: 2,
+        reasons: ["not_there", "private_land"],
+        feedback: [first.id, second.id],
+      },
+    ]);
+  });
+
+  it("one report leaves a published place shown and lists nothing", () => {
+    const item = added(0);
+    const out = run([remove(1, "dev-b", item)], { ...inData(item), now: 2 });
+    expect(out.places.size).toBe(0);
+    expect(out.held).toEqual([]);
+  });
+
+  it("confirms a place two other devices found there nearby, and then needs three reports to hide it", () => {
+    const item = added(0);
+    const yes = [visit(1, "dev-b", item, true), visit(1, "dev-c", item, true)];
+    const confirmed = run(yes, { ...inData(item), now: 2 });
+    expect(confirmed.after(idOf(item))?.standing).toBe("confirmed");
+    const history = [applied(item), ...yes.map((y) => applied(y))];
+    const places = [place(), written(item, "confirmed")];
+    const two = run([remove(3, "dev-d", item), remove(3, "dev-e", item)], { history, places, now: 4 });
+    expect(two.places.size).toBe(0);
+    const three = run([remove(3, "dev-d", item), remove(3, "dev-e", item), remove(3, "dev-f", item)], { history, places, now: 4 });
+    expect(three.after(idOf(item))?.standing).toBe("hidden");
+  });
+
+  it("does not confirm a place on checks that were not sent near it, or from its adder", () => {
+    const item = added(0);
+    const out = run([visit(1, "dev-b", item, true, false), visit(1, "dev-a", item, true), visit(1, "dev-c", item, true)], { ...inData(item), now: 2 });
+    expect(out.places.size).toBe(0);
+  });
+
+  it("holds a new place within 150 m of a place in the same group for a person", () => {
+    const near = { lat: -36.851, lon: 144.5505 };
+    const item = added(0, "dev-a", {}, near);
+    const out = run([item]);
+    expect(out.outcome(item)).toBe("needs_review");
+    expect(out.places.size).toBe(0);
+    expect(out.edits).toEqual([{ kind: "new_place", record: expect.objectContaining({ id: idOf(item), standing: "held" }), feedback: item.id }]);
+    expect(out.changes).toEqual([expect.objectContaining({ automatic: false, summary: expect.stringContaining(`possible duplicate of ${PLACE}, 120 m away`) })]);
+    expect(out.held).toEqual([
+      expect.objectContaining({ case: "duplicate", place: idOf(item), standing: "held", duplicate_of: PLACE, distance_m: 120, feedback: [item.id] }),
+      expect.objectContaining({ case: "first_place" }),
+    ]);
+  });
+
+  it("does not hold a new place near a place in another group, or further than 150 m away", () => {
+    const toilet = added(0, "dev-a", { place_kind: "picnic_site" }, { lat: -36.851, lon: 144.5505 });
+    const far = added(0, "dev-b", {}, { lat: -36.852, lon: 144.5505 });
+    const out = run([toilet, far]);
+    expect(out.outcome(toilet)).toBe("applied");
+    expect(out.outcome(far)).toBe("applied");
+  });
+
+  it("holds the second of two places added at the same spot in one run", () => {
+    const first = added(0, "dev-a");
+    const second = added(0.1, "dev-b");
+    const out = run([first, second]);
+    expect(out.outcome(first)).toBe("applied");
+    expect(out.outcome(second)).toBe("needs_review");
+    expect(out.held).toContainEqual(expect.objectContaining({ case: "duplicate", place: idOf(second), duplicate_of: idOf(first), distance_m: 0 }));
+  });
+
+  it("publishes a place with contacts but leaves the contacts for a person", () => {
+    const item = added(0, "dev-a", { contacts: { phone: "03 5555 0100", website: "https://park.example.org" } });
+    const history = [applied(added(-5, "dev-a", {}, { lat: -30, lon: 140 }))];
+    const out = run([item], { history });
+    expect(out.after(idOf(item))?.facts).toEqual({});
+    expect(out.held).toEqual([
+      { case: "contacts", place: idOf(item), standing: "shown", location: SPOT, kind: "free_camp", contacts: ["phone", "website"], feedback: [item.id] },
+    ]);
+    expect(JSON.stringify(out.held)).not.toContain("5555");
+  });
+
+  it("lists a contributor's first place, published, and not their second", () => {
+    const first = added(0, "dev-a");
+    const out = run([first]);
+    expect(out.outcome(first)).toBe("applied");
+    expect(out.held).toEqual([expect.objectContaining({ case: "first_place", place: idOf(first), standing: "shown", contributor: ctr("dev-a") })]);
+    const second = added(2, "dev-a", {}, { lat: -30, lon: 140 });
+    expect(run([second], { history: [applied(first)], now: 3 }).held).toEqual([]);
+  });
+
+  it("drafts a place reported down before it was ever published for a person, with its contacts", () => {
+    const item = added(0, "dev-a", { contacts: { phone: "03 5555 0100" } });
+    const reports = [remove(0.1, "dev-b", item), remove(0.2, "dev-c", item)];
+    const out = run([item, ...reports]);
+    expect(out.outcome(item)).toBe("needs_review");
+    expect(out.places.size).toBe(0);
+    const edit = out.edits[0];
+    expect(edit?.kind === "new_place" && edit.record).toMatchObject({ standing: "hidden", facts: { phone: "03 5555 0100" }, fact_sources: { phone: "feedback" } });
+    expect(out.held.map((h) => h.case)).toEqual(["hidden", "first_place"]);
+  });
+
+  it("hides a published place once its contributor is blocked", () => {
+    const item = added(0);
+    const out = run([visit(1, "dev-b", item, true)], { ...inData(item), blocked: [ctr("dev-a")], now: 2 });
+    expect(out.after(idOf(item))?.standing).toBe("hidden");
+    expect(out.held).toEqual([expect.objectContaining({ case: "hidden", blocked: true })]);
+  });
+
+  it("sends a removal report on a place that is not new to a person", () => {
+    const report = { ...base(0, "dev-b"), type: "report", report: { kind: "remove", reason: "fake" } } as StoredFeedback;
+    const out = run([report]);
+    expect(out.outcome(report)).toBe("needs_review");
+    expect(out.changes).toEqual([expect.objectContaining({ place: PLACE, automatic: false, summary: expect.stringContaining("fake") })]);
   });
 });

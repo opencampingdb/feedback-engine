@@ -14,7 +14,7 @@ import {
 import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
 import { autoPrBody, reviewPrBody } from "./prbody.js";
 import { checkProof as realCheckProof, type ProofResult } from "./proof.js";
-import { applyEdit, applyHeldReview, applyRules, resolvePlace, WINDOW_DAYS, type Decision } from "./rules.js";
+import { applyEdit, applyHeldReview, applyRules, newPlaceIdOf, resolvePlace, WINDOW_DAYS, type Decision } from "./rules.js";
 import type { Fee, Place, Review } from "./types.js";
 
 export interface RunOptions {
@@ -113,6 +113,8 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   // Every record the rules may read, following merged ids to their targets.
   const wanted = new Set<string>([
     ...crowd.map((p) => p.place),
+    // A new place's own record, when an earlier run already wrote it.
+    ...crowd.filter((p) => p.type === "report" && p.report.kind === "new_place").map(newPlaceIdOf),
     ...ownerItems.map((p) => p.place),
     ...awaitingClaims.map((a) => a.place),
     ...owners.keys(),
