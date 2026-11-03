@@ -1,6 +1,7 @@
 import {
   isFactName,
   isValidFactValue,
+  safeSearchVerdict,
   type FactName,
   type FactValue,
   type StoredFeedback,
@@ -538,8 +539,18 @@ export function applyRules(input: RulesInput): RulesOutput {
       const repeated =
         (input.photos ?? []).some((p) => p.sha256 === photo.sha256 && p.place !== item.place) ||
         sent.some((other) => other.id !== item.id && other.place !== item.place && other.photo.full_sha256 === photo.sha256);
-      if (repeated || !trusted.has(item.contributor)) {
-        const why = repeated ? "the same file was sent for another place" : "first photo from this contributor";
+      // SafeSearch ratings from the intake, when it checks photos: a likely adult
+      // or violent photo, or one it couldn't check, waits for a person.
+      const rated = item.photo.safesearch;
+      const flagged = rated !== undefined && safeSearchVerdict(rated) !== "pass";
+      if (repeated || flagged || !trusted.has(item.contributor)) {
+        const why = repeated
+          ? "the same file was sent for another place"
+          : flagged
+            ? rated === "unchecked"
+              ? "SafeSearch could not check it"
+              : `SafeSearch rates it adult ${rated.adult}, violence ${rated.violence}, racy ${rated.racy}`
+            : "first photo from this contributor";
         edits.push({ kind: "photo", place: item.place, photo, feedback: item.id });
         note(item.place, `photo ${photoId} (${photo.width} x ${photo.height}), ${why} (look at it before merging)`, false, [item]);
         decide(item, "needs_review", `${why}, so a person checks it`);
