@@ -6,6 +6,7 @@ export {
   createPhotoClient,
   backoffDelay,
   isJpeg,
+  keyIsUnusable,
   ConsentRequiredError,
   FeedbackValidationError,
   OwnerRequestError,
@@ -13,6 +14,7 @@ export {
 } from "./client.js";
 export type {
   AttestationError,
+  AttestationRejection,
   CheckInput,
   FeeInput,
   FeedbackClient,
@@ -30,6 +32,7 @@ export type {
   PhotoPassResult,
   PhotoReportInput,
   PhotoResult,
+  RefusalReason,
   ReportInput,
   ReviewInput,
   ReviewReportInput,
