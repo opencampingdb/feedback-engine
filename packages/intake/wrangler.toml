@@ -34,7 +34,8 @@ id = "REPLACE_ME_ATTEST_KV_NAMESPACE_ID"
 
 # The recent list: new places served by GET /v1/places/recent until the apply
 # run writes them into the data, with their evidence and the block list. Apply
-# the schema with `npx wrangler d1 migrations apply RECENT_LIST --remote`.
+# the schema with the deploy copy of this file, once it holds the database_id:
+# `npx wrangler d1 migrations apply RECENT_LIST --remote -c wrangler.deploy.toml`.
 [[d1_databases]]
 binding = "RECENT_LIST"
 database_name = "ocdb-recent-list"

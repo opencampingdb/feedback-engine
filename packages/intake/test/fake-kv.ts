@@ -1,10 +1,19 @@
 import type { ListableKV } from "../src/recent-kv.js";
+import type { KVLike } from "../src/ratelimit.js";
+
+/** A fake KV namespace: listable, as the copy reads it, and writable, as tests and the rate limits use it. */
+export type FakeKv = ListableKV &
+  KVLike & {
+    put(key: string, value: string, options?: { metadata?: unknown; expirationTtl?: number }): Promise<void>;
+    data: Map<string, { value: string; metadata?: unknown }>;
+    lists: number;
+  };
 
 /**
  * A KV namespace with list and metadata, as Workers KV has, paging two keys at
  * a time. Like Workers KV it refuses metadata over 1024 bytes as JSON.
  */
-export function listableKv(): ListableKV & { data: Map<string, { value: string; metadata?: unknown }>; lists: number } {
+export function listableKv(): FakeKv {
   const data = new Map<string, { value: string; metadata?: unknown }>();
   const kv = {
     data,

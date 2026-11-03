@@ -1,6 +1,6 @@
 # The recent list lives in D1, not Workers KV
 
-The intake built the recent list by listing every new place and its evidence in Workers KV on each request. KV's free plan allows 1,000 list operations a day, and one traveller's map panning used them up in a day. The recent list now lives in D1: one table of new places and one of evidence, queried by bounding box, with each standing still worked out at read time. KV keeps attestation keys, challenges and rate limits, which only need reads and writes by key.
+The intake built the recent list by listing every new place and its evidence in Workers KV on each request. KV's free plan allows 1,000 list operations a day, and one traveller's map panning used them up in a day. The recent list now lives in D1: one table of new places and one of evidence, queried by bounding box, with each standing still worked out at read time. KV keeps registered keys, challenges and rate limits, which only need reads and writes by key.
 
 ## Considered options
 
