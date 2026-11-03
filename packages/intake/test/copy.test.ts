@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { copyToD1 } from "../src/copy-to-d1.js";
-import { addEvidence, addPlace, setBlocked, type ListableKV } from "../src/recent-kv.js";
-import { getPlace, insertEvidence, listPlaces, setBlockList, type StoredPlace } from "../src/recent.js";
+import { getPlace, insertEvidence, listPlaces, removePlaces, setBlockList, type StoredPlace } from "../src/recent.js";
 import { fakeD1 } from "./fake-d1.js";
-import { listableKv } from "./fake-kv.js";
-import { listPlacesFromKv } from "./kv-recent-list.js";
+import { listableKv, type FakeKv } from "./fake-kv.js";
+import { addKvEvidence, addKvPlace, listPlacesFromKv, setKvBlocked } from "./kv-recent-list.js";
 
 const NOW = "2026-11-03T09:00:00Z";
+/** When the first copy started. Everything `storeInKv` writes is from before it. */
+const FIRST_COPY = "2026-11-03T08:00:00Z";
 
 const place = (id: string, lat: number, lon: number, more: Partial<StoredPlace> = {}): StoredPlace => ({
   id,
@@ -27,30 +28,30 @@ const report = (device: string) => ({ device, reason: "not_there" as const, day:
  * contributor, with a name too long for metadata, attested, and in another
  * state, plus evidence whose place has gone.
  */
-async function storeInKv(kv: ListableKV) {
-  await addPlace(kv, place("plain", -33.5, 151.2));
-  await addPlace(kv, place("checked", -33.6, 151.3));
-  await addEvidence(kv, "checked", "fb_c1", { type: "check", check: check("dev_x") });
-  await addEvidence(kv, "checked", "fb_c2", { type: "check", check: check("dev_y") });
-  await addPlace(kv, place("reported", -33.7, 151.4));
-  await addEvidence(kv, "reported", "fb_r1", { type: "report", report: report("dev_x") });
-  await addEvidence(kv, "reported", "fb_r2", { type: "report", report: report("dev_y") });
-  await addPlace(kv, place("withdrawn", -33.8, 151.5));
-  await addEvidence(kv, "withdrawn", "fb_w1", { type: "withdraw", at: "2026-11-02T09:00:00Z" });
-  await addPlace(kv, place("blocked", -33.9, 151.6, { contributor: "ctr_bad" }));
-  await setBlocked(kv, ["ctr_bad", "ctr_other"]);
-  await addPlace(kv, place("long", -34.0, 151.7, { name: "N".repeat(1100) }));
-  await addPlace(kv, place("attested", -34.1, 151.8, { attest_key: "att_1" }));
-  await addEvidence(kv, "attested", "fb_c3", { type: "check", check: check("dev_x", false) });
-  await addPlace(kv, place("west", -31.9, 115.9));
-  await addEvidence(kv, "gone", "fb_c4", { type: "check", check: check("dev_x") });
+async function storeInKv(kv: FakeKv) {
+  await addKvPlace(kv, place("plain", -33.5, 151.2));
+  await addKvPlace(kv, place("checked", -33.6, 151.3));
+  await addKvEvidence(kv, "checked", "fb_c1", { type: "check", check: check("dev_x") });
+  await addKvEvidence(kv, "checked", "fb_c2", { type: "check", check: check("dev_y") });
+  await addKvPlace(kv, place("reported", -33.7, 151.4));
+  await addKvEvidence(kv, "reported", "fb_r1", { type: "report", report: report("dev_x") });
+  await addKvEvidence(kv, "reported", "fb_r2", { type: "report", report: report("dev_y") });
+  await addKvPlace(kv, place("withdrawn", -33.8, 151.5));
+  await addKvEvidence(kv, "withdrawn", "fb_w1", { type: "withdraw", at: "2026-11-02T09:00:00Z" });
+  await addKvPlace(kv, place("blocked", -33.9, 151.6, { contributor: "ctr_bad" }));
+  await setKvBlocked(kv, ["ctr_bad", "ctr_other"]);
+  await addKvPlace(kv, place("long", -34.0, 151.7, { name: "N".repeat(1100) }));
+  await addKvPlace(kv, place("attested", -34.1, 151.8, { attest_key: "att_1" }));
+  await addKvEvidence(kv, "attested", "fb_c3", { type: "check", check: check("dev_x", false) });
+  await addKvPlace(kv, place("west", -31.9, 115.9));
+  await addKvEvidence(kv, "gone", "fb_c4", { type: "check", check: check("dev_x") });
 }
 
 describe("copying the recent list from KV to D1", () => {
   it("copies a new place so the D1 recent list serves it", async () => {
     const kv = listableKv();
     const db = fakeD1();
-    await addPlace(kv, {
+    await addKvPlace(kv, {
       id: "np_01",
       location: { lat: -33.5, lon: 151.2 },
       kind: "campground",
@@ -122,12 +123,76 @@ describe("copying the recent list from KV to D1", () => {
     await insertEvidence(db, "plain", "fb_r9", { kind: "removal_report", report: report("dev_p") });
     await insertEvidence(db, "plain", "fb_r10", { kind: "removal_report", report: report("dev_q") });
     await setBlockList(db, ["ctr_bad", "ctr_other", "ctr_west"]);
-    await copyToD1(kv, db);
+    await copyToD1(kv, db, { since: FIRST_COPY });
 
     expect((await listPlaces(db, NOW)).map((p) => p.id).sort()).toEqual(["attested", "checked", "long"]);
   });
 
-  it("keeps the attestation key the adder's withdraw is checked against", async () => {
+  describe("the copy after the deploy, from when the first copy started", () => {
+    it("leaves a place the apply run removed from D1 removed", async () => {
+      const kv = listableKv();
+      const db = fakeD1();
+      await storeInKv(kv);
+      await copyToD1(kv, db);
+
+      await removePlaces(db, ["plain"]);
+      await copyToD1(kv, db, { since: FIRST_COPY });
+
+      expect((await listPlaces(db, NOW)).map((p) => p.id)).not.toContain("plain");
+      expect(await getPlace(db, "plain")).toBeUndefined();
+    });
+
+    it("keeps a place withdrawn after the first copy off the list", async () => {
+      const kv = listableKv();
+      const db = fakeD1();
+      await storeInKv(kv);
+      await copyToD1(kv, db);
+
+      // The adder withdraws it through the new intake, and the apply run then takes it out.
+      await insertEvidence(db, "plain", "fb_w9", { kind: "withdraw", at: "2026-11-03T08:30:00Z" });
+      await removePlaces(db, ["plain"]);
+      await copyToD1(kv, db, { since: FIRST_COPY });
+
+      expect((await listPlaces(db, NOW)).map((p) => p.id)).not.toContain("plain");
+    });
+
+    it("leaves a contributor taken off the block list in D1 off it", async () => {
+      const kv = listableKv();
+      const db = fakeD1();
+      await storeInKv(kv);
+      await copyToD1(kv, db);
+      expect((await listPlaces(db, NOW)).map((p) => p.id)).not.toContain("blocked");
+
+      await setBlockList(db, []);
+      const count = await copyToD1(kv, db, { since: FIRST_COPY });
+
+      expect(count.blocked).toBe(0);
+      expect((await listPlaces(db, NOW)).map((p) => p.id)).toContain("blocked");
+    });
+
+    it("copies a place, and evidence, written to KV after the first copy started", async () => {
+      const kv = listableKv();
+      const db = fakeD1();
+      await storeInKv(kv);
+      await copyToD1(kv, db);
+
+      // The old intake, still live until the deploy, takes a new place and a check on an older one.
+      await addKvPlace(kv, place("late", -33.4, 151.1, { added: "2026-11-03T08:10:00Z" }));
+      await addKvEvidence(kv, "plain", "fb_c9", { type: "check", check: { ...check("dev_p"), day: "2026-11-03T08:20:00Z" } });
+      await addKvEvidence(kv, "plain", "fb_c10", { type: "check", check: { ...check("dev_q"), day: "2026-11-03T08:20:00Z" } });
+      expect(await copyToD1(kv, db, { since: FIRST_COPY })).toEqual({ places: 1, evidence: 2, blocked: 0 });
+
+      const listed = await listPlaces(db, NOW);
+      expect(listed.find((p) => p.id === "late")?.standing).toBe("shown");
+      expect(listed.find((p) => p.id === "plain")?.standing).toBe("confirmed");
+    });
+
+    it("refuses a since that is not a time", async () => {
+      await expect(copyToD1(listableKv(), fakeD1(), { since: "yesterday" })).rejects.toThrow(/not a time/);
+    });
+  });
+
+  it("keeps the registered key the adder's withdraw is checked against", async () => {
     const kv = listableKv();
     const db = fakeD1();
     await storeInKv(kv);

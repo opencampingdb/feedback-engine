@@ -1,7 +1,7 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createHandler, type CacheLike, type Env } from "../src/index.js";
-import type { D1Like, D1Statement } from "../src/recent.js";
+import { insertPlace, type D1Like, type D1Statement } from "../src/recent.js";
 import { fakeD1 } from "./fake-d1.js";
 import { listableKv } from "./fake-kv.js";
 
@@ -454,6 +454,17 @@ describe("recent places", () => {
     expect((await handle(recent("?bbox=nope"), e)).status).toBe(400);
   });
 
+  it("lists places in id order, whatever order they were added in", async () => {
+    // Places copied from KV keep the time they were added, so ids and times need not run together.
+    const at = (id: string, added: string) =>
+      insertPlace(store, { id, location: { lat: -36.1, lon: 146.9 }, kind: null, name: null, added, contributor: `ctr_${id}`, device: `dev_${id}` });
+    await at("ocdb_03", "2026-11-03T06:00:00Z");
+    await at("ocdb_01", "2026-11-03T08:00:00Z");
+    await at("ocdb_02", "2026-11-03T07:00:00Z");
+    expect((await list()).map((p) => p.id)).toEqual(["ocdb_01", "ocdb_02", "ocdb_03"]);
+    expect((await list("?bbox=146,-37,147,-36")).map((p) => p.id)).toEqual(["ocdb_01", "ocdb_02", "ocdb_03"]);
+  });
+
   it("lists every place", async () => {
     for (let i = 0; i < 3; i++) await add({ device: otherDevice(i) });
     await add({ device: otherDevice(3), contributor: "acct_second_person_01" });
@@ -478,17 +489,24 @@ describe("recent places", () => {
       expect((await list()).map((p) => p.id)).toEqual([kept]);
     });
 
-    it("removes the checks and reports on a place with it", async () => {
+    it("removes the removal reports on a place with it", async () => {
+      // Fixed random bytes for each item, so the place can be sent again with the same id after its removal.
+      let seed = 1;
+      handle = createHandler({ fetch: services.fetch, now: () => clock, randomBytes: (n) => new Uint8Array(n).fill(seed) });
       const id = await add();
-      await handle(
-        feedback({ type: "check", place: id, device: otherDevice(1), app_version: "1.0.0", consent: true, check: { visited: "2026-11-03", still_there: true, nearby: true } }),
-        e,
-      );
-      await handle(feedback({ ...newPlace({ device: otherDevice(2), contributor: "acct_reporter_0000002" }), place: id, location: undefined, report: { kind: "remove", reason: "fake" } }), e);
-      expect((await handle(remove([id]), e)).status).toBe(200);
+      const report = (i: number) =>
+        feedback({ ...newPlace({ device: otherDevice(i), contributor: `acct_reporter_000000${i}` }), place: id, location: undefined, report: { kind: "remove", reason: "fake" } });
+      seed = 2;
+      expect((await handle(report(1), e)).status).toBe(202);
+      seed = 3;
+      expect((await handle(report(2), e)).status).toBe(202);
       expect(await list()).toEqual([]);
-      // Evidence left behind is invisible through the API, so this one looks at the table.
-      expect(store.db.prepare("SELECT count(*) AS n FROM evidence").get()).toEqual({ n: 0 });
+      expect((await handle(remove([id]), e)).status).toBe(200);
+
+      seed = 1;
+      expect(await add()).toBe(id);
+      // Had the two removal reports outlived the place, they would hide it again.
+      expect((await list()).map((p) => p.id)).toEqual([id]);
     });
 
     it("refuses a wrong token and a bad body", async () => {

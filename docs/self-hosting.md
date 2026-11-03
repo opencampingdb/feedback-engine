@@ -44,25 +44,46 @@ The schema is kept as numbered migrations in `packages/intake/migrations`. After
 
 Each new place, check, removal report or withdraw is one row written. Each refresh of the list that misses the edge cache is one query. The box a request names is grown out to whole degrees before the query and the cache, so map views in the same degrees share one cached answer for 30 seconds. This fits the D1 free plan.
 
-The apply run keeps the store in step with two calls, each with `authorization: Bearer <PLACES_TOKEN>`. `POST /v1/places/recent/remove` with `{"ids": [...]}` (1 to 500 place ids) takes places it has written into the data off the list, answering `{"removed": <count>}`. `POST /v1/places/recent/block` with `{"contributors": [...]}` (up to 5,000 hashed `ctr_` ids, `[]` for none) replaces the block list the intake keeps, answering `{"blocked": <count>}`. A blocked contributor's places leave the list and later ones aren't listed; one taken off the block list is listed again. Both answer `401` for a wrong token and `404` without `RECENT_LIST` or `PLACES_TOKEN`.
+The apply run keeps the recent list in step with two calls, each with `authorization: Bearer <PLACES_TOKEN>`. `POST /v1/places/recent/remove` with `{"ids": [...]}` (1 to 500 place ids) takes places it has written into the data off the list, answering `{"removed": <count>}`. `POST /v1/places/recent/block` with `{"contributors": [...]}` (up to 5,000 hashed `ctr_` ids, `[]` for none) replaces the block list the intake keeps, answering `{"blocked": <count>}`. A blocked contributor's places leave the list and later ones aren't listed; one taken off the block list is listed again. Both answer `401` for a wrong token and `404` without `RECENT_LIST` or `PLACES_TOKEN`.
 
 ### Moving the recent list from KV to D1
 
-Intakes set up before the recent list moved to D1 kept it in a `RECENT_PLACES` KV namespace. A copy command moves its new places, their evidence and the block list into `RECENT_LIST`. It runs from your own machine through Wrangler's platform proxy, signed in with `npx wrangler login`, and needs no endpoint on the intake. From `packages/intake`:
+Intakes set up before the recent list moved to D1 kept it in a `RECENT_PLACES` KV namespace. A copy command moves its new places, their evidence and the block list into `RECENT_LIST`. It runs from your own machine through Wrangler's platform proxy, signed in with `npx wrangler login`, and needs no endpoint on the intake. It lists the `np:` keys once and reads each place's value, and every row it writes is skipped when D1 has it already. Evidence whose place has already left KV is not copied. Add `--local` to rehearse against the local state `wrangler dev` keeps in `.wrangler/state`.
 
-```sh
-npm run copy-to-d1 -- --kv <RECENT_PLACES namespace id> --d1 <RECENT_LIST database_id>
-```
+Go live in this order, running every command from `packages/intake`:
 
-It lists the `np:` keys once, reads each place's value and the block list, and writes rows that are not in D1 yet, so it is safe to run more than once. The block list is added to the one D1 holds, never replacing it, so a list the apply run sent after the deploy is kept. Evidence whose place has already left KV is not copied. Add `--local` to rehearse against the local state `wrangler dev` keeps in `.wrangler/state`.
+1. Note the `RECENT_PLACES` namespace id before anything else: it is the `id` under `binding = "RECENT_PLACES"` in your current `wrangler.deploy.toml`, or find it with `npx wrangler kv namespace list`. The new `wrangler.toml` no longer names it, so regenerating the deploy copy drops it. Then create the D1 database, regenerate `wrangler.deploy.toml` with the `sed` command in step 6 (which adds the `RECENT_LIST` `database_id`), and apply the migration with that copy:
 
-Go live in this order:
+   ```sh
+   npx wrangler d1 create ocdb-recent-list
+   npx wrangler d1 migrations apply RECENT_LIST --remote -c wrangler.deploy.toml
+   ```
 
-1. Create the D1 database and apply the migration (above).
-2. Run the copy.
-3. Deploy the intake with the `RECENT_LIST` binding (step 6).
-4. Run the copy again, to pick up anything written to KV while the deploy went out.
-5. A week later, once the recent list has served from D1 without trouble, delete the `np:` keys and the `blocked:contributors` key from `RECENT_PLACES`, then remove the namespace. Until then the old keys are there to fall back to.
+2. Run the first copy. It copies everything, the block list too, and ends by printing the `--since` to use in step 4: the time it started, less five minutes.
+
+   ```sh
+   npm run copy-to-d1 -- --kv <RECENT_PLACES namespace id> --d1 <RECENT_LIST database_id>
+   ```
+
+3. Deploy the intake with `npx wrangler deploy -c wrangler.deploy.toml` (step 6).
+4. Run the second copy, with the time the first one printed, to pick up what the old intake wrote to KV while the deploy went out:
+
+   ```sh
+   npm run copy-to-d1 -- --kv <RECENT_PLACES namespace id> --d1 <RECENT_LIST database_id> --since <time the first copy printed>
+   ```
+
+   With `--since` it copies only the new places added and the evidence sent from that time on, and leaves the block list alone. D1 is the recent list by then, so a place the apply run has removed from it, or a contributor it has taken off the block list, stays that way.
+
+5. A week later, once the recent list has served from D1 without trouble, delete the `np:` keys and the `blocked:contributors` key from `RECENT_PLACES`. Until then the old keys are there to fall back to.
+
+   ```sh
+   npx wrangler kv key list --namespace-id <RECENT_PLACES namespace id> --prefix np: --remote > recent-places-keys.json
+   npx wrangler kv bulk delete recent-places-keys.json --namespace-id <RECENT_PLACES namespace id> --remote
+   npx wrangler kv key delete blocked:contributors --namespace-id <RECENT_PLACES namespace id> --remote
+   rm recent-places-keys.json
+   ```
+
+   Then delete the namespace with `npx wrangler kv namespace delete --namespace-id <RECENT_PLACES namespace id>`.
 
 ## 3. Create the private inbox repository
 

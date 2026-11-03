@@ -54,7 +54,8 @@ export const MAX_BLOCKED_CONTRIBUTORS = 5000;
 /** D1 allows 100 bound values in one statement. */
 const MAX_BOUND = 100;
 
-const chunks = <T>(items: readonly T[], size: number): T[][] =>
+/** `items` in runs of at most `size`. */
+export const chunks = <T>(items: readonly T[], size: number): T[][] =>
   Array.from({ length: Math.ceil(items.length / size) }, (_, i) => items.slice(i * size, (i + 1) * size));
 const marks = (n: number) => Array.from({ length: n }, () => "?").join(", ");
 
@@ -105,13 +106,14 @@ export function evidenceStatement(db: D1Like, place: string, feedbackId: string,
 
 /** Replaces the block list in one transaction. Standings are worked out with it each time the list is read. */
 export async function setBlockList(db: D1Like, contributors: readonly string[]): Promise<void> {
-  const unique = [...new Set(contributors)];
-  await db.batch([
-    db.prepare("DELETE FROM blocked_contributors"),
-    ...chunks(unique, MAX_BOUND).map((part) =>
-      db.prepare(`INSERT INTO blocked_contributors (contributor) VALUES ${part.map(() => "(?)").join(", ")}`).bind(...part),
-    ),
-  ]);
+  await db.batch([db.prepare("DELETE FROM blocked_contributors"), ...blockStatements(db, contributors)]);
+}
+
+/** Statements adding contributors to the block list. One already on it is left as it is. */
+export function blockStatements(db: D1Like, contributors: readonly string[]): D1Statement[] {
+  return chunks([...new Set(contributors)], MAX_BOUND).map((part) =>
+    db.prepare(`INSERT OR IGNORE INTO blocked_contributors (contributor) VALUES ${part.map(() => "(?)").join(", ")}`).bind(...part),
+  );
 }
 
 interface PlaceRow {
@@ -162,7 +164,7 @@ export type Bbox = [number, number, number, number];
 type ListedRow = PlaceRow & { blocked: number; evidence_kind: Evidence["kind"] | null; evidence_data: string | null };
 
 /**
- * Every `shown` or `confirmed` new place, within `bbox` when given, read in
+ * Every `shown` or `confirmed` new place in id order, within `bbox` when given, read in
  * one query with its evidence. Each standing is worked out at `now` from the
  * evidence and the block list, so nothing is written back.
  */
@@ -172,7 +174,7 @@ export async function listPlaces(db: D1Like, now: string, bbox?: Bbox): Promise<
        e.kind AS evidence_kind, e.data AS evidence_data
      FROM new_places p LEFT JOIN evidence e ON e.place_id = p.id
      ${bbox ? "WHERE p.lat BETWEEN ? AND ? AND p.lon BETWEEN ? AND ?" : ""}
-     ORDER BY p.added, p.id`,
+     ORDER BY p.id`,
   );
   const { results } = await (bbox ? query.bind(bbox[1], bbox[3], bbox[0], bbox[2]) : query).all<ListedRow>();
 
