@@ -60,8 +60,15 @@ const EVIDENCE_KEY = { check: "c", report: "r", withdraw: "w" } as const;
 /** Outside the `np:` prefix, so listing places never reads it. */
 const BLOCKED_KEY = "blocked:contributors";
 
-/** The listed part of a place, kept in its key's metadata so the list needs no get for each place. */
-type PlaceMetadata = Omit<StoredPlace, "id" | "attest_key">;
+/**
+ * The listed part of a place, kept in its key's metadata so the list needs no
+ * get for each place. A name too long for the metadata stays in the value
+ * alone, and `long_name` says to read it from there.
+ */
+type PlaceMetadata = Omit<StoredPlace, "id" | "attest_key"> & { long_name?: true };
+/** Workers KV refuses metadata longer than this, as JSON in UTF-8. */
+const MAX_METADATA_BYTES = 1024;
+const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
 type EvidenceMetadata = NewPlaceCheck | NewPlaceReport | { day: string };
 
 /** A key under `np:`: a place (`np:<id>`) or evidence on it (`np:<id>:<c|r|w>:<feedback id>`). */
@@ -83,8 +90,10 @@ export async function setBlocked(kv: ListableKV, contributors: readonly string[]
 
 /** Writes a new place. It is never written again: evidence on it goes under keys of its own. */
 export async function addPlace(kv: ListableKV, place: StoredPlace): Promise<void> {
-  const { id: _, attest_key: __, ...metadata } = place;
-  await kv.put(key(place.id), JSON.stringify(place), { metadata: metadata satisfies PlaceMetadata });
+  const { id: _, attest_key: __, ...listed } = place;
+  // The rest of the place is short and bounded; a name of 300 characters can be 1200 bytes.
+  const metadata: PlaceMetadata = bytes(listed) <= MAX_METADATA_BYTES ? listed : { ...listed, name: null, long_name: true };
+  await kv.put(key(place.id), JSON.stringify(place), { metadata });
 }
 
 /**
@@ -186,8 +195,10 @@ export async function listPlaces(kv: ListableKV, now: string, bbox?: Bbox): Prom
       now,
     });
     if (standing !== "shown" && standing !== "confirmed") continue;
-    const { location, kind, name, added, contributor } = metadata;
-    out.push({ id, location, kind, name: name ?? null, standing, added, contributor });
+    const { location, kind, added, contributor } = metadata;
+    // Rare, so the list stays a read of list pages for nearly every place.
+    const name = metadata.long_name ? ((await getPlace(kv, id))?.name ?? null) : (metadata.name ?? null);
+    out.push({ id, location, kind, name, standing, added, contributor });
   }
   return out;
 }

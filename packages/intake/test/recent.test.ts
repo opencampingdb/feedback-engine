@@ -27,15 +27,22 @@ function fakeKv(): KVLike & { data: Map<string, string> } {
   };
 }
 
-/** A KV namespace with list and metadata, as Workers KV has, paging two keys at a time. */
+/**
+ * A KV namespace with list and metadata, as Workers KV has, paging two keys at
+ * a time. Like Workers KV it refuses metadata over 1024 bytes as JSON.
+ */
 function listableKv(): ListableKV & { data: Map<string, { value: string; metadata?: unknown }>; lists: number } {
   const data = new Map<string, { value: string; metadata?: unknown }>();
   const kv = {
     data,
     lists: 0,
     get: async (k: string) => data.get(k)?.value ?? null,
-    put: async (k: string, value: string, options?: { metadata?: unknown }) =>
-      void data.set(k, { value, ...(options?.metadata !== undefined ? { metadata: options.metadata } : {}) }),
+    put: async (k: string, value: string, options?: { metadata?: unknown }) => {
+      if (options?.metadata !== undefined && new TextEncoder().encode(JSON.stringify(options.metadata)).length > 1024) {
+        throw new Error("KV PUT failed: 413 Metadata length limit exceeded");
+      }
+      data.set(k, { value, ...(options?.metadata !== undefined ? { metadata: options.metadata } : {}) });
+    },
     delete: async (k: string) => void data.delete(k),
     list: async ({ prefix, cursor }: { prefix?: string; cursor?: string }) => {
       kv.lists += 1;
@@ -258,6 +265,15 @@ describe("recent places", () => {
   it("lists the name tidied, as the data would have it", async () => {
     await add({ name: "lake   eppalock rest area" });
     expect((await list())[0]!.name).toBe("Lake Eppalock Rest Area");
+  });
+
+  it("lists a place whose name is too long for KV metadata in full", async () => {
+    // 300 characters of three bytes each: 900 bytes before the rest of the place.
+    const name = Array.from({ length: 300 }, (_, i) => String.fromCodePoint(0x6c34 + (i % 40))).join("");
+    const id = await add({ name });
+    const places = await list();
+    expect(places.map((p) => p.id)).toEqual([id]);
+    expect(places[0]!.name).toBe(name);
   });
 
   it("lists a new place sent without a name with a null name", async () => {
