@@ -2,7 +2,7 @@
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import type { ReviewPr } from "./owners.js";
-import { intakeRecentStore, settleRecentPlaces } from "./recent.js";
+import { intakeRecentStore, sendBlockList, settleRecentPlaces } from "./recent.js";
 import { run } from "./run.js";
 
 const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>]
@@ -22,8 +22,8 @@ from the data repository itself, and only comments by --bot-login, count.
 <data> holds only photos and moderation files, place records are read from the
 Open Camping DB data checkout in <dir>, and anything but photos is refused.
 --main and --intake take new places that are now in the data on main, and
-withdrawn ones, out of the intake's recent places store, with the token in
-PLACES_TOKEN. <dir> is a checkout of the data repository's main branch, so a
+withdrawn ones, out of the intake's recent places store, and send it the
+contributors blocked on main, with the token in PLACES_TOKEN. <dir> is a checkout of the data repository's main branch, so a
 place leaves the store only once the PR that writes it is merged.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
@@ -91,8 +91,11 @@ async function main(): Promise<number> {
     await appendFile(output, `${lines.join("\n")}\n`, "utf8");
   }
   if (values.main && values.intake && token) {
-    const settled = await settleRecentPlaces({ inbox: values.inbox, main: values.main, store: intakeRecentStore(values.intake, token), ...(now ? { now } : {}) });
+    const store = intakeRecentStore(values.intake, token);
+    const settled = await settleRecentPlaces({ inbox: values.inbox, main: values.main, store, ...(now ? { now } : {}) });
     console.log(`${settled.length} new place(s) taken out of the recent places store`);
+    const blocked = await sendBlockList({ main: values.main, store });
+    console.log(`block list of ${blocked.length} contributor(s) sent to the intake`);
   }
   const c = summary.counts;
   console.log(

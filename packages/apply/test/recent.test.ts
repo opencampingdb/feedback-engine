@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { intakeRecentStore, settleRecentPlaces } from "../src/recent.js";
+import { intakeRecentStore, sendBlockList, settleRecentPlaces } from "../src/recent.js";
 
 let root: string;
 let inbox: string;
@@ -56,19 +56,54 @@ describe("settleRecentPlaces", () => {
     await put(join(main, "places", placeOf(5).slice(-2).toLowerCase(), `${placeOf(5)}.json`), { id: placeOf(5) });
 
     const remove = vi.fn(async (_ids: readonly string[]) => {});
-    const ids = await settleRecentPlaces({ inbox, main, store: { remove }, now: NOW });
+    const ids = await settleRecentPlaces({ inbox, main, store: { remove, block: async () => {} }, now: NOW });
     expect(ids).toEqual([placeOf(1), placeOf(3), placeOf(9)]);
     expect(remove).toHaveBeenCalledWith([placeOf(1), placeOf(3), placeOf(9)]);
   });
 
   it("calls nothing when there is nothing to remove", async () => {
     const remove = vi.fn(async (_ids: readonly string[]) => {});
-    expect(await settleRecentPlaces({ inbox, main, store: { remove }, now: NOW })).toEqual([]);
+    expect(await settleRecentPlaces({ inbox, main, store: { remove, block: async () => {} }, now: NOW })).toEqual([]);
     expect(remove).not.toHaveBeenCalled();
   });
 });
 
+describe("sendBlockList", () => {
+  it("sends every blocked contributor on main, so the intake keeps their places off the list", async () => {
+    await put(join(main, "moderation", "blocked_contributors.json"), {
+      contributors: [
+        { contributor: "ctr_00000000000000b2", added: "2026-10-01", reason: "spam" },
+        { contributor: "ctr_00000000000000a1", added: "2026-10-02", reason: "fake places" },
+      ],
+    });
+    const block = vi.fn(async (_contributors: readonly string[]) => {});
+    expect(await sendBlockList({ main, store: { remove: async () => {}, block } })).toEqual(["ctr_00000000000000a1", "ctr_00000000000000b2"]);
+    expect(block).toHaveBeenCalledWith(["ctr_00000000000000a1", "ctr_00000000000000b2"]);
+  });
+
+  it("sends an empty list when nobody is blocked, so anyone unblocked is listed again", async () => {
+    const block = vi.fn(async (_contributors: readonly string[]) => {});
+    expect(await sendBlockList({ main, store: { remove: async () => {}, block } })).toEqual([]);
+    expect(block).toHaveBeenCalledWith([]);
+  });
+});
+
 describe("intakeRecentStore", () => {
+  it("posts the whole block list to the intake with the token", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ blocked: 1 }), { status: 200 }));
+    await intakeRecentStore("https://intake.example.org/", "secret", fetch).block(["ctr_00000000000000a1"]);
+    const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://intake.example.org/v1/places/recent/block");
+    expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("authorization")).toBe("Bearer secret");
+    expect(JSON.parse(init.body as string)).toEqual({ contributors: ["ctr_00000000000000a1"] });
+  });
+
+  it("throws when the block list is refused", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ error: "invalid" }), { status: 400 }));
+    await expect(intakeRecentStore("https://intake.example.org", "secret", fetch).block(["nope"])).rejects.toThrow(/400/);
+  });
+
   it("posts the ids to the intake with the token, at most 500 at a time", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ removed: 1 }), { status: 200 }));
     const store = intakeRecentStore("https://intake.example.org/", "secret", fetch);
