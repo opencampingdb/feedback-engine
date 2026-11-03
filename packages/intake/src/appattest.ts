@@ -39,16 +39,18 @@ export class AttestError extends Error {
 }
 
 /**
- * Runs a check, turning bytes that cannot be read into `malformed` and a key
- * or signature the platform's crypto will not take into `bad_signature`.
+ * Runs a verification and gives every way it can say no a reason code: bytes
+ * that cannot be read are `malformed`, and a key or signature the platform's
+ * crypto will not take is `bad_signature`. Any other error is a fault in the
+ * intake, not the app's proof, so it is thrown on and the key is kept.
  */
-async function checked<T>(check: () => Promise<T>): Promise<T> {
+async function withRefusalCodes<T>(verification: () => Promise<T>): Promise<T> {
   try {
-    return await check();
+    return await verification();
   } catch (error) {
-    if (error instanceof AttestError) throw error;
     if (error instanceof CborError || error instanceof DerError) throw new AttestError("malformed", error.message);
-    throw new AttestError("bad_signature", error instanceof Error ? error.message : String(error));
+    if (error instanceof DOMException) throw new AttestError("bad_signature", error.message);
+    throw error;
   }
 }
 
@@ -165,7 +167,7 @@ export async function verifyAttestation(input: {
   now: number;
   rootPem?: string;
 }): Promise<{ publicKey: string }> {
-  return checked(() => attestation(input));
+  return withRefusalCodes(() => attestation(input));
 }
 
 async function attestation(input: Parameters<typeof verifyAttestation>[0]): Promise<{ publicKey: string }> {
@@ -225,7 +227,7 @@ export async function verifyAssertion(input: {
   key: AttestedKey;
   config: IosConfig;
 }): Promise<{ counter: number }> {
-  return checked(() => assertion(input));
+  return withRefusalCodes(() => assertion(input));
 }
 
 async function assertion(input: Parameters<typeof verifyAssertion>[0]): Promise<{ counter: number }> {

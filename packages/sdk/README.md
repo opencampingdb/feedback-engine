@@ -14,10 +14,10 @@ await feedback.review({ place, review: { stars: 5, text: "Quiet and shady", visi
 - A random per-install device id is made once and kept in storage.
 - Nothing is sent unless `consent: true` is passed. Show `CONSENT_TEXT` first.
 - Show `ATTRIBUTION` wherever the data appears.
-- Reviews, fees and `reportReview()` carry the signed-in traveller's opaque `contributor` id. Pass an `attest` function when the app key requires App Attest or Play Integrity; it gets the exact body and its SHA-256 at send time. A refused attestation keeps the item queued and calls `onAttestationRejected` (see below).
+- Reviews, fees and `reportReview()` carry the signed-in traveller's opaque `contributor` id. Pass an `attest` function when the app key requires App Attest or Play Integrity; it gets the exact body and its SHA-256 at send time. A refused assertion keeps the item queued and calls `onAttestationRejected` (see below).
 - `tidyName`, `tidyText` and `textProblem` tidy what a traveller types and find rude words, contact details and spam before it is sent. `withdraw()` takes back a new place the same install sent.
 
-## Refused attestation
+## Refused assertion
 
 When the intake refuses an item's proof it answers `401` with `attestation_required` (no proof was sent) or `attestation_invalid`. For `attestation_invalid` it also sends a `reason` code and readable `details`, and the client passes both to your hook. The item stays queued either way. A `503 unavailable` is a storage error at the intake, not a refusal: the item waits, the hook is not called and the key is kept.
 
@@ -26,9 +26,9 @@ import { keyIsUnusable } from "@opencampingdb/feedback";
 
 const feedback = createFeedbackClient({
   // ...
-  onAttestationRejected: async (error, rejection) => {
-    report(error, rejection?.reason, rejection?.details);
-    if (keyIsUnusable(rejection?.reason)) await dropStoredKey(); // register a new key before the next try
+  onAttestationRejected: async (error, refusal) => {
+    report(error, refusal?.reason, refusal?.details);
+    if (keyIsUnusable(refusal?.reason)) await dropStoredKey(); // register a new key before the next try
   },
 });
 ```
@@ -45,6 +45,6 @@ A hook written for one argument still works. `keyIsUnusable(reason)` is the one 
 | `malformed` | The proof could not be read. | No |
 | `integrity_not_met` | Android: the Play Integrity verdict falls short of what the app key requires. | No |
 
-Key registration refusals use the same codes. The reason type is exported as `RefusalReason`. Adding a code later is additive; a code this version does not know is left out of `reason`, and its `details` still reach the hook.
+Key registration refusals use the same codes. Registration also answers `malformed` for an unknown or used challenge (`401`) and for a key that is already registered (`409`), `counter_not_increased` when a new key's counter is not 0, and `category_not_accepted` when the key is not from this app key's environment. The reason type is exported as `RefusalReason`, and the second argument of the hook as `AttestationRefusal`. Adding a code later is additive; a code this version does not know is left out of `reason`, and its `details` still reach the hook.
 
 The full guide is [docs/integration.md](../../docs/integration.md). Licence: Apache 2.0.

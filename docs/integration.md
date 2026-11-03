@@ -245,7 +245,7 @@ export const feedback = createFeedbackClient({
 });
 ```
 
-If `attest` throws, the item stays queued and is tried later. If the intake refuses the proof (`401 attestation_required` or `attestation_invalid`), the item also stays queued and is tried again with backoff, and the client calls your `onAttestationRejected(error, rejection)` if you pass one. For `attestation_invalid`, `rejection` holds the intake's `reason` code and `details`. Drop the stored App Attest key only when `keyIsUnusable(rejection?.reason)` is true, so a fresh key registers before the next try; every other refusal keeps the key. The codes and what each means are listed in the SDK's README.
+If `attest` throws, the item stays queued and is tried later. If the intake refuses the proof (`401 attestation_required` or `attestation_invalid`), the item also stays queued and is tried again with backoff, and the client calls your `onAttestationRejected(error, refusal)` if you pass one. For `attestation_invalid`, `refusal` holds the intake's `reason` code and `details`. Drop the stored App Attest key only when `keyIsUnusable(refusal?.reason)` is true, so a fresh key registers before the next try; every other refusal keeps the key. The codes and what each means are listed in the SDK's README.
 
 **iOS, App Attest.** Once per install, generate a key, get a challenge and register the attestation:
 
