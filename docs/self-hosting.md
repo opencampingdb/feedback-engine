@@ -17,7 +17,7 @@ npx wrangler login
 
 ## 2. Create the KV namespace
 
-The intake counts submissions per device, per client network and per app in Workers KV. A network is the client address from `CF-Connecting-IP`, cut to its IPv4 /24 or IPv6 /48 and kept only as a salted hash. Each network may send 100 feedback submissions and, counted separately, 10 owner submissions a day.
+The intake counts submissions per device, per client network and per app in Workers KV. A network is the client address from `CF-Connecting-IP`, cut to its IPv4 /24 or IPv6 /48 and kept only as a salted hash. Each network may send 100 feedback submissions and, counted separately, 10 owner submissions a day. Each network may also register 500 App Attest keys a day.
 
 ```sh
 npx wrangler kv namespace create RATE_LIMIT
