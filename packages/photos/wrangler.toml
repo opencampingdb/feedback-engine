@@ -1,11 +1,11 @@
 # Photo server for an app's own photo service (docs/photos.md). Replace every
-# REPLACE_ME and the name before deploying, or
+# REPLACE_ME and replace-me value before deploying, or
 # deploy with an untracked copy holding the real ids (see docs/photos.md).
 # Secrets are set with `wrangler secret put`, never written here:
 #   PHOTO_KEYS         JSON map of photo key to {"app": "<name>", "daily_limit": <reads a day>}
 #   PHOTO_PASS_SECRET  the same secret as the intake's, to check photo passes
 
-name = "REPLACE_ME_PHOTO_SERVER_NAME"
+name = "replace-me-photo-server"
 main = "src/index.ts"
 compatibility_date = "2026-10-01"
 # Photos are served only on the custom domain, where the cache sits in front.
@@ -19,7 +19,7 @@ DAILY_READ_CAP = "200000"
 
 [[r2_buckets]]
 binding = "PHOTOS"
-bucket_name = "REPLACE_ME_PHOTO_SERVER_NAME"
+bucket_name = "replace-me-photo-server"
 
 # The off switch (key "off"), the read counters and withheld photos.
 [[kv_namespaces]]

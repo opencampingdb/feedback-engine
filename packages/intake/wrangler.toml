@@ -37,7 +37,7 @@ id = "REPLACE_ME_ATTEST_KV_NAMESPACE_ID"
 # the photo server's state namespace, where illegal-content reports withhold a photo.
 # [[r2_buckets]]
 # binding = "PHOTOS_PENDING"
-# bucket_name = "REPLACE_ME_PENDING_BUCKET"
+# bucket_name = "replace-me-pending-bucket"
 #
 # [[kv_namespaces]]
 # binding = "PHOTO_STATE"
