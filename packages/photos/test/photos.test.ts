@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { signPass } from "../../intake/src/pass.js";
-import { createHandler, FLUSH_EVERY, STATE_TTL_MS, type BucketLike, type CacheLike, type Ctx, type Env, type KVLike } from "../src/index.js";
+import { createHandler, FLUSH_EVERY, STATE_TTL_MS, type BucketLike, type CacheLike, type Ctx, type Env, type KVLike, WITHHELD_PREFIX } from "../src/index.js";
 
 const KEY = "camporacle-photo-key-0001";
 const OTHER_KEY = "other-app-photo-key-0002";
@@ -9,7 +9,12 @@ const NOW = Date.parse("2026-11-03T01:00:00Z");
 
 function fakeKv(): KVLike & { data: Map<string, string> } {
   const data = new Map<string, string>();
-  return { data, get: async (k) => data.get(k) ?? null, put: async (k, v) => void data.set(k, v) };
+  return {
+    data,
+    get: async (k) => data.get(k) ?? null,
+    put: async (k, v) => void data.set(k, v),
+    list: async ({ prefix }) => ({ keys: [...data.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })), list_complete: true }),
+  };
 }
 
 function fakeBucket(keys: string[]): BucketLike & { reads: number } {
@@ -95,6 +100,19 @@ describe("photo server", () => {
     expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(200);
     clock += STATE_TTL_MS;
     expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(503);
+  });
+
+  it("stops a withheld photo within a minute, even when it is in the cache", async () => {
+    expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(200);
+    expect(cache.store.size).toBe(1);
+    env.STATE.data.set(`${WITHHELD_PREFIX}${PHOTO}`, '{"feedback":"fb_x"}');
+    clock += STATE_TTL_MS;
+    const withheld = await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx());
+    expect(withheld.status).toBe(404);
+    expect(withheld.headers.get("cache-control")).toBe("no-store");
+    env.STATE.data.delete(`${WITHHELD_PREFIX}${PHOTO}`);
+    clock += STATE_TTL_MS;
+    expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(200);
   });
 
   it("stops an app at its daily limit, counting only reads that reach R2", async () => {

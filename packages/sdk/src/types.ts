@@ -191,8 +191,13 @@ export interface ReviewReportBody {
   reason: ReviewReportReason;
 }
 
-/** Why a traveller reports a published photo. */
-export type PhotoReportReason = "spam_ad" | "offensive" | "off_topic" | "not_this_place" | "personal_details" | "copyright";
+/**
+ * Why a traveller reports a published photo. `illegal` is for child sexual
+ * abuse material, an intimate image shared without consent, or terrorist or
+ * violent extremist material: the photo stops being served at once and a
+ * person decides.
+ */
+export type PhotoReportReason = "spam_ad" | "offensive" | "off_topic" | "not_this_place" | "personal_details" | "copyright" | "illegal";
 
 export interface PhotoReportBody {
   /** Id of the published photo, `pho_<ulid>`. */
@@ -220,6 +225,22 @@ export interface StoredPhotoFiles extends PhotoFiles {
   /** Pixel size of the full size JPEG, read from the file. */
   width: number;
   height: number;
+  /**
+   * Google Cloud Vision SafeSearch's ratings of the full size file, when the
+   * intake checks photos. `"unchecked"` when the check failed, so a person looks.
+   */
+  safesearch?: SafeSearchRatings | "unchecked";
+}
+
+/** How likely Google Cloud Vision SafeSearch rates each kind of content. */
+export type Likelihood = "UNKNOWN" | "VERY_UNLIKELY" | "UNLIKELY" | "POSSIBLE" | "LIKELY" | "VERY_LIKELY";
+
+export interface SafeSearchRatings {
+  adult: Likelihood;
+  violence: Likelihood;
+  racy: Likelihood;
+  medical: Likelihood;
+  spoof: Likelihood;
 }
 
 export interface CheckBody {

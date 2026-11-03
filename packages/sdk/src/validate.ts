@@ -116,6 +116,7 @@ export const PHOTO_REPORT_REASONS: readonly PhotoReportReason[] = [
   "not_this_place",
   "personal_details",
   "copyright",
+  "illegal",
 ];
 /** Largest full size photo the intake takes, in bytes. */
 export const MAX_PHOTO_BYTES = 1_500_000;
