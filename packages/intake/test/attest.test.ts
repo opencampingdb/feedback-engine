@@ -205,6 +205,20 @@ describe("App Attest", () => {
     expect(await again.json()).toMatchObject({ error: "attestation_invalid", reason: "malformed", details: ["unknown or used challenge"] });
   });
 
+  it("limits key registrations to 500 a day for each client network", async () => {
+    const e = env(kv, IOS);
+    const register = (ip: string) =>
+      handle(
+        request("/v1/attest/register", JSON.stringify({ key_id: device.keyId, challenge: "unused", attestation: b64(new Uint8Array([1])) }), { "cf-connecting-ip": ip }),
+        e,
+      );
+    for (let i = 0; i < 500; i++) expect((await register("203.0.113.7")).status).toBe(401);
+    const over = await register("203.0.113.9");
+    expect(over.status).toBe(429);
+    expect(await over.json()).toEqual({ error: "rate_limited" });
+    expect((await register("198.51.100.1")).status).toBe(401);
+  });
+
   it("reads a launch validation category sent as little-endian bytes, as iOS 27 does", async () => {
     expect((await registered({ category: new Uint8Array([2, 0, 0, 0]) })).status).toBe(201);
     const res = await send(reviewBody(), 1, { category: new Uint8Array([2, 0, 0, 0]) });

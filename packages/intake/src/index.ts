@@ -347,7 +347,7 @@ export function sanitise(submission: FeedbackSubmission): FeedbackSubmission {
 /** Seconds an App Attest challenge stays usable. */
 export const CHALLENGE_TTL_SECONDS = 300;
 /** App Attest registrations per hashed client network per day. */
-export const REGISTER_ORIGIN_DAILY_LIMIT = 50;
+export const REGISTER_ORIGIN_DAILY_LIMIT = 500;
 
 type Attested =
   | { attested: "app_attest" | "play_integrity"; keyId?: string }
