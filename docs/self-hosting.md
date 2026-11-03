@@ -41,6 +41,8 @@ npx wrangler kv namespace create RECENT_PLACES
 
 Each listed new place, check or report on one makes one more write. Each refresh of the list that misses the edge cache makes one list operation per 1,000 places, at most twice a minute in each Cloudflare location, which is more than the free plan's 1,000 list operations a day once many phones use it. Use the Workers paid plan for it.
 
+The apply run keeps the store in step with two calls, each with `authorization: Bearer <PLACES_TOKEN>`. `POST /v1/places/recent/remove` with `{"ids": [...]}` (1 to 500 place ids) takes places it has written into the data off the list, answering `{"removed": <count>}`. `POST /v1/places/recent/block` with `{"contributors": [...]}` (up to 5,000 hashed `ctr_` ids, `[]` for none) replaces the block list the intake keeps, answering `{"blocked": <count>}`. A blocked contributor's places leave the list and later ones aren't listed; one taken off the block list is listed again. Both answer `401` for a wrong token and `404` without `RECENT_PLACES` or `PLACES_TOKEN`.
+
 ## 3. Create the private inbox repository
 
 Create `inbox` in your organisation, private, with a `README.md` on `main` so the branch exists. The intake writes to `pending/<yyyy-mm-dd>/`, and the workflow moves files to `applied/` and `refused/`.
@@ -90,7 +92,7 @@ npx wrangler secret put GH_INSTALLATION_ID
 
   Make keys with `openssl rand -hex 16`. To revoke a key, remove it and set the secret again.
 - `DEVICE_SALT` is a long random string, for example from `openssl rand -hex 32`. Changing it makes every device look new, which resets the two-device rule for pending items, so set it once.
-- `PLACES_TOKEN`, needed only with `RECENT_PLACES`, is a long random string, for example from `openssl rand -hex 32`. The apply run sends it to take places it has written into the data off the recent list. Set it with `npx wrangler secret put PLACES_TOKEN` and keep the same value for the apply workflow.
+- `PLACES_TOKEN`, needed only with `RECENT_PLACES`, is a long random string, for example from `openssl rand -hex 32`. The apply run sends it to take places it has written into the data off the recent list, and to send the block list. Set it with `npx wrangler secret put PLACES_TOKEN` and keep the same value for the apply workflow.
 - `GH_APP_PRIVATE_KEY` accepts the PEM GitHub gives you (PKCS#1) or PKCS#8.
 - `GOOGLE_SERVICE_ACCOUNT`, needed only for `android`, is the JSON key file of a Google Cloud service account in the project linked to the app in Play Console, allowed to decode integrity tokens. Set it with `npx wrangler secret put GOOGLE_SERVICE_ACCOUNT < key.json`.
 

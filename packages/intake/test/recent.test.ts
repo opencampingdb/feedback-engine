@@ -407,4 +407,58 @@ describe("recent places", () => {
       expect((await handle(remove(["ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA"]), noToken)).status).toBe(404);
     });
   });
+
+  describe("block list from the apply run", () => {
+    const block = (contributors: unknown, token = TOKEN) =>
+      new Request("https://intake.example/v1/places/recent/block", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ contributors }),
+      });
+    const contributorOf = (i: number) => services.writes[i]!.contributor as string;
+
+    it("takes a blocked contributor's new places off the list, and lists none they add later", async () => {
+      await add();
+      const kept = await add({ device: otherDevice(1), contributor: "acct_second_person_01" });
+      const res = await handle(block([contributorOf(0)]), e);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ blocked: 1 });
+      expect((await list()).map((p) => p.id)).toEqual([kept]);
+      const later = await handle(feedback(newPlace({ device: otherDevice(2) })), e);
+      expect(later.status).toBe(202);
+      expect(services.writes).toHaveLength(3);
+      expect((await list()).map((p) => p.id)).toEqual([kept]);
+    });
+
+    it("keeps a blocked contributor's place off the list when a check or report comes in", async () => {
+      const id = await add();
+      await handle(block([contributorOf(0)]), e);
+      await handle(
+        feedback({ type: "check", place: id, device: otherDevice(1), app_version: "1.0.0", consent: true, check: { visited: "2026-11-03", still_there: true, nearby: true } }),
+        e,
+      );
+      expect(await list()).toEqual([]);
+    });
+
+    it("replaces the list each time, so a contributor taken off it is listed again", async () => {
+      const id = await add();
+      await handle(block([contributorOf(0)]), e);
+      expect(await list()).toEqual([]);
+      expect(await (await handle(block([]), e)).json()).toEqual({ blocked: 0 });
+      expect((await list()).map((p) => p.id)).toEqual([id]);
+    });
+
+    it("refuses a wrong token and a bad body", async () => {
+      await add();
+      expect((await handle(block([contributorOf(0)], "not-the-token"), e)).status).toBe(401);
+      expect((await handle(block(["acct_3f9a8b7c6d5e4f30"]), e)).status).toBe(400);
+      expect((await handle(block("ctr_0123456789abcdef"), e)).status).toBe(400);
+      expect(await list()).toHaveLength(1);
+    });
+
+    it("is not served without a token configured", async () => {
+      const { PLACES_TOKEN: _, ...noToken } = e;
+      expect((await handle(block([]), noToken)).status).toBe(404);
+    });
+  });
 });

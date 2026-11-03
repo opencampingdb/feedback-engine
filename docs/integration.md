@@ -80,7 +80,7 @@ await feedback.report({ place, report: { kind: "closed", note: "Gate chained, si
 await feedback.report({
   place: null,
   location: { lat: -36.851234, lon: 144.551234 },
-  report: { kind: "new_place", note: "Free camp beside the creek" },
+  report: { kind: "new_place", name: "Creek Bend Free Camp", note: "Flat ground beside the creek" },
   consent: true,
 });
 
@@ -93,8 +93,9 @@ await feedback.review({
   consent: true,
 });
 
-// A check: the user was there and the place still exists (or not).
-await feedback.check({ place, check: { visited: "2026-10-30", still_there: true }, consent: true });
+// A check: the user was there and the place still exists (or not). nearby:
+// true when the app saw the phone near the place at the time.
+await feedback.check({ place, check: { visited: "2026-10-30", still_there: true, nearby: true }, consent: true });
 
 // A fee: what the traveller paid per night in Australian dollars, the site
 // type (FEE_SITES: unpowered, powered, cabin) and the month they paid.
@@ -124,7 +125,9 @@ await feedback.report({ place, report: { kind: "description", value: "Shady rive
 await feedback.report({ place, report: { kind: "kind", place_kind: "caravan_park" }, consent: true });
 ```
 
-A name is 1 to 300 characters and a description at most 500. Neither may hold an email address, phone number or link. `place_kind` is a code from `data/schema/kinds.json`: an unknown code is refused at the next apply run. Once accepted, the new kind is kept through later OSM syncs.
+A name is 1 to 300 characters and a description at most 500. Neither may hold an email address, phone number or link. A `new_place` report carries the place's name in `report.name`, checked the same way and also refused when `textProblem` finds a problem (`report.name must pass the text checks (rude)`). Keep the name out of the note, which holds the traveller's other words. `name` is refused on every other report kind.
+
+A check's `nearby: true` says the app saw the phone near the place at the time, for example within a few hundred metres when the traveller answered. Only `true` is sent; leave it out otherwise. Like a review's `visited_nearby`, the location itself is never sent. `place_kind` is a code from `data/schema/kinds.json`: an unknown code is refused at the next apply run. Once accepted, the new kind is kept through later OSM syncs.
 
 Ask users not to put names, email addresses or phone numbers in notes or reviews. The intake removes contact details it finds, and reviews that still contain personal details, advertising or offensive language (also when spelled with spaces or symbols) are refused.
 
@@ -176,10 +179,10 @@ It needs no app key. `bbox` is optional: west, south, east and north in degrees.
 
 ```json
 {"places": [{"id": "ocdb_01JC...", "location": {"lat": -36.12345, "lon": 146.88765}, "kind": "free_camp",
-  "standing": "shown", "added": "2026-11-03T09:00:00Z", "contributor": "ctr_5d1c0e2a9b7f4436"}]}
+  "name": "Creek Bend Free Camp", "standing": "shown", "added": "2026-11-03T09:00:00Z", "contributor": "ctr_5d1c0e2a9b7f4436"}]}
 ```
 
-A place is listed when its report came from an attested install (an app key with `requires_attestation`) with a contributor, and its note passes `textProblem`. Other new places reach a person through the apply run as before. `kind` is the code the traveller picked, or `null`; look its group up in `data/schema/kinds.json`. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive, so a place two other devices report leaves the list on the next refresh. A `still_there` check counts as from near the place. The list never carries the note, the contacts or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. A place leaves the list once the apply run has written it into the data, where apps find it with the rest.
+A place is listed when its report came from an attested install (an app key with `requires_attestation`) with a contributor, and its note passes `textProblem`. Other new places reach a person through the apply run as before. `kind` is the code the traveller picked, or `null`; look its group up in `data/schema/kinds.json`. `name` is the report's `name`, or `null` when it had none. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive, so a place two other devices report leaves the list on the next refresh. Only `still_there` checks with `nearby: true` count towards `confirmed`. The list never carries the note, the contacts or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. The intake also keeps the block list the apply run sends: a blocked contributor's new places leave the list, and later ones are accepted to the inbox but not listed. A place leaves the list once the apply run has written it into the data, where apps find it with the rest.
 
 Each contributor (or install, without one) may send 3 new places a day. The fourth gets `429 rate_limited`.
 

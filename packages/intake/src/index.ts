@@ -33,12 +33,14 @@ import {
 import {
   getPlace,
   listPlaces,
+  MAX_BLOCKED_CONTRIBUTORS,
   MAX_REMOVE_IDS,
   NEW_PLACE_DAILY_LIMIT,
   parseBbox,
   RECENT_CACHE_SECONDS,
   removePlaces,
   savePlace,
+  setBlocked,
   WITHDRAW_WINDOW_MS,
   type ListableKV,
   type StoredPlace,
@@ -641,27 +643,62 @@ export function createHandler(deps: Deps) {
   }
 
   /**
-   * `POST /v1/places/recent/remove`, for the apply run once the places are in
-   * the data: `{ "ids": [...] }` with `authorization: Bearer <PLACES_TOKEN>`.
+   * Reads the body of a call from the apply run, after checking its
+   * `authorization: Bearer <PLACES_TOKEN>`. A Response when the call is refused.
    */
-  async function removeRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+  async function placesCall(
+    request: Request,
+    env: Env,
+    cors: Record<string, string>,
+    maxBytes: number,
+  ): Promise<{ kv: ListableKV; body: Record<string, unknown> } | Response> {
     if (!env.RECENT_PLACES || !env.PLACES_TOKEN) return json(404, { error: "not_found" }, cors);
     const given = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1] ?? "";
     // Compared as hashes, so the time taken says nothing about the token.
     if (hex(await sha256(given)) !== hex(await sha256(env.PLACES_TOKEN))) return json(401, { error: "unauthorised" }, cors);
     const text = await request.text();
-    if (new TextEncoder().encode(text).length > MAX_BODY_BYTES * 4) return json(413, { error: "too_large" }, cors);
-    let ids: unknown;
+    if (new TextEncoder().encode(text).length > maxBytes) return json(413, { error: "too_large" }, cors);
+    let body: unknown;
     try {
-      ids = (JSON.parse(text) as { ids?: unknown }).ids;
+      body = JSON.parse(text);
     } catch {
-      ids = undefined;
+      body = undefined;
     }
+    return { kv: env.RECENT_PLACES, body: typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {} };
+  }
+
+  /**
+   * `POST /v1/places/recent/remove`, for the apply run once the places are in
+   * the data: `{ "ids": [...] }` with `authorization: Bearer <PLACES_TOKEN>`.
+   */
+  async function removeRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 4);
+    if (call instanceof Response) return call;
+    const ids = call.body.ids;
     if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_REMOVE_IDS || !ids.every(isPlaceId)) {
       return json(400, { error: "invalid", details: [`ids must be 1 to ${MAX_REMOVE_IDS} place ids`] }, cors);
     }
-    await removePlaces(env.RECENT_PLACES, ids as string[]);
+    await removePlaces(call.kv, ids as string[]);
     return json(200, { removed: ids.length }, cors);
+  }
+
+  /**
+   * `POST /v1/places/recent/block`, for the apply run: `{ "contributors": [...] }`,
+   * the whole block list as hashed contributor ids, with `authorization: Bearer
+   * <PLACES_TOKEN>`. It replaces the list the intake keeps.
+   */
+  async function blockRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    // Each id is 20 characters, and a little more in JSON.
+    const call = await placesCall(request, env, cors, MAX_BLOCKED_CONTRIBUTORS * 24 + 1024);
+    if (call instanceof Response) return call;
+    const contributors = call.body.contributors;
+    const isHashed = (c: unknown) => typeof c === "string" && /^ctr_[0-9a-f]{16}$/.test(c);
+    if (!Array.isArray(contributors) || contributors.length > MAX_BLOCKED_CONTRIBUTORS || !contributors.every(isHashed)) {
+      return json(400, { error: "invalid", details: [`contributors must be up to ${MAX_BLOCKED_CONTRIBUTORS} hashed contributor ids`] }, cors);
+    }
+    const now = new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
+    await setBlocked(call.kv, contributors as string[], now);
+    return json(200, { blocked: new Set(contributors).size }, cors);
   }
 
   return async function handle(request: Request, env: Env): Promise<Response> {
@@ -687,6 +724,10 @@ export function createHandler(deps: Deps) {
     if (route === "/v1/places/recent/remove") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return removeRecent(request, env, cors);
+    }
+    if (route === "/v1/places/recent/block") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return blockRecent(request, env, cors);
     }
     if (
       route !== "/v1/feedback" &&

@@ -44,8 +44,12 @@ export const NEW_PLACE_DAILY_LIMIT = 3;
 export const RECENT_CACHE_SECONDS = 30;
 /** Most ids one removal call may name. */
 export const MAX_REMOVE_IDS = 500;
+/** Most contributors the block list may hold. */
+export const MAX_BLOCKED_CONTRIBUTORS = 5000;
 
 const key = (id: string) => `np:${id}`;
+/** Outside the `np:` prefix, so listing places never reads it. */
+const BLOCKED_KEY = "blocked:contributors";
 
 const listed = (place: StoredPlace): RecentPlace => ({
   id: place.id,
@@ -57,15 +61,45 @@ const listed = (place: StoredPlace): RecentPlace => ({
   contributor: place.contributor,
 });
 
+/** The contributors the apply run last sent as blocked. Empty until it has sent a list. */
+export async function getBlocked(kv: ListableKV): Promise<Set<string>> {
+  const text = await kv.get(BLOCKED_KEY);
+  return new Set(text === null ? [] : (JSON.parse(text) as string[]));
+}
+
+/**
+ * Replaces the block list, then works out again the standing of every stored
+ * place whose contributor was blocked or unblocked by the change.
+ */
+export async function setBlocked(kv: ListableKV, contributors: readonly string[], now: string): Promise<void> {
+  const before = await getBlocked(kv);
+  const after = new Set(contributors);
+  await kv.put(BLOCKED_KEY, JSON.stringify([...after]));
+  const changed = (c: string) => before.has(c) !== after.has(c);
+  let cursor: string | undefined;
+  do {
+    const page = await kv.list({ prefix: "np:", ...(cursor ? { cursor } : {}) });
+    for (const { name, metadata } of page.keys) {
+      const contributor = (metadata as RecentPlace | undefined)?.contributor;
+      if (contributor === undefined || !changed(contributor)) continue;
+      const place = await getPlace(kv, name.slice(3));
+      if (place) await savePlace(kv, place, now, after);
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+}
+
 /**
  * Works the standing out again and writes the place. The listed part goes in
  * the key's metadata too, so the list is read without a get for each place.
+ * The block list is read from the store unless it is given.
  */
-export async function savePlace(kv: ListableKV, place: StoredPlace, now: string): Promise<void> {
+export async function savePlace(kv: ListableKV, place: StoredPlace, now: string, blocked?: ReadonlySet<string>): Promise<void> {
+  const blockedNow = blocked ?? (await getBlocked(kv));
   const standing = newPlaceStanding({
     added: place.added,
-    // The intake has no block list or place history: the apply run settles those.
-    contributor: { device: place.device, blocked: false, firstPlace: false },
+    // The intake has no place history: the apply run settles first places.
+    contributor: { device: place.device, blocked: blockedNow.has(place.contributor), firstPlace: false },
     checks: place.checks,
     reports: place.reports,
     withdrawnAt: place.withdrawn_at,
