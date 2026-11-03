@@ -1,17 +1,8 @@
-/**
- * Why the intake refused a key registration or an assertion. One closed set,
- * shared with the SDK: renaming or removing a code breaks apps.
- */
-export type RefusalReason =
-  | "unknown_key"
-  | "wrong_app"
-  | "bad_signature"
-  | "counter_not_increased"
-  | "category_not_accepted"
-  | "malformed"
-  | "integrity_not_met";
+import type { RefusalReason } from "@opencampingdb/feedback";
 
-/** A refusal: the reason code and readable details. */
+export type { RefusalReason };
+
+/** A refusal: a reason code from the set the SDK publishes, and readable details. */
 export interface Refusal {
   reason: RefusalReason;
   details: string[];
