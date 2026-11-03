@@ -18,7 +18,12 @@ export type ReportKind =
   /** A short description. `value` is the text. A person checks it. */
   | "description"
   /** What the place is. `place_kind` is the kind code. A person checks it. */
-  | "kind";
+  | "kind"
+  /** A new place should come down. `reason` says why. */
+  | "remove";
+
+/** Why a new place should come down. */
+export type NewPlaceReportReason = "not_there" | "fake" | "offensive" | "private_land" | "duplicate";
 
 /**
  * A place kind code from `data/schema/kinds.json` in the data repository (the
@@ -166,7 +171,17 @@ export interface ReportBody {
    * data does not know. Required on `kind`: the kind the place should be.
    */
   place_kind?: string;
+  /** Required on `remove`, and allowed only there. */
+  reason?: NewPlaceReportReason;
+  /**
+   * On `new_place` only: how to reach the place, each checked as a fact
+   * report of that name is. A person checks them before they are published.
+   */
+  contacts?: NewPlaceContacts;
 }
+
+/** The contact facts a new place may carry. */
+export type NewPlaceContacts = Partial<Pick<PlaceFacts, "phone" | "website" | "email">>;
 
 export interface ReviewBody {
   stars: 1 | 2 | 3 | 4 | 5;

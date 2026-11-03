@@ -9,6 +9,8 @@ import type {
   FactValue,
   FeedbackSubmission,
   LatLon,
+  NewPlaceContacts,
+  NewPlaceReportReason,
   OwnerContact,
   OwnerFactName,
   OwnerFacts,
@@ -38,6 +40,14 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   "name",
   "description",
   "kind",
+  "remove",
+];
+export const NEW_PLACE_REPORT_REASONS: readonly NewPlaceReportReason[] = [
+  "not_there",
+  "fake",
+  "offensive",
+  "private_land",
+  "duplicate",
 ];
 /** Longest name a `name` report may propose. */
 export const MAX_NAME_LENGTH = 300;
@@ -331,6 +341,41 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
     else if (typeof value.place_kind !== "string" || !KIND_CODE.test(value.place_kind)) {
       errors.push("report.place_kind must be a kind code from data/schema/kinds.json");
     } else out.place_kind = value.place_kind;
+  }
+  if (kind === "remove") {
+    if (typeof value.reason !== "string" || !(NEW_PLACE_REPORT_REASONS as readonly string[]).includes(value.reason)) {
+      errors.push(`report.reason must be one of ${NEW_PLACE_REPORT_REASONS.join(", ")}`);
+    } else out.reason = value.reason as NewPlaceReportReason;
+  } else if (value.reason !== undefined) {
+    errors.push("report.reason is only allowed when report.kind is remove");
+  }
+  if (value.contacts !== undefined) {
+    if (kind !== "new_place") errors.push("report.contacts is only allowed when report.kind is new_place");
+    else {
+      const contacts = checkContacts(value.contacts, errors);
+      if (contacts) out.contacts = contacts;
+    }
+  }
+  return out;
+}
+
+const CONTACT_FACTS = ["phone", "website", "email"] as const;
+
+function checkContacts(value: unknown, errors: string[]): NewPlaceContacts | undefined {
+  const names = isObject(value) ? Object.keys(value) : [];
+  if (!isObject(value) || names.some((name) => !(CONTACT_FACTS as readonly string[]).includes(name))) {
+    errors.push("report.contacts may hold only phone, website and email");
+    return undefined;
+  }
+  if (names.length === 0) {
+    errors.push("report.contacts must hold at least one of phone, website and email");
+    return undefined;
+  }
+  const out: NewPlaceContacts = {};
+  for (const name of CONTACT_FACTS) {
+    if (value[name] === undefined) continue;
+    if (!FACTS[name](value[name])) errors.push(`report.contacts.${name} is not a valid value for ${name}`);
+    else out[name] = value[name] as string;
   }
   return out;
 }
