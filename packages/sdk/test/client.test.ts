@@ -4,7 +4,10 @@ import {
   CONSENT_TEXT,
   createFeedbackClient,
   FeedbackValidationError,
+  type FeedbackClientOptions,
   type FetchLike,
+  keyIsUnusable,
+  type RefusalReason,
   type StorageAdapter,
 } from "../src/index.js";
 
@@ -24,7 +27,7 @@ function memoryStorage(): StorageAdapter & { data: Map<string, string> } {
   };
 }
 
-type Reply = number | "network" | { status: number; retryAfter?: string };
+type Reply = number | "network" | { status: number; retryAfter?: string; body?: unknown };
 
 function fakeFetch(replies: Reply[]) {
   const calls: { url: string; headers: Record<string, string>; body: unknown }[] = [];
@@ -36,16 +39,17 @@ function fakeFetch(replies: Reply[]) {
     if (reply === "network") throw new TypeError("Network request failed");
     const status = typeof reply === "number" ? reply : reply.status;
     const retryAfter = typeof reply === "object" ? reply.retryAfter ?? null : null;
+    const body = typeof reply === "object" && "body" in reply ? reply.body : status === 202 ? { id: `fb_${n}` } : { error: "x" };
     return {
       status,
-      json: async () => (status === 202 ? { id: `fb_${n}` } : { error: "x" }),
+      json: async () => body,
       headers: { get: (name: string) => (name.toLowerCase() === "retry-after" ? retryAfter : null) },
     };
   };
   return { fetch, calls };
 }
 
-function setup(replies: Reply[], start = 1_000_000) {
+function setup(replies: Reply[], start = 1_000_000, extra: Partial<FeedbackClientOptions> = {}) {
   const storage = memoryStorage();
   const { fetch, calls } = fakeFetch(replies);
   let clock = start;
@@ -59,6 +63,7 @@ function setup(replies: Reply[], start = 1_000_000) {
     now: () => clock,
     random: () => 0,
     randomUUID: () => `00000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+    ...extra,
   });
   return {
     client,
@@ -218,5 +223,96 @@ describe("createFeedbackClient", () => {
     expect(CONSENT_TEXT).toContain("DbCL");
     expect(CONSENT_TEXT).toContain("OpenStreetMap as notes");
     expect(CONSENT_TEXT).not.toMatch(/[\u2013\u2014]/);
+  });
+});
+
+describe("refusal reasons", () => {
+  const attest = async () => ({ "x-attest-platform": "ios" });
+  const refused = (reason: string, details = ["counter 4 is not above 7"]) => ({
+    status: 401,
+    body: { error: "attestation_invalid", reason, details },
+  });
+
+  it("passes the reason and details of a refused assertion to the app's hook", async () => {
+    const seen: unknown[][] = [];
+    const { client } = setup([refused("counter_not_increased")], 1_000_000, {
+      attest,
+      onAttestationRejected: (...args) => void seen.push(args),
+    });
+    expect(await client.check(check)).toEqual({ status: "queued" });
+    expect(seen).toEqual([
+      ["attestation_invalid", { reason: "counter_not_increased", details: ["counter 4 is not above 7"] }],
+    ]);
+  });
+
+  it("calls the hook with the error alone when the intake gave no reason", async () => {
+    const seen: unknown[][] = [];
+    const { client } = setup([{ status: 401, body: { error: "attestation_required" } }], 1_000_000, {
+      attest,
+      onAttestationRejected: (...args) => void seen.push(args),
+    });
+    await client.check(check);
+    expect(seen).toEqual([["attestation_required"]]);
+  });
+
+  it("still works with a hook written for one argument", async () => {
+    const seen: string[] = [];
+    const { client } = setup([refused("bad_signature")], 1_000_000, {
+      attest,
+      onAttestationRejected: (error: string) => void seen.push(error),
+    });
+    expect(await client.check(check)).toEqual({ status: "queued" });
+    expect(seen).toEqual(["attestation_invalid"]);
+  });
+
+  it("keeps the details but leaves out a reason code it does not know", async () => {
+    const seen: unknown[][] = [];
+    const { client } = setup([refused("some_later_code", ["a newer check failed"])], 1_000_000, {
+      attest,
+      onAttestationRejected: (...args) => void seen.push(args),
+    });
+    await client.check(check);
+    expect(seen).toEqual([["attestation_invalid", { details: ["a newer check failed"] }]]);
+  });
+
+  it("keeps a refused item queued and sends it on a later flush", async () => {
+    const { client, advance } = setup([refused("unknown_key"), 202], 1_000_000, { attest });
+    expect(await client.check(check)).toEqual({ status: "queued" });
+    expect(await client.pending()).toBe(1);
+    advance(60 * 60 * 1000);
+    expect(await client.flush()).toEqual({ sent: 1, dropped: 0, remaining: 0 });
+  });
+
+  it("keeps the item queued and leaves the hook alone on 503 unavailable", async () => {
+    const seen: unknown[] = [];
+    const { client, advance } = setup([{ status: 503, body: { error: "unavailable" } }, 202], 1_000_000, {
+      attest,
+      onAttestationRejected: (error) => void seen.push(error),
+    });
+    expect(await client.check(check)).toEqual({ status: "queued" });
+    expect(await client.pending()).toBe(1);
+    expect(seen).toEqual([]);
+    advance(60 * 60 * 1000);
+    expect(await client.flush()).toEqual({ sent: 1, dropped: 0, remaining: 0 });
+  });
+});
+
+describe("keyIsUnusable", () => {
+  const table = {
+    unknown_key: true,
+    wrong_app: true,
+    bad_signature: true,
+    counter_not_increased: false,
+    category_not_accepted: false,
+    malformed: false,
+    integrity_not_met: false,
+  } satisfies Record<RefusalReason, boolean>;
+
+  it.each(Object.entries(table))("says %s drops the key: %s", (reason, drops) => {
+    expect(keyIsUnusable(reason as RefusalReason)).toBe(drops);
+  });
+
+  it("keeps the key when there is no reason", () => {
+    expect(keyIsUnusable(undefined)).toBe(false);
   });
 });

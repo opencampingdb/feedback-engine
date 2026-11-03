@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyAttestation } from "../src/appattest.js";
 import { createHandler, type Env } from "../src/index.js";
 import { verifyPass } from "../src/pass.js";
@@ -18,14 +18,28 @@ const { privateKey } = generateKeyPairSync("rsa", {
   publicKeyEncoding: { type: "spki", format: "pem" },
 });
 
-function fakeKv(): KVLike & { data: Map<string, string> } {
+type KvOperation = "get" | "put" | "delete";
+
+/** An in-memory KV. Set `failing` to an operation to make it throw, as a storage error would. */
+function fakeKv(): KVLike & { data: Map<string, string>; failing: KvOperation | undefined } {
   const data = new Map<string, string>();
-  return {
+  const kv = {
     data,
-    get: async (k) => data.get(k) ?? null,
-    put: async (k, v) => void data.set(k, v),
-    delete: async (k) => void data.delete(k),
+    failing: undefined as KvOperation | undefined,
+    get: async (k: string) => {
+      if (kv.failing === "get") throw new Error("KV get failed");
+      return data.get(k) ?? null;
+    },
+    put: async (k: string, v: string) => {
+      if (kv.failing === "put") throw new Error("KV put failed");
+      data.set(k, v);
+    },
+    delete: async (k: string) => {
+      if (kv.failing === "delete") throw new Error("KV delete failed");
+      data.delete(k);
+    },
   };
+  return kv;
 }
 
 const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
@@ -175,33 +189,10 @@ describe("App Attest", () => {
     expect(await verifyPass("pass-secret", pass, NOW)).toEqual({ app: "example-app", expires: NOW / 1000 + 3600 });
   });
 
-  it("refuses a replayed or older assertion", async () => {
-    await registered();
-    const body = reviewBody();
-    expect((await send(body, 1)).status).toBe(202);
-    const replay = await send(body, 1);
-    expect(replay.status).toBe(401);
-    expect(await replay.json()).toEqual({ error: "attestation_invalid" });
-  });
-
-  it("refuses an assertion over another body", async () => {
-    await registered();
-    const res = await handle(
-      request("/v1/feedback", reviewBody(), {
-        "x-attest-platform": "ios",
-        "x-attest-key-id": device.keyId,
-        "x-attest-assertion": b64(device.assert(reviewBody({ app_version: "9.9.9" }), 1)),
-      }),
-      env(kv, IOS),
-    );
-    expect(res.status).toBe(401);
-  });
-
-  it("asks for attestation when the headers are missing, and refuses an unknown key", async () => {
+  it("asks for attestation when the headers are missing, with no reason", async () => {
     const missing = await handle(request("/v1/feedback", reviewBody()), env(kv, IOS));
+    expect(missing.status).toBe(401);
     expect(await missing.json()).toEqual({ error: "attestation_required" });
-    const unknown = await send(reviewBody(), 1);
-    expect(await unknown.json()).toEqual({ error: "attestation_invalid" });
   });
 
   it("uses a challenge once", async () => {
@@ -211,6 +202,7 @@ describe("App Attest", () => {
     expect((await handle(request("/v1/attest/register", body), env(kv, IOS))).status).toBe(201);
     const again = await handle(request("/v1/attest/register", body), env(kv, IOS));
     expect(again.status).toBe(401);
+    expect(await again.json()).toMatchObject({ error: "attestation_invalid", reason: "malformed", details: ["unknown or used challenge"] });
   });
 
   it("reads a launch validation category sent as little-endian bytes, as iOS 27 does", async () => {
@@ -220,15 +212,49 @@ describe("App Attest", () => {
   });
 
   it.each([
-    ["a development build sent as bytes", { category: new Uint8Array([3, 0, 0, 0]) }, "category 3,0,0,0"],
-    ["another app", { appId: "ZZZZZ99999.other.app" }, "another app"],
-    ["a used key", { counter: 3 }, "counter"],
-    ["the development environment", { aaguid: "appattestdevelop" }, "environment"],
-    ["a development build", { category: 3 }, "category"],
-  ])("refuses an attestation for %s", async (_, options, reason) => {
+    ["a development build sent as bytes", { category: new Uint8Array([3, 0, 0, 0]) }, "category 3,0,0,0", "category_not_accepted"],
+    ["another app", { appId: "ZZZZZ99999.other.app" }, "another app", "wrong_app"],
+    ["a used key", { counter: 3 }, "counter", "counter_not_increased"],
+    ["the development environment", { aaguid: "appattestdevelop" }, "environment", "category_not_accepted"],
+    ["a development build", { category: 3 }, "category", "category_not_accepted"],
+  ])("refuses a key registration for %s", async (_, options, details, reason) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const res = await registered(options);
     expect(res.status).toBe(401);
-    expect(JSON.stringify(await res.json())).toContain(reason);
+    const body = (await res.json()) as { error: string; reason: string; details: string[] };
+    expect(body).toMatchObject({ error: "attestation_invalid", reason });
+    expect(body.details.join(" ")).toContain(details);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = warn.mock.calls[0]!.map(String).join(" ");
+    expect(line).toContain(reason);
+    expect(line).toContain("/v1/attest/register");
+    expect(line).not.toContain(device.keyId);
+    warn.mockRestore();
+  });
+
+  it("refuses a key registration that is not CBOR as malformed", async () => {
+    const res = await handle(request("/v1/attest/challenge", ""), env(kv, IOS));
+    const { challenge } = (await res.json()) as { challenge: string };
+    const refused = await handle(
+      request("/v1/attest/register", JSON.stringify({ key_id: device.keyId, challenge, attestation: b64(new Uint8Array([0xff, 1, 2])) })),
+      env(kv, IOS),
+    );
+    expect(refused.status).toBe(401);
+    expect(await refused.json()).toMatchObject({ error: "attestation_invalid", reason: "malformed", details: [expect.any(String)] });
+  });
+
+  it("answers 503 unavailable when the key cannot be stored, and the install can register afterwards", async () => {
+    const res = await handle(request("/v1/attest/challenge", ""), env(kv, IOS));
+    const { challenge } = (await res.json()) as { challenge: string };
+    kv.failing = "put";
+    const failed = await handle(
+      request("/v1/attest/register", JSON.stringify({ key_id: device.keyId, challenge, attestation: b64(device.attest(challenge)) })),
+      env(kv, IOS),
+    );
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toEqual({ error: "unavailable" });
+    kv.failing = undefined;
+    expect((await registered()).status).toBe(201);
   });
 
   it("refuses an attestation made for another challenge", async () => {
@@ -251,6 +277,158 @@ describe("App Attest", () => {
     ).rejects.toThrow("key id");
   });
 
+  describe("refusals", () => {
+    let warn: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    });
+    afterEach(() => warn.mockRestore());
+
+    /** The one log line for the refusal, checked for anything that identifies the install. */
+    function logged(): string {
+      expect(warn).toHaveBeenCalledTimes(1);
+      const line = warn.mock.calls[0]!.map(String).join(" ");
+      expect(line).not.toContain(device.keyId);
+      expect(line).not.toContain("3b241101-e2bb-4255-8caf-4136c566a962");
+      return line;
+    }
+
+    async function refused(res: Response, reason: string): Promise<void> {
+      expect(res.status).toBe(401);
+      const body = (await res.json()) as { error: string; reason: string; details: string[] };
+      expect(body).toMatchObject({ error: "attestation_invalid", reason });
+      expect(body.details.length).toBeGreaterThan(0);
+      const line = logged();
+      expect(line).toContain(reason);
+      expect(line).toContain("example-app");
+      expect(line).toContain("/v1/feedback");
+    }
+
+    it("names an unknown key", async () => {
+      await refused(await send(reviewBody(), 1), "unknown_key");
+    });
+
+    it("names a key stored for another app key", async () => {
+      await registered();
+      const record = JSON.parse(kv.data.get(`aa:${device.keyId}`)!) as Record<string, unknown>;
+      kv.data.set(`aa:${device.keyId}`, JSON.stringify({ ...record, app: "other-app" }));
+      await refused(await send(reviewBody(), 1), "wrong_app");
+    });
+
+    it("names an assertion signed over another body", async () => {
+      await registered();
+      const res = await handle(
+        request("/v1/feedback", reviewBody(), {
+          "x-attest-platform": "ios",
+          "x-attest-key-id": device.keyId,
+          "x-attest-assertion": b64(device.assert(reviewBody({ app_version: "9.9.9" }), 1)),
+        }),
+        env(kv, IOS),
+      );
+      await refused(res, "bad_signature");
+    });
+
+    it("names a replayed assertion, and keeps the counter strict", async () => {
+      await registered();
+      const body = reviewBody();
+      expect((await send(body, 2)).status).toBe(202);
+      await refused(await send(body, 2), "counter_not_increased");
+      warn.mockClear();
+      await refused(await send(body, 1), "counter_not_increased");
+    });
+
+    it("names a launch category not accepted in this environment", async () => {
+      await registered();
+      await refused(await send(reviewBody(), 1, { category: 3 }), "category_not_accepted");
+    });
+
+    it("names an assertion that is not CBOR", async () => {
+      await registered();
+      const res = await handle(
+        request("/v1/feedback", reviewBody(), {
+          "x-attest-platform": "ios",
+          "x-attest-key-id": device.keyId,
+          "x-attest-assertion": b64(new Uint8Array([0xff, 0x00, 0x13])),
+        }),
+        env(kv, IOS),
+      );
+      await refused(res, "malformed");
+    });
+  });
+
+  it("answers 503 unavailable when the counter cannot be stored, and the key still works afterwards", async () => {
+    await registered();
+    kv.failing = "put";
+    const failed = await send(reviewBody(), 1);
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toEqual({ error: "unavailable" });
+    kv.failing = undefined;
+    expect((await send(reviewBody(), 1)).status).toBe(202);
+  });
+
+  it("answers 503 unavailable when the key cannot be read, and the key still works afterwards", async () => {
+    await registered();
+    kv.failing = "get";
+    const failed = await send(reviewBody(), 1);
+    expect(failed.status).toBe(503);
+    expect(failed.headers.get("retry-after")).toBe("60");
+    expect(await failed.json()).toEqual({ error: "unavailable" });
+    kv.failing = undefined;
+    expect((await send(reviewBody(), 1)).status).toBe(202);
+  });
+
+  it("answers 503 unavailable when a key registration cannot read the key store, and the install can register afterwards", async () => {
+    const res = await handle(request("/v1/attest/challenge", ""), env(kv, IOS));
+    const { challenge } = (await res.json()) as { challenge: string };
+    kv.failing = "get";
+    const failed = await handle(
+      request("/v1/attest/register", JSON.stringify({ key_id: device.keyId, challenge, attestation: b64(device.attest(challenge)) })),
+      env(kv, IOS),
+    );
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toEqual({ error: "unavailable" });
+    kv.failing = undefined;
+    expect((await registered()).status).toBe(201);
+  });
+
+  it("answers 503 unavailable when a used challenge cannot be deleted, and the install can register afterwards", async () => {
+    const res = await handle(request("/v1/attest/challenge", ""), env(kv, IOS));
+    const { challenge } = (await res.json()) as { challenge: string };
+    kv.failing = "delete";
+    const failed = await handle(
+      request("/v1/attest/register", JSON.stringify({ key_id: device.keyId, challenge, attestation: b64(device.attest(challenge)) })),
+      env(kv, IOS),
+    );
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toEqual({ error: "unavailable" });
+    kv.failing = undefined;
+    expect((await registered()).status).toBe(201);
+  });
+
+  it("refuses an assertion whose stored key record cannot be read as an unknown key", async () => {
+    await registered();
+    kv.data.set(`aa:${device.keyId}`, "{not json");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const res = await send(reviewBody(), 1);
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ error: "attestation_invalid", reason: "unknown_key", details: [expect.any(String)] });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("lets a fault inside the intake through rather than answering a reason that drops the key, and the key still works afterwards", async () => {
+    await registered();
+    const verify = vi.spyOn(crypto.subtle, "verify").mockRejectedValueOnce(new TypeError("a programming fault"));
+    try {
+      await expect(send(reviewBody(), 1)).rejects.toThrow(TypeError);
+    } finally {
+      verify.mockRestore();
+    }
+    expect((await send(reviewBody(), 1)).status).toBe(202);
+  });
+
   it("gives an attested install a contributor id when the app sends none", async () => {
     await registered();
     const body = reviewBody({ contributor: undefined });
@@ -261,6 +439,11 @@ describe("App Attest", () => {
 
 describe("Play Integrity", () => {
   const ANDROID = { requires_attestation: true, android: { package: PACKAGE, certificate_sha256: ["cert-a"] } };
+  let warn: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+  afterEach(() => warn.mockRestore());
 
   function setup(verdict: (body: string) => Verdict) {
     const verdicts = new Map<string, Verdict>();
@@ -286,17 +469,43 @@ describe("Play Integrity", () => {
     ["an old token", (body) => ({ requestHash: hex(body), timestampMillis: NOW - 10 * 60_000 })],
     ["an unrecognised app", (body) => ({ requestHash: hex(body), appRecognitionVerdict: "UNRECOGNIZED_VERSION" })],
     ["a device without integrity", (body) => ({ requestHash: hex(body), deviceRecognitionVerdict: [] })],
-  ])("refuses %s", async (_, verdict) => {
+  ])("refuses %s as integrity_not_met", async (_, verdict) => {
     const { send } = setup(verdict);
     const res = await send(reviewBody());
     expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: "attestation_invalid" });
+    expect(await res.json()).toMatchObject({ error: "attestation_invalid", reason: "integrity_not_met", details: [expect.any(String)] });
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = warn.mock.calls[0]!.map(String).join(" ");
+    expect(line).toContain("integrity_not_met");
+    expect(line).not.toContain("token-1");
+    expect(line).not.toContain("3b241101-e2bb-4255-8caf-4136c566a962");
   });
 
   it("refuses an app signed with another certificate", async () => {
     const { send } = setup((body) => ({ requestHash: hex(body) }));
     const res = await send(reviewBody(), { requires_attestation: true, android: { package: PACKAGE, certificate_sha256: ["cert-b"] } });
     expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ reason: "integrity_not_met" });
+  });
+
+  it("refuses a token Google cannot read as malformed", async () => {
+    const verdicts = new Map<string, Verdict>();
+    const handle = createHandler({ fetch: fakeServices(verdicts).fetch, now: () => NOW });
+    const res = await handle(request("/v1/feedback", reviewBody(), { "x-attest-platform": "android", "x-attest-token": "garbled" }), env(fakeKv(), ANDROID));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ error: "attestation_invalid", reason: "malformed", details: [expect.any(String)] });
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers 503 unavailable when Google fails, which is not a refusal", async () => {
+    const { fetch } = fakeServices(new Map());
+    const down = async (url: string, init?: RequestInit) =>
+      url.includes("playintegrity.googleapis.com") ? new Response("busy", { status: 503 }) : fetch(url, init);
+    const handle = createHandler({ fetch: down, now: () => NOW });
+    const res = await handle(request("/v1/feedback", reviewBody(), { "x-attest-platform": "android", "x-attest-token": "token-1" }), env(fakeKv(), ANDROID));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "unavailable" });
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 

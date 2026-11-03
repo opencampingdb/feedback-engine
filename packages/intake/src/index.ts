@@ -17,10 +17,11 @@ import {
   tidyName,
   tidyText,
 } from "@opencampingdb/feedback";
-import { verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
+import { AttestError, verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
+import { refuse, type RefusalBody } from "./refusal.js";
 import { fromBase64, hex, sha256, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
-import { IntegrityError, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
+import { IntegrityError, IntegrityUnavailable, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
 import { SafeSearch, verdict } from "./safesearch.js";
 import { jpegSize } from "./jpeg.js";
 import { PASS_TTL_SECONDS, signPass } from "./pass.js";
@@ -348,7 +349,48 @@ export const CHALLENGE_TTL_SECONDS = 300;
 /** App Attest registrations per hashed client network per day. */
 export const REGISTER_ORIGIN_DAILY_LIMIT = 50;
 
-type Attested = { attested: "app_attest" | "play_integrity"; keyId?: string } | { error: "attestation_required" | "attestation_invalid" };
+type Attested =
+  | { attested: "app_attest" | "play_integrity"; keyId?: string }
+  | { error: "attestation_required" }
+  | RefusalBody
+  | { error: "unavailable" };
+
+/** A storage error or an outage at Google: not a refusal, so the app keeps its key and tries again later. */
+function unavailable(cors: Record<string, string>): Response {
+  return json(503, { error: "unavailable" }, { ...cors, "retry-after": "60" });
+}
+
+/** The answer to an item whose assertion was missing or refused (401), or could not be checked (503). */
+function refusedOrUnavailable(result: Exclude<Attested, { attested: string }>, cors: Record<string, string>): Response {
+  if (result.error === "unavailable") return unavailable(cors);
+  return json(401, result, cors);
+}
+
+/** A read or write on the key store that failed. */
+class StorageError extends Error {}
+
+/** Runs a read or write on the key store, marking a failure as a storage error. */
+async function inKeyStore<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw new StorageError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+/** A stored key record, or undefined when the stored text is not one. */
+function readKeyRecord(saved: string): AttestedKey | undefined {
+  let record: unknown;
+  try {
+    record = JSON.parse(saved);
+  } catch {
+    return undefined;
+  }
+  if (typeof record !== "object" || record === null) return undefined;
+  const { app, public_key, counter } = record as Record<string, unknown>;
+  if (typeof app !== "string" || typeof public_key !== "string" || typeof counter !== "number") return undefined;
+  return { app, public_key, counter };
+}
 
 export function createHandler(deps: Deps) {
   const github = new GitHubApp(deps.fetch, deps.now);
@@ -360,17 +402,21 @@ export function createHandler(deps: Deps) {
   async function attest(request: Request, env: Env, app: AppEntry, body: string): Promise<Attested> {
     const platform = request.headers.get("x-attest-platform");
     if (platform === "ios" && app.ios && env.ATTEST) {
+      const kv = env.ATTEST;
       const keyId = request.headers.get("x-attest-key-id") ?? "";
       const assertion = fromBase64(request.headers.get("x-attest-assertion") ?? "");
       if (!keyId || !assertion) return { error: "attestation_required" };
-      const stored = await env.ATTEST.get(`aa:${keyId}`);
-      const key = stored ? (JSON.parse(stored) as AttestedKey) : undefined;
-      if (!key || key.app !== app.app) return { error: "attestation_invalid" };
       try {
+        const saved = await inKeyStore(() => kv.get(`aa:${keyId}`));
+        if (saved === null) return refuse(request, app.app, { reason: "unknown_key", details: ["key is not registered"] });
+        const key = readKeyRecord(saved);
+        if (!key) return refuse(request, app.app, { reason: "unknown_key", details: ["stored key record cannot be read"] });
+        if (key.app !== app.app) return refuse(request, app.app, { reason: "wrong_app", details: ["key is registered for another app key"] });
         const { counter } = await verifyAssertion({ assertion, clientData: new TextEncoder().encode(body), key, config: app.ios });
-        await env.ATTEST.put(`aa:${keyId}`, JSON.stringify({ ...key, counter }));
+        await inKeyStore(() => kv.put(`aa:${keyId}`, JSON.stringify({ ...key, counter })));
       } catch (error) {
-        if (error instanceof Error) return { error: "attestation_invalid" };
+        if (error instanceof StorageError) return { error: "unavailable" };
+        if (error instanceof AttestError) return refuse(request, app.app, { reason: error.reason, details: [error.message] });
         throw error;
       }
       return { attested: "app_attest", keyId };
@@ -386,7 +432,9 @@ export function createHandler(deps: Deps) {
           account: JSON.parse(env.GOOGLE_SERVICE_ACCOUNT) as ServiceAccount,
         });
       } catch (error) {
-        if (error instanceof IntegrityError || error instanceof SyntaxError) return { error: "attestation_invalid" };
+        // Google failing, or a service account that cannot be read, is not the app's fault.
+        if (error instanceof IntegrityUnavailable || error instanceof SyntaxError) return { error: "unavailable" };
+        if (error instanceof IntegrityError) return refuse(request, app.app, { reason: error.reason, details: [error.message] });
         throw error;
       }
       return { attested: "play_integrity" };
@@ -424,15 +472,16 @@ export function createHandler(deps: Deps) {
       if (counted >= REGISTER_ORIGIN_DAILY_LIMIT) return json(429, { error: "rate_limited" }, cors);
       await env.RATE_LIMIT.put(`r:${day}:${origin}`, String(counted + 1), { expirationTtl: 2 * 24 * 60 * 60 });
     }
-    // A challenge is used once, by the app it was issued to.
-    const issuedTo = await env.ATTEST.get(`ac:${given}`);
-    await env.ATTEST.delete(`ac:${given}`);
-    if (issuedTo !== app.app) return json(401, { error: "attestation_invalid", details: ["unknown or used challenge"] }, cors);
-    // A key is registered once, so a key cannot be moved to another install's record.
-    if ((await env.ATTEST.get(`aa:${keyId}`)) !== null) {
-      return json(409, { error: "attestation_invalid", details: ["key is already registered"] }, cors);
-    }
+    const kv = env.ATTEST;
     try {
+      // A challenge is used once, by the app it was issued to.
+      const issuedTo = await inKeyStore(() => kv.get(`ac:${given}`));
+      await inKeyStore(() => kv.delete(`ac:${given}`));
+      if (issuedTo !== app.app) return json(401, refuse(request, app.app, { reason: "malformed", details: ["unknown or used challenge"] }), cors);
+      // A key is registered once, so a key cannot be moved to another install's record.
+      if ((await inKeyStore(() => kv.get(`aa:${keyId}`))) !== null) {
+        return json(409, refuse(request, app.app, { reason: "malformed", details: ["key is already registered"] }), cors);
+      }
       const { publicKey } = await verifyAttestation({
         attestation,
         keyId,
@@ -442,10 +491,10 @@ export function createHandler(deps: Deps) {
         ...(deps.appAttestRoot ? { rootPem: deps.appAttestRoot } : {}),
       });
       const key: AttestedKey = { app: app.app, public_key: publicKey, counter: 0 };
-      await env.ATTEST.put(`aa:${keyId}`, JSON.stringify(key));
+      await inKeyStore(() => kv.put(`aa:${keyId}`, JSON.stringify(key)));
     } catch (error) {
-      // Any failure to read or check the object refuses it, with the reason.
-      if (error instanceof Error) return json(401, { error: "attestation_invalid", details: [error.message] }, cors);
+      if (error instanceof StorageError) return unavailable(cors);
+      if (error instanceof AttestError) return json(401, refuse(request, app.app, { reason: error.reason, details: [error.message] }), cors);
       throw error;
     }
     return json(201, { key_id: keyId }, cors);
@@ -482,7 +531,7 @@ export function createHandler(deps: Deps) {
     let proof: { attested: "app_attest" | "play_integrity"; keyId?: string } | undefined;
     if (app.requires_attestation) {
       const result = await attest(request, env, app, text);
-      if ("error" in result) return json(401, { error: result.error }, cors);
+      if ("error" in result) return refusedOrUnavailable(result, cors);
       proof = result;
     }
 
@@ -603,7 +652,7 @@ export function createHandler(deps: Deps) {
     if (!Number.isFinite(sent) || Math.abs(sent - nowMs) > PASS_CLOCK_SKEW_MS) return json(400, { error: "clock_skew" }, cors);
     if (app.requires_attestation) {
       const proof = await attest(request, env, app, text);
-      if ("error" in proof) return json(401, { error: proof.error }, cors);
+      if ("error" in proof) return refusedOrUnavailable(proof, cors);
     }
 
     const day = new Date(nowMs).toISOString().slice(0, 10);
@@ -799,7 +848,7 @@ export function createHandler(deps: Deps) {
       const feedback = submission as FeedbackSubmission;
       if (app.requires_attestation) {
         const result = await attest(request, env, app, text);
-        if ("error" in result) return json(401, { error: result.error }, cors);
+        if ("error" in result) return refusedOrUnavailable(result, cors);
         proof = result;
       }
       if (feedback.contributor !== undefined) contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
