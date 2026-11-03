@@ -91,6 +91,37 @@ export interface Fee {
   contributor: string;
 }
 
+/**
+ * One line of `photos/<place id>.ndjson`: a traveller's photo of a place. The
+ * files are served as `<id>/full.jpg` and `<id>/thumb.jpg`.
+ */
+export interface Photo {
+  /** `pho_` and the ulid of the feedback item. */
+  id: string;
+  place: string;
+  /** Opaque id of the account that took it, `ctr_` and 16 hex characters. */
+  contributor: string;
+  created: string;
+  app: string;
+  /** The photo is the contributor's work, licensed to everyone under CC BY 4.0. */
+  licence: "CC-BY-4.0";
+  /** Pixel size of the full size file. */
+  width: number;
+  height: number;
+  /** SHA-256 of the full size file, lower case hex, to spot one photo sent for several places. */
+  sha256: string;
+  /** Left out of the release and not served. As for reviews. */
+  hidden?: "reported" | "moderator";
+}
+
+/**
+ * `moderation/removed_photos.json` in the data repository: photos whose files
+ * are deleted from both buckets. A removed id never comes back.
+ */
+export interface RemovedPhotos {
+  photos: { photo: string; removed: string; reason: "refused" | "erased" | "moderator" }[];
+}
+
 /** `moderation/blocked_contributors.json` in the data repository. */
 export interface BlockedList {
   contributors: { contributor: string; added: string; reason: string }[];

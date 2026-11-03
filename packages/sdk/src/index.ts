@@ -3,6 +3,7 @@ export * from "./consent.js";
 export {
   createFeedbackClient,
   backoffDelay,
+  isJpeg,
   ConsentRequiredError,
   FeedbackValidationError,
   OwnerRequestError,
@@ -19,6 +20,12 @@ export type {
   OwnerClaimInput,
   OwnerListingInput,
   OwnerUpdateInput,
+  PhotoErasureInput,
+  PhotoFetchLike,
+  PhotoInput,
+  PhotoPassResult,
+  PhotoReportInput,
+  PhotoResult,
   ReportInput,
   ReviewInput,
   ReviewReportInput,
@@ -34,15 +41,19 @@ export {
   MAX_FEE_AMOUNT,
   MAX_DESCRIPTION_LENGTH,
   MAX_NAME_LENGTH,
+  MAX_PHOTO_BYTES,
+  MAX_THUMB_BYTES,
   MAX_TEXT_LENGTH,
   OWNER_FACTS,
   OWNER_TYPES,
+  PHOTO_REPORT_REASONS,
   REPORT_KINDS,
   REVIEW_REPORT_REASONS,
   SITE_FEATURES,
   isContributor,
   isFactName,
   isOwnerSubmission,
+  isPhotoId,
   isPlaceId,
   isPublicHttpsUrl,
   isReviewId,
@@ -50,6 +61,6 @@ export {
   validateSubmission,
 } from "./validate.js";
 export type { ValidationResult } from "./validate.js";
-export { sha256Hex } from "./sha256.js";
+export { sha256Hex, sha256HexBytes } from "./sha256.js";
 export { REMOVED_MARKER, findContactDetails, findContactDetailsInHours, stripContactDetails } from "./text.js";
 export type { ContactDetailKind } from "./text.js";

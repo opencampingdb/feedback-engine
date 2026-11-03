@@ -5,6 +5,7 @@
 #   GH_APP_ID           GitHub App id
 #   GH_APP_PRIVATE_KEY  GitHub App private key (PEM)
 #   GH_INSTALLATION_ID  installation id of the App on the inbox repository
+#   PHOTO_PASS_SECRET   signs photo passes, the same secret as the photo server's. Only for /v1/photos/pass
 #   GOOGLE_SERVICE_ACCOUNT  Google service account key file (JSON), only for app keys with "android"
 
 name = "ocdb-feedback-intake"
@@ -26,3 +27,10 @@ id = "REPLACE_ME_KV_NAMESPACE_ID"
 [[kv_namespaces]]
 binding = "ATTEST"
 id = "REPLACE_ME_ATTEST_KV_NAMESPACE_ID"
+
+# Private bucket for uploaded photos until their record is merged. Needed for /v1/photos.
+# Give it a lifecycle rule that deletes objects 180 days after upload, so files of
+# photos a person turned down do not stay for ever.
+[[r2_buckets]]
+binding = "PHOTOS_PENDING"
+bucket_name = "ocdb-photos-pending"
