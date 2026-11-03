@@ -801,6 +801,11 @@ export function createHandler(deps: Deps) {
       if (feedback.contributor !== undefined) contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
       else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
       if (proof?.keyId) attestKey = `ak_${await saltedHash(env.DEVICE_SALT, `key:${proof.keyId}`)}`;
+      // A signed-out install attested by Play Integrity has neither. Its new places still need a
+      // contributor to list and block them by, so the hashed install stands in.
+      if (contributor === undefined && proof && feedback.type === "report" && feedback.report.kind === "new_place") {
+        contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
+      }
       if (contributor === undefined && ["review", "review_report", "fee", "photo_report", "photo_erasure"].includes(feedback.type)) {
         return json(400, { error: "contributor_required" }, cors);
       }

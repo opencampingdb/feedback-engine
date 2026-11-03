@@ -133,12 +133,12 @@ function feedback(body: Record<string, unknown>, headers: Record<string, string>
   });
 }
 
-const newPlace = (extra: { device?: string; contributor?: string; note?: string; name?: string; contacts?: Record<string, string> } = {}) => ({
+const newPlace = (extra: { device?: string; contributor?: string | null; note?: string; name?: string; contacts?: Record<string, string> } = {}) => ({
   type: "report",
   place: null,
   location: { lat: -36.12345, lon: 146.88765 },
   device: extra.device ?? ADDER,
-  contributor: extra.contributor ?? "acct_3f9a8b7c6d5e4f30",
+  ...(extra.contributor === null ? {} : { contributor: extra.contributor ?? "acct_3f9a8b7c6d5e4f30" }),
   app_version: "1.0.0",
   consent: true,
   report: {
@@ -465,6 +465,22 @@ describe("recent places", () => {
       expect((await handle(block(["acct_3f9a8b7c6d5e4f30"]), e)).status).toBe(400);
       expect((await handle(block("ctr_0123456789abcdef"), e)).status).toBe(400);
       expect(await list()).toHaveLength(1);
+    });
+
+    it("lists a signed-out Android install's places under a contributor of its own, which can be blocked", async () => {
+      const id = await add({ contributor: null });
+      const second = await add({ contributor: null });
+      const other = await add({ device: otherDevice(1), contributor: null });
+      const places = await list();
+      expect(places.map((p) => p.id).sort()).toEqual([id, second, other].sort());
+      const [first] = places.filter((p) => p.id === id);
+      expect(first!.contributor).toMatch(/^ctr_[0-9a-f]{16}$/);
+      expect(first!.contributor).toBe(contributorOf(0));
+      expect(contributorOf(1)).toBe(contributorOf(0));
+      expect(contributorOf(2)).not.toBe(contributorOf(0));
+      expect(JSON.stringify(services.writes)).not.toContain(ADDER);
+      await handle(block([contributorOf(0)]), e);
+      expect((await list()).map((p) => p.id)).toEqual([other]);
     });
 
     it("is not served without a token configured", async () => {
