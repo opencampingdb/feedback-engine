@@ -63,6 +63,11 @@ const marks = (n: number) => Array.from({ length: n }, () => "?").join(", ");
  * same place twice keeps one.
  */
 export function insertPlace(db: D1Like, place: StoredPlace): Promise<unknown> {
+  return placeStatement(db, place).run();
+}
+
+/** The statement `insertPlace` runs, for writing many places in one batch. */
+export function placeStatement(db: D1Like, place: StoredPlace): D1Statement {
   return db
     .prepare(
       "INSERT OR IGNORE INTO new_places (id, lat, lon, kind, name, added, contributor, device, attest_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -77,8 +82,7 @@ export function insertPlace(db: D1Like, place: StoredPlace): Promise<unknown> {
       place.contributor,
       place.device,
       place.attest_key ?? null,
-    )
-    .run();
+    );
 }
 
 /**
@@ -88,11 +92,15 @@ export function insertPlace(db: D1Like, place: StoredPlace): Promise<unknown> {
  * counts once.
  */
 export function insertEvidence(db: D1Like, place: string, feedbackId: string, evidence: Evidence): Promise<unknown> {
+  return evidenceStatement(db, place, feedbackId, evidence).run();
+}
+
+/** The statement `insertEvidence` runs, for writing many pieces of evidence in one batch. */
+export function evidenceStatement(db: D1Like, place: string, feedbackId: string, evidence: Evidence): D1Statement {
   const data = evidence.kind === "check" ? evidence.check : evidence.kind === "removal_report" ? evidence.report : { at: evidence.at };
   return db
     .prepare("INSERT OR IGNORE INTO evidence (feedback_id, place_id, kind, data) VALUES (?, ?, ?, ?)")
-    .bind(feedbackId, place, evidence.kind, JSON.stringify(data))
-    .run();
+    .bind(feedbackId, place, evidence.kind, JSON.stringify(data));
 }
 
 /** Replaces the block list in one transaction. Standings are worked out with it each time the list is read. */

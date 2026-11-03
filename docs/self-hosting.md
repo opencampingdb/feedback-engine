@@ -46,6 +46,24 @@ Each new place, check, removal report or withdraw is one row written. Each refre
 
 The apply run keeps the store in step with two calls, each with `authorization: Bearer <PLACES_TOKEN>`. `POST /v1/places/recent/remove` with `{"ids": [...]}` (1 to 500 place ids) takes places it has written into the data off the list, answering `{"removed": <count>}`. `POST /v1/places/recent/block` with `{"contributors": [...]}` (up to 5,000 hashed `ctr_` ids, `[]` for none) replaces the block list the intake keeps, answering `{"blocked": <count>}`. A blocked contributor's places leave the list and later ones aren't listed; one taken off the block list is listed again. Both answer `401` for a wrong token and `404` without `RECENT_LIST` or `PLACES_TOKEN`.
 
+### Moving the recent list from KV to D1
+
+Intakes set up before the recent list moved to D1 kept it in a `RECENT_PLACES` KV namespace. A copy command moves its new places, their evidence and the block list into `RECENT_LIST`. It runs from your own machine through Wrangler's platform proxy, signed in with `npx wrangler login`, and needs no endpoint on the intake. From `packages/intake`:
+
+```sh
+npm run copy-to-d1 -- --kv <RECENT_PLACES namespace id> --d1 <RECENT_LIST database_id>
+```
+
+It lists the `np:` keys once, reads each place's value and the block list, and writes rows that are not in D1 yet, so it is safe to run more than once. The block list is added to the one D1 holds, never replacing it, so a list the apply run sent after the deploy is kept. Evidence whose place has already left KV is not copied. Add `--local` to rehearse against the local state `wrangler dev` keeps in `.wrangler/state`.
+
+Go live in this order:
+
+1. Create the D1 database and apply the migration (above).
+2. Run the copy.
+3. Deploy the intake with the `RECENT_LIST` binding (step 6).
+4. Run the copy again, to pick up anything written to KV while the deploy went out.
+5. A week later, once the recent list has served from D1 without trouble, delete the `np:` keys and the `blocked:contributors` key from `RECENT_PLACES`, then remove the namespace. Until then the old keys are there to fall back to.
+
 ## 3. Create the private inbox repository
 
 Create `inbox` in your organisation, private, with a `README.md` on `main` so the branch exists. The intake writes to `pending/<yyyy-mm-dd>/`, and the workflow moves files to `applied/` and `refused/`.
