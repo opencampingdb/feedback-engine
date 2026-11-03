@@ -1,5 +1,11 @@
 # Passing changes to OpenStreetMap
 
+Accepted changes from travellers and owners now reach OpenStreetMap's mappers as [MapRoulette](https://maproulette.org) challenges, built in the data repository at each OSM sync. The data repository's [maproulette/README.md](https://github.com/opencampingdb/data/blob/main/maproulette/README.md) describes the challenges, how a person approves them and how to rebuild them. A mapper takes a task, checks the place and edits OSM if they agree. Open Camping DB never edits OSM itself.
+
+## The retired OSM notes
+
+The OSM notes workflow below did the same job by posting an [OSM note](https://wiki.openstreetmap.org/wiki/Notes) at each place. It is retired: it never had an OSM token, so every run was a dry run and no note was ever posted. The "What travellers report" challenge (`data/pipeline/maproulette.py`) follows the same rules, and copies its tag table and its rules for what may be passed on from [`packages/osm-notes/src/tags.ts`](../packages/osm-notes/src/tags.ts) and [`changes.ts`](../packages/osm-notes/src/changes.ts). Keep the two in step when a fact or tag changes, until this package is removed. The rest of this page describes the notes workflow as it was.
+
 Open Camping DB is built from OpenStreetMap (OSM). When travellers or a place's owner tell us something OSM does not show yet, such as a camp that has stopped charging a fee, the OSM notes workflow passes it back as an [OSM note](https://wiki.openstreetmap.org/wiki/Notes) at the place. OSM's volunteer mappers read notes, check them and edit OSM if they agree. Open Camping DB never edits OSM data itself.
 
 The workflow is `.github/workflows/osm-notes.yml`, and the script it runs is [`packages/osm-notes`](../packages/osm-notes). It runs once a day from the private `inbox` repository.
