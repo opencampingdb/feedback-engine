@@ -34,3 +34,10 @@ id = "REPLACE_ME_ATTEST_KV_NAMESPACE_ID"
 [[r2_buckets]]
 binding = "PHOTOS_PENDING"
 bucket_name = "ocdb-photos-pending"
+
+# The photo server's STATE namespace (the same id as in packages/photos/wrangler.toml).
+# A photo reported as illegal is withheld there at once. Optional: without it, such
+# reports still reach a person but the photo is served until they act.
+[[kv_namespaces]]
+binding = "PHOTO_STATE"
+id = "REPLACE_ME_PHOTOS_KV_NAMESPACE_ID"

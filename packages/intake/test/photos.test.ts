@@ -1,7 +1,7 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { jpegSize } from "../src/jpeg.js";
-import { createHandler, hashContributor, type BucketLike, type Env } from "../src/index.js";
+import { createHandler, hashContributor, withheldKey, type BucketLike, type Env } from "../src/index.js";
 import type { KVLike } from "../src/ratelimit.js";
 
 const { privateKey } = generateKeyPairSync("rsa", {
@@ -210,5 +210,26 @@ describe("photo reports and erasure", () => {
     expect(gh.puts[1]!.content).toMatchObject({ type: "photo_erasure", place: null, contributor: await hashContributor("pepper", "example-app", CONTRIBUTOR) });
     const { contributor: _c, ...noContributor } = base;
     expect((await send({ ...noContributor, type: "photo_report", place: PLACE, photo_report: { photo: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB", reason: "offensive" } })).status).toBe(400);
+  });
+
+  it("withholds a photo reported as illegal in the photo server's state, and only then", async () => {
+    const gh = fakeGitHub();
+    const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
+    const state = fakeKv();
+    const e = { ...env(), PHOTO_STATE: state };
+    const send = (reason: string) =>
+      handle(
+        new Request("https://intake.example/v1/feedback", {
+          method: "POST",
+          headers: { "x-app-key": APP_KEY },
+          body: JSON.stringify({ device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true, type: "photo_report", place: PLACE, photo_report: { photo: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB", reason } }),
+        }),
+        e,
+      );
+    expect((await send("offensive")).status).toBe(202);
+    expect(await state.get(withheldKey("pho_01JBXK3M8Q4R5S6T7V8W9X0YZB"))).toBeNull();
+    expect((await send("illegal")).status).toBe(202);
+    expect(JSON.parse((await state.get(withheldKey("pho_01JBXK3M8Q4R5S6T7V8W9X0YZB")))!)).toMatchObject({ feedback: expect.stringMatching(/^fb_/) });
+    expect(gh.puts[1]!.content).toMatchObject({ type: "photo_report", photo_report: { reason: "illegal" } });
   });
 });
