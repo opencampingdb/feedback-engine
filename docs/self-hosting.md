@@ -17,7 +17,7 @@ npx wrangler login
 
 ## 2. Create the KV namespace
 
-The intake counts submissions per device, per client network and per app in Workers KV. A network is the client address from `CF-Connecting-IP`, cut to its IPv4 /24 or IPv6 /48 and kept only as a salted hash. Each network may send 100 feedback submissions and, counted separately, 10 owner submissions a day.
+The intake counts submissions per device, per client network and per app in Workers KV. A network is the client address from `CF-Connecting-IP`, cut to its IPv4 /24 or IPv6 /48 and kept only as a salted hash. Each network may send 100 feedback submissions and, counted separately, 10 owner submissions a day. Each network may also register 500 App Attest keys a day.
 
 ```sh
 npx wrangler kv namespace create RATE_LIMIT
@@ -33,15 +33,57 @@ If an app key uses App Attest, create a second namespace for registered keys and
 npx wrangler kv namespace create ATTEST
 ```
 
-To serve new places at once (`GET /v1/places/recent`, see [integration.md](integration.md) section 5), create a namespace for them and note its `id` for the `RECENT_PLACES` binding:
+To serve new places at once (`GET /v1/places/recent`, see [integration.md](integration.md) section 5), create a D1 database for the recent list, note its `database_id` for the `RECENT_LIST` binding, and apply its schema once the deploy copy of `wrangler.toml` holds that id (step 6):
 
 ```sh
-npx wrangler kv namespace create RECENT_PLACES
+npx wrangler d1 create ocdb-recent-list
+npx wrangler d1 migrations apply RECENT_LIST --remote -c wrangler.deploy.toml
 ```
 
-Each listed new place, check or report on one makes one more write. Each refresh of the list that misses the edge cache makes one list operation per 1,000 places, at most twice a minute in each Cloudflare location, which is more than the free plan's 1,000 list operations a day once many phones use it. Use the Workers paid plan for it.
+The schema is kept as numbered migrations in `packages/intake/migrations`. After updating to a release that adds one, run the same `migrations apply` command before deploying. Without `RECENT_LIST` the recent-list routes answer `404` and feedback still reaches the inbox.
 
-The apply run keeps the store in step with two calls, each with `authorization: Bearer <PLACES_TOKEN>`. `POST /v1/places/recent/remove` with `{"ids": [...]}` (1 to 500 place ids) takes places it has written into the data off the list, answering `{"removed": <count>}`. `POST /v1/places/recent/block` with `{"contributors": [...]}` (up to 5,000 hashed `ctr_` ids, `[]` for none) replaces the block list the intake keeps, answering `{"blocked": <count>}`. A blocked contributor's places leave the list and later ones aren't listed; one taken off the block list is listed again. Both answer `401` for a wrong token and `404` without `RECENT_PLACES` or `PLACES_TOKEN`.
+Each new place, check, removal report or withdraw is one row written. Each refresh of the list that misses the edge cache is one query. The box a request names is grown out to whole degrees before the query and the cache, so map views in the same degrees share one cached answer for 30 seconds. This fits the D1 free plan.
+
+The apply run keeps the recent list in step with two calls, each with `authorization: Bearer <PLACES_TOKEN>`. `POST /v1/places/recent/remove` with `{"ids": [...]}` (1 to 500 place ids) takes places it has written into the data off the list, answering `{"removed": <count>}`. `POST /v1/places/recent/block` with `{"contributors": [...]}` (up to 5,000 hashed `ctr_` ids, `[]` for none) replaces the block list the intake keeps, answering `{"blocked": <count>}`. A blocked contributor's places leave the list and later ones aren't listed; one taken off the block list is listed again. Both answer `401` for a wrong token and `404` without `RECENT_LIST` or `PLACES_TOKEN`.
+
+### Moving the recent list from KV to D1
+
+Intakes set up before the recent list moved to D1 kept it in a `RECENT_PLACES` KV namespace. A copy command moves its new places, their evidence and the block list into `RECENT_LIST`. It runs from your own machine through Wrangler's platform proxy, signed in with `npx wrangler login`, and needs no endpoint on the intake. It lists the `np:` keys once and reads each place's value, and every row it writes is skipped when D1 has it already. Evidence whose place has already left KV is not copied. Add `--local` to rehearse against the local state `wrangler dev` keeps in `.wrangler/state`.
+
+Go live in this order, running every command from `packages/intake`:
+
+1. Note the `RECENT_PLACES` namespace id before anything else: it is the `id` under `binding = "RECENT_PLACES"` in your current `wrangler.deploy.toml`, or find it with `npx wrangler kv namespace list`. The new `wrangler.toml` no longer names it, so regenerating the deploy copy drops it. Then create the D1 database, regenerate `wrangler.deploy.toml` with the `sed` command in step 6 (which adds the `RECENT_LIST` `database_id`), and apply the migration with that copy:
+
+   ```sh
+   npx wrangler d1 create ocdb-recent-list
+   npx wrangler d1 migrations apply RECENT_LIST --remote -c wrangler.deploy.toml
+   ```
+
+2. Run the first copy. It copies everything, the block list too, and ends by printing the `--since` to use in step 4: the time it started, less five minutes.
+
+   ```sh
+   npm run copy-to-d1 -- --kv <RECENT_PLACES namespace id> --d1 <RECENT_LIST database_id>
+   ```
+
+3. Deploy the intake with `npx wrangler deploy -c wrangler.deploy.toml` (step 6).
+4. Run the second copy, with the time the first one printed, to pick up what the old intake wrote to KV while the deploy went out:
+
+   ```sh
+   npm run copy-to-d1 -- --kv <RECENT_PLACES namespace id> --d1 <RECENT_LIST database_id> --since <time the first copy printed>
+   ```
+
+   With `--since` it copies only the new places added and the evidence sent from that time on, and leaves the block list alone. D1 is the recent list by then, so a place the apply run has removed from it, or a contributor it has taken off the block list, stays that way.
+
+5. A week later, once the recent list has served from D1 without trouble, delete the `np:` keys and the `blocked:contributors` key from `RECENT_PLACES`. Until then the old keys are there to fall back to.
+
+   ```sh
+   npx wrangler kv key list --namespace-id <RECENT_PLACES namespace id> --prefix np: --remote > recent-places-keys.json
+   npx wrangler kv bulk delete recent-places-keys.json --namespace-id <RECENT_PLACES namespace id> --remote
+   npx wrangler kv key delete blocked:contributors --namespace-id <RECENT_PLACES namespace id> --remote
+   rm recent-places-keys.json
+   ```
+
+   Then delete the namespace with `npx wrangler kv namespace delete --namespace-id <RECENT_PLACES namespace id>`.
 
 ## 3. Create the private inbox repository
 
@@ -92,7 +134,7 @@ npx wrangler secret put GH_INSTALLATION_ID
 
   Make keys with `openssl rand -hex 16`. To revoke a key, remove it and set the secret again.
 - `DEVICE_SALT` is a long random string, for example from `openssl rand -hex 32`. Changing it makes every device look new, which resets the two-device rule for pending items, so set it once.
-- `PLACES_TOKEN`, needed only with `RECENT_PLACES`, is a long random string, for example from `openssl rand -hex 32`. The apply run sends it to take places it has written into the data off the recent list, and to send the block list. Set it with `npx wrangler secret put PLACES_TOKEN` and keep the same value for the apply workflow.
+- `PLACES_TOKEN`, needed only with `RECENT_LIST`, is a long random string, for example from `openssl rand -hex 32`. The apply run sends it to take places it has written into the data off the recent list, and to send the block list. Set it with `npx wrangler secret put PLACES_TOKEN` and keep the same value for the apply workflow.
 - `GH_APP_PRIVATE_KEY` accepts the PEM GitHub gives you (PKCS#1) or PKCS#8.
 - `GOOGLE_SERVICE_ACCOUNT`, needed only for `android`, is the JSON key file of a Google Cloud service account in the project linked to the app in Play Console, allowed to decode integrity tokens. Set it with `npx wrangler secret put GOOGLE_SERVICE_ACCOUNT < key.json`.
 
@@ -100,13 +142,13 @@ npx wrangler secret put GH_INSTALLATION_ID
 
 ## 6. Deploy
 
-`wrangler.toml` holds placeholders for the namespace ids. Keep your ids in a copy that git does not track, so updating your checkout never resets them, and deploy with that copy:
+`wrangler.toml` holds placeholders for the namespace and database ids. Keep your ids in a copy that git does not track, so updating your checkout never resets them, and deploy with that copy:
 
 ```sh
 cd packages/intake
 sed -e "s/REPLACE_ME_KV_NAMESPACE_ID/<RATE_LIMIT id>/" \
     -e "s/REPLACE_ME_ATTEST_KV_NAMESPACE_ID/<ATTEST id>/" \
-    -e "s/REPLACE_ME_RECENT_PLACES_KV_NAMESPACE_ID/<RECENT_PLACES id>/" wrangler.toml > wrangler.deploy.toml
+    -e "s/REPLACE_ME_RECENT_LIST_D1_DATABASE_ID/<RECENT_LIST database_id>/" wrangler.toml > wrangler.deploy.toml
 npx wrangler deploy -c wrangler.deploy.toml
 ```
 
@@ -149,7 +191,7 @@ Install it on only `inbox` and `data`. The workflow asks for a token limited to 
 
 ## 9. Add the workflow to the inbox
 
-Copy [`packages/apply/examples/inbox-apply-feedback.yml`](../packages/apply/examples/inbox-apply-feedback.yml) to `.github/workflows/apply-feedback.yml` in `inbox`. Replace both `REPLACE_WITH_ENGINE_SHA` values with the same full commit SHA of this repository. Replace `REPLACE_WITH_INTAKE_URL` with the intake's base URL, for example `https://intake.example.org`, or remove the `intake-url` and `places-token` lines when the intake has no `RECENT_PLACES`. Then add the Actions secrets in `inbox`:
+Copy [`packages/apply/examples/inbox-apply-feedback.yml`](../packages/apply/examples/inbox-apply-feedback.yml) to `.github/workflows/apply-feedback.yml` in `inbox`. Replace both `REPLACE_WITH_ENGINE_SHA` values with the same full commit SHA of this repository. Replace `REPLACE_WITH_INTAKE_URL` with the intake's base URL, for example `https://intake.example.org`, or remove the `intake-url` and `places-token` lines when the intake has no `RECENT_LIST`. Then add the Actions secrets in `inbox`:
 
 - `OCDB_BOT_CLIENT_ID`: the bot App's Client ID.
 - `OCDB_BOT_PRIVATE_KEY`: the contents of the bot App's `.pem` file.
@@ -166,7 +208,7 @@ The review PR body lists every held new place under "Held new places", one line 
 
 **A person's decision on a new place.** Reports set aside a place's `standing` again on later runs unless a person's decision is on its record. To restore a hidden place, set `"standing": "shown"` and `"moderator": {"action": "restore", "at": "<now>"}` on the record, on the review PR or in a PR to `main`. Reports up to `at` no longer count, and later ones count as usual. To hide one, set `"standing": "hidden"` and `"moderator": {"action": "hide", "at": "<now>"}`: it stays hidden whatever travellers send. `at` is a UTC time such as `2026-11-03T09:00:00Z` or a day such as `2026-11-03`. Only the latest decision is kept, so a new one replaces the old. The note on a place hidden before it was published gives the line to paste.
 
-With `intake-url` set, each run passes `--main <checkout of data main> --intake <intake URL>` and the `PLACES_TOKEN` secret to `ocdb-apply`. It takes new places out of the intake's recent places store once the PR that writes them is merged, and withdrawn ones at once, then sends the intake the contributors in `moderation/blocked_contributors.json` on `main`, so a blocked contributor's new places leave the recent list.
+With `intake-url` set, each run passes `--main <checkout of data main> --intake <intake URL>` and the `PLACES_TOKEN` secret to `ocdb-apply`. It takes new places off the intake's recent list once the PR that writes them is merged, and withdrawn ones at once, then sends the intake the contributors in `moderation/blocked_contributors.json` on `main`, so a blocked contributor's new places leave the recent list.
 
 When a PR from either branch is already open, later runs add a commit and a comment to it. Once a PR is merged or closed, the next run starts the branch again from `main`. With nothing to do the workflow ends without changes.
 

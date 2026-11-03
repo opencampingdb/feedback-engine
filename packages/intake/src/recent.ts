@@ -1,15 +1,17 @@
 import { newPlaceStanding, type LatLon, type NewPlaceCheck, type NewPlaceReport, type NewPlaceStanding } from "@opencampingdb/feedback";
 
-/** The part of a Workers KV namespace the recent places store uses: values with metadata, and listing. */
-export interface ListableKV {
-  get(key: string): Promise<string | null>;
-  put(key: string, value: string, options?: { metadata?: unknown }): Promise<void>;
-  delete(key: string): Promise<void>;
-  list(options: { prefix?: string; cursor?: string }): Promise<{
-    keys: { name: string; metadata?: unknown }[];
-    list_complete: boolean;
-    cursor?: string;
-  }>;
+/** A prepared D1 statement: the part of the Workers D1 API the recent list uses. */
+export interface D1Statement {
+  bind(...values: unknown[]): D1Statement;
+  all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+  run(): Promise<unknown>;
+  first<T = Record<string, unknown>>(column?: string): Promise<T | null>;
+}
+
+/** The part of a D1 database binding the recent list uses. A batch runs as one transaction. */
+export interface D1Like {
+  prepare(sql: string): D1Statement;
+  batch(statements: D1Statement[]): Promise<unknown[]>;
 }
 
 /** What the recent list serves for a place. Never the note or contacts. */
@@ -25,7 +27,7 @@ export interface RecentPlace {
   contributor: string;
 }
 
-/** A new place as the store keeps it. Written once, when the place is added. */
+/** A new place as the recent list keeps it. Written once, when the place is added. */
 export interface StoredPlace extends Omit<RecentPlace, "standing"> {
   /** The adder's hashed device. */
   device: string;
@@ -33,11 +35,11 @@ export interface StoredPlace extends Omit<RecentPlace, "standing"> {
   attest_key?: string;
 }
 
-/** A check, removal report or withdraw on a stored place, each kept under its own key. */
+/** A check, removal report or withdraw on a new place. */
 export type Evidence =
-  | { type: "check"; check: NewPlaceCheck }
-  | { type: "report"; report: NewPlaceReport }
-  | { type: "withdraw"; at: string };
+  | { kind: "check"; check: NewPlaceCheck }
+  | { kind: "removal_report"; report: NewPlaceReport }
+  | { kind: "withdraw"; at: string };
 
 /** How long the adder may withdraw a new place outright. */
 export const WITHDRAW_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -49,144 +51,150 @@ export const RECENT_CACHE_SECONDS = 30;
 export const MAX_REMOVE_IDS = 500;
 /** Most contributors the block list may hold. */
 export const MAX_BLOCKED_CONTRIBUTORS = 5000;
-/** Workers KV reads, writes, deletes and lists one call may make. */
-const KV_OPERATIONS_PER_CALL = 1000;
-/** Evidence older than this whose place has left the store is swept up by a removal. */
-const ORPHAN_AGE_MS = 24 * 60 * 60 * 1000;
+/** D1 allows 100 bound values in one statement. */
+const MAX_BOUND = 100;
 
-const PREFIX = "np:";
-const key = (id: string) => `${PREFIX}${id}`;
-const EVIDENCE_KEY = { check: "c", report: "r", withdraw: "w" } as const;
-/** Outside the `np:` prefix, so listing places never reads it. */
-const BLOCKED_KEY = "blocked:contributors";
+/** `items` in runs of at most `size`. */
+export const chunks = <T>(items: readonly T[], size: number): T[][] =>
+  Array.from({ length: Math.ceil(items.length / size) }, (_, i) => items.slice(i * size, (i + 1) * size));
+const marks = (n: number) => Array.from({ length: n }, () => "?").join(", ");
 
 /**
- * The listed part of a place, kept in its key's metadata so the list needs no
- * get for each place. A name too long for the metadata stays in the value
- * alone, and `long_name` says to read it from there.
+ * Writes a new place. A place already there is left as it is, so writing the
+ * same place twice keeps one.
  */
-type PlaceMetadata = Omit<StoredPlace, "id" | "attest_key"> & { long_name?: true };
-/** Workers KV refuses metadata longer than this, as JSON in UTF-8. */
-const MAX_METADATA_BYTES = 1024;
-const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length;
-type EvidenceMetadata = NewPlaceCheck | NewPlaceReport | { day: string };
-
-/** A key under `np:`: a place (`np:<id>`) or evidence on it (`np:<id>:<c|r|w>:<feedback id>`). */
-function readKey(name: string): { place: string; evidence?: "c" | "r" | "w" } {
-  const [place = "", evidence] = name.slice(PREFIX.length).split(":");
-  return evidence === "c" || evidence === "r" || evidence === "w" ? { place, evidence } : { place };
+export function insertPlace(db: D1Like, place: StoredPlace): Promise<unknown> {
+  return placeStatement(db, place).run();
 }
 
-/** The contributors the apply run last sent as blocked. Empty until it has sent a list. */
-export async function getBlocked(kv: ListableKV): Promise<Set<string>> {
-  const text = await kv.get(BLOCKED_KEY);
-  return new Set(text === null ? [] : (JSON.parse(text) as string[]));
-}
-
-/** Replaces the block list. Standings are worked out with it each time the list is read. */
-export async function setBlocked(kv: ListableKV, contributors: readonly string[]): Promise<void> {
-  await kv.put(BLOCKED_KEY, JSON.stringify([...new Set(contributors)]));
-}
-
-/** Writes a new place. It is never written again: evidence on it goes under keys of its own. */
-export async function addPlace(kv: ListableKV, place: StoredPlace): Promise<void> {
-  const { id: _, attest_key: __, ...listed } = place;
-  // The rest of the place is short and bounded; a name of 300 characters can be 1200 bytes.
-  const metadata: PlaceMetadata = bytes(listed) <= MAX_METADATA_BYTES ? listed : { ...listed, name: null, long_name: true };
-  await kv.put(key(place.id), JSON.stringify(place), { metadata });
+/** The statement `insertPlace` runs, for writing many places in one batch. */
+export function placeStatement(db: D1Like, place: StoredPlace): D1Statement {
+  return db
+    .prepare(
+      "INSERT OR IGNORE INTO new_places (id, lat, lon, kind, name, added, contributor, device, attest_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(
+      place.id,
+      place.location.lat,
+      place.location.lon,
+      place.kind,
+      place.name,
+      place.added,
+      place.contributor,
+      place.device,
+      place.attest_key ?? null,
+    );
 }
 
 /**
- * Writes one check, report or withdraw on a place under a key of its own,
- * named by the feedback item's id. Nothing is read first, so two arriving at
- * the same moment are both kept.
+ * Writes one check, removal report or withdraw on a place, as a row of its own
+ * named by the feedback item's id. Nothing is read first, so evidence arriving
+ * at the same moment all counts, and the same feedback item written twice
+ * counts once.
  */
-export async function addEvidence(kv: ListableKV, place: string, feedbackId: string, evidence: Evidence): Promise<void> {
-  const metadata: EvidenceMetadata =
-    evidence.type === "check" ? evidence.check : evidence.type === "report" ? evidence.report : { day: evidence.at };
-  await kv.put(`${key(place)}:${EVIDENCE_KEY[evidence.type]}:${feedbackId}`, "", { metadata });
+export function insertEvidence(db: D1Like, place: string, feedbackId: string, evidence: Evidence): Promise<unknown> {
+  return evidenceStatement(db, place, feedbackId, evidence).run();
 }
 
-export async function getPlace(kv: ListableKV, id: string): Promise<StoredPlace | undefined> {
-  const text = await kv.get(key(id));
-  return text === null ? undefined : (JSON.parse(text) as StoredPlace);
+/** The statement `insertEvidence` runs, for writing many pieces of evidence in one batch. */
+export function evidenceStatement(db: D1Like, place: string, feedbackId: string, evidence: Evidence): D1Statement {
+  const data = evidence.kind === "check" ? evidence.check : evidence.kind === "removal_report" ? evidence.report : { at: evidence.at };
+  return db
+    .prepare("INSERT OR IGNORE INTO evidence (feedback_id, place_id, kind, data) VALUES (?, ?, ?, ?)")
+    .bind(feedbackId, place, evidence.kind, JSON.stringify(data));
 }
 
-/** The keys under `np:`, a page (one KV list operation) at a time. */
-async function* pages(kv: ListableKV): AsyncGenerator<{ name: string; metadata?: unknown }[]> {
-  let cursor: string | undefined;
-  do {
-    const page = await kv.list({ prefix: PREFIX, ...(cursor ? { cursor } : {}) });
-    yield page.keys;
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
+/** Replaces the block list in one transaction. Standings are worked out with it each time the list is read. */
+export async function setBlockList(db: D1Like, contributors: readonly string[]): Promise<void> {
+  await db.batch([db.prepare("DELETE FROM blocked_contributors"), ...blockStatements(db, contributors)]);
+}
+
+/** Statements adding contributors to the block list. One already on it is left as it is. */
+export function blockStatements(db: D1Like, contributors: readonly string[]): D1Statement[] {
+  return chunks([...new Set(contributors)], MAX_BOUND).map((part) =>
+    db.prepare(`INSERT OR IGNORE INTO blocked_contributors (contributor) VALUES ${part.map(() => "(?)").join(", ")}`).bind(...part),
+  );
+}
+
+interface PlaceRow {
+  id: string;
+  lat: number;
+  lon: number;
+  kind: string | null;
+  name: string | null;
+  added: string;
+  contributor: string;
+  device: string;
+  attest_key: string | null;
+}
+
+const fromRow = (row: PlaceRow): StoredPlace => ({
+  id: row.id,
+  location: { lat: row.lat, lon: row.lon },
+  kind: row.kind,
+  name: row.name,
+  added: row.added,
+  contributor: row.contributor,
+  device: row.device,
+  ...(row.attest_key === null ? {} : { attest_key: row.attest_key }),
+});
+
+export async function getPlace(db: D1Like, id: string): Promise<StoredPlace | undefined> {
+  const row = await db.prepare("SELECT * FROM new_places WHERE id = ?").bind(id).first<PlaceRow>();
+  return row === null ? undefined : fromRow(row);
 }
 
 /**
- * Removes places and the evidence on them. Place keys go first, so the list
- * drops them at once. Evidence is then deleted while the call has KV
- * operations to spare, along with evidence left behind by earlier removals.
+ * Removes places and the evidence on them in one transaction, along with any
+ * evidence whose place has already gone (written while its place was being removed).
  */
-export async function removePlaces(kv: ListableKV, ids: readonly string[], now: string): Promise<void> {
-  await Promise.all(ids.map((id) => kv.delete(key(id))));
-  const removed = new Set(ids);
-  let spare = KV_OPERATIONS_PER_CALL - ids.length - 1;
-  const places = new Set<string>();
-  const evidence: { name: string; place: string; day: string }[] = [];
-  for await (const keys of pages(kv)) {
-    spare -= 1;
-    for (const { name, metadata } of keys) {
-      const read = readKey(name);
-      if (read.evidence === undefined) places.add(read.place);
-      else evidence.push({ name, place: read.place, day: (metadata as { day?: string } | undefined)?.day ?? "" });
-    }
-  }
-  // Older than a day, so a place written moments ago but not yet in the listing is never mistaken for gone.
-  const orphan = (e: { place: string; day: string }) => !places.has(e.place) && Date.parse(now) - Date.parse(e.day) > ORPHAN_AGE_MS;
-  const doomed = evidence.filter((e) => removed.has(e.place) || orphan(e)).slice(0, Math.max(0, spare - 10));
-  await Promise.all(doomed.map((e) => kv.delete(e.name)));
+export async function removePlaces(db: D1Like, ids: readonly string[]): Promise<void> {
+  await db.batch([
+    ...chunks(ids, MAX_BOUND).flatMap((part) => [
+      db.prepare(`DELETE FROM new_places WHERE id IN (${marks(part.length)})`).bind(...part),
+      db.prepare(`DELETE FROM evidence WHERE place_id IN (${marks(part.length)})`).bind(...part),
+    ]),
+    db.prepare("DELETE FROM evidence WHERE place_id NOT IN (SELECT id FROM new_places)"),
+  ]);
 }
 
 /** West, south, east, north. */
 export type Bbox = [number, number, number, number];
 
+type ListedRow = PlaceRow & { blocked: number; evidence_kind: Evidence["kind"] | null; evidence_data: string | null };
+
 /**
- * Every `shown` or `confirmed` place in the store, within `bbox` when given.
- * Each standing is worked out at `now` from the place's evidence and the
- * block list, so nothing written to the store is ever read back and changed.
+ * Every `shown` or `confirmed` new place in id order, within `bbox` when given, read in
+ * one query with its evidence. Each standing is worked out at `now` from the
+ * evidence and the block list, so nothing is written back.
  */
-export async function listPlaces(kv: ListableKV, now: string, bbox?: Bbox): Promise<RecentPlace[]> {
-  const places = new Map<string, { metadata?: PlaceMetadata; checks: NewPlaceCheck[]; reports: NewPlaceReport[]; withdrawn: string[] }>();
-  const entry = (id: string) => {
-    let found = places.get(id);
-    if (!found) places.set(id, (found = { checks: [], reports: [], withdrawn: [] }));
-    return found;
-  };
-  for await (const keys of pages(kv)) {
-    for (const { name, metadata } of keys) {
-      if (metadata === undefined) continue;
-      const read = readKey(name);
-      const place = entry(read.place);
-      if (read.evidence === undefined) place.metadata = metadata as PlaceMetadata;
-      else if (read.evidence === "c") place.checks.push(metadata as NewPlaceCheck);
-      else if (read.evidence === "r") place.reports.push(metadata as NewPlaceReport);
-      else place.withdrawn.push((metadata as { day: string }).day);
-    }
+export async function listPlaces(db: D1Like, now: string, bbox?: Bbox): Promise<RecentPlace[]> {
+  const query = db.prepare(
+    `SELECT p.*, EXISTS (SELECT 1 FROM blocked_contributors b WHERE b.contributor = p.contributor) AS blocked,
+       e.kind AS evidence_kind, e.data AS evidence_data
+     FROM new_places p LEFT JOIN evidence e ON e.place_id = p.id
+     ${bbox ? "WHERE p.lat BETWEEN ? AND ? AND p.lon BETWEEN ? AND ?" : ""}
+     ORDER BY p.id`,
+  );
+  const { results } = await (bbox ? query.bind(bbox[1], bbox[3], bbox[0], bbox[2]) : query).all<ListedRow>();
+
+  const places = new Map<string, { place: StoredPlace; blocked: boolean; checks: NewPlaceCheck[]; reports: NewPlaceReport[]; withdrawn: string[] }>();
+  for (const row of results) {
+    let entry = places.get(row.id);
+    if (!entry) places.set(row.id, (entry = { place: fromRow(row), blocked: row.blocked === 1, checks: [], reports: [], withdrawn: [] }));
+    if (row.evidence_kind === null || row.evidence_data === null) continue;
+    const data: unknown = JSON.parse(row.evidence_data);
+    if (row.evidence_kind === "check") entry.checks.push(data as NewPlaceCheck);
+    else if (row.evidence_kind === "removal_report") entry.reports.push(data as NewPlaceReport);
+    else entry.withdrawn.push((data as { at: string }).at);
   }
-  const blocked = await getBlocked(kv);
+
   const out: RecentPlace[] = [];
-  for (const [id, { metadata, checks, reports, withdrawn }] of places) {
-    // Evidence whose place has been removed.
-    if (!metadata) continue;
-    if (bbox) {
-      const [west, south, east, north] = bbox;
-      const { lat, lon } = metadata.location;
-      if (lat < south || lat > north || lon < west || lon > east) continue;
-    }
+  for (const { place, blocked, checks, reports, withdrawn } of places.values()) {
     const standing = newPlaceStanding({
-      added: metadata.added,
+      added: place.added,
       // The intake has no place history: the apply run settles first places.
-      contributor: { device: metadata.device, blocked: blocked.has(metadata.contributor), firstPlace: false },
+      contributor: { device: place.device, blocked, firstPlace: false },
       checks,
       reports,
       withdrawnAt: withdrawn.sort()[0] ?? null,
@@ -195,9 +203,7 @@ export async function listPlaces(kv: ListableKV, now: string, bbox?: Bbox): Prom
       now,
     });
     if (standing !== "shown" && standing !== "confirmed") continue;
-    const { location, kind, added, contributor } = metadata;
-    // Rare, so the list stays a read of list pages for nearly every place.
-    const name = metadata.long_name ? ((await getPlace(kv, id))?.name ?? null) : (metadata.name ?? null);
+    const { id, location, kind, name, added, contributor } = place;
     out.push({ id, location, kind, name, standing, added, contributor });
   }
   return out;
