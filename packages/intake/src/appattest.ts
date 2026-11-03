@@ -104,12 +104,28 @@ function parseAuthData(data: Uint8Array): AuthData {
   return out;
 }
 
+/**
+ * The launch validation category as a number. iOS 27 sends it as a byte string
+ * holding a little-endian integer (TestFlight arrives as 02 00 00 00).
+ */
+function categoryNumber(value: CborValue | undefined): number | undefined {
+  if (typeof value === "number") return value;
+  if (value instanceof Uint8Array && value.length >= 1 && value.length <= 4) {
+    let n = 0;
+    for (let i = value.length - 1; i >= 0; i--) n = n * 256 + value[i]!;
+    return n;
+  }
+  return undefined;
+}
+
 /** The launch validation category, when the device reports one, must suit the environment. */
 function checkCategory(auth: AuthData, environment: AppAttestEnvironment): void {
-  const category = auth.extensions?.get("apple_validation_category_01");
-  if (category === undefined) return;
-  if (typeof category !== "number" || !CATEGORIES[environment].has(category)) {
-    throw new AttestError(`app validation category ${String(category)} is not accepted`);
+  const raw = auth.extensions?.get("apple_validation_category_01");
+  if (raw === undefined) return;
+  const category = categoryNumber(raw);
+  if (category === undefined || !CATEGORIES[environment].has(category)) {
+    const shown = raw instanceof Uint8Array ? Array.from(raw).join(",") : String(raw);
+    throw new AttestError(`app validation category ${shown} is not accepted`);
   }
 }
 
