@@ -8,19 +8,31 @@ import { newPlaceIdOf, WINDOW_DAYS, WITHDRAWN } from "./rules.js";
  */
 export interface RecentStore {
   remove(ids: readonly string[]): Promise<void>;
+  /** Replaces the intake's block list with these hashed contributor ids. */
+  block(contributors: readonly string[]): Promise<void>;
 }
 
 /** The intake takes at most this many ids in one call. */
 const REMOVE_BATCH = 500;
 
 /**
- * The intake's `POST /v1/places/recent/remove`, authorised with the places
- * token the intake keeps as `PLACES_TOKEN`. Removing an id that is not in the
- * store does nothing, so sending the same ids again is safe.
+ * The intake's `POST /v1/places/recent/remove` and `POST /v1/places/recent/block`,
+ * authorised with the places token the intake keeps as `PLACES_TOKEN`.
+ * Removing an id that is not in the store does nothing, and the block list
+ * replaces the last one, so sending either again is safe.
  */
 export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeof fetch = fetch): RecentStore {
   const url = new URL("/v1/places/recent/remove", baseUrl).toString();
+  const blockUrl = new URL("/v1/places/recent/block", baseUrl).toString();
   return {
+    async block(contributors) {
+      const response = await fetcher(blockUrl, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ contributors }),
+      });
+      if (!response.ok) throw new Error(`the intake refused the block list: ${response.status} ${await response.text()}`);
+    },
     async remove(ids) {
       for (let start = 0; start < ids.length; start += REMOVE_BATCH) {
         const response = await fetcher(url, {
@@ -66,4 +78,15 @@ export async function settleRecentPlaces(options: SettleOptions): Promise<string
   const ids = [...new Set([...inData.keys(), ...withdrawn])].sort();
   if (ids.length > 0) await options.store.remove(ids);
   return ids;
+}
+
+/**
+ * Sends the intake every contributor blocked in `moderation/blocked_contributors.json`
+ * on `main`, so their new places leave the recent list and later ones aren't
+ * listed. The whole list goes each time. Returns it, sorted.
+ */
+export async function sendBlockList(options: { main: string; store: RecentStore }): Promise<string[]> {
+  const contributors = [...(await new DataRepo(options.main).blocked())].sort();
+  await options.store.block(contributors);
+  return contributors;
 }

@@ -962,7 +962,7 @@ export function applyRules(input: RulesInput): RulesOutput {
             .map((r) => ({ device: r.device, reason: r.report.reason!, day: r.received })),
           withdrawnAt: items.filter((i) => i.type === "withdraw" && i.device === origin.device).map((i) => i.received).sort()[0] ?? null,
           duplicateOf: duplicate?.place ?? null,
-          moderator: null,
+          moderator: moderatorOf(existing),
           now: nowIso,
         });
       const standing = standingFrom([...earlier, ...mine]);
@@ -1035,7 +1035,7 @@ export function applyRules(input: RulesInput): RulesOutput {
             ? `${unlisted}, so it is not published (keep it: set standing to shown)`
             : standing === "held"
             ? `possible duplicate of ${duplicate!.place}, ${duplicate!.distance} m away (keep it: set standing to shown; the same place: merge it into ${duplicate!.place})`
-            : "hidden before it was published (keep it: set standing to shown)";
+            : `hidden before it was published (keep it: set standing to shown and moderator to {"action": "restore", "at": "${nowIso}"})`;
         note(id, `new place at ${where}, ${why}`, false, [origin]);
         decide(
           origin,
@@ -1053,6 +1053,14 @@ export function applyRules(input: RulesInput): RulesOutput {
       if (isPending && published && contacts.length > 0) held.push(caseFor("contacts", [origin]));
       if (isPending && firstPlace) held.push(caseFor("first_place", [origin]));
     }
+  }
+
+  /** A person's decision on a new place's record, or null when it has none it can read. */
+  function moderatorOf(place: Place | undefined): { action: "restore" | "hide"; at: string } | null {
+    const decision = place?.moderator;
+    if (decision === undefined || (decision.action !== "restore" && decision.action !== "hide")) return null;
+    if (typeof decision.at !== "string" || !/^\d{4}-\d{2}-\d{2}(T|$)/.test(decision.at) || Number.isNaN(Date.parse(decision.at))) return null;
+    return { action: decision.action, at: decision.at };
   }
 
   /** Why the intake would not list a new place, or undefined when it would. */

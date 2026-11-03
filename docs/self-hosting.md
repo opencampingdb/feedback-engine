@@ -149,10 +149,11 @@ Install it on only `inbox` and `data`. The workflow asks for a token limited to 
 
 ## 9. Add the workflow to the inbox
 
-Copy [`packages/apply/examples/inbox-apply-feedback.yml`](../packages/apply/examples/inbox-apply-feedback.yml) to `.github/workflows/apply-feedback.yml` in `inbox`. Replace both `REPLACE_WITH_ENGINE_SHA` values with the same full commit SHA of this repository. Then add two Actions secrets in `inbox`:
+Copy [`packages/apply/examples/inbox-apply-feedback.yml`](../packages/apply/examples/inbox-apply-feedback.yml) to `.github/workflows/apply-feedback.yml` in `inbox`. Replace both `REPLACE_WITH_ENGINE_SHA` values with the same full commit SHA of this repository. Replace `REPLACE_WITH_INTAKE_URL` with the intake's base URL, for example `https://intake.example.org`, or remove the `intake-url` and `places-token` lines when the intake has no `RECENT_PLACES`. Then add the Actions secrets in `inbox`:
 
 - `OCDB_BOT_CLIENT_ID`: the bot App's Client ID.
 - `OCDB_BOT_PRIVATE_KEY`: the contents of the bot App's `.pem` file.
+- `PLACES_TOKEN`, only with `intake-url`: the same value as the Worker's `PLACES_TOKEN` (step 5). Make it once with `openssl rand -hex 32`, set it on the Worker with `npx wrangler secret put PLACES_TOKEN`, then add it to `inbox` with `gh secret set PLACES_TOKEN --repo <owner>/inbox` (or Settings, Secrets and variables, Actions). To change it, set the new value in both places.
 
 Run the workflow once by hand from the Actions tab. With items in `pending/` it commits the moved files to `inbox` and keeps up to two PRs open on `data`:
 
@@ -163,7 +164,9 @@ New places are written with their `standing` from the SDK's `newPlaceStanding`. 
 
 The review PR body lists every held new place under "Held new places", one line each: `- held-case` and a JSON object with `case` (`duplicate`, `hidden`, `contacts` or `first_place`), `place`, `standing`, `location`, `kind`, the case's details (`duplicate_of` and `distance_m`, `reports` and `reasons` or `blocked`, the facts named in `contacts`, which may include `address`, the `contributor`) and the `feedback` ids to read in the inbox. A triage agent can read these lines instead of the prose.
 
-Run `ocdb-apply` with `--main <checkout of data main> --intake <intake URL>` and the `PLACES_TOKEN` secret to take new places out of the intake's recent places store once the PR that writes them is merged, and withdrawn ones at once.
+**A person's decision on a new place.** Reports set aside a place's `standing` again on later runs unless a person's decision is on its record. To restore a hidden place, set `"standing": "shown"` and `"moderator": {"action": "restore", "at": "<now>"}` on the record, on the review PR or in a PR to `main`. Reports up to `at` no longer count, and later ones count as usual. To hide one, set `"standing": "hidden"` and `"moderator": {"action": "hide", "at": "<now>"}`: it stays hidden whatever travellers send. `at` is a UTC time such as `2026-11-03T09:00:00Z` or a day such as `2026-11-03`. Only the latest decision is kept, so a new one replaces the old. The note on a place hidden before it was published gives the line to paste.
+
+With `intake-url` set, each run passes `--main <checkout of data main> --intake <intake URL>` and the `PLACES_TOKEN` secret to `ocdb-apply`. It takes new places out of the intake's recent places store once the PR that writes them is merged, and withdrawn ones at once, then sends the intake the contributors in `moderation/blocked_contributors.json` on `main`, so a blocked contributor's new places leave the recent list.
 
 When a PR from either branch is already open, later runs add a commit and a comment to it. Once a PR is merged or closed, the next run starts the branch again from `main`. With nothing to do the workflow ends without changes.
 

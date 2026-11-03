@@ -2,9 +2,13 @@
 # Replace both REPLACE_WITH_ENGINE_SHA values with the same full 40 character
 # commit SHA of opencampingdb/feedback-engine, and update them together.
 #
+# Replace REPLACE_WITH_INTAKE_URL with the intake's base URL, or remove the
+# intake-url and places-token lines when the intake has no RECENT_PLACES.
+#
 # Repository secrets in the inbox:
 #   OCDB_BOT_CLIENT_ID    Client ID of the opencampingdb-bot GitHub App
 #   OCDB_BOT_PRIVATE_KEY  Private key of the opencampingdb-bot GitHub App
+#   PLACES_TOKEN          The intake's PLACES_TOKEN, the same value as the Worker secret
 
 name: Apply feedback
 
@@ -21,6 +25,8 @@ jobs:
     uses: opencampingdb/feedback-engine/.github/workflows/apply-feedback.yml@REPLACE_WITH_ENGINE_SHA
     with:
       engine-ref: REPLACE_WITH_ENGINE_SHA
+      intake-url: REPLACE_WITH_INTAKE_URL
     secrets:
       app-client-id: ${{ secrets.OCDB_BOT_CLIENT_ID }}
       app-private-key: ${{ secrets.OCDB_BOT_PRIVATE_KEY }}
+      places-token: ${{ secrets.PLACES_TOKEN }}
