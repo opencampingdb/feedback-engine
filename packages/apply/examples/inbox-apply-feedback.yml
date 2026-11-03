@@ -3,7 +3,7 @@
 # commit SHA of opencampingdb/feedback-engine, and update them together.
 #
 # Replace REPLACE_WITH_INTAKE_URL with the intake's base URL, or remove the
-# intake-url and places-token lines when the intake has no RECENT_PLACES.
+# intake-url and places-token lines when the intake has no RECENT_LIST.
 #
 # Repository secrets in the inbox:
 #   OCDB_BOT_CLIENT_ID    Client ID of the opencampingdb-bot GitHub App

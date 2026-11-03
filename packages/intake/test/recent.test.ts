@@ -1,8 +1,9 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createHandler, type CacheLike, type Env } from "../src/index.js";
-import type { KVLike } from "../src/ratelimit.js";
-import type { ListableKV } from "../src/recent.js";
+import type { D1Like, D1Statement } from "../src/recent.js";
+import { fakeD1 } from "./fake-d1.js";
+import { listableKv } from "./fake-kv.js";
 
 const NOW = Date.parse("2026-11-03T09:00:00Z");
 const HOUR = 60 * 60 * 1000;
@@ -17,72 +18,32 @@ const { privateKey } = generateKeyPairSync("rsa", {
   publicKeyEncoding: { type: "spki", format: "pem" },
 });
 
-function fakeKv(): KVLike & { data: Map<string, string> } {
-  const data = new Map<string, string>();
-  return {
-    data,
-    get: async (k) => data.get(k) ?? null,
-    put: async (k, v) => void data.set(k, v),
-    delete: async (k) => void data.delete(k),
-  };
-}
-
 /**
- * A KV namespace with list and metadata, as Workers KV has, paging two keys at
- * a time. Like Workers KV it refuses metadata over 1024 bytes as JSON.
+ * The recent list as two requests see it when they reach it at the same
+ * moment: each read of one new place waits until `n` reads have been asked
+ * for, so both read before either writes.
  */
-function listableKv(): ListableKV & { data: Map<string, { value: string; metadata?: unknown }>; lists: number } {
-  const data = new Map<string, { value: string; metadata?: unknown }>();
-  const kv = {
-    data,
-    lists: 0,
-    get: async (k: string) => data.get(k)?.value ?? null,
-    put: async (k: string, value: string, options?: { metadata?: unknown }) => {
-      if (options?.metadata !== undefined && new TextEncoder().encode(JSON.stringify(options.metadata)).length > 1024) {
-        throw new Error("KV PUT failed: 413 Metadata length limit exceeded");
-      }
-      data.set(k, { value, ...(options?.metadata !== undefined ? { metadata: options.metadata } : {}) });
-    },
-    delete: async (k: string) => void data.delete(k),
-    list: async ({ prefix, cursor }: { prefix?: string; cursor?: string }) => {
-      kv.lists += 1;
-      const names = [...data.keys()].filter((k) => k.startsWith(prefix ?? "")).sort();
-      const start = cursor ? Number(cursor) : 0;
-      const page = names.slice(start, start + 2);
-      const done = start + 2 >= names.length;
-      return {
-        keys: page.map((name) => ({ name, metadata: data.get(name)!.metadata })),
-        list_complete: done,
-        ...(done ? {} : { cursor: String(start + 2) }),
-      };
-    },
-  };
-  return kv;
-}
-
-/**
- * The store as two requests see it when they reach it at the same moment: each
- * read of a place waits until `n` reads have been asked for, so both read
- * before either writes.
- */
-function atOnce(kv: ListableKV, n: number): ListableKV {
+function atOnce(d1: D1Like, n: number): D1Like {
   let waiting: (() => void)[] = [];
-  return {
-    ...kv,
-    get: async (k: string) => {
-      if (k.startsWith("np:") && n > 0) {
-        n -= 1;
-        await new Promise<void>((resolve) => {
-          waiting.push(resolve);
-          if (n === 0) {
-            for (const go of waiting) go();
-            waiting = [];
-          }
-        });
+  const wait = () =>
+    new Promise<void>((resolve) => {
+      n -= 1;
+      waiting.push(resolve);
+      if (n === 0) {
+        for (const go of waiting) go();
+        waiting = [];
       }
-      return kv.get(k);
+    });
+  const wrap = (stmt: D1Statement): D1Statement => ({
+    bind: (...values: unknown[]) => wrap(stmt.bind(...values)),
+    all: () => stmt.all(),
+    run: () => stmt.run(),
+    first: async <T,>(column?: string) => {
+      if (n > 0) await wait();
+      return stmt.first<T>(column);
     },
-  };
+  });
+  return { prepare: (sql: string) => wrap(d1.prepare(sql)), batch: (list) => d1.batch(list) };
 }
 
 function fakeCache(): CacheLike & { entries: Map<string, Response> } {
@@ -132,7 +93,7 @@ function fakeServices() {
 
 let clock = NOW;
 
-function env(store: ListableKV, appKey: Record<string, unknown> = {}): Env {
+function env(store: D1Like, appKey: Record<string, unknown> = {}): Env {
   return {
     APP_KEYS: JSON.stringify({
       [APP_KEY]: { app: "example-app", daily_limit: 1000, requires_attestation: true, android: { package: PACKAGE }, ...appKey },
@@ -142,9 +103,9 @@ function env(store: ListableKV, appKey: Record<string, unknown> = {}): Env {
     GH_APP_PRIVATE_KEY: privateKey,
     GH_INSTALLATION_ID: "2",
     INBOX_REPO: "opencampingdb/inbox",
-    RATE_LIMIT: fakeKv(),
+    RATE_LIMIT: listableKv(),
     GOOGLE_SERVICE_ACCOUNT: JSON.stringify({ client_email: "intake@example.iam.gserviceaccount.com", private_key: privateKey }),
-    RECENT_PLACES: store,
+    RECENT_LIST: store,
     PLACES_TOKEN: TOKEN,
   };
 }
@@ -199,13 +160,13 @@ interface Listed {
 describe("recent places", () => {
   let services: ReturnType<typeof fakeServices>;
   let handle: ReturnType<typeof createHandler>;
-  let store: ReturnType<typeof listableKv>;
+  let store: ReturnType<typeof fakeD1>;
   let e: Env;
 
   beforeEach(() => {
     clock = NOW;
     services = fakeServices();
-    store = listableKv();
+    store = fakeD1();
     e = env(store);
     handle = createHandler({ fetch: services.fetch, now: () => clock, randomBytes: () => crypto.getRandomValues(new Uint8Array(16)) });
   });
@@ -267,8 +228,8 @@ describe("recent places", () => {
     expect((await list())[0]!.name).toBe("Lake Eppalock Rest Area");
   });
 
-  it("lists a place whose name is too long for KV metadata in full", async () => {
-    // 300 characters of three bytes each: 900 bytes before the rest of the place.
+  it("lists a long name in full", async () => {
+    // 300 characters of three bytes each.
     const name = Array.from({ length: 300 }, (_, i) => String.fromCodePoint(0x6c34 + (i % 40))).join("");
     const id = await add({ name });
     const places = await list();
@@ -290,7 +251,6 @@ describe("recent places", () => {
     await add({ device: otherDevice(1) });
     const second = await handle(recent(), e);
     expect(((await second.json()) as { places: Listed[] }).places).toHaveLength(1);
-    expect(store.lists).toBe(1);
     expect(second.headers.get("cache-control")).toBe("public, max-age=30");
   });
 
@@ -300,9 +260,13 @@ describe("recent places", () => {
     await add();
     const first = await handle(recent("?bbox=146.1,-36.9,146.5,-36.5"), e);
     expect(((await first.json()) as { places: Listed[] }).places).toHaveLength(1);
+    // A second place in the same degrees, which the cached answer doesn't hold yet.
+    await add({ device: otherDevice(1) });
     const second = await handle(recent("?bbox=146.2,-36.8,146.3,-36.7&zoom=9"), e);
     expect(((await second.json()) as { places: Listed[] }).places).toHaveLength(1);
-    expect(store.lists).toBe(1);
+    clock += 31 * 1000;
+    cache.entries.clear();
+    expect(((await (await handle(recent("?bbox=146.2,-36.8,146.3,-36.7"), e)).json()) as { places: Listed[] }).places).toHaveLength(2);
     expect([...cache.entries.keys()]).toEqual(["https://intake.example/v1/places/recent?bbox=146,-37,147,-36"]);
   });
 
@@ -356,7 +320,7 @@ describe("recent places", () => {
     const id = await add();
     const check = (i: number) =>
       feedback({ type: "check", place: id, device: otherDevice(i), app_version: "1.0.0", consent: true, check: { visited: "2026-11-03", still_there: true, nearby: true } });
-    const both = { ...e, RECENT_PLACES: atOnce(store, 2) };
+    const both = { ...e, RECENT_LIST: atOnce(store, 2) };
     const answers = await Promise.all([handle(check(1), both), handle(check(2), both)]);
     expect(answers.map((a) => a.status)).toEqual([202, 202]);
     expect((await list())[0]!.standing).toBe("confirmed");
@@ -365,7 +329,7 @@ describe("recent places", () => {
   it("counts both of two reports sent at the same moment", async () => {
     const id = await add();
     const remove = (i: number) => feedback({ ...newPlace({ device: otherDevice(i), contributor: `acct_reporter_000000${i}` }), place: id, location: undefined, report: { kind: "remove", reason: "fake" } });
-    const both = { ...e, RECENT_PLACES: atOnce(store, 2) };
+    const both = { ...e, RECENT_LIST: atOnce(store, 2) };
     await Promise.all([handle(remove(1), both), handle(remove(2), both)]);
     expect(await list()).toEqual([]);
   });
@@ -380,6 +344,44 @@ describe("recent places", () => {
       expect(res.status).toBe(202);
     }
     expect((await list())[0]!.standing).toBe("shown");
+  });
+
+  it("counts a feedback item sent twice once", async () => {
+    const id = await add();
+    // The same random bytes at the same moment give both checks one feedback id.
+    const same = new Uint8Array(16).fill(7);
+    handle = createHandler({ fetch: services.fetch, now: () => clock, randomBytes: () => same });
+    const check = (i: number) =>
+      feedback({ type: "check", place: id, device: otherDevice(i), app_version: "1.0.0", consent: true, check: { visited: "2026-11-03", still_there: true, nearby: true } });
+    expect((await handle(check(1), e)).status).toBe(202);
+    expect((await handle(check(2), e)).status).toBe(202);
+    expect((await list())[0]!.standing).toBe("shown");
+  });
+
+  it("makes no KV list for the recent list", async () => {
+    const counted = listableKv();
+    const withCounted = { ...e, RATE_LIMIT: counted, ATTEST: counted };
+    const id = await handle(feedback(newPlace()), withCounted);
+    expect(id.status).toBe(202);
+    expect((await handle(recent(), withCounted)).status).toBe(200);
+    expect((await handle(recent("?bbox=146,-37,147,-36"), withCounted)).status).toBe(200);
+    expect(counted.lists).toBe(0);
+  });
+
+  it("answers 404 on every recent list route without a D1 database bound", async () => {
+    const { RECENT_LIST: _, ...without } = e;
+    const post = (path: string, body: unknown) =>
+      new Request(`https://intake.example/v1/places/recent/${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify(body),
+      });
+    expect((await handle(recent(), without)).status).toBe(404);
+    expect((await handle(post("remove", { ids: ["ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA"] }), without)).status).toBe(404);
+    expect((await handle(post("block", { contributors: [] }), without)).status).toBe(404);
+    // Feedback still reaches the inbox.
+    expect((await handle(feedback(newPlace()), without)).status).toBe(202);
+    expect(services.writes).toHaveLength(1);
   });
 
   describe("withdraw", () => {
@@ -452,7 +454,7 @@ describe("recent places", () => {
     expect((await handle(recent("?bbox=nope"), e)).status).toBe(400);
   });
 
-  it("lists every page of the store", async () => {
+  it("lists every place", async () => {
     for (let i = 0; i < 3; i++) await add({ device: otherDevice(i) });
     await add({ device: otherDevice(3), contributor: "acct_second_person_01" });
     await add({ device: otherDevice(4), contributor: "acct_second_person_01" });
@@ -484,7 +486,9 @@ describe("recent places", () => {
       );
       await handle(feedback({ ...newPlace({ device: otherDevice(2), contributor: "acct_reporter_0000002" }), place: id, location: undefined, report: { kind: "remove", reason: "fake" } }), e);
       expect((await handle(remove([id]), e)).status).toBe(200);
-      expect([...store.data.keys()].filter((k) => k.startsWith("np:"))).toEqual([]);
+      expect(await list()).toEqual([]);
+      // Evidence left behind is invisible through the API, so this one looks at the table.
+      expect(store.db.prepare("SELECT count(*) AS n FROM evidence").get()).toEqual({ n: 0 });
     });
 
     it("refuses a wrong token and a bad body", async () => {
