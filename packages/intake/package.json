@@ -7,12 +7,14 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "copy-to-d1": "esbuild scripts/copy-to-d1.ts --bundle --platform=node --format=esm --external:wrangler --outfile=.wrangler/copy-to-d1.mjs --log-level=warning && node .wrangler/copy-to-d1.mjs"
   },
   "dependencies": {
     "@opencampingdb/feedback": "0.7.0"
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
     "wrangler": "4.156.2"
   }
 }

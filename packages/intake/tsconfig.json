@@ -6,5 +6,5 @@
     "paths": { "@opencampingdb/feedback": ["./../sdk/src/index.ts"] },
     "noEmit": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test", "scripts"]
 }
