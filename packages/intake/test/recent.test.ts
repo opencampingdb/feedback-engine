@@ -230,6 +230,11 @@ describe("recent places", () => {
     );
   });
 
+  it("lists the name tidied, as the data would have it", async () => {
+    await add({ name: "lake   eppalock rest area" });
+    expect((await list())[0]!.name).toBe("Lake Eppalock Rest Area");
+  });
+
   it("lists a new place sent without a name with a null name", async () => {
     await add();
     expect((await list())[0]!.name).toBeNull();

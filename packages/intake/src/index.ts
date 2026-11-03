@@ -14,6 +14,7 @@ import {
   firstProblem,
   isPlaceId,
   newPlaceId,
+  tidyName,
   tidyText,
 } from "@opencampingdb/feedback";
 import { verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
@@ -933,7 +934,7 @@ async function updateRecent(
       id: newPlaceId(id),
       location: submission.location,
       kind: place_kind ?? null,
-      name: name ?? null,
+      name: name === undefined ? null : tidyName(name),
       standing: "shown",
       added: received,
       contributor,
