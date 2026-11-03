@@ -38,12 +38,14 @@ export type {
   WithdrawInput,
 } from "./client.js";
 export {
+  ADDRESS_STATES,
   BRANDS,
   FACTS,
   FEEDBACK_TYPES,
   FEE_SITES,
   MAX_FEE_AGE_MONTHS,
   MAX_FEE_AMOUNT,
+  MAX_ADDRESS_FIELD_LENGTH,
   MAX_DESCRIPTION_LENGTH,
   MAX_NAME_LENGTH,
   MAX_PHOTO_BYTES,
@@ -56,6 +58,8 @@ export {
   REPORT_KINDS,
   REVIEW_REPORT_REASONS,
   SITE_FEATURES,
+  addressProblems,
+  isAddress,
   isContributor,
   isFactName,
   isOwnerSubmission,

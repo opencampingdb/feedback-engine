@@ -114,8 +114,9 @@ Facts a report may name:
 - `brand`, one of `BRANDS` (`big4`, `discovery`, `nrma` and the other chains and clubs)
 - `access` (`2wd`, `awd`, `4wd`, `unknown`), `entry` (`public`, `customers`, `permit`, `private`), `max_stay` (such as `48h`, `2d`, `1w`), `opening_hours` (with no email address, phone number or link)
 - contacts: `website`, `facebook`, `instagram`, `tiktok` and `x` (https only), `phone`, `phone_2` and `email`
+- `address`, an object (`PlaceAddress`) with a `street` or, for a rural address, a named `place`, and any of `unit`, `housenumber`, `suburb`, `state` (one of `ADDRESS_STATES`: `NSW`, `VIC`, `QLD`, `SA`, `WA`, `TAS`, `NT`, `ACT`) and `postcode` (four digits)
 
-A fact two devices agree on within 90 days is applied. Contact changes (website, phones, email and social pages) are checked by a person, even from one report. `booking_url` comes only from the owner.
+A fact two devices agree on within 90 days is applied. Contact changes (website, phones, email and social pages) and addresses are checked by a person, even from one report. `booking_url` comes only from the owner.
 
 Three more report kinds let a traveller fix what Edit site covers on other apps. Each goes to a person, who accepts or rejects it on the review PR:
 
@@ -154,6 +155,21 @@ await feedback.report({
 });
 ```
 
+**Addresses.** An address is checked as the data's `schema/place.schema.json` has it. Each text field is 1 to 100 characters (`MAX_ADDRESS_FIELD_LENGTH`), holds no email address, phone number or link, and passes `textProblem` (a field of digits alone, such as a house number, is only checked for contact details). Fields are stored trimmed, and unknown fields such as `city` are refused. `addressProblems(value)` lists what is wrong, empty for a good address, so the app can show it before sending; `isAddress(value)` is the yes or no.
+
+```ts
+import { addressProblems } from "@opencampingdb/feedback";
+
+const address = { housenumber: "12", street: "Lake Road", suburb: "Lakeside", state: "VIC", postcode: "3999" };
+addressProblems(address); // []
+addressProblems({ suburb: "Lakeside", state: "Victoria" });
+// ["address must have a street or a place", "address.state must be one of NSW, VIC, QLD, SA, WA, TAS, NT, ACT"]
+
+await feedback.report({ place, report: { kind: "fact", fact: "address", value: address }, consent: true });
+```
+
+A `new_place` report may carry `report.address`, checked the same way and held for a person like its contacts. It still needs its `location`, so an app that lets a traveller add a place by address finds the spot first. `address` is refused on every other report kind.
+
 **Reporting a new place.** A `remove` report says a new place should come down, with a `reason` from `NEW_PLACE_REPORT_REASONS`: `not_there`, `fake`, `offensive`, `private_land` or `duplicate`. `reason` is refused on every other report kind.
 
 ```ts
@@ -182,7 +198,7 @@ It needs no app key. `bbox` is optional: west, south, east and north in degrees.
   "name": "Creek Bend Free Camp", "standing": "shown", "added": "2026-11-03T09:00:00Z", "contributor": "ctr_5d1c0e2a9b7f4436"}]}
 ```
 
-A place is listed when its report came from an attested install (an app key with `requires_attestation`) with a contributor, and its note passes `textProblem`. Other new places reach a person through the apply run as before. `kind` is the code the traveller picked, or `null`; look its group up in `data/schema/kinds.json`. `name` is the report's `name`, or `null` when it had none. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive, so a place two other devices report leaves the list on the next refresh. Only `still_there` checks with `nearby: true` count towards `confirmed`. The list never carries the note, the contacts or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. The intake also keeps the block list the apply run sends: a blocked contributor's new places leave the list, and later ones are accepted to the inbox but not listed. A place leaves the list once the apply run has written it into the data, where apps find it with the rest.
+A place is listed when its report came from an attested install (an app key with `requires_attestation`) with a contributor, and its note passes `textProblem`. Other new places reach a person through the apply run as before. `kind` is the code the traveller picked, or `null`; look its group up in `data/schema/kinds.json`. `name` is the report's `name`, or `null` when it had none. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive, so a place two other devices report leaves the list on the next refresh. Only `still_there` checks with `nearby: true` count towards `confirmed`. The list never carries the note, the contacts, the address or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. The intake also keeps the block list the apply run sends: a blocked contributor's new places leave the list, and later ones are accepted to the inbox but not listed. A place leaves the list once the apply run has written it into the data, where apps find it with the rest.
 
 Each contributor (or install, without one) may send 3 new places a day. The fourth gets `429 rate_limited`.
 

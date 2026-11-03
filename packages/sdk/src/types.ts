@@ -66,6 +66,25 @@ export type BrandValue =
 export type AccessValue = "2wd" | "awd" | "4wd" | "unknown";
 export type EntryValue = "public" | "customers" | "permit" | "private";
 export type WaterType = "tank_fill" | "fountain";
+/** An Australian state or territory, as its abbreviation. */
+export type AddressState = "NSW" | "VIC" | "QLD" | "SA" | "WA" | "TAS" | "NT" | "ACT";
+
+/**
+ * A place's street address, as `schema/place.schema.json` in the data
+ * repository has it (OSM addr:*). It has a `street` or, for a rural address,
+ * a named `place` instead. Each text field is 1 to 100 characters.
+ */
+export interface PlaceAddress {
+  unit?: string;
+  housenumber?: string;
+  street?: string;
+  /** A named rural place used instead of a street (OSM addr:place). */
+  place?: string;
+  suburb?: string;
+  state?: AddressState;
+  /** Four digits. */
+  postcode?: string;
+}
 
 /** Facts a place record can hold, with the value type of each. */
 export interface PlaceFacts {
@@ -144,6 +163,8 @@ export interface PlaceFacts {
   nudist?: boolean;
   // Brand and contacts.
   brand?: BrandValue;
+  /** A person checks it, as they check phones and links. */
+  address?: PlaceAddress;
   email?: string;
   phone_2?: string;
   /** https only. */
@@ -159,7 +180,7 @@ export interface PlaceFacts {
 export type FactName = keyof PlaceFacts;
 /** Facts an app report may name. booking_url comes only from owners. */
 export type ReportFactName = Exclude<FactName, "booking_url">;
-export type FactValue = boolean | string;
+export type FactValue = boolean | string | PlaceAddress;
 
 export interface LatLon {
   lat: number;
@@ -193,6 +214,11 @@ export interface ReportBody {
    * report of that name is. A person checks them before they are published.
    */
   contacts?: NewPlaceContacts;
+  /**
+   * On `new_place` only: the place's address, checked as an `address` fact
+   * report's value is. A person checks it before it is published.
+   */
+  address?: PlaceAddress;
 }
 
 /** The contact facts a new place may carry. */
