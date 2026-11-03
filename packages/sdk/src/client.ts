@@ -74,14 +74,84 @@ export interface FeedbackClientOptions {
   /**
    * Called when the intake refuses an item's attestation (401
    * `attestation_required` or `attestation_invalid`). The item stays queued and
-   * is tried again with backoff. On `attestation_invalid` an iOS app can drop
-   * its stored App Attest key here so a fresh key registers before the next try.
+   * is tried again with backoff. On `attestation_invalid` the second argument
+   * carries the intake's `reason` code and readable `details`, when it sent
+   * them. Drop the stored key and register a new one only when
+   * `keyIsUnusable(rejection.reason)` is true.
    */
-  onAttestationRejected?: (error: AttestationError) => Promise<void> | void;
+  onAttestationRejected?: (error: AttestationError, rejection?: AttestationRejection) => Promise<void> | void;
 }
 
 /** Why the intake refused an item's attestation. */
 export type AttestationError = "attestation_required" | "attestation_invalid";
+
+/**
+ * The intake's code for a refused key registration or assertion. Adding a
+ * code is additive; renaming or removing one is a breaking change.
+ */
+export type RefusalReason =
+  | "unknown_key"
+  | "wrong_app"
+  | "bad_signature"
+  | "counter_not_increased"
+  | "category_not_accepted"
+  | "malformed"
+  | "integrity_not_met";
+
+/** What the intake said about a refusal, as passed to `onAttestationRejected`. */
+export interface AttestationRejection {
+  /** The refusal's code, when the intake sent one this SDK knows. */
+  reason?: RefusalReason;
+  /** Readable text about what failed. */
+  details?: string[];
+}
+
+const REFUSAL_REASONS: ReadonlySet<string> = new Set<RefusalReason>([
+  "unknown_key",
+  "wrong_app",
+  "bad_signature",
+  "counter_not_increased",
+  "category_not_accepted",
+  "malformed",
+  "integrity_not_met",
+]);
+
+const UNUSABLE_KEY_REASONS: ReadonlySet<string> = new Set<RefusalReason>(["unknown_key", "wrong_app", "bad_signature"]);
+
+/**
+ * Whether a refusal means the app's key can no longer be used, so the app
+ * should drop it and make a new key registration. False for every other
+ * reason, and when there is none: the key is kept and the item tried again.
+ */
+export function keyIsUnusable(reason: RefusalReason | undefined): boolean {
+  return reason !== undefined && UNUSABLE_KEY_REASONS.has(reason);
+}
+
+/** The reason and details from a refusal's body, or undefined when it has neither. */
+function readRejection(answer: unknown): AttestationRejection | undefined {
+  if (typeof answer !== "object" || answer === null) return undefined;
+  const { reason, details } = answer as { reason?: unknown; details?: unknown };
+  const rejection: AttestationRejection = {};
+  if (typeof reason === "string" && REFUSAL_REASONS.has(reason)) rejection.reason = reason as RefusalReason;
+  if (Array.isArray(details) && details.every((d) => typeof d === "string")) rejection.details = details;
+  return rejection.reason === undefined && rejection.details === undefined ? undefined : rejection;
+}
+
+/** Calls the app's hook with one argument, or two when the intake said why. */
+async function tellApp(
+  hook: FeedbackClientOptions["onAttestationRejected"],
+  error: AttestationError,
+  answer: unknown,
+): Promise<void> {
+  if (!hook) return;
+  const rejection = readRejection(answer);
+  try {
+    if (rejection) await hook(error, rejection);
+    else await hook(error);
+  } catch {
+    // The app's own clean-up failing must not lose the item or change the answer.
+  }
+}
 
 export interface ReportInput {
   place: string | null;
@@ -472,18 +542,15 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
     if (res.status === 401) {
       // A refused attestation keeps the item: the next try brings a fresh
       // assertion or token. Any other 401 (an unknown app key) drops it.
-      let error: unknown;
+      let answer: unknown;
       try {
-        error = ((await res.json()) as { error?: unknown }).error;
+        answer = await res.json();
       } catch {
-        error = undefined;
+        answer = undefined;
       }
+      const error = (answer as { error?: unknown } | null | undefined)?.error;
       if (error === "attestation_required" || error === "attestation_invalid") {
-        try {
-          await options.onAttestationRejected?.(error);
-        } catch {
-          // The app's own clean-up failing must not lose the item.
-        }
+        await tellApp(options.onAttestationRejected, error, answer);
         return "stop";
       }
     }
@@ -657,11 +724,7 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
     }
     if (res.status >= 200 && res.status < 300) return { status: "sent", id: typeof answer.id === "string" ? answer.id : "" };
     if (res.status === 401 && (answer.error === "attestation_required" || answer.error === "attestation_invalid")) {
-      try {
-        await options.onAttestationRejected?.(answer.error);
-      } catch {
-        // The app's own clean-up failing does not change the answer.
-      }
+      await tellApp(options.onAttestationRejected, answer.error, answer);
     }
     return { status: "rejected", httpStatus: res.status, ...(typeof answer.error === "string" ? { error: answer.error } : {}) };
   }
@@ -702,11 +765,7 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
       return { status: "ok", ...currentPass };
     }
     if (res.status === 401 && (answer.error === "attestation_required" || answer.error === "attestation_invalid")) {
-      try {
-        await options.onAttestationRejected?.(answer.error);
-      } catch {
-        // The app's own clean-up failing does not change the answer.
-      }
+      await tellApp(options.onAttestationRejected, answer.error, answer);
     }
     return { status: "rejected", httpStatus: res.status, ...(typeof answer.error === "string" ? { error: answer.error } : {}) };
   }
