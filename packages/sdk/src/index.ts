@@ -68,3 +68,5 @@ export type { ValidationResult } from "./validate.js";
 export { sha256Hex, sha256HexBytes } from "./sha256.js";
 export { REMOVED_MARKER, findContactDetails, findContactDetailsInHours, stripContactDetails } from "./text.js";
 export type { ContactDetailKind } from "./text.js";
+export { firstProblem, textProblem, tidyName, tidyText } from "./tidy.js";
+export type { TextProblem } from "./tidy.js";
