@@ -7,6 +7,7 @@
 
 import type { Fetch } from "./github.js";
 import { GoogleToken, type ServiceAccount } from "./googleauth.js";
+import type { RefusalReason } from "./refusal.js";
 
 export interface AndroidConfig {
   /** Package name, for example `com.example.app`. */
@@ -20,7 +21,18 @@ export interface AndroidConfig {
 
 export type { ServiceAccount } from "./googleauth.js";
 
-export class IntegrityError extends Error {}
+/** A token Play Integrity refused, with the reason code the intake answers with. */
+export class IntegrityError extends Error {
+  constructor(
+    readonly reason: Extract<RefusalReason, "integrity_not_met" | "malformed">,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** Google could not be asked about the token. Not a refusal: the app tries again later. */
+export class IntegrityUnavailable extends Error {}
 
 const SCOPE = "https://www.googleapis.com/auth/playintegrity";
 /** A token older than this is refused. */
@@ -40,7 +52,7 @@ export class PlayIntegrity {
     try {
       return await this.#token.get(account);
     } catch (error) {
-      throw new IntegrityError(error instanceof Error ? error.message : String(error));
+      throw new IntegrityUnavailable(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -48,7 +60,8 @@ export class PlayIntegrity {
    * Decodes `token` and checks it: the request came from this package with
    * `requestHash` (the body's SHA-256, lower case hex) within the last five
    * minutes, Play recognises the app, and the device meets device integrity.
-   * Throws IntegrityError with the reason otherwise.
+   * Throws IntegrityError with the reason code otherwise, and
+   * IntegrityUnavailable when Google cannot be reached or fails.
    */
   async verify(input: { token: string; requestHash: string; config: AndroidConfig; account: ServiceAccount }): Promise<void> {
     const { config } = input;
@@ -57,24 +70,30 @@ export class PlayIntegrity {
       headers: { authorization: `Bearer ${await this.#accessToken(input.account)}`, "content-type": "application/json" },
       body: JSON.stringify({ integrity_token: input.token }),
     });
-    if (res.status === 400) throw new IntegrityError("Google could not decode the token");
-    if (!res.ok) throw new IntegrityError(`Google answered ${res.status}`);
-    const payload = ((await res.json()) as { tokenPayloadExternal?: Record<string, Record<string, unknown>> }).tokenPayloadExternal;
+    if (res.status === 400) throw new IntegrityError("malformed", "Google could not decode the token");
+    if (!res.ok) throw new IntegrityUnavailable(`Google answered ${res.status}`);
+    let answer: unknown;
+    try {
+      answer = await res.json();
+    } catch {
+      throw new IntegrityUnavailable("Google answered with no JSON");
+    }
+    const payload = (answer as { tokenPayloadExternal?: Record<string, Record<string, unknown>> } | null)?.tokenPayloadExternal;
     const request = payload?.requestDetails;
     const app = payload?.appIntegrity;
     const device = payload?.deviceIntegrity;
-    if (!request || request.requestPackageName !== config.package) throw new IntegrityError("token is for another package");
-    if (request.requestHash !== input.requestHash) throw new IntegrityError("token is for another request");
+    if (!request || request.requestPackageName !== config.package) throw new IntegrityError("integrity_not_met", "token is for another package");
+    if (request.requestHash !== input.requestHash) throw new IntegrityError("integrity_not_met", "token is for another request");
     const age = this.now() - Number(request.timestampMillis);
-    if (!Number.isFinite(age) || age > MAX_TOKEN_AGE_MS || age < -MAX_TOKEN_AGE_MS) throw new IntegrityError("token is too old");
+    if (!Number.isFinite(age) || age > MAX_TOKEN_AGE_MS || age < -MAX_TOKEN_AGE_MS) throw new IntegrityError("integrity_not_met", "token is too old");
     if (app?.appRecognitionVerdict !== "PLAY_RECOGNIZED" || app.packageName !== config.package) {
-      throw new IntegrityError("Play does not recognise the app");
+      throw new IntegrityError("integrity_not_met", "Play does not recognise the app");
     }
     const digests = Array.isArray(app.certificateSha256Digest) ? app.certificateSha256Digest : [];
     if (config.certificate_sha256 && !digests.some((d) => config.certificate_sha256!.includes(String(d)))) {
-      throw new IntegrityError("app is signed with another certificate");
+      throw new IntegrityError("integrity_not_met", "app is signed with another certificate");
     }
     const verdicts = Array.isArray(device?.deviceRecognitionVerdict) ? device.deviceRecognitionVerdict : [];
-    if (!verdicts.includes("MEETS_DEVICE_INTEGRITY")) throw new IntegrityError("device does not meet device integrity");
+    if (!verdicts.includes("MEETS_DEVICE_INTEGRITY")) throw new IntegrityError("integrity_not_met", "device does not meet device integrity");
   }
 }
