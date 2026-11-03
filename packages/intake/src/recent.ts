@@ -145,6 +145,15 @@ export async function listPlaces(kv: ListableKV, bbox?: Bbox): Promise<RecentPla
   return out;
 }
 
+/**
+ * The box grown out to whole degrees. The recent list is cached by its box, so
+ * every map view inside the same degrees shares one cached answer.
+ */
+export function snapBbox([west, south, east, north]: Bbox): Bbox {
+  // `+ 0` turns -0 into 0, so the cache key reads the same either way.
+  return [Math.floor(west) + 0, Math.floor(south) + 0, Math.ceil(east) + 0, Math.ceil(north) + 0];
+}
+
 /** Reads `west,south,east,north` in degrees. Undefined when the text is not a box. */
 export function parseBbox(text: string): Bbox | undefined {
   const parts = text.split(",").map((p) => (p.trim() === "" ? NaN : Number(p)));

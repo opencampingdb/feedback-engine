@@ -191,7 +191,7 @@ It is sent to `/v1/feedback` with `type: "withdraw"`, from the same install and 
 curl "https://<intake>/v1/places/recent?bbox=146.5,-37.2,147.5,-36.0"
 ```
 
-It needs no app key. `bbox` is optional: west, south, east and north in degrees. The answer is cached at the edge for 30 seconds:
+It needs no app key. `bbox` is optional: west, south, east and north in degrees. The intake grows the box out to whole degrees (`146.5,-37.2,147.5,-36.0` is answered as `146,-38,148,-36`) and caches the answer at the edge for 30 seconds by that box, so every map view inside the same degrees shares one cached list and the store is read once per box each 30 seconds. The list can therefore hold places a little outside the box you asked for; draw them or filter them on the phone. Other query parameters are ignored.
 
 ```json
 {"places": [{"id": "ocdb_01JC...", "location": {"lat": -36.12345, "lon": 146.88765}, "kind": "free_camp",

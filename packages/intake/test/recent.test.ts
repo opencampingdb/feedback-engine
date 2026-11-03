@@ -253,6 +253,18 @@ describe("recent places", () => {
     expect(second.headers.get("cache-control")).toBe("public, max-age=30");
   });
 
+  it("snaps a bounding box out to whole degrees, so nearby map views share one cached list", async () => {
+    const cache = fakeCache();
+    handle = createHandler({ fetch: services.fetch, now: () => clock, cache });
+    await add();
+    const first = await handle(recent("?bbox=146.1,-36.9,146.5,-36.5"), e);
+    expect(((await first.json()) as { places: Listed[] }).places).toHaveLength(1);
+    const second = await handle(recent("?bbox=146.2,-36.8,146.3,-36.7&zoom=9"), e);
+    expect(((await second.json()) as { places: Listed[] }).places).toHaveLength(1);
+    expect(store.lists).toBe(1);
+    expect([...cache.entries.keys()]).toEqual(["https://intake.example/v1/places/recent?bbox=146,-37,147,-36"]);
+  });
+
   it("adds the caller's CORS header to a cached list", async () => {
     const cache = fakeCache();
     handle = createHandler({ fetch: services.fetch, now: () => clock, cache });

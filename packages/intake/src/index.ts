@@ -42,6 +42,7 @@ import {
   removePlaces,
   savePlace,
   setBlocked,
+  snapBbox,
   WITHDRAW_WINDOW_MS,
   type ListableKV,
   type StoredPlace,
@@ -620,21 +621,24 @@ export function createHandler(deps: Deps) {
 
   /**
    * `GET /v1/places/recent`: new places that are `shown` or `confirmed`,
-   * optionally within `bbox=west,south,east,north`. Public, like the data, and
-   * cached at the edge, so the store is read at most once per cache period in
-   * each location. The cached copy has no CORS headers; they are added here.
+   * optionally within `bbox=west,south,east,north` grown out to whole
+   * degrees. Public, like the data, and cached at the edge by that box, so the
+   * store is read at most once per cache period for each box in each location.
+   * The cached copy has no CORS headers; they are added here.
    */
   async function recentPlaces(request: Request, env: Env, url: URL, cors: Record<string, string>): Promise<Response> {
     if (!env.RECENT_PLACES) return json(404, { error: "not_found" }, cors);
     const box = url.searchParams.get("bbox");
-    const bbox = box === null ? undefined : parseBbox(box);
-    if (box !== null && !bbox) return json(400, { error: "invalid", details: ["bbox must be west,south,east,north in degrees"] }, cors);
+    const parsed = box === null ? undefined : parseBbox(box);
+    if (box !== null && !parsed) return json(400, { error: "invalid", details: ["bbox must be west,south,east,north in degrees"] }, cors);
+    const bbox = parsed && snapBbox(parsed);
     const withCors = (response: Response) => {
       const out = new Response(response.body, response);
       for (const [name, value] of Object.entries(cors)) out.headers.set(name, value);
       return out;
     };
-    const cacheKey = new Request(url.toString(), { method: "GET" });
+    // Keyed by the snapped box alone, so other query parameters can't split the cache.
+    const cacheKey = new Request(`${url.origin}${url.pathname}${bbox ? `?bbox=${bbox.join(",")}` : ""}`, { method: "GET" });
     const hit = await deps.cache?.match(cacheKey);
     if (hit) return withCors(hit);
     const places = await listPlaces(env.RECENT_PLACES, bbox);
