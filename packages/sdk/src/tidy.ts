@@ -59,7 +59,7 @@ function tidySpacing(text: string, oneLine: boolean): string {
     .replace(/[\u0000-\u0009\u000B-\u001F\u007F​-‍⁠﻿]/g, "");
   out = oneLine ? out.replace(/\s+/g, " ") : out.replace(/[  ]+/g, " ").replace(/ *\n */g, "\n").replace(/\n{3,}/g, "\n\n");
   return out
-    .replace(/[!?]{2,}/g, (run) => run[0])
+    .replace(/[!?]{2,}/g, (run) => run.charAt(0))
     .replace(/\.{4,}/g, "...")
     .replace(/([,;:*~_=#+-])\1{2,}/g, "$1")
     .replace(/(\p{Extended_Pictographic})\1{2,}/gu, "$1")
@@ -146,7 +146,7 @@ function fold(text: string): string {
   const words = plain.split(/\s+/).map((token) => {
     const core = token.replace(/^[^a-z0-9@$!]+|[^a-z0-9@$!]+$/g, "");
     if (!/[a-z]/.test(core)) return token;
-    return core.replace(/[0134579@$!]/g, (c) => LEET[c]);
+    return core.replace(/[0134579@$!]/g, (c) => LEET[c] ?? c);
   });
   return words.join(" ").replace(/\b(?:[a-z][ .\-_*]){2,}[a-z]\b/g, (run) => run.replace(/[ .\-_*]/g, ""));
 }
