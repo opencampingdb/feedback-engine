@@ -14,6 +14,9 @@ import type {
   OwnerFacts,
   OwnerSubmission,
   OwnerUpdate,
+  PhotoFiles,
+  PhotoReportBody,
+  PhotoReportReason,
   ReportBody,
   ReportKind,
   ReviewBody,
@@ -22,7 +25,7 @@ import type {
   Submission,
 } from "./types.js";
 
-export const FEEDBACK_TYPES = ["report", "review", "check", "review_report", "fee"] as const;
+export const FEEDBACK_TYPES = ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "photo_erasure"] as const;
 export const OWNER_TYPES = ["owner_claim", "owner_listing", "owner_update"] as const;
 const ALL_TYPES: readonly string[] = [...FEEDBACK_TYPES, ...OWNER_TYPES];
 export const REPORT_KINDS: readonly ReportKind[] = [
@@ -106,6 +109,18 @@ export const REVIEW_REPORT_REASONS: readonly ReviewReportReason[] = [
   "fake",
   "personal_details",
 ];
+export const PHOTO_REPORT_REASONS: readonly PhotoReportReason[] = [
+  "spam_ad",
+  "offensive",
+  "off_topic",
+  "not_this_place",
+  "personal_details",
+  "copyright",
+];
+/** Largest full size photo the intake takes, in bytes. */
+export const MAX_PHOTO_BYTES = 1_500_000;
+/** Largest thumbnail the intake takes, in bytes. */
+export const MAX_THUMB_BYTES = 200_000;
 export const FEE_SITES: readonly FeeSite[] = ["unpowered", "powered", "cabin"];
 /** Highest fee per night, in Australian dollars. */
 export const MAX_FEE_AMOUNT = 1000;
@@ -165,6 +180,8 @@ export const OWNER_FACTS: Readonly<Record<OwnerFactName, (value: unknown) => boo
 
 const PLACE_ID = /^ocdb_[0-9A-HJKMNP-TV-Z]{26}$/;
 const REVIEW_ID = /^rev_[0-9A-HJKMNP-TV-Z]{26}$/;
+const PHOTO_ID = /^pho_[0-9A-HJKMNP-TV-Z]{26}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
 const CONTRIBUTOR = /^[A-Za-z0-9_-]{16,128}$/;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -183,6 +200,8 @@ const TOP_LEVEL_KEYS = new Set([
   "check",
   "review_report",
   "fee",
+  "photo",
+  "photo_report",
   "terms_accepted",
   "token",
   "owner",
@@ -220,6 +239,11 @@ export function isPlaceId(value: unknown): value is string {
 /** A published review id, `rev_<ulid>`. */
 export function isReviewId(value: unknown): value is string {
   return typeof value === "string" && REVIEW_ID.test(value);
+}
+
+/** A published photo id, `pho_<ulid>`. */
+export function isPhotoId(value: unknown): value is string {
+  return typeof value === "string" && PHOTO_ID.test(value);
 }
 
 /** A contributor id as an app sends it: 16 to 128 characters of `A-Z a-z 0-9 _ -`. */
@@ -346,6 +370,43 @@ function checkReviewReport(value: unknown, errors: string[]): ReviewReportBody |
   return { review: value.review as string, reason: value.reason as ReviewReportReason };
 }
 
+function checkPhotoReport(value: unknown, errors: string[]): PhotoReportBody | undefined {
+  if (!isObject(value)) {
+    errors.push("photo_report must be an object");
+    return undefined;
+  }
+  if (!isPhotoId(value.photo)) errors.push("photo_report.photo must be a photo id (pho_<ulid>)");
+  if (typeof value.reason !== "string" || !(PHOTO_REPORT_REASONS as readonly string[]).includes(value.reason)) {
+    errors.push(`photo_report.reason must be one of ${PHOTO_REPORT_REASONS.join(", ")}`);
+  }
+  return { photo: value.photo as string, reason: value.reason as PhotoReportReason };
+}
+
+function checkPhotoFiles(value: unknown, errors: string[]): PhotoFiles | undefined {
+  if (!isObject(value)) {
+    errors.push("photo must be an object");
+    return undefined;
+  }
+  const { full_sha256, full_bytes, thumb_sha256, thumb_bytes } = value;
+  for (const key of Object.keys(value)) {
+    if (!["full_sha256", "full_bytes", "thumb_sha256", "thumb_bytes"].includes(key)) errors.push(`unknown field photo.${key}`);
+  }
+  if (typeof full_sha256 !== "string" || !SHA256.test(full_sha256)) errors.push("photo.full_sha256 must be a lower case hex SHA-256");
+  if (typeof thumb_sha256 !== "string" || !SHA256.test(thumb_sha256)) errors.push("photo.thumb_sha256 must be a lower case hex SHA-256");
+  if (!Number.isInteger(full_bytes) || (full_bytes as number) < 1 || (full_bytes as number) > MAX_PHOTO_BYTES) {
+    errors.push(`photo.full_bytes must be a whole number from 1 to ${MAX_PHOTO_BYTES}`);
+  }
+  if (!Number.isInteger(thumb_bytes) || (thumb_bytes as number) < 1 || (thumb_bytes as number) > MAX_THUMB_BYTES) {
+    errors.push(`photo.thumb_bytes must be a whole number from 1 to ${MAX_THUMB_BYTES}`);
+  }
+  return {
+    full_sha256: full_sha256 as string,
+    full_bytes: full_bytes as number,
+    thumb_sha256: thumb_sha256 as string,
+    thumb_bytes: thumb_bytes as number,
+  };
+}
+
 /** Months since year 0, for comparing `YYYY-MM` values. */
 function monthIndex(year: number, month: number): number {
   return year * 12 + (month - 1);
@@ -415,7 +476,7 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     return { ok: false, errors };
   }
   if ((OWNER_TYPES as readonly string[]).includes(type)) return validateOwner(input, type as OwnerSubmission["type"]);
-  for (const other of ["report", "review", "check", "review_report", "fee", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
+  for (const other of ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
     if (other !== type && input[other] !== undefined) errors.push(`${other} is not allowed when type is ${type}`);
   }
 
@@ -449,7 +510,14 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
   };
 
   let value: FeedbackSubmission | undefined;
-  if (type === "report") {
+  if ((type === "photo" || type === "photo_erasure") && contributor === undefined) {
+    errors.push(`contributor is required for a ${type}`);
+  }
+  if (type === "photo_erasure") {
+    if (place !== null) errors.push("place must be null for a photo_erasure");
+    if (input.location !== undefined) errors.push("location is not allowed on a photo_erasure");
+    value = { ...base, place: null, type: "photo_erasure" };
+  } else if (type === "report") {
     const report = checkReport(input.report, errors);
     if (report) {
       const isNew = report.kind === "new_place";
@@ -470,6 +538,12 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     } else if (type === "review_report") {
       const reviewReport = checkReviewReport(input.review_report, errors);
       if (reviewReport) value = { ...base, place: place as string, type: "review_report", review_report: reviewReport };
+    } else if (type === "photo") {
+      const photo = checkPhotoFiles(input.photo, errors);
+      if (photo) value = { ...base, place: place as string, type: "photo", photo };
+    } else if (type === "photo_report") {
+      const photoReport = checkPhotoReport(input.photo_report, errors);
+      if (photoReport) value = { ...base, place: place as string, type: "photo_report", photo_report: photoReport };
     } else if (type === "fee") {
       const fee = checkFee(input.fee, now, errors);
       if (fee) value = { ...base, place: place as string, type: "fee", fee };
@@ -594,7 +668,7 @@ const OWNER_FIELDS: Record<OwnerSubmission["type"], string[]> = {
 /** Validates the three owner submission types (SPEC "Owners"). */
 function validateOwner(input: Record<string, unknown>, type: OwnerSubmission["type"]): ValidationResult {
   const errors: string[] = [];
-  for (const key of ["report", "review", "check", "review_report", "fee", "contributor", "token", "owner", "claim", "listing", "update", "location"]) {
+  for (const key of ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "contributor", "token", "owner", "claim", "listing", "update", "location"]) {
     if (input[key] !== undefined && !OWNER_FIELDS[type].includes(key)) errors.push(`${key} is not allowed when type is ${type}`);
   }
   if (input.terms_accepted !== true) errors.push("terms_accepted must be true");

@@ -158,6 +158,8 @@ Every report goes to a person on the `feedback/review` PR, who looks at reported
 
 Hide a review the traveller reported straight away on their phone as well. The data catches up at the next release.
 
+**Photos.** Photos, photo reports and photo erasures follow the same pattern as reviews. [photos.md](photos.md) covers them.
+
 ## 7. Prove the app with App Attest or Play Integrity
 
 An app key with `requires_attestation` takes reports, reviews, checks and review reports only from a genuine copy of the app on a sound device. Without proof the intake answers `401 attestation_required`, and with proof that fails `401 attestation_invalid`. The SDK calls your `attest` function each time it sends, with the exact body and its SHA-256, and adds the headers it returns:

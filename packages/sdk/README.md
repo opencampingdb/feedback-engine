@@ -1,6 +1,6 @@
 # @opencampingdb/feedback
 
-Client for sending reports, reviews, checks and fees about places in Open Camping DB. Works in React Native, Expo and the browser, with no dependencies.
+Client for sending reports, reviews, checks, fees and photos about places in Open Camping DB. Works in React Native, Expo and the browser, with no dependencies.
 
 ```ts
 import AsyncStorage from "@react-native-async-storage/async-storage";

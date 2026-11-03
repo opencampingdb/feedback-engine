@@ -3,7 +3,7 @@
  * (`POST /v1/feedback`), matching SPEC.md "Feedback submission".
  */
 
-export type FeedbackType = "report" | "review" | "check" | "review_report" | "fee";
+export type FeedbackType = "report" | "review" | "check" | "review_report" | "fee" | "photo" | "photo_report" | "photo_erasure";
 export type OwnerType = "owner_claim" | "owner_listing" | "owner_update";
 
 export type ReportKind =
@@ -191,6 +191,37 @@ export interface ReviewReportBody {
   reason: ReviewReportReason;
 }
 
+/** Why a traveller reports a published photo. */
+export type PhotoReportReason = "spam_ad" | "offensive" | "off_topic" | "not_this_place" | "personal_details" | "copyright";
+
+export interface PhotoReportBody {
+  /** Id of the published photo, `pho_<ulid>`. */
+  photo: string;
+  reason: PhotoReportReason;
+}
+
+/**
+ * The files of a photo upload, as the meta part of `POST /v1/photos` names
+ * them. The intake checks the bytes it receives against these.
+ */
+export interface PhotoFiles {
+  /** SHA-256 (lower case hex) of the full size JPEG. */
+  full_sha256: string;
+  /** Size of the full size JPEG in bytes, at most 1.5 MB. */
+  full_bytes: number;
+  /** SHA-256 (lower case hex) of the thumbnail JPEG. */
+  thumb_sha256: string;
+  /** Size of the thumbnail in bytes, at most 200 KB. */
+  thumb_bytes: number;
+}
+
+/** A stored photo upload: the files as the intake checked them. */
+export interface StoredPhotoFiles extends PhotoFiles {
+  /** Pixel size of the full size JPEG, read from the file. */
+  width: number;
+  height: number;
+}
+
 export interface CheckBody {
   /** Day of the visit, `YYYY-MM-DD`. */
   visited: string;
@@ -257,6 +288,32 @@ export interface ReviewReportSubmission extends SubmissionBase {
   type: "review_report";
   place: string;
   review_report: ReviewReportBody;
+}
+
+/**
+ * The meta part of a photo upload (`POST /v1/photos`). The JPEG files travel
+ * beside it in the same request. Needs a contributor.
+ */
+export interface PhotoSubmission extends SubmissionBase {
+  type: "photo";
+  place: string;
+  photo: PhotoFiles;
+}
+
+/** A traveller's report of a published photo. `place` is the photo's place. */
+export interface PhotoReportSubmission extends SubmissionBase {
+  type: "photo_report";
+  place: string;
+  photo_report: PhotoReportBody;
+}
+
+/**
+ * Asks for every photo from the contributor to be removed, before their
+ * account is deleted. `place` is null. Needs a contributor.
+ */
+export interface PhotoErasureSubmission extends SubmissionBase {
+  type: "photo_erasure";
+  place: null;
 }
 
 /** Contact details of an owner. They stay in the private inbox and are never published. */
@@ -335,7 +392,10 @@ export type FeedbackSubmission =
   | ReviewSubmission
   | CheckSubmission
   | ReviewReportSubmission
-  | FeeSubmission;
+  | FeeSubmission
+  | PhotoSubmission
+  | PhotoReportSubmission
+  | PhotoErasureSubmission;
 
 /** Every body the intake accepts. */
 export type Submission = FeedbackSubmission | OwnerSubmission;
@@ -345,7 +405,9 @@ export type Submission = FeedbackSubmission | OwnerSubmission;
  * the validated submission with `device` replaced by its salted hash, plus the
  * id, the time it arrived and the app name taken from the app key.
  */
-export type StoredFeedback = DistributiveOmit<FeedbackSubmission, "device" | "contributor"> & StoredFields;
+export type StoredFeedback =
+  | (DistributiveOmit<Exclude<FeedbackSubmission, PhotoSubmission>, "device" | "contributor"> & StoredFields)
+  | (Omit<PhotoSubmission, "device" | "contributor" | "photo"> & StoredFields & { photo: StoredPhotoFiles });
 
 /**
  * An owner submission as stored. A claim or listing gains the `code` the owner

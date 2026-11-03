@@ -1,5 +1,5 @@
 /**
- * SHA-256 of a string's UTF-8 bytes, as lower case hex. Written out here
+ * SHA-256 of a string's UTF-8 bytes, or of raw bytes, as lower case hex. Written out here
  * because React Native has no `crypto.subtle`, and the attestation headers
  * must hash the exact body the client sends.
  */
@@ -18,7 +18,10 @@ const K = new Uint32Array([
 const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
 
 export function sha256Hex(text: string): string {
-  const data = new TextEncoder().encode(text);
+  return sha256HexBytes(new TextEncoder().encode(text));
+}
+
+export function sha256HexBytes(data: Uint8Array): string {
   const bitLength = data.length * 8;
   const padded = new Uint8Array(Math.ceil((data.length + 9) / 64) * 64);
   padded.set(data);
