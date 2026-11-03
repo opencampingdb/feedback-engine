@@ -32,6 +32,8 @@ import {
   type KVLike,
 } from "./ratelimit.js";
 import {
+  addEvidence,
+  addPlace,
   getPlace,
   listPlaces,
   MAX_BLOCKED_CONTRIBUTORS,
@@ -40,7 +42,6 @@ import {
   parseBbox,
   RECENT_CACHE_SECONDS,
   removePlaces,
-  savePlace,
   setBlocked,
   snapBbox,
   WITHDRAW_WINDOW_MS,
@@ -641,7 +642,7 @@ export function createHandler(deps: Deps) {
     const cacheKey = new Request(`${url.origin}${url.pathname}${bbox ? `?bbox=${bbox.join(",")}` : ""}`, { method: "GET" });
     const hit = await deps.cache?.match(cacheKey);
     if (hit) return withCors(hit);
-    const places = await listPlaces(env.RECENT_PLACES, bbox);
+    const places = await listPlaces(env.RECENT_PLACES, new Date(deps.now()).toISOString(), bbox);
     const response = json(200, { places }, { "cache-control": `public, max-age=${RECENT_CACHE_SECONDS}` });
     await deps.cache?.put(cacheKey, response.clone());
     return withCors(response);
@@ -683,7 +684,7 @@ export function createHandler(deps: Deps) {
     if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_REMOVE_IDS || !ids.every(isPlaceId)) {
       return json(400, { error: "invalid", details: [`ids must be 1 to ${MAX_REMOVE_IDS} place ids`] }, cors);
     }
-    await removePlaces(call.kv, ids as string[]);
+    await removePlaces(call.kv, ids as string[], new Date(deps.now()).toISOString());
     return json(200, { removed: ids.length }, cors);
   }
 
@@ -701,8 +702,7 @@ export function createHandler(deps: Deps) {
     if (!Array.isArray(contributors) || contributors.length > MAX_BLOCKED_CONTRIBUTORS || !contributors.every(isHashed)) {
       return json(400, { error: "invalid", details: [`contributors must be up to ${MAX_BLOCKED_CONTRIBUTORS} hashed contributor ids`] }, cors);
     }
-    const now = new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
-    await setBlocked(call.kv, contributors as string[], now);
+    await setBlocked(call.kv, contributors as string[]);
     return json(200, { blocked: new Set(contributors).size }, cors);
   }
 
@@ -920,8 +920,8 @@ export function createHandler(deps: Deps) {
 /**
  * Keeps the recent places store up to date with an accepted item: a new place
  * from an attested install whose note passes the text checks once its contact
- * details are stripped (as the inbox stores it) goes in, and a
- * check, removal report or withdraw on a stored place works its standing out again.
+ * details are stripped (as the inbox stores it) goes in, and a check, removal
+ * report or withdraw on a stored place is added as evidence of its own.
  */
 async function updateRecent(
   kv: ListableKV,
@@ -940,33 +940,28 @@ async function updateRecent(
   if (submission.type === "report" && submission.report.kind === "new_place") {
     const { note, place_kind, name } = submission.report;
     if (!proof || !contributor || !submission.location || firstProblem(note === undefined ? undefined : tidyText(stripContactDetails(note)))) return;
-    const place: StoredPlace = {
+    await addPlace(kv, {
       id: newPlaceId(id),
       location: submission.location,
       kind: place_kind ?? null,
       name: name === undefined ? null : tidyName(name),
-      standing: "shown",
       added: received,
       contributor,
       device,
       ...(attestKey ? { attest_key: attestKey } : {}),
-      checks: [],
-      reports: [],
-      withdrawn_at: null,
-    };
-    await savePlace(kv, place, received);
+    });
     return;
   }
   if (!target) return;
   if (submission.type === "check") {
     // A check carries no location: only the app's word that the phone was near the place.
     const check = { device, stillThere: submission.check.still_there, nearby: submission.check.nearby === true, day: received };
-    await savePlace(kv, { ...target, checks: [...target.checks, check] }, received);
+    await addEvidence(kv, target.id, id, { type: "check", check });
   } else if (submission.type === "report" && submission.report.kind === "remove" && submission.report.reason) {
     const report = { device, reason: submission.report.reason, day: received };
-    await savePlace(kv, { ...target, reports: [...target.reports, report] }, received);
+    await addEvidence(kv, target.id, id, { type: "report", report });
   } else if (submission.type === "withdraw") {
-    await savePlace(kv, { ...target, withdrawn_at: received }, received);
+    await addEvidence(kv, target.id, id, { type: "withdraw", at: received });
   }
 }
 

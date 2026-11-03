@@ -53,6 +53,31 @@ function listableKv(): ListableKV & { data: Map<string, { value: string; metadat
   return kv;
 }
 
+/**
+ * The store as two requests see it when they reach it at the same moment: each
+ * read of a place waits until `n` reads have been asked for, so both read
+ * before either writes.
+ */
+function atOnce(kv: ListableKV, n: number): ListableKV {
+  let waiting: (() => void)[] = [];
+  return {
+    ...kv,
+    get: async (k: string) => {
+      if (k.startsWith("np:") && n > 0) {
+        n -= 1;
+        await new Promise<void>((resolve) => {
+          waiting.push(resolve);
+          if (n === 0) {
+            for (const go of waiting) go();
+            waiting = [];
+          }
+        });
+      }
+      return kv.get(k);
+    },
+  };
+}
+
 function fakeCache(): CacheLike & { entries: Map<string, Response> } {
   const entries = new Map<string, Response>();
   return {
@@ -311,6 +336,24 @@ describe("recent places", () => {
     expect((await list())[0]!.standing).toBe("confirmed");
   });
 
+  it("counts both of two checks sent at the same moment", async () => {
+    const id = await add();
+    const check = (i: number) =>
+      feedback({ type: "check", place: id, device: otherDevice(i), app_version: "1.0.0", consent: true, check: { visited: "2026-11-03", still_there: true, nearby: true } });
+    const both = { ...e, RECENT_PLACES: atOnce(store, 2) };
+    const answers = await Promise.all([handle(check(1), both), handle(check(2), both)]);
+    expect(answers.map((a) => a.status)).toEqual([202, 202]);
+    expect((await list())[0]!.standing).toBe("confirmed");
+  });
+
+  it("counts both of two reports sent at the same moment", async () => {
+    const id = await add();
+    const remove = (i: number) => feedback({ ...newPlace({ device: otherDevice(i), contributor: `acct_reporter_000000${i}` }), place: id, location: undefined, report: { kind: "remove", reason: "fake" } });
+    const both = { ...e, RECENT_PLACES: atOnce(store, 2) };
+    await Promise.all([handle(remove(1), both), handle(remove(2), both)]);
+    expect(await list()).toEqual([]);
+  });
+
   it("doesn't confirm a place on still there checks from away from it", async () => {
     const id = await add();
     for (const i of [1, 2, 3]) {
@@ -415,6 +458,17 @@ describe("recent places", () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ removed: 2 });
       expect((await list()).map((p) => p.id)).toEqual([kept]);
+    });
+
+    it("removes the checks and reports on a place with it", async () => {
+      const id = await add();
+      await handle(
+        feedback({ type: "check", place: id, device: otherDevice(1), app_version: "1.0.0", consent: true, check: { visited: "2026-11-03", still_there: true, nearby: true } }),
+        e,
+      );
+      await handle(feedback({ ...newPlace({ device: otherDevice(2), contributor: "acct_reporter_0000002" }), place: id, location: undefined, report: { kind: "remove", reason: "fake" } }), e);
+      expect((await handle(remove([id]), e)).status).toBe(200);
+      expect([...store.data.keys()].filter((k) => k.startsWith("np:"))).toEqual([]);
     });
 
     it("refuses a wrong token and a bad body", async () => {
