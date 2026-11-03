@@ -78,6 +78,25 @@ describe("photo server", () => {
     expect(env.PHOTOS.reads).toBe(1);
   });
 
+  it("serves a place's photo records for five minutes, and an empty list for a place without photos", async () => {
+    const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
+    const line = `{"id":"${PHOTO}","place":"${PLACE}"}\n`;
+    env.PHOTOS = Object.assign(fakeBucket([]), {
+      get: async (key: string) =>
+        key === `records/${PLACE}.ndjson` ? { body: new Response(line).body!, httpEtag: '"r1"', size: line.length } : null,
+    }) as typeof env.PHOTOS;
+    const res = await handle(get(`/v1/places/${PLACE}/photos.ndjson`), env, ctx());
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/x-ndjson; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(await res.text()).toBe(line);
+    const none = await handle(get("/v1/places/ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZC/photos.ndjson"), env, ctx());
+    expect(none.status).toBe(200);
+    expect(await none.text()).toBe("");
+    expect((await handle(get("/v1/places/not-a-place/photos.ndjson"), env, ctx())).status).toBe(404);
+    expect((await handle(get(`/v1/places/${PLACE}/photos.ndjson`, "nope"), env, ctx())).status).toBe(401);
+  });
+
   it("needs a known app key", async () => {
     expect((await handle(get(`/v1/photos/${PHOTO}/thumb.jpg`, "nope"), env, ctx())).status).toBe(401);
   });

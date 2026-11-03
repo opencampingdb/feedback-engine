@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createFeedbackClient,
+  createPhotoClient,
   FeedbackValidationError,
   isJpeg,
   sha256Hex,
@@ -92,7 +93,7 @@ describe("photo client", () => {
       posts.push({ body: init.body });
       return { status: 202, json: async () => ({ id: "fb_1" }), headers: { get: () => null } };
     };
-    const client = createFeedbackClient({
+    const client = createPhotoClient({
       endpoint: "https://intake.example/",
       appKey: "key-1",
       appVersion: "1.2.3",
@@ -149,7 +150,7 @@ describe("photo client", () => {
   });
 
   it("answers offline when the intake cannot be reached, and queues nothing", async () => {
-    const client = createFeedbackClient({
+    const client = createPhotoClient({
       endpoint: "https://intake.example",
       appKey: "key-1",
       appVersion: "1.2.3",
@@ -170,6 +171,19 @@ describe("photo client", () => {
     expect(JSON.parse(posts[1]!.body)).toMatchObject({ type: "photo_erasure", place: null, contributor: CONTRIBUTOR });
   });
 
+  it("keeps photos out of the feedback client, and its queue apart from feedback's", async () => {
+    const storage = memoryStorage();
+    const offline = async (): Promise<never> => {
+      throw new Error("offline");
+    };
+    const options = { endpoint: "https://intake.example", appKey: "key-1", appVersion: "1.0.0", storage, fetch: offline };
+    const feedback = createFeedbackClient(options) as unknown as Record<string, unknown>;
+    expect(["photo", "photoPass", "reportPhoto", "erasePhotos"].filter((m) => m in feedback)).toEqual([]);
+    await createPhotoClient(options).reportPhoto({ place: PLACE, photo: PHOTO, reason: "illegal", contributor: CONTRIBUTOR, consent: true });
+    expect(await storage.getItem("ocdb.photos.queue")).toContain("photo_report");
+    expect(await storage.getItem("ocdb.feedback.queue")).toBeNull();
+  });
+
   it("knows a JPEG by its first bytes", () => {
     expect(isJpeg(jpeg(4))).toBe(true);
     expect(isJpeg(new Uint8Array([0xff, 0xd8]))).toBe(false);
@@ -185,7 +199,7 @@ describe("photo pass client", () => {
       const expires = new Date(clock + 3600_000).toISOString().replace(/\.\d{3}Z$/, "Z");
       return { status: 200, json: async () => ({ pass: `p1.example-app.${posts.length}`, expires }), headers: { get: () => null } };
     };
-    const client = createFeedbackClient({
+    const client = createPhotoClient({
       endpoint: "https://intake.example",
       appKey: "key-1",
       appVersion: "1.2.3",
@@ -209,7 +223,7 @@ describe("photo pass client", () => {
   });
 
   it("answers offline when the intake cannot be reached", async () => {
-    const client = createFeedbackClient({
+    const client = createPhotoClient({
       endpoint: "https://intake.example",
       appKey: "key-1",
       appVersion: "1.2.3",

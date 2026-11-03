@@ -1,6 +1,7 @@
 /**
- * Serves published photos from the `ocdb-photos` bucket:
- * `GET /v1/photos/<pho_id>/full.jpg` and `/thumb.jpg`. A request carries a
+ * Serves published photos from the serving bucket:
+ * `GET /v1/photos/<pho_id>/full.jpg` and `/thumb.jpg`, and a place's visible
+ * photo records at `GET /v1/places/<place id>/photos.ndjson`. A request carries a
  * photo pass from the intake in `x-photo-pass` (apps on phones), or a photo
  * key in `x-app-key` (servers, which can keep a key secret). Answers come from the edge cache when they can.
  * Reads that reach R2 are counted per app per day, and above the app's
@@ -9,6 +10,7 @@
  * a `withheld:<photo id>` key stops one photo, cache or not.
  */
 
+import { isPlaceId } from "@opencampingdb/feedback";
 import { verifyPass } from "../../intake/src/pass.js";
 
 /** The parts of an R2 bucket binding the server uses. */
@@ -77,6 +79,10 @@ export const FLUSH_EVERY = 50;
 export const MAX_AGE_SECONDS = 24 * 60 * 60;
 
 const ROUTE = /^\/v1\/photos\/(pho_[0-9A-HJKMNP-TV-Z]{26})\/(full|thumb)\.jpg$/;
+/** A place's visible photo records, as the sync tool writes them to `records/<place id>.ndjson`. */
+const RECORDS_ROUTE = /^\/v1\/places\/([A-Za-z0-9_]{1,64})\/photos\.ndjson$/;
+/** How long the edge and the app may keep a place's records. */
+export const RECORDS_MAX_AGE_SECONDS = 5 * 60;
 const APP_NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
 export function parsePhotoKeys(raw: string): Map<string, PhotoKey> {
@@ -176,8 +182,9 @@ export function createHandler(deps: Deps) {
   return async function handle(request: Request, env: Env, ctx: Ctx): Promise<Response> {
     if (request.method !== "GET" && request.method !== "HEAD") return answer(405, "method_not_allowed", { allow: "GET, HEAD" });
     const url = new URL(request.url);
-    const match = ROUTE.exec(url.pathname);
-    if (!match) return answer(404, "not_found");
+    const photo = ROUTE.exec(url.pathname);
+    const records = photo ? null : RECORDS_ROUTE.exec(url.pathname);
+    if (!photo && !(records && isPlaceId(records[1]!))) return answer(404, "not_found");
 
     let keys: Map<string, PhotoKey>;
     try {
@@ -202,7 +209,7 @@ export function createHandler(deps: Deps) {
     await refresh(env, apps, nowMs);
     if (off) return answer(503, "paused", { "retry-after": "3600" });
     // Checked before the cache, so a withheld photo stops at once, not when its cache entry ends.
-    if (withheld.has(match[1]!)) return answer(404, "not_found");
+    if (photo && withheld.has(photo[1]!)) return answer(404, "not_found");
 
     // The cache key is the photo alone: no app key, no query string.
     const cacheKey = new Request(`${url.origin}${url.pathname}`, { method: "GET" });
@@ -217,20 +224,21 @@ export function createHandler(deps: Deps) {
       return answer(503, "daily_read_cap", { "retry-after": String(secondsToMidnightUtc(nowMs)) });
     }
 
-    const object = await env.PHOTOS.get(`${match[1]}/${match[2]}.jpg`);
+    const object = await env.PHOTOS.get(photo ? `${photo[1]}/${photo[2]}.jpg` : `records/${records![1]}.ndjson`);
     unsent.set(key.app, (unsent.get(key.app) ?? 0) + 1);
     since.set(key.app, (since.get(key.app) ?? 0) + 1);
     const pendingReads = [...unsent.values()].reduce((n, c) => n + c, 0);
     if (pendingReads >= FLUSH_EVERY || nowMs - lastFlush >= STATE_TTL_MS) ctx.waitUntil(flush(env, nowMs));
-    if (!object) return answer(404, "not_found");
+    if (!object && photo) return answer(404, "not_found");
 
-    const response = new Response(object.body, {
+    // A place without a records file has no visible photos: an empty list, cached like any other.
+    const response = new Response(object ? object.body : "", {
       status: 200,
       headers: {
-        "content-type": "image/jpeg",
-        "content-length": String(object.size),
-        etag: object.httpEtag,
-        "cache-control": `public, max-age=${MAX_AGE_SECONDS}`,
+        "content-type": photo ? "image/jpeg" : "application/x-ndjson; charset=utf-8",
+        "content-length": String(object ? object.size : 0),
+        ...(object ? { etag: object.httpEtag } : {}),
+        "cache-control": `public, max-age=${photo ? MAX_AGE_SECONDS : RECORDS_MAX_AGE_SECONDS}`,
         "x-content-type-options": "nosniff",
       },
     });

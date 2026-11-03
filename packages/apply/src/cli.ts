@@ -7,7 +7,8 @@ import { run } from "./run.js";
 const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>]
                   [--auto-pr-body <file>] [--review-pr-body <file>]
                   [--review-prs <file>] [--bot-login <login>]
-                  [--summary <file>] [--now <ISO time>]
+                  [--summary <file>] [--now <ISO time>] [--places <dir>]
+                  [--photo-licence <id>]
 
 Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
@@ -16,6 +17,9 @@ tree when left out). Decided items move to <inbox>/applied or <inbox>/refused.
 --json number,state,body,comments,author,isCrossRepository\`; ticked owner
 claim boxes in merged PRs approve those claims. Only PRs opened by --bot-login
 from the data repository itself, and only comments by --bot-login, count.
+--places makes it a photo repository run for an app's own photo service:
+<data> holds only photos and moderation files, place records are read from the
+Open Camping DB data checkout in <dir>, and anything but photos is refused.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
 
@@ -31,6 +35,8 @@ async function main(): Promise<number> {
       "bot-login": { type: "string", multiple: true },
       summary: { type: "string" },
       now: { type: "string" },
+      places: { type: "string" },
+      "photo-licence": { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -54,6 +60,8 @@ async function main(): Promise<number> {
     ...(values["bot-login"] ? { botLogins: values["bot-login"] } : {}),
     ...(values["review-data"] ? { reviewData: values["review-data"] } : {}),
     ...(now ? { now } : {}),
+    ...(values.places ? { places: values.places } : {}),
+    ...(values["photo-licence"] ? { photoLicence: values["photo-licence"] } : {}),
   });
 
   if (values["auto-pr-body"]) await writeFile(values["auto-pr-body"], summary.auto_pr_body, "utf8");

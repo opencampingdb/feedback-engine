@@ -103,8 +103,8 @@ export interface Photo {
   contributor: string;
   created: string;
   app: string;
-  /** The photo is the contributor's work, licensed to everyone under CC BY 4.0. */
-  licence: "CC-BY-4.0";
+  /** Licence id the photo service sets, for example `CC-BY-4.0`. */
+  licence: string;
   /** Pixel size of the full size file. */
   width: number;
   height: number;

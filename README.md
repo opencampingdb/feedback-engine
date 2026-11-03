@@ -1,14 +1,14 @@
 # Open Camping DB feedback engine
 
-Lets any app send reports, reviews, checks, fees and photos about places in [Open Camping DB](https://github.com/opencampingdb/data). Each submission passes quality rules and reaches the public `opencampingdb/data` repository as a pull request.
+Lets any app send reports, reviews, checks and fees about places in [Open Camping DB](https://github.com/opencampingdb/data). Each submission passes quality rules and reaches the public `opencampingdb/data` repository as a pull request.
 
-It has five parts:
+It has five parts, and a photo kit that each app runs for itself (see Photos below):
 
 | Package | What it does |
 |---|---|
 | [`packages/sdk`](packages/sdk) (`@opencampingdb/feedback`) | Client for React Native, Expo and the web. Queues submissions offline, retries with backoff, keeps a random per-install device id and refuses to send without consent. |
-| [`packages/intake`](packages/intake) | Cloudflare Worker at `POST /v1/feedback` and `POST /v1/photos`. Checks the app key, the schema and consent, App Attest or Play Integrity when the key requires it, rate limits, removes contact details from free text, hashes the device and contributor ids and writes one JSON file per submission to the private `inbox` repository. |
-| [`packages/photos`](packages/photos) | Cloudflare Worker that serves published photos from R2 to attested installs with a photo pass, and to servers with a photo key, behind the edge cache, with a per-address limit, daily read caps and an off switch. |
+| [`packages/intake`](packages/intake) | Cloudflare Worker at `POST /v1/feedback`, and at `POST /v1/photos` when an app deploys it as its own photo service. Checks the app key, the schema and consent, App Attest or Play Integrity when the key requires it, rate limits, removes contact details from free text, hashes the device and contributor ids and writes one JSON file per submission to the private `inbox` repository. |
+| [`packages/photos`](packages/photos) | Photo kit: a Cloudflare Worker an app runs to serve its published photos and photo records from R2 to its attested installs with a photo pass, and to servers with a photo key, behind the edge cache, with a per-address limit, daily read caps and an off switch. |
 | [`packages/apply`](packages/apply) | Script and reusable GitHub workflow that runs hourly in `inbox`, applies the quality rules and keeps up to two PRs open on `data`: one for automatic changes, one for a person. |
 | [`packages/osm-notes`](packages/osm-notes) | Script and reusable GitHub workflow that runs daily in `inbox` and passes changes accepted into `data` to OpenStreetMap as notes for its mappers to check. It never edits OSM. |
 
@@ -31,7 +31,7 @@ const feedback = createFeedbackClient({
 await feedback.check({ place: "ocdb_01JBX...", check: { visited: "2026-10-30", still_there: true }, consent: true });
 ```
 
-Show `ATTRIBUTION` wherever the data appears, and call `feedback.flush()` when the app returns to the foreground. [docs/integration.md](docs/integration.md) walks through an Expo app step by step. To get an app key, email dev@example.org.
+Show `ATTRIBUTION` wherever the data appears, and call `feedback.flush()` when the app returns to the foreground. [docs/integration.md](docs/integration.md) walks through an Expo app step by step. To get an app key, open an issue with the **App key** form in this repository.
 
 ## Reviews
 
@@ -39,7 +39,7 @@ Reviews carry an opaque contributor id from the app's signed-in account. One rev
 
 ## Photos
 
-Signed-in travellers can add photos of a place, licensed under CC BY 4.0. A contributor's first photo goes to a person, three reports hide a photo, and a traveller's photos are removed when they ask before deleting their account. The files stay in a private bucket until their record is merged, and are served only through the photo server, to installs that prove themselves with App Attest or Play Integrity. [docs/photos.md](docs/photos.md) covers the app side, moderation and how to run the storage.
+Open Camping DB holds no photos. The photo kit lets an app run its own photo service on its own Cloudflare account and GitHub repositories: `createPhotoClient` in the SDK, the intake with a photo bucket for uploads and photo passes, the photo server, the apply rules in photos-only mode for the app's records repository, and `ocdb-photos` to sync its buckets and check its records. A contributor's first photo goes to a person, three reports hide a photo, a report of illegal content stops it being served at once, SafeSearch can refuse adult or violent uploads, and a traveller's photos are removed when they delete their account. [docs/photos.md](docs/photos.md) walks through running it.
 
 ## Owners
 

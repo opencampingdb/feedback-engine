@@ -541,7 +541,7 @@ export function createHandler(deps: Deps) {
    * with `photo_pass_unattested`.
    */
   async function photoPass(request: Request, env: Env, app: AppEntry, text: string, cors: Record<string, string>): Promise<Response> {
-    if (!env.PHOTO_PASS_SECRET) return json(404, { error: "not_found" }, cors);
+    if (!env.PHOTO_PASS_SECRET || !env.PHOTOS_PENDING) return json(404, { error: "not_found" }, cors);
     if (!app.requires_attestation && !app.photo_pass_unattested) {
       return json(403, { error: "attestation_not_required_for_app_key" }, cors);
     }
@@ -647,6 +647,10 @@ export function createHandler(deps: Deps) {
 
     const submission = checked.value;
     if (submission.type === "photo") return json(400, { error: "invalid", details: ["photos are sent to /v1/photos"] }, cors);
+    // Photo reports and erasures belong to a photo service: an intake with a photo bucket.
+    if ((submission.type === "photo_report" || submission.type === "photo_erasure") && !env.PHOTOS_PENDING) {
+      return json(404, { error: "photos_not_served_here" }, cors);
+    }
     const isOwner = isOwnerSubmission(submission);
     const kind: SubmissionKind = isOwner ? "owner" : "feedback";
     if (app.kinds && !app.kinds.includes(kind)) return json(403, { error: "type_not_allowed_for_app_key" }, cors);

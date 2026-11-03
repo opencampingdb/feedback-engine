@@ -1,0 +1,24 @@
+name: App key
+description: Ask for an app key for the Open Camping DB feedback intake.
+title: "App key: "
+labels: ["app-key"]
+body:
+  - type: input
+    id: app
+    attributes:
+      label: App name
+      description: Lower case letters, digits and dashes. It is stored with each submission your app sends.
+    validations:
+      required: true
+  - type: input
+    id: volume
+    attributes:
+      label: Submissions a day
+      description: Roughly how many reports, reviews, checks and fees you expect a day.
+    validations:
+      required: true
+  - type: textarea
+    id: platforms
+    attributes:
+      label: Platforms and attestation
+      description: iOS bundle id with team id, Android package name, and whether you want the key to require App Attest or Play Integrity. The key is sent to you through a private security advisory on this repository.

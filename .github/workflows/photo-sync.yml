@@ -1,0 +1,104 @@
+# Reusable workflow for an app's photo repository (the photo kit, see
+# docs/photos.md): checks the photo lines, then keeps the app's two R2 buckets
+# in step with them and writes each place's records for the photo server.
+# Call it from the photo repository on each push to main and once a day.
+
+name: Photo sync
+
+on:
+  workflow_call:
+    inputs:
+      engine-repository:
+        description: owner/name of the feedback-engine repository
+        type: string
+        default: opencampingdb/feedback-engine
+      engine-ref:
+        description: Commit of feedback-engine to run. Use the same SHA the caller pins this workflow to.
+        type: string
+        required: true
+      places-repository:
+        description: owner/name of the Open Camping DB data repository to check places against
+        type: string
+        default: opencampingdb/data
+      photo-licence:
+        description: Licence id every photo line must carry
+        type: string
+        default: CC-BY-4.0
+      serving-bucket:
+        description: R2 bucket the photo server reads
+        type: string
+        required: true
+      pending-bucket:
+        description: R2 bucket the intake writes uploads to
+        type: string
+        required: true
+    secrets:
+      r2-account-id:
+        required: true
+      r2-access-key-id:
+        required: true
+      r2-secret-access-key:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: photo-sync-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Check and sync photos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the photo repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: photos
+          persist-credentials: false
+
+      - name: Check out the engine
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.engine-repository }}
+          ref: ${{ inputs.engine-ref }}
+          path: engine
+          persist-credentials: false
+
+      - name: Check out Open Camping DB place records
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.places-repository }}
+          path: places
+          sparse-checkout: |
+            places
+            schema
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Build the photo tools
+        working-directory: engine
+        run: |
+          npm ci --ignore-scripts --include-workspace-root --workspace packages/sdk --workspace packages/apply
+          npm run build
+
+      - name: Check the photo lines
+        env:
+          PHOTO_LICENCE: ${{ inputs.photo-licence }}
+        run: node engine/packages/apply/dist/photos-cli.js check --root photos --places places --licence "$PHOTO_LICENCE"
+
+      - name: Sync the buckets
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.r2-account-id }}
+          R2_ACCESS_KEY_ID: ${{ secrets.r2-access-key-id }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.r2-secret-access-key }}
+          SERVING: ${{ inputs.serving-bucket }}
+          PENDING: ${{ inputs.pending-bucket }}
+        run: node engine/packages/apply/dist/photos-cli.js sync --root photos --serving "$SERVING" --pending "$PENDING"

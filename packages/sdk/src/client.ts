@@ -215,27 +215,6 @@ export interface FeedbackClient {
   /** Reports a published review. Queued and retried like the others. */
   reportReview(input: ReviewReportInput): Promise<SubmitResult>;
   /**
-   * Uploads a photo of a place, sent at once and never queued. The answer's
-   * id is the photo's, `pho_<ulid>`. The photo stays private until a person
-   * or the apply rules accept it and its record is merged.
-   */
-  photo(input: PhotoInput): Promise<PhotoResult>;
-  /**
-   * A photo pass to send in `x-photo-pass` with every photo request. Kept in
-   * memory and reused until five minutes before it expires, so call it before
-   * each photo request. Pass `renew: true` after the photo server answers
-   * `401 invalid_pass`, to drop the kept pass and get a new one. Needs an app
-   * key that requires attestation, or one allowed unattested passes.
-   */
-  photoPass(options?: { renew?: boolean }): Promise<PhotoPassResult>;
-  /** Reports a published photo. Queued and retried like a review report. */
-  reportPhoto(input: PhotoReportInput): Promise<SubmitResult>;
-  /**
-   * Asks for every photo from the contributor to be removed. Call it before
-   * deleting the account. Queued and retried like the others.
-   */
-  erasePhotos(input: PhotoErasureInput): Promise<SubmitResult>;
-  /**
    * Claims an existing place for its owner. Sent at once, never queued, because
    * the token in the answer is shown only once. Show `code` and `token` to the
    * owner straight away.
@@ -251,9 +230,45 @@ export interface FeedbackClient {
   pending(): Promise<number>;
 }
 
+/**
+ * The client for an app's own photo service: the Open Camping DB photo kit
+ * (packages/intake with a photo bucket, packages/photos and the apply photo
+ * rules) run by the app's developer. Open Camping DB itself holds no photos.
+ */
+export interface PhotoClient {
+  /**
+   * Uploads a photo of a place, sent at once and never queued. The answer's
+   * id is the photo's, `pho_<ulid>`. The photo stays private until a person
+   * or the apply rules accept it and its record is merged.
+   */
+  photo(input: PhotoInput): Promise<PhotoResult>;
+  /**
+   * A photo pass to send in `x-photo-pass` with every photo request. Kept in
+   * memory and reused until five minutes before it expires, so call it before
+   * each photo request. Pass `renew: true` after the photo server answers
+   * `401 invalid_pass`, to drop the kept pass and get a new one. Needs an app
+   * key that requires attestation, or one allowed unattested passes.
+   */
+  photoPass(options?: { renew?: boolean }): Promise<PhotoPassResult>;
+  /** Reports a published photo. Queued and retried, like feedback. */
+  reportPhoto(input: PhotoReportInput): Promise<SubmitResult>;
+  /**
+   * Asks for every photo from the contributor to be removed. Call it before
+   * deleting the account. Queued and retried, like feedback.
+   */
+  erasePhotos(input: PhotoErasureInput): Promise<SubmitResult>;
+  /** Sends queued reports and erasures that are due. Call when the app comes to the foreground. */
+  flush(): Promise<FlushResult>;
+  /** Number of items waiting to be sent. */
+  pending(): Promise<number>;
+}
+
+/** Options for a photo client: as for feedback, with the photo service's endpoint and app key. */
+export type PhotoClientOptions = FeedbackClientOptions;
+
 export class ConsentRequiredError extends Error {
   constructor() {
-    super("Feedback needs consent: true, given after the user agreed to CONSENT_TEXT");
+    super("Sending needs consent: true, given after the user agreed to CONSENT_TEXT, or to the app's own photo terms for photos");
     this.name = "ConsentRequiredError";
   }
 }
@@ -344,7 +359,7 @@ export function backoffDelay(attempts: number, random: () => number = Math.rando
   return Math.round(ceiling * (0.5 + random() * 0.5));
 }
 
-export function createFeedbackClient(options: FeedbackClientOptions): FeedbackClient {
+function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoClient {
   const {
     appKey,
     appVersion,
@@ -750,5 +765,27 @@ export function createFeedbackClient(options: FeedbackClientOptions): FeedbackCl
     erasePhotos: ({ contributor, consent }) => submit({ place: null, contributor, consent }, "photo_erasure"),
     flush: flushNow,
     pending: () => serial(async () => (await readQueue()).length),
+  };
+}
+
+/** A client for Open Camping DB's feedback intake: reports, reviews, checks, fees and owner requests. */
+export function createFeedbackClient(options: FeedbackClientOptions): FeedbackClient {
+  const { photo: _photo, photoPass: _pass, reportPhoto: _report, erasePhotos: _erase, ...feedback } = createClient(options);
+  return feedback;
+}
+
+/**
+ * A client for an app's own photo service. Its storage keys default to the
+ * `ocdb.photos` prefix, so its queue stays apart from the feedback client's.
+ */
+export function createPhotoClient(options: PhotoClientOptions): PhotoClient {
+  const client = createClient({ storagePrefix: "ocdb.photos", ...options });
+  return {
+    photo: client.photo,
+    photoPass: client.photoPass,
+    reportPhoto: client.reportPhoto,
+    erasePhotos: client.erasePhotos,
+    flush: client.flush,
+    pending: client.pending,
   };
 }

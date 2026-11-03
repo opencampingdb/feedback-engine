@@ -31,16 +31,14 @@ id = "REPLACE_ME_KV_NAMESPACE_ID"
 binding = "ATTEST"
 id = "REPLACE_ME_ATTEST_KV_NAMESPACE_ID"
 
-# Private bucket for uploaded photos until their record is merged. Needed for /v1/photos.
-# Give it a lifecycle rule that deletes objects 180 days after upload, so files of
-# photos a person turned down do not stay for ever.
-[[r2_buckets]]
-binding = "PHOTOS_PENDING"
-bucket_name = "ocdb-photos-pending"
-
-# The photo server's STATE namespace (the same id as in packages/photos/wrangler.toml).
-# A photo reported as illegal is withheld there at once. Optional: without it, such
-# reports still reach a person but the photo is served until they act.
-[[kv_namespaces]]
-binding = "PHOTO_STATE"
-id = "REPLACE_ME_PHOTOS_KV_NAMESPACE_ID"
+# Only when this intake is an app's own photo service (docs/photos.md): uncomment
+# and fill in. The pending bucket holds uploads until their record is merged. Give
+# it a lifecycle rule that deletes objects 180 days after upload. PHOTO_STATE is
+# the photo server's state namespace, where illegal-content reports withhold a photo.
+# [[r2_buckets]]
+# binding = "PHOTOS_PENDING"
+# bucket_name = "replace-me-pending-bucket"
+#
+# [[kv_namespaces]]
+# binding = "PHOTO_STATE"
+# id = "REPLACE_ME_PHOTO_STATE_KV_NAMESPACE_ID"
