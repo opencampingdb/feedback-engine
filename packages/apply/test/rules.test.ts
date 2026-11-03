@@ -692,6 +692,8 @@ describe("items for a person", () => {
   const newPlace = (note?: string) =>
     ({
       ...base(0, "dev-a", null),
+      contributor: ctr("dev-a"),
+      attested: "play_integrity",
       type: "report",
       location: { lat: -35.1, lon: 149.2 },
       report: { kind: "new_place", ...(note ? { note } : {}) },
@@ -866,6 +868,8 @@ describe("new place kind", () => {
   const newPlace = (placeKind?: string) =>
     ({
       ...base(0, "dev-a", null),
+      contributor: ctr("dev-a"),
+      attested: "app_attest",
       type: "report",
       location: { lat: -35.1, lon: 149.2 },
       report: { kind: "new_place", ...(placeKind ? { place_kind: placeKind } : {}) },
@@ -888,6 +892,7 @@ describe("new places", () => {
     ({
       ...base(day, device, null),
       contributor: ctr(device),
+      attested: "app_attest",
       type: "report",
       location,
       report: { kind: "new_place", place_kind: "free_camp", note: "Gravel pit off the highway", ...extra },
@@ -1091,5 +1096,26 @@ describe("new places", () => {
     const out = run([report]);
     expect(out.outcome(report)).toBe("needs_review");
     expect(out.changes).toEqual([expect.objectContaining({ place: PLACE, automatic: false, summary: expect.stringContaining("fake") })]);
+  });
+
+  it("sends a new place to a person when the intake would not list it", () => {
+    const unproven = { ...added(0, "dev-a"), attested: undefined } as unknown as StoredFeedback;
+    const anonymous = { ...added(0, "dev-b", {}, { lat: -30, lon: 140 }), contributor: undefined } as unknown as StoredFeedback;
+    const rude = added(0, "dev-c", { note: "Call 0400 000 000 for a spot" }, { lat: -31, lon: 141 });
+    const out = run([unproven, anonymous, rude]);
+    expect(out.places.size).toBe(0);
+    for (const item of [unproven, anonymous, rude]) expect(out.outcome(item)).toBe("needs_review");
+    expect(out.edits.map((e) => e.kind === "new_place" && e.record.standing)).toEqual(["held", "held", "held"]);
+    expect(out.changes.map((c) => c.summary)).toEqual([
+      expect.stringContaining("not proven by attestation"),
+      expect.stringContaining("no contributor"),
+      expect.stringContaining("note fails the text checks (contact)"),
+    ]);
+  });
+
+  it("counts a check as near the place unless it says otherwise, as the intake does", () => {
+    const item = added(0);
+    const plain = (device: string) => ({ ...base(1, device, idOf(item)), type: "check", check: { visited: at(1).slice(0, 10), still_there: true } }) as StoredFeedback;
+    expect(run([plain("dev-b"), plain("dev-c")], { ...inData(item), now: 2 }).after(idOf(item))?.standing).toBe("confirmed");
   });
 });

@@ -1,7 +1,9 @@
 import {
   isFactName,
+  firstProblem,
   isValidFactValue,
   newPlaceStanding,
+  tidyText,
   safeSearchVerdict,
   type FactName,
   type FactValue,
@@ -54,6 +56,9 @@ const DRAFT_GROUP = "overnight";
  */
 /** The id a new place gets from its `new_place` report: `ocdb_` and the report's ulid, as the SDK's `newPlaceId` makes it. */
 export const newPlaceIdOf = (item: { id: string }) => `ocdb_${item.id.replace(/^fb_/, "")}`;
+
+/** Decision reasons the recent places store is settled by. */
+export const WITHDRAWN = { place: "the person who added it withdrew it", withdrawal: "new place withdrawn" } as const;
 
 export function resolvePlace(id: string | null, places: ReadonlyMap<string, Place>): string | undefined {
   let current = id ?? undefined;
@@ -284,9 +289,9 @@ const isNewPlaceEvidence = (item: StoredFeedback) =>
 
 /**
  * Whether a check was sent near the place. Checks carry no such signal yet,
- * so a check counts as near only when the stored item says `nearby: true`.
+ * so, as at the intake, every check counts as near unless it says `nearby: false`.
  */
-const wasNearby = (item: CheckItem) => (item.check as { nearby?: unknown }).nearby === true;
+const wasNearby = (item: CheckItem) => (item.check as { nearby?: unknown }).nearby !== false;
 
 /** A new place this close to a place in the same group is a possible duplicate. */
 export const DUPLICATE_DISTANCE_M = 150;
@@ -971,7 +976,7 @@ export function applyRules(input: RulesInput): RulesOutput {
       for (const e of mine) {
         if (e.type === "withdraw") {
           if (e.device !== origin.device) decide(e, "refused", "only the install that added a place can withdraw it");
-          else if (standing === "withdrawn") decide(e, "applied", "new place withdrawn");
+          else if (standing === "withdrawn") decide(e, "applied", WITHDRAWN.withdrawal);
           else decide(e, "applied", "withdrawn more than 24 hours after it was added, so it counts as a report");
         } else {
           decide(e, "applied", e.type === "check" ? "check recorded" : "report recorded");
@@ -984,11 +989,13 @@ export function applyRules(input: RulesInput): RulesOutput {
           removed.push(id);
           note(id, "new place withdrawn by the person who added it, so its record is removed", true, by);
         }
-        if (isPending) decide(origin, "refused", "the person who added it withdrew it");
+        if (isPending) decide(origin, "refused", WITHDRAWN.place);
         continue;
       }
 
-      const published = standing === "shown" || standing === "confirmed";
+      // The intake lists a new place only when it passes these, so apply publishes no other.
+      const unlisted = existing ? undefined : whyNotListed(origin);
+      const published = (standing === "shown" || standing === "confirmed") && unlisted === undefined;
       const contacts = Object.keys(origin.report.contacts ?? {}) as (keyof NewPlaceContacts)[];
       const where = `${origin.location!.lat}, ${origin.location!.lon}`;
       const against = [...earlier, ...mine].filter((i) => i.type === "report" || (i.type === "check" && !i.check.still_there));
@@ -1025,12 +1032,19 @@ export function applyRules(input: RulesInput): RulesOutput {
           setSource(draft, fact, "feedback", nowIso);
         }
         edits.push({ kind: "new_place", record: draft, feedback: origin.id });
+        if (unlisted !== undefined && !(standing === "held" || standing === "hidden")) draft.standing = "held";
         const why =
-          standing === "held"
+          unlisted !== undefined && draft.standing === "held" && standing !== "held"
+            ? `${unlisted}, so it is not published (keep it: set standing to shown)`
+            : standing === "held"
             ? `possible duplicate of ${duplicate!.place}, ${duplicate!.distance} m away (keep it: set standing to shown; the same place: merge it into ${duplicate!.place})`
             : "hidden before it was published (keep it: set standing to shown)";
         note(id, `new place at ${where}, ${why}`, false, [origin]);
-        decide(origin, "needs_review", standing === "held" ? "possible duplicate, so a person checks it" : "hidden by reports, so a person checks it");
+        decide(
+          origin,
+          "needs_review",
+          standing === "hidden" ? "hidden by reports, so a person checks it" : standing === "held" ? "possible duplicate, so a person checks it" : `${unlisted}, so a person checks it`,
+        );
       } else if (before !== standing) {
         // Not in the data and already with a person: only the listing changes.
         edits.push({ kind: "note", place: id, feedback: mine[0]!.id });
@@ -1042,6 +1056,14 @@ export function applyRules(input: RulesInput): RulesOutput {
       if (isPending && published && contacts.length > 0) held.push(caseFor("contacts", [origin]));
       if (isPending && firstPlace) held.push(caseFor("first_place", [origin]));
     }
+  }
+
+  /** Why the intake would not list a new place, or undefined when it would. */
+  function whyNotListed(item: ReportItem): string | undefined {
+    if (item.attested === undefined) return "not proven by attestation";
+    if (item.contributor === undefined) return "no contributor";
+    const problem = item.report.note === undefined ? null : firstProblem(tidyText(item.report.note));
+    return problem === null ? undefined : `note fails the text checks (${problem})`;
   }
 
   /** A new place's record as its report describes it, with no standing yet. */

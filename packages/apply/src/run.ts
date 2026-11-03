@@ -67,6 +67,8 @@ export interface RunSummary {
   auto_pr_body: string;
   /** Empty when `review_changed` is false. */
   review_pr_body: string;
+  /** New places this run wrote into the automatic checkout for the first time. */
+  new_places: string[];
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -152,6 +154,15 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   // Every photo line, when anything in this run is about photos.
   const photos = crowd.some((p) => photoTypes.has(p.type)) ? await auto.allPhotos() : [];
 
+  // Every record, for the duplicates check, when anything in this run is about a new place.
+  const aboutNewPlaces = crowd.some(
+    (p) =>
+      p.type === "withdraw" ||
+      (p.type === "report" && (p.report.kind === "new_place" || p.report.kind === "remove")) ||
+      (p.type === "check" && p.place !== null && places.get(p.place)?.standing === "held"),
+  );
+  const everyPlace = aboutNewPlaces && !photosOnly ? await auto.allPlaces() : undefined;
+
   const crowdResult = applyRules({
     now: runAt,
     pending: crowd,
@@ -164,6 +175,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     reviewers,
     photos,
     ...(options.photoLicence ? { photoLicence: options.photoLicence } : {}),
+    ...(everyPlace ? { everyPlace } : {}),
   });
 
   // Proof pages for claims and listings still in pending/, oldest first, within
@@ -221,9 +233,17 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   }
   const removedWritten = await auto.addRemovedPhotos(crowdResult.removedPhotos);
   if (removedWritten) autoFiles.push(removedWritten);
+  // Withdrawn new places leave both checkouts.
+  const reviewFiles: string[] = [];
+  for (const placeId of crowdResult.removed) {
+    const gone = await auto.removePlace(placeId);
+    if (gone) autoFiles.push(gone);
+    const draft = sameTree ? undefined : await review.removePlace(placeId);
+    if (draft) reviewFiles.push(draft);
+  }
+  const newPlaces = [...crowdResult.places.values()].filter((p) => p.standing !== undefined && !places.has(p.id)).map((p) => p.id);
 
   // Review edits, applied on top of whatever the review checkout already holds.
-  const reviewFiles: string[] = [];
   const effective = new Set<string>();
   for (const edit of [...crowdResult.edits, ...ownerResult.edits]) {
     if (edit.kind === "note") {
@@ -286,7 +306,9 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const reviewChanges = changes.filter((c) => !c.automatic && c.feedback.some((f) => effective.has(f)));
   const autoChanged = autoFiles.length > 0;
   const ownerClaims = ownerResult.forReview.length > 0;
-  const reviewChanged = reviewFiles.length > 0 || reviewChanges.length > 0 || ownerClaims;
+  // A held case is listed when this run wrote its place or its edit for a person.
+  const held = crowdResult.held.filter((h) => crowdResult.places.has(h.place) || h.feedback.some((f) => effective.has(f)));
+  const reviewChanged = reviewFiles.length > 0 || reviewChanges.length > 0 || ownerClaims || held.length > 0;
 
   return {
     run_at: runAt,
@@ -298,6 +320,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     auto_files: autoFiles,
     review_files: reviewFiles,
     auto_pr_body: autoChanged ? autoPrBody(runAt, autoChanges, decisions, allPlaces) : "",
-    review_pr_body: reviewChanged ? reviewPrBody(runAt, reviewChanges, allPlaces, ownerResult.forReview) : "",
+    review_pr_body: reviewChanged ? reviewPrBody(runAt, reviewChanges, allPlaces, ownerResult.forReview, held) : "",
+    new_places: newPlaces,
   };
 }

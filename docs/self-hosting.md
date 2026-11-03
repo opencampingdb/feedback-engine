@@ -144,8 +144,14 @@ Copy [`packages/apply/examples/inbox-apply-feedback.yml`](../packages/apply/exam
 
 Run the workflow once by hand from the Actions tab. With items in `pending/` it commits the moved files to `inbox` and keeps up to two PRs open on `data`:
 
-- `feedback/auto`: changes from the automatic rules. It merges itself once CI passes.
-- `feedback/review`: new places, location changes, website and phone changes and other reports, labelled `needs-review`. Edit the files on the branch if needed, then merge it, or close it to refuse them.
+- `feedback/auto`: changes from the automatic rules, new places included. It merges itself once CI passes.
+- `feedback/review`: held new places, location changes, website and phone changes and other reports, labelled `needs-review`. Edit the files on the branch if needed, then merge it, or close it to refuse them.
+
+New places are written with their `standing` from the SDK's `newPlaceStanding`. A `shown` or `confirmed` place goes on `feedback/auto` when its report was attested, has a contributor and its note passes the SDK's text checks, as the intake requires to list it. Checks, `remove` reports and the adder's `withdraw` on a place added in the last 90 days work its standing out again: reports from two devices (three once confirmed) set it to `hidden`, and a place withdrawn within 24 hours is not written, or its record is deleted. A place within 150 m of another in the same group, a place hidden before it was published, and a place the intake would not list are drafted on `feedback/review` with standing `held` or `hidden`: set `standing` to `shown` to publish it, or close the PR. Contact details sent with a new place stay in the inbox for a person and never reach the record unchecked.
+
+The review PR body lists every held new place under "Held new places", one line each: `- held-case` and a JSON object with `case` (`duplicate`, `hidden`, `contacts` or `first_place`), `place`, `standing`, `location`, `kind`, the case's details (`duplicate_of` and `distance_m`, `reports` and `reasons` or `blocked`, the `contacts` named, the `contributor`) and the `feedback` ids to read in the inbox. A triage agent can read these lines instead of the prose.
+
+Run `ocdb-apply` with `--main <checkout of data main> --intake <intake URL>` and the `PLACES_TOKEN` secret to take new places out of the intake's recent places store once the PR that writes them is merged, and withdrawn ones at once.
 
 When a PR from either branch is already open, later runs add a commit and a comment to it. Once a PR is merged or closed, the next run starts the branch again from `main`. With nothing to do the workflow ends without changes.
 
