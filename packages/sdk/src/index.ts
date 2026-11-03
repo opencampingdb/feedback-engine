@@ -14,7 +14,7 @@ export {
 } from "./client.js";
 export type {
   AttestationError,
-  AttestationRejection,
+  AttestationRefusal,
   CheckInput,
   FeeInput,
   FeedbackClient,

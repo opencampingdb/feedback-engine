@@ -18,18 +18,26 @@ const { privateKey } = generateKeyPairSync("rsa", {
   publicKeyEncoding: { type: "spki", format: "pem" },
 });
 
-/** An in-memory KV. Set `failing` to make every `put` throw, as a storage error would. */
-function fakeKv(): KVLike & { data: Map<string, string>; failing: boolean } {
+type KvOperation = "get" | "put" | "delete";
+
+/** An in-memory KV. Set `failing` to an operation to make it throw, as a storage error would. */
+function fakeKv(): KVLike & { data: Map<string, string>; failing: KvOperation | undefined } {
   const data = new Map<string, string>();
   const kv = {
     data,
-    failing: false,
-    get: async (k: string) => data.get(k) ?? null,
+    failing: undefined as KvOperation | undefined,
+    get: async (k: string) => {
+      if (kv.failing === "get") throw new Error("KV get failed");
+      return data.get(k) ?? null;
+    },
     put: async (k: string, v: string) => {
-      if (kv.failing) throw new Error("KV put failed");
+      if (kv.failing === "put") throw new Error("KV put failed");
       data.set(k, v);
     },
-    delete: async (k: string) => void data.delete(k),
+    delete: async (k: string) => {
+      if (kv.failing === "delete") throw new Error("KV delete failed");
+      data.delete(k);
+    },
   };
   return kv;
 }
@@ -238,14 +246,14 @@ describe("App Attest", () => {
   it("answers 503 unavailable when the key cannot be stored, and the install can register afterwards", async () => {
     const res = await handle(request("/v1/attest/challenge", ""), env(kv, IOS));
     const { challenge } = (await res.json()) as { challenge: string };
-    kv.failing = true;
+    kv.failing = "put";
     const failed = await handle(
       request("/v1/attest/register", JSON.stringify({ key_id: device.keyId, challenge, attestation: b64(device.attest(challenge)) })),
       env(kv, IOS),
     );
     expect(failed.status).toBe(503);
     expect(await failed.json()).toEqual({ error: "unavailable" });
-    kv.failing = false;
+    kv.failing = undefined;
     expect((await registered()).status).toBe(201);
   });
 
@@ -350,11 +358,74 @@ describe("App Attest", () => {
 
   it("answers 503 unavailable when the counter cannot be stored, and the key still works afterwards", async () => {
     await registered();
-    kv.failing = true;
+    kv.failing = "put";
     const failed = await send(reviewBody(), 1);
     expect(failed.status).toBe(503);
     expect(await failed.json()).toEqual({ error: "unavailable" });
-    kv.failing = false;
+    kv.failing = undefined;
+    expect((await send(reviewBody(), 1)).status).toBe(202);
+  });
+
+  it("answers 503 unavailable when the key cannot be read, and the key still works afterwards", async () => {
+    await registered();
+    kv.failing = "get";
+    const failed = await send(reviewBody(), 1);
+    expect(failed.status).toBe(503);
+    expect(failed.headers.get("retry-after")).toBe("60");
+    expect(await failed.json()).toEqual({ error: "unavailable" });
+    kv.failing = undefined;
+    expect((await send(reviewBody(), 1)).status).toBe(202);
+  });
+
+  it("answers 503 unavailable when a key registration cannot read the key store, and the install can register afterwards", async () => {
+    const res = await handle(request("/v1/attest/challenge", ""), env(kv, IOS));
+    const { challenge } = (await res.json()) as { challenge: string };
+    kv.failing = "get";
+    const failed = await handle(
+      request("/v1/attest/register", JSON.stringify({ key_id: device.keyId, challenge, attestation: b64(device.attest(challenge)) })),
+      env(kv, IOS),
+    );
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toEqual({ error: "unavailable" });
+    kv.failing = undefined;
+    expect((await registered()).status).toBe(201);
+  });
+
+  it("answers 503 unavailable when a used challenge cannot be deleted, and the install can register afterwards", async () => {
+    const res = await handle(request("/v1/attest/challenge", ""), env(kv, IOS));
+    const { challenge } = (await res.json()) as { challenge: string };
+    kv.failing = "delete";
+    const failed = await handle(
+      request("/v1/attest/register", JSON.stringify({ key_id: device.keyId, challenge, attestation: b64(device.attest(challenge)) })),
+      env(kv, IOS),
+    );
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toEqual({ error: "unavailable" });
+    kv.failing = undefined;
+    expect((await registered()).status).toBe(201);
+  });
+
+  it("refuses an assertion whose stored key record cannot be read as an unknown key", async () => {
+    await registered();
+    kv.data.set(`aa:${device.keyId}`, "{not json");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const res = await send(reviewBody(), 1);
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ error: "attestation_invalid", reason: "unknown_key", details: [expect.any(String)] });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("lets a fault inside the intake through rather than answering a reason that drops the key, and the key still works afterwards", async () => {
+    await registered();
+    const verify = vi.spyOn(crypto.subtle, "verify").mockRejectedValueOnce(new TypeError("a programming fault"));
+    try {
+      await expect(send(reviewBody(), 1)).rejects.toThrow(TypeError);
+    } finally {
+      verify.mockRestore();
+    }
     expect((await send(reviewBody(), 1)).status).toBe(202);
   });
 

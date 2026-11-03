@@ -13,5 +13,5 @@ The proof sent with each item, signed by a registered key over that item's exact
 _Avoid_: attestation, signature (for the whole proof)
 
 **Refusal**:
-The intake rejecting a key registration or an assertion, always with a reason.
+The intake saying no to a key registration or an assertion, always with a reason.
 _Avoid_: rejection, failure (for a check that ran and said no)
