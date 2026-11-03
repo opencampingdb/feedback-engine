@@ -213,7 +213,14 @@ describe("App Attest", () => {
     expect(again.status).toBe(401);
   });
 
+  it("reads a launch validation category sent as little-endian bytes, as iOS 27 does", async () => {
+    expect((await registered({ category: new Uint8Array([2, 0, 0, 0]) })).status).toBe(201);
+    const res = await send(reviewBody(), 1, { category: new Uint8Array([2, 0, 0, 0]) });
+    expect(res.status).toBe(202);
+  });
+
   it.each([
+    ["a development build sent as bytes", { category: new Uint8Array([3, 0, 0, 0]) }, "category 3,0,0,0"],
     ["another app", { appId: "ZZZZZ99999.other.app" }, "another app"],
     ["a used key", { counter: 3 }, "counter"],
     ["the development environment", { aaguid: "appattestdevelop" }, "environment"],

@@ -95,8 +95,8 @@ export const APP_ID = "ABCDE12345.com.example.app";
 export interface Device {
   rootPem: string;
   keyId: string;
-  attest(challenge: string, options?: { appId?: string; counter?: number; aaguid?: string; category?: number; keyIdOverride?: string }): Uint8Array;
-  assert(body: string, counter: number, options?: { appId?: string; category?: number }): Uint8Array;
+  attest(challenge: string, options?: { appId?: string; counter?: number; aaguid?: string; category?: number | Uint8Array; keyIdOverride?: string }): Uint8Array;
+  assert(body: string, counter: number, options?: { appId?: string; category?: number | Uint8Array }): Uint8Array;
 }
 
 const flags = (attested: boolean, extensions: boolean) => (attested ? 0x40 : 0) | (extensions ? 0x80 : 0);
@@ -122,7 +122,7 @@ export function makeDevice(now: number): Device {
   const keyId = Buffer.from(keyIdBytes).toString("base64");
   const rootPem = `-----BEGIN CERTIFICATE-----\n${Buffer.from(root.der).toString("base64")}\n-----END CERTIFICATE-----`;
 
-  const extensionsFor = (category?: number) => (category === undefined ? new Uint8Array() : cbor({ apple_validation_category_01: category }));
+  const extensionsFor = (category?: number | Uint8Array) => (category === undefined ? new Uint8Array() : cbor({ apple_validation_category_01: category }));
 
   return {
     rootPem,
