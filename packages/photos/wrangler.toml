@@ -19,7 +19,7 @@ DAILY_READ_CAP = "200000"
 
 [[r2_buckets]]
 binding = "PHOTOS"
-bucket_name = "replace-me-photo-server"
+bucket_name = "replace-me-serving-bucket"
 
 # The off switch (key "off"), the read counters and withheld photos.
 [[kv_namespaces]]
