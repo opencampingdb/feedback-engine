@@ -18,6 +18,9 @@ INBOX_REPO = "opencampingdb/inbox"
 INBOX_BRANCH = "main"
 # Comma separated list of web origins allowed to call the intake, or * for any.
 ALLOWED_ORIGINS = "*"
+# "on" checks each uploaded photo with Google Cloud Vision SafeSearch, as the
+# GOOGLE_SERVICE_ACCOUNT secret (its project needs the Cloud Vision API turned on).
+SAFESEARCH = "off"
 
 [[kv_namespaces]]
 binding = "RATE_LIMIT"

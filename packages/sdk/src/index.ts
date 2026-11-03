@@ -1,5 +1,6 @@
 export * from "./types.js";
 export * from "./consent.js";
+export * from "./safesearch.js";
 export {
   createFeedbackClient,
   backoffDelay,

@@ -109,6 +109,20 @@ describe("photo rules", () => {
     expect(out.photos.get(PLACE)!.map((l) => l.id)).toEqual([photoLine(1, "sam").id, p.id.replace("fb_", "pho_")]);
   });
 
+  it("holds a photo SafeSearch flags or couldn't check, even from a trusted contributor", () => {
+    const calm = { adult: "VERY_UNLIKELY", violence: "VERY_UNLIKELY", racy: "UNLIKELY", medical: "VERY_UNLIKELY", spoof: "VERY_UNLIKELY" } as const;
+    const rated = (n: number, safesearch: unknown) => {
+      const item = upload("sam", n) as StoredFeedback & { photo: Record<string, unknown> };
+      return { ...item, photo: { ...item.photo, safesearch } } as StoredFeedback;
+    };
+    for (const safesearch of [{ ...calm, adult: "LIKELY" }, { ...calm, racy: "VERY_LIKELY" }, "unchecked"]) {
+      const p = rated(2, safesearch);
+      expect(rules([p], { photos: [photoLine(1, "sam")] }).outcome(p)).toBe("needs_review");
+    }
+    const ok = rated(3, calm);
+    expect(rules([ok], { photos: [photoLine(1, "sam")] }).outcome(ok)).toBe("applied");
+  });
+
   it("holds a file already sent for another place, even from a trusted contributor", () => {
     const p = upload("sam", 3, OTHER);
     const out = rules([p], { photos: [photoLine(1, "sam", { sha256: sha(3) })] });

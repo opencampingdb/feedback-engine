@@ -27,7 +27,7 @@ const result = await feedback.photo({ place, contributor, consent: true, full, t
 | Result | Meaning |
 |---|---|
 | `{ status: "sent", id }` | The intake has it. `id` is the photo's id, `pho_<ulid>`. |
-| `{ status: "rejected", httpStatus, error }` | The intake refused it. `error` says why, for example `rate_limited`, `not_jpeg`, `sha256_mismatch` or `attestation_invalid`. |
+| `{ status: "rejected", httpStatus, error }` | The intake refused it. `error` says why, for example `rate_limited`, `not_jpeg`, `sha256_mismatch`, `attestation_invalid` or `photo_not_allowed` (SafeSearch). |
 | `{ status: "offline" }` | The intake could not be reached, or the platform could not attest. Nothing was sent. |
 
 Photos are never queued, because the files are too big for the queue's storage. On `offline`, keep the files and call `photo` again later. The client checks that both files are JPEGs within the size limits before sending and throws `FeedbackValidationError` if not.
@@ -35,6 +35,21 @@ Photos are never queued, because the files are too big for the queue's storage. 
 On the wire, the SDK sends the photo's meta (place, contributor, device, app version, consent and the SHA-256 and size of each file) as base64url JSON in the `x-photo-meta` header, and the full size file followed by the thumbnail as the body. Attestation covers the meta text, so the intake can check the files against the hashes it carries.
 
 Each contributor may send 10 photos a day, as well as the usual limits per device, network and app key.
+
+### SafeSearch
+
+With `SAFESEARCH = "on"`, the intake sends each full size file to Google Cloud Vision SafeSearch before keeping it, after the rate limits. SafeSearch rates five kinds of content from `VERY_UNLIKELY` to `VERY_LIKELY`: adult, violence, racy, medical and spoof. It has no self-harm rating, so that stays with the person who checks first photos, and with reports.
+
+| Ratings | What happens |
+|---|---|
+| adult or violence `VERY_LIKELY` | Refused: `422 photo_not_allowed`. Nothing is kept. |
+| adult or violence `LIKELY`, or racy `VERY_LIKELY` | Kept, and held for a person even from a trusted contributor. |
+| Google can't be asked, or answers with an error | Kept as `"unchecked"`, and held for a person. |
+| Anything else | The usual rules. |
+
+The stored item carries the ratings in `photo.safesearch`, and the review PR note says why a photo was held. The rule is `safeSearchVerdict` in the SDK, shared by the intake and apply. The check works the same for every app and platform, since it runs on the intake.
+
+Google processes these requests in memory, doesn't keep the images, and doesn't train on them ([Cloud Vision data usage](https://cloud.google.com/vision/docs/data-usage)). Name Google Cloud Vision as a processor in the privacy policy before turning it on. The [pricing page](https://cloud.google.com/vision/pricing) lists SafeSearch at the first 1,000 images a month free, then $1.50 per 1,000.
 
 ## Report and remove
 
@@ -118,7 +133,8 @@ These steps need the Cloudflare account that runs the intake.
 4. **Pass secret and photo keys.** Make one long random secret, for example with `openssl rand -base64 48`, and set it as `PHOTO_PASS_SECRET` on both Workers: `npx wrangler secret put PHOTO_PASS_SECRET` in `packages/intake` and again in `packages/photos`. Then set `PHOTO_KEYS` in `packages/photos`, with JSON such as `{"<random key, 32 characters>": {"app": "camporacle", "daily_limit": 100000}}`. The entry gives the app's daily limit to its passes as well. Its key is only for servers, so CampOracle never ships it. `daily_limit` counts the reads that reach R2, not those served from the cache. `DAILY_READ_CAP` in `wrangler.toml` caps all apps together. Changing `PHOTO_PASS_SECRET` on both Workers ends every pass at once.
 5. **Custom domain.** The `routes` line in `packages/photos/wrangler.toml` names the photo server's host, `photos.camporacle.com.au`. Its zone, `camporacle.com.au`, must be in the same Cloudflare account. Wrangler adds the DNS record and certificate on deploy. Change the line to run the server on another host. The photo server is served only there, so the edge cache sits in front of R2.
 6. **Deploy** the photo server: `npx wrangler deploy` in `packages/photos`.
-7. **Data repository secrets.** Create an R2 API token with Object Read and Write on both buckets, and add `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` as Actions secrets in `opencampingdb/data`. The Photos workflow does nothing without them.
+7. **SafeSearch (optional).** Turn on the Cloud Vision API in the Google Cloud project of the service account in `GOOGLE_SERVICE_ACCOUNT` (the one the intake uses for Play Integrity), with billing on, and set `SAFESEARCH = "on"` in the intake's `wrangler.toml`. Without the service account, every photo is held as `"unchecked"`.
+8. **Data repository secrets.** Create an R2 API token with Object Read and Write on both buckets, and add `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` as Actions secrets in `opencampingdb/data`. The Photos workflow does nothing without them.
 
 To stop serving at once, run `npx wrangler kv key put --binding STATE off 1` in `packages/photos`: the server answers `503 paused` within a minute. Delete the key to start again. Removing the custom domain also stops all serving.
 

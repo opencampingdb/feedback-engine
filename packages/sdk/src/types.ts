@@ -225,6 +225,22 @@ export interface StoredPhotoFiles extends PhotoFiles {
   /** Pixel size of the full size JPEG, read from the file. */
   width: number;
   height: number;
+  /**
+   * Google Cloud Vision SafeSearch's ratings of the full size file, when the
+   * intake checks photos. `"unchecked"` when the check failed, so a person looks.
+   */
+  safesearch?: SafeSearchRatings | "unchecked";
+}
+
+/** How likely Google Cloud Vision SafeSearch rates each kind of content. */
+export type Likelihood = "UNKNOWN" | "VERY_UNLIKELY" | "UNLIKELY" | "POSSIBLE" | "LIKELY" | "VERY_LIKELY";
+
+export interface SafeSearchRatings {
+  adult: Likelihood;
+  violence: Likelihood;
+  racy: Likelihood;
+  medical: Likelihood;
+  spoof: Likelihood;
 }
 
 export interface CheckBody {

@@ -233,3 +233,61 @@ describe("photo reports and erasure", () => {
     expect(gh.puts[1]!.content).toMatchObject({ type: "photo_report", photo_report: { reason: "illegal" } });
   });
 });
+
+describe("SafeSearch on uploads", () => {
+  const ACCOUNT = JSON.stringify({ client_email: "intake@example.iam.gserviceaccount.com", private_key: privateKey });
+
+  /** GitHub plus Google: a token, then SafeSearch answering with `ratings` (or `status`). */
+  function withVision(ratings: Record<string, string> | undefined, status = 200) {
+    const gh = fakeGitHub();
+    const vision: { auth: string | null; image: string }[] = [];
+    const fetch = async (url: string, init?: RequestInit) => {
+      if (url === "https://oauth2.googleapis.com/token") return new Response(JSON.stringify({ access_token: "ya29.test", expires_in: 3600 }));
+      if (url === "https://vision.googleapis.com/v1/images:annotate") {
+        const body = JSON.parse(init!.body as string) as { requests: { image: { content: string }; features: { type: string }[] }[] };
+        vision.push({ auth: new Headers(init!.headers).get("authorization"), image: body.requests[0]!.image.content });
+        expect(body.requests[0]!.features).toEqual([{ type: "SAFE_SEARCH_DETECTION" }]);
+        return new Response(JSON.stringify({ responses: [ratings ? { safeSearchAnnotation: ratings } : {}] }), { status });
+      }
+      return gh.fetch(url, init);
+    };
+    const handle = createHandler({ fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
+    return { gh, vision, handle };
+  }
+
+  const calm = { adult: "VERY_UNLIKELY", violence: "UNLIKELY", racy: "POSSIBLE", medical: "VERY_UNLIKELY", spoof: "UNLIKELY" };
+  const on = (bucket = fakeBucket()) => ({ ...env(bucket), SAFESEARCH: "on", GOOGLE_SERVICE_ACCOUNT: ACCOUNT });
+
+  it("sends the full size file and stores the ratings", async () => {
+    const { gh, vision, handle } = withVision(calm);
+    const full = jpeg(1600, 1200);
+    expect((await handle(upload(full, jpeg(400, 300, 10)), on())).status).toBe(202);
+    expect(vision).toEqual([{ auth: "Bearer ya29.test", image: Buffer.from(full).toString("base64") }]);
+    expect(gh.puts[0]!.content).toMatchObject({ photo: { safesearch: calm } });
+  });
+
+  it("refuses a very likely adult or violent photo and keeps nothing", async () => {
+    for (const worst of [{ adult: "VERY_LIKELY" }, { violence: "VERY_LIKELY" }]) {
+      const { gh, handle } = withVision({ ...calm, ...worst });
+      const bucket = fakeBucket();
+      const res = await handle(upload(jpeg(1600, 1200), jpeg(400, 300, 10)), on(bucket));
+      expect(res.status).toBe(422);
+      expect(await res.json()).toEqual({ error: "photo_not_allowed" });
+      expect(bucket.objects.size).toBe(0);
+      expect(gh.puts).toHaveLength(0);
+    }
+  });
+
+  it("stores the photo as unchecked when Google fails, so a person looks", async () => {
+    const { gh, handle } = withVision(undefined, 500);
+    expect((await handle(upload(jpeg(1600, 1200), jpeg(400, 300, 10)), on())).status).toBe(202);
+    expect(gh.puts[0]!.content).toMatchObject({ photo: { safesearch: "unchecked" } });
+  });
+
+  it("doesn't ask Google when SAFESEARCH is off", async () => {
+    const { gh, vision, handle } = withVision(calm);
+    expect((await handle(upload(jpeg(1600, 1200), jpeg(400, 300, 10)), { ...env(), GOOGLE_SERVICE_ACCOUNT: ACCOUNT })).status).toBe(202);
+    expect(vision).toHaveLength(0);
+    expect((gh.puts[0]!.content as { photo: Record<string, unknown> }).photo.safesearch).toBeUndefined();
+  });
+});
