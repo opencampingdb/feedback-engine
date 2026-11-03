@@ -164,7 +164,24 @@ const newPlace = newPlaceId(result.id);
 await feedback.withdraw({ place: newPlace, consent: true });
 ```
 
-It is sent to `/v1/feedback` with `type: "withdraw"`, from the same install and with the same attestation as the report. Within 24 hours of the report the place is withdrawn. After that the withdraw counts as one more report.
+It is sent to `/v1/feedback` with `type: "withdraw"`, from the same install and with the same attestation as the report. Within 24 hours of the report the place is withdrawn. While the place is on the recent list, the intake answers `403 not_your_place` to any other install and `409 withdraw_window_closed` after 24 hours. After 24 hours send a `remove` report instead, which counts as one more report.
+
+**The recent places list.** A new place shows to everyone within about 30 seconds of its report, without waiting for the apply run:
+
+```sh
+curl "https://<intake>/v1/places/recent?bbox=146.5,-37.2,147.5,-36.0"
+```
+
+It needs no app key. `bbox` is optional: west, south, east and north in degrees. The answer is cached at the edge for 30 seconds:
+
+```json
+{"places": [{"id": "ocdb_01JC...", "location": {"lat": -36.12345, "lon": 146.88765}, "kind": "free_camp",
+  "standing": "shown", "added": "2026-11-03T09:00:00Z", "contributor": "ctr_5d1c0e2a9b7f4436"}]}
+```
+
+A place is listed when its report came from an attested install (an app key with `requires_attestation`) with a contributor, and its note passes `textProblem`. Other new places reach a person through the apply run as before. `kind` is the code the traveller picked, or `null`; look its group up in `data/schema/kinds.json`. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive, so a place two other devices report leaves the list on the next refresh. A `still_there` check counts as from near the place. The list never carries the note, the contacts or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. A place leaves the list once the apply run has written it into the data, where apps find it with the rest.
+
+Each contributor (or install, without one) may send 3 new places a day. The fourth gets `429 rate_limited`.
 
 ## 6. Reviews: contributors, reports and blocking
 

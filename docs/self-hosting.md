@@ -33,6 +33,14 @@ If an app key uses App Attest, create a second namespace for registered keys and
 npx wrangler kv namespace create ATTEST
 ```
 
+To serve new places at once (`GET /v1/places/recent`, see [integration.md](integration.md) section 5), create a namespace for them and note its `id` for the `RECENT_PLACES` binding:
+
+```sh
+npx wrangler kv namespace create RECENT_PLACES
+```
+
+Each listed new place, check or report on one makes one more write. Each refresh of the list that misses the edge cache makes one list operation per 1,000 places, at most twice a minute in each Cloudflare location, which is more than the free plan's 1,000 list operations a day once many phones use it. Use the Workers paid plan for it.
+
 ## 3. Create the private inbox repository
 
 Create `inbox` in your organisation, private, with a `README.md` on `main` so the branch exists. The intake writes to `pending/<yyyy-mm-dd>/`, and the workflow moves files to `applied/` and `refused/`.
@@ -82,6 +90,7 @@ npx wrangler secret put GH_INSTALLATION_ID
 
   Make keys with `openssl rand -hex 16`. To revoke a key, remove it and set the secret again.
 - `DEVICE_SALT` is a long random string, for example from `openssl rand -hex 32`. Changing it makes every device look new, which resets the two-device rule for pending items, so set it once.
+- `PLACES_TOKEN`, needed only with `RECENT_PLACES`, is a long random string, for example from `openssl rand -hex 32`. The apply run sends it to take places it has written into the data off the recent list. Set it with `npx wrangler secret put PLACES_TOKEN` and keep the same value for the apply workflow.
 - `GH_APP_PRIVATE_KEY` accepts the PEM GitHub gives you (PKCS#1) or PKCS#8.
 - `GOOGLE_SERVICE_ACCOUNT`, needed only for `android`, is the JSON key file of a Google Cloud service account in the project linked to the app in Play Console, allowed to decode integrity tokens. Set it with `npx wrangler secret put GOOGLE_SERVICE_ACCOUNT < key.json`.
 
@@ -94,7 +103,8 @@ npx wrangler secret put GH_INSTALLATION_ID
 ```sh
 cd packages/intake
 sed -e "s/REPLACE_ME_KV_NAMESPACE_ID/<RATE_LIMIT id>/" \
-    -e "s/REPLACE_ME_ATTEST_KV_NAMESPACE_ID/<ATTEST id>/" wrangler.toml > wrangler.deploy.toml
+    -e "s/REPLACE_ME_ATTEST_KV_NAMESPACE_ID/<ATTEST id>/" \
+    -e "s/REPLACE_ME_RECENT_PLACES_KV_NAMESPACE_ID/<RECENT_PLACES id>/" wrangler.toml > wrangler.deploy.toml
 npx wrangler deploy -c wrangler.deploy.toml
 ```
 
