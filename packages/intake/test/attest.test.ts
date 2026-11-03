@@ -167,7 +167,7 @@ describe("App Attest", () => {
         "x-attest-key-id": device.keyId,
         "x-attest-assertion": b64(device.assert(body, 1)),
       }),
-      { ...env(kv, IOS), PHOTO_PASS_SECRET: "pass-secret" },
+      { ...env(kv, IOS), PHOTO_PASS_SECRET: "pass-secret", PHOTOS_PENDING: { put: async () => undefined, delete: async () => undefined } },
     );
     expect(res.status).toBe(200);
     const { pass, expires } = (await res.json()) as { pass: string; expires: string };

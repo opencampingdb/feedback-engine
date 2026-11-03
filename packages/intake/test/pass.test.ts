@@ -53,6 +53,7 @@ describe("photo pass route", () => {
       INBOX_REPO: "opencampingdb/inbox",
       RATE_LIMIT: fakeKv(),
       PHOTO_PASS_SECRET: SECRET,
+      PHOTOS_PENDING: { put: async () => undefined, delete: async () => undefined },
       ...extra,
     };
   }

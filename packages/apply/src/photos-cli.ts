@@ -103,7 +103,7 @@ async function sync(root: string, serving: string, pending: string, dryRun: bool
     if (!dryRun) await r2.delete(bucket, keys);
   }
 
-  // Each place's records, rewritten every run; files for places with no visible photos go.
+  // Each place's records are written again every run. Files for places with no visible photos go.
   const records = await recordFiles(root);
   for (const [place, text] of records) {
     if (!dryRun) await r2.put(serving, `${RECORDS}${place}.ndjson`, text, "application/x-ndjson; charset=utf-8");
