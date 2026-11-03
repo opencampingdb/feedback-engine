@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { NEW_PLACE_REPORT_REASONS, validateSubmission } from "../src/index.js";
+import { NEW_PLACE_REPORT_REASONS, isPlaceId, newPlaceId, validateSubmission } from "../src/index.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const base = {
@@ -88,5 +88,12 @@ describe("withdrawing a new place", () => {
       ok: false,
       errors: ["report is not allowed when type is withdraw"],
     });
+  });
+});
+
+describe("a new place's id", () => {
+  it("is ocdb_ and the feedback id the intake answered with", () => {
+    expect(newPlaceId("fb_01JBXK3M8Q4R5S6T7V8W9X0YZA")).toBe("ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA");
+    expect(isPlaceId(newPlaceId("fb_01JBXK3M8Q4R5S6T7V8W9X0YZA"))).toBe(true);
   });
 });

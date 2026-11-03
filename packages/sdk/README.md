@@ -15,5 +15,6 @@ await feedback.review({ place, review: { stars: 5, text: "Quiet and shady", visi
 - Nothing is sent unless `consent: true` is passed. Show `CONSENT_TEXT` first.
 - Show `ATTRIBUTION` wherever the data appears.
 - Reviews, fees and `reportReview()` carry the signed-in traveller's opaque `contributor` id. Pass an `attest` function when the app key requires App Attest or Play Integrity; it gets the exact body and its SHA-256 at send time. A refused attestation keeps the item queued and calls `onAttestationRejected`.
+- `tidyName`, `tidyText` and `textProblem` tidy what a traveller types and find rude words, contact details and spam before it is sent. `withdraw()` takes back a new place the same install sent.
 
 The full guide is [docs/integration.md](../../docs/integration.md). Licence: Apache 2.0.

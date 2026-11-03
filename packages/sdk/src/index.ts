@@ -64,6 +64,7 @@ export {
   isPublicHttpsUrl,
   isReviewId,
   isValidFactValue,
+  newPlaceId,
   validateSubmission,
 } from "./validate.js";
 export type { ValidationResult } from "./validate.js";

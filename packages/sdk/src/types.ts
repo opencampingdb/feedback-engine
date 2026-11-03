@@ -362,9 +362,9 @@ export interface PhotoErasureSubmission extends SubmissionBase {
 }
 
 /**
- * Takes back a new place the same install sent. `place` is the new place's id,
- * `ocdb_` and the id the intake answered with. Within 24 hours of the report
- * the place is withdrawn; after that it counts as one more report.
+ * Takes back a new place the same install sent. `place` is the new place's id
+ * (`newPlaceId`). Within 24 hours of the report the place is withdrawn. After
+ * that it counts as one more report.
  */
 export interface WithdrawSubmission extends SubmissionBase {
   type: "withdraw";

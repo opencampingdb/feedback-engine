@@ -258,6 +258,14 @@ export function isPlaceId(value: unknown): value is string {
 }
 
 /** A published review id, `rev_<ulid>`. */
+/**
+ * The id a new place has once its `new_place` report is sent: `ocdb_` and the
+ * feedback id (`fb_<ulid>`) the intake answered with, as the apply run makes it.
+ */
+export function newPlaceId(feedbackId: string): string {
+  return `ocdb_${feedbackId.replace(/^fb_/, "")}`;
+}
+
 export function isReviewId(value: unknown): value is string {
   return typeof value === "string" && REVIEW_ID.test(value);
 }

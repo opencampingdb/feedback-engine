@@ -128,6 +128,44 @@ A name is 1 to 300 characters and a description at most 500. Neither may hold an
 
 Ask users not to put names, email addresses or phone numbers in notes or reviews. The intake removes contact details it finds, and reviews that still contain personal details, advertising or offensive language (also when spelled with spaces or symbols) are refused.
 
+**Tidy and check text before sending.** The SDK has the checks for names and notes, so the app can catch a problem while the traveller is still typing:
+
+```ts
+import { firstProblem, tidyName, tidyText } from "@opencampingdb/feedback";
+
+const name = tidyName("LAKE EPPALOCK REST AREA"); // "Lake Eppalock Rest Area"
+const note = tidyText("GREAT SPOT!!!! LOTS OF SHADE"); // "Great spot! Lots of shade"
+const problem = firstProblem(name, note); // "rude", "contact", "spam" or null
+```
+
+`tidyName` brings a shouted or all lower case name to title case and keeps states and road terms such as `NSW` and `4WD` in capitals. `tidyText` turns shouted text into sentences. Both collapse spacing and runs such as `!!!!` or `sooooo`. `textProblem` checks one text and `firstProblem` several, after tidying: `rude` for rude words and slurs, however they are spelt, `contact` for an email address, link or phone number (opening hours such as 0800-1700 are left alone), and `spam` for advertising wording, a word said over and over, or keyboard mashing. Show your own message for each.
+
+**Contacts on a new place.** A `new_place` report may carry `contacts`, with any of `phone`, `website` and `email`, each checked as the fact of that name is. Keep them out of the note. A person checks them before they are published. `contacts` is refused on every other report kind.
+
+```ts
+await feedback.report({
+  place: null,
+  location: { lat: -36.851234, lon: 144.551234 },
+  report: { kind: "new_place", note: "Caravan park by the lake", contacts: { phone: "03 5555 0100", website: "https://park.example.org" } },
+  consent: true,
+});
+```
+
+**Reporting a new place.** A `remove` report says a new place should come down, with a `reason` from `NEW_PLACE_REPORT_REASONS`: `not_there`, `fake`, `offensive`, `private_land` or `duplicate`. `reason` is refused on every other report kind.
+
+```ts
+await feedback.report({ place: newPlace, report: { kind: "remove", reason: "private_land" }, consent: true });
+```
+
+**Withdrawing a new place.** A new place has its id as soon as its report is sent: `newPlaceId(result.id)` when the result is `sent`, which is `ocdb_` and the feedback id without its `fb_`. Keep it. The install that sent the place can take it back:
+
+```ts
+const newPlace = newPlaceId(result.id);
+await feedback.withdraw({ place: newPlace, consent: true });
+```
+
+It is sent to `/v1/feedback` with `type: "withdraw"`, from the same install and with the same attestation as the report. Within 24 hours of the report the place is withdrawn. After that the withdraw counts as one more report.
+
 ## 6. Reviews: contributors, reports and blocking
 
 App stores ask any app that shows reviews to filter objectionable content, let people report it and block abusive users. The engine does each part; the app supplies who wrote a review and the buttons.

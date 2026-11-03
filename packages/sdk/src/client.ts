@@ -116,7 +116,7 @@ export interface CheckInput {
 }
 
 export interface WithdrawInput {
-  /** The new place's id, `ocdb_` and the id `report` answered with. */
+  /** The new place's id: `newPlaceId` of the id `report` answered with. */
   place: string;
   contributor?: string;
   consent: boolean;
