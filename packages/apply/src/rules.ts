@@ -287,12 +287,6 @@ const isNewPlaceReport = (item: StoredFeedback): item is ReportItem => item.type
 const isNewPlaceEvidence = (item: StoredFeedback) =>
   item.type === "withdraw" || item.type === "check" || (item.type === "report" && item.report.kind === "remove");
 
-/**
- * Whether a check was sent near the place. Checks carry no such signal yet,
- * so, as at the intake, every check counts as near unless it says `nearby: false`.
- */
-const wasNearby = (item: CheckItem) => (item.check as { nearby?: unknown }).nearby !== false;
-
 /** A new place this close to a place in the same group is a possible duplicate. */
 export const DUPLICATE_DISTANCE_M = 150;
 
@@ -961,7 +955,7 @@ export function applyRules(input: RulesInput): RulesOutput {
           contributor: { device: origin.device, blocked: isBlocked, firstPlace },
           checks: items
             .filter((i): i is CheckItem => i.type === "check")
-            .map((c) => ({ device: c.device, stillThere: c.check.still_there, nearby: wasNearby(c), day: c.received })),
+            .map((c) => ({ device: c.device, stillThere: c.check.still_there, nearby: c.check.nearby === true, day: c.received })),
           reports: items
             .filter((i): i is ReportItem => i.type === "report")
             .map((r) => ({ device: r.device, reason: r.report.reason!, day: r.received })),
@@ -1070,9 +1064,10 @@ export function applyRules(input: RulesInput): RulesOutput {
   function draftOf(item: ReportItem): Place {
     const picked = item.report.place_kind;
     const pickedGroup = picked === undefined ? undefined : input.kinds?.get(picked);
+    const name = item.report.name ?? null;
     return {
       id: newPlaceIdOf(item),
-      name: null,
+      name,
       kind: pickedGroup ? picked! : DRAFT_KIND,
       group: pickedGroup ?? input.kinds?.get(DRAFT_KIND) ?? DRAFT_GROUP,
       location: { lat: roundCoord(item.location!.lat), lon: roundCoord(item.location!.lon) },
@@ -1080,8 +1075,8 @@ export function applyRules(input: RulesInput): RulesOutput {
       facts: {},
       status: "open",
       rating: null,
-      fact_sources: { location: "feedback" },
-      fact_dates: { location: nowIso },
+      fact_sources: name === null ? { location: "feedback" } : { location: "feedback", name: "feedback" },
+      fact_dates: name === null ? { location: nowIso } : { location: nowIso, name: nowIso },
       updated: nowIso,
     };
   }

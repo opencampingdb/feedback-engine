@@ -938,7 +938,11 @@ describe("new places", () => {
   const remove = (day: number, device: string, target: StoredFeedback, reason = "fake") =>
     ({ ...base(day, device, idOf(target)), type: "report", report: { kind: "remove", reason } }) as StoredFeedback;
   const visit = (day: number, device: string, target: StoredFeedback, stillThere: boolean, nearby = true) =>
-    ({ ...base(day, device, idOf(target)), type: "check", check: { visited: at(day).slice(0, 10), still_there: stillThere, nearby } }) as unknown as StoredFeedback;
+    ({
+      ...base(day, device, idOf(target)),
+      type: "check",
+      check: { visited: at(day).slice(0, 10), still_there: stillThere, ...(nearby ? { nearby: true } : {}) },
+    }) as StoredFeedback;
   /** The new place's record as an earlier run wrote it. */
   const written = (item: StoredFeedback, standing: Place["standing"] = "shown") =>
     place({ id: idOf(item), name: null, osm: null, facts: {}, fact_sources: { location: "feedback" }, location: SPOT, standing });
@@ -1113,9 +1117,18 @@ describe("new places", () => {
     ]);
   });
 
-  it("counts a check as near the place unless it says otherwise, as the intake does", () => {
+  it("confirms a place only on checks sent near it, as the intake does", () => {
     const item = added(0);
-    const plain = (device: string) => ({ ...base(1, device, idOf(item)), type: "check", check: { visited: at(1).slice(0, 10), still_there: true } }) as StoredFeedback;
-    expect(run([plain("dev-b"), plain("dev-c")], { ...inData(item), now: 2 }).after(idOf(item))?.standing).toBe("confirmed");
+    const out = run([visit(1, "dev-b", item, true, false), visit(1, "dev-c", item, true, false)], { ...inData(item), now: 2 });
+    expect(out.places.size).toBe(0);
+  });
+
+  it("names a new place with the name its report carries", () => {
+    const item = added(0, "dev-a", { name: "Gravel Pit Rest Area" });
+    expect(run([item]).after(idOf(item))).toMatchObject({
+      name: "Gravel Pit Rest Area",
+      fact_sources: { location: "feedback", name: "feedback" },
+      fact_dates: { location: at(1), name: at(1) },
+    });
   });
 });
