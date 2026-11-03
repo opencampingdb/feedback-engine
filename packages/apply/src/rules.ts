@@ -1,6 +1,7 @@
 import {
   isFactName,
   isValidFactValue,
+  safeSearchVerdict,
   type FactName,
   type FactValue,
   type StoredFeedback,
@@ -538,8 +539,18 @@ export function applyRules(input: RulesInput): RulesOutput {
       const repeated =
         (input.photos ?? []).some((p) => p.sha256 === photo.sha256 && p.place !== item.place) ||
         sent.some((other) => other.id !== item.id && other.place !== item.place && other.photo.full_sha256 === photo.sha256);
-      if (repeated || !trusted.has(item.contributor)) {
-        const why = repeated ? "the same file was sent for another place" : "first photo from this contributor";
+      // SafeSearch ratings from the intake, when it checks photos: a likely adult
+      // or violent photo, or one it couldn't check, waits for a person.
+      const rated = item.photo.safesearch;
+      const flagged = rated !== undefined && safeSearchVerdict(rated) !== "pass";
+      if (repeated || flagged || !trusted.has(item.contributor)) {
+        const why = repeated
+          ? "the same file was sent for another place"
+          : flagged
+            ? rated === "unchecked"
+              ? "SafeSearch could not check it"
+              : `SafeSearch rates it adult ${rated.adult}, violence ${rated.violence}, racy ${rated.racy}`
+            : "first photo from this contributor";
         edits.push({ kind: "photo", place: item.place, photo, feedback: item.id });
         note(item.place, `photo ${photoId} (${photo.width} x ${photo.height}), ${why} (look at it before merging)`, false, [item]);
         decide(item, "needs_review", `${why}, so a person checks it`);
@@ -570,6 +581,19 @@ export function applyRules(input: RulesInput): RulesOutput {
       }
       reportsSent.push(item);
       edits.push({ kind: "note", place: item.place, feedback: item.id });
+      if (reason === "illegal") {
+        // One report is enough: the intake has already withheld the photo at the photo server.
+        if (target.hidden === undefined) target.hidden = "reported";
+        note(
+          item.place,
+          `URGENT: photo ${photoId} reported as illegal (child abuse, an intimate image shared without consent, or terrorist material). ` +
+            "Hidden and withheld until a person decides. Follow the safety procedure: remove it, and report it where the procedure says",
+          false,
+          [item],
+        );
+        decide(item, "needs_review", "an illegal-content report hides the photo at once and is read by a person");
+        continue;
+      }
       note(item.place, `photo ${photoId} reported as ${reason} (decide: keep, hide, remove or block the contributor)`, false, [item]);
       decide(item, "needs_review", "photo reports are read by a person");
       const reporters = new Set(

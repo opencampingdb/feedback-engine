@@ -8,6 +8,7 @@ import {
   type FeedbackSubmission,
   type OwnerSubmission,
   type PhotoSubmission,
+  type SafeSearchRatings,
   type StoredFeedback,
   type StoredOwnerSubmission,
 } from "@opencampingdb/feedback";
@@ -15,6 +16,7 @@ import { verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } 
 import { fromBase64, hex, sha256, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
 import { IntegrityError, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
+import { SafeSearch, verdict } from "./safesearch.js";
 import { jpegSize } from "./jpeg.js";
 import { PASS_TTL_SECONDS, signPass } from "./pass.js";
 import {
@@ -59,7 +61,21 @@ export interface Env {
   PHOTOS_PENDING?: BucketLike;
   /** Secret, shared with the photo server. Signs photo passes. Needed for `/v1/photos/pass`. */
   PHOTO_PASS_SECRET?: string;
+  /**
+   * The photo server's STATE namespace. A photo reported as `illegal` gets a
+   * `withheld:<photo id>` key there, and the photo server stops serving it.
+   */
+  PHOTO_STATE?: KVLike;
+  /**
+   * `on` checks each uploaded photo with Google Cloud Vision SafeSearch, as the
+   * GOOGLE_SERVICE_ACCOUNT (its project needs the Cloud Vision API). Very likely
+   * adult or violent photos are refused; likely ones wait for a person.
+   */
+  SAFESEARCH?: string;
 }
+
+/** Key in the photo server's STATE that stops one photo being served. */
+export const withheldKey = (photo: string) => `withheld:${photo}`;
 
 type SubmissionKind = "feedback" | "owner";
 
@@ -300,6 +316,7 @@ type Attested = { attested: "app_attest" | "play_integrity"; keyId?: string } | 
 export function createHandler(deps: Deps) {
   const github = new GitHubApp(deps.fetch, deps.now);
   const integrity = new PlayIntegrity(deps.fetch, deps.now);
+  const safeSearch = new SafeSearch(deps.fetch, deps.now);
   const random = deps.randomBytes ?? ((n: number) => crypto.getRandomValues(new Uint8Array(n)));
 
   /** Checks the attestation headers against the exact body text. */
@@ -460,6 +477,19 @@ export function createHandler(deps: Deps) {
     ]);
     if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
 
+    // After the limits, so a flood of uploads can't run up the Vision bill.
+    let ratings: SafeSearchRatings | "unchecked" | undefined;
+    if (env.SAFESEARCH === "on") {
+      let account: ServiceAccount | undefined;
+      try {
+        account = env.GOOGLE_SERVICE_ACCOUNT ? (JSON.parse(env.GOOGLE_SERVICE_ACCOUNT) as ServiceAccount) : undefined;
+      } catch {
+        account = undefined;
+      }
+      ratings = account ? await safeSearch.rate(full, account) : "unchecked";
+      if (verdict(ratings) === "refuse") return json(422, { error: "photo_not_allowed" }, cors);
+    }
+
     const ulidText = ulid(nowMs, deps.randomBytes);
     const id = `fb_${ulidText}`;
     const photoId = `pho_${ulidText}`;
@@ -477,7 +507,7 @@ export function createHandler(deps: Deps) {
       ...(attestKey ? { attest_key: attestKey } : {}),
       app_version: submission.app_version,
       consent: true,
-      photo: { full_sha256, full_bytes, thumb_sha256, thumb_bytes, width: size.width, height: size.height },
+      photo: { full_sha256, full_bytes, thumb_sha256, thumb_bytes, width: size.width, height: size.height, ...(ratings ? { safesearch: ratings } : {}) },
     } as StoredFeedback;
     const customMetadata = { place: submission.place, contributor };
     try {
@@ -712,6 +742,12 @@ export function createHandler(deps: Deps) {
       await write(stored);
     } catch {
       return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
+    }
+    // An illegal-content report withholds the photo before a person sees it. The
+    // report is in the inbox already, so a failed write here still reaches a person.
+    if (stored.type === "photo_report" && stored.photo_report.reason === "illegal" && env.PHOTO_STATE) {
+      const value = JSON.stringify({ feedback: id, at: received });
+      await env.PHOTO_STATE.put(withheldKey(stored.photo_report.photo), value).catch(() => undefined);
     }
     return json(202, { id }, cors);
   };
