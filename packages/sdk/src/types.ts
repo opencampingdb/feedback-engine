@@ -191,8 +191,13 @@ export interface ReviewReportBody {
   reason: ReviewReportReason;
 }
 
-/** Why a traveller reports a published photo. */
-export type PhotoReportReason = "spam_ad" | "offensive" | "off_topic" | "not_this_place" | "personal_details" | "copyright";
+/**
+ * Why a traveller reports a published photo. `illegal` is for child sexual
+ * abuse material, an intimate image shared without consent, or terrorist or
+ * violent extremist material: the photo stops being served at once and a
+ * person decides.
+ */
+export type PhotoReportReason = "spam_ad" | "offensive" | "off_topic" | "not_this_place" | "personal_details" | "copyright" | "illegal";
 
 export interface PhotoReportBody {
   /** Id of the published photo, `pho_<ulid>`. */
