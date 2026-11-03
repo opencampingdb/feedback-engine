@@ -3,6 +3,7 @@ export * from "./consent.js";
 export * from "./safesearch.js";
 export {
   createFeedbackClient,
+  createPhotoClient,
   backoffDelay,
   isJpeg,
   ConsentRequiredError,
@@ -24,6 +25,8 @@ export type {
   PhotoErasureInput,
   PhotoFetchLike,
   PhotoInput,
+  PhotoClient,
+  PhotoClientOptions,
   PhotoPassResult,
   PhotoReportInput,
   PhotoResult,

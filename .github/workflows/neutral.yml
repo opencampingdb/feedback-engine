@@ -1,0 +1,50 @@
+# Keeps this repository neutral: no app, company or person that uses Open
+# Camping DB is named in its files or commit messages. The terms live in the
+# organisation secret NEUTRAL_TERMS (an extended regular expression), not here,
+# so the check itself names nobody. It prints file names and commit ids only.
+
+name: Neutral
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  neutral:
+    name: No app-specific names
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Look for the terms
+        env:
+          TERMS: ${{ secrets.NEUTRAL_TERMS }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$TERMS" ]; then
+            echo "::warning::NEUTRAL_TERMS is not set, so nothing was checked"
+            exit 0
+          fi
+          found=0
+          files="$(git grep -l -i -I -E "$TERMS" -- . || true)"
+          if [ -n "$files" ]; then
+            echo "$files" | while read -r f; do echo "::error file=$f::names an app, company or person that uses Open Camping DB"; done
+            found=1
+          fi
+          if [ -n "$BASE" ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            for c in $(git rev-list "$BASE..HEAD"); do
+              if git log -1 --format=%B "$c" | grep -q -i -E "$TERMS"; then
+                echo "::error::commit $c message names an app, company or person that uses Open Camping DB"
+                found=1
+              fi
+            done
+          fi
+          exit "$found"

@@ -1,16 +1,17 @@
-# Open Camping DB photo server. Replace every REPLACE_ME before deploying, or
+# Photo server for an app's own photo service (docs/photos.md). Replace every
+# REPLACE_ME and the name before deploying, or
 # deploy with an untracked copy holding the real ids (see docs/photos.md).
 # Secrets are set with `wrangler secret put`, never written here:
 #   PHOTO_KEYS         JSON map of photo key to {"app": "<name>", "daily_limit": <reads a day>}
 #   PHOTO_PASS_SECRET  the same secret as the intake's, to check photo passes
 
-name = "ocdb-photos"
+name = "REPLACE_ME_PHOTO_SERVER_NAME"
 main = "src/index.ts"
 compatibility_date = "2026-10-01"
 # Photos are served only on the custom domain, where the cache sits in front.
 workers_dev = false
 
-routes = [{ pattern = "photos.example.com", custom_domain = true }]
+routes = [{ pattern = "REPLACE_ME_PHOTOS_HOST", custom_domain = true }]
 
 [vars]
 # Most uncached reads (R2 reads) a day across every app. Above it the server answers 503 until midnight UTC.
@@ -18,12 +19,12 @@ DAILY_READ_CAP = "200000"
 
 [[r2_buckets]]
 binding = "PHOTOS"
-bucket_name = "ocdb-photos"
+bucket_name = "REPLACE_ME_PHOTO_SERVER_NAME"
 
-# The off switch (key "off") and the read counters.
+# The off switch (key "off"), the read counters and withheld photos.
 [[kv_namespaces]]
 binding = "STATE"
-id = "REPLACE_ME_PHOTOS_KV_NAMESPACE_ID"
+id = "REPLACE_ME_PHOTO_STATE_KV_NAMESPACE_ID"
 
 # Requests per client address: 300 a minute.
 [[ratelimits]]

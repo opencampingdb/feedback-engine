@@ -1,9 +1,22 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "lib": ["ES2022", "WebWorker"],
-    "types": ["node"],
-    "noEmit": true
+    "lib": [
+      "ES2022",
+      "WebWorker"
+    ],
+    "types": [
+      "node"
+    ],
+    "noEmit": true,
+    "paths": {
+      "@opencampingdb/feedback": [
+        "./../sdk/src/index.ts"
+      ]
+    }
   },
-  "include": ["src", "test"]
+  "include": [
+    "src",
+    "test"
+  ]
 }

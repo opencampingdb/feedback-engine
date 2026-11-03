@@ -96,6 +96,8 @@ export interface RulesInput {
   reviewers?: ReadonlySet<string>;
   /** Every photo line in the data. None when left out. */
   photos?: readonly Photo[];
+  /** Licence id written on new photo lines. Defaults to CC-BY-4.0. */
+  photoLicence?: string;
 }
 
 /**
@@ -531,7 +533,7 @@ export function applyRules(input: RulesInput): RulesOutput {
         contributor: item.contributor,
         created: item.received,
         app: item.app,
-        licence: "CC-BY-4.0",
+        licence: input.photoLicence ?? "CC-BY-4.0",
         width: item.photo.width,
         height: item.photo.height,
         sha256: item.photo.full_sha256,

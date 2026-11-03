@@ -167,4 +167,4 @@ With no `--review-data`, automatic and review changes land in the same checkout.
 
 ## Abuse
 
-Report abuse of a public intake, or a leaked app key, to abuse@example.org.
+Report abuse of a public intake, or a leaked app key, with **Report a vulnerability** on this repository's Security tab.

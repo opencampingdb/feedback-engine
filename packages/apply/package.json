@@ -6,7 +6,8 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "ocdb-apply": "./dist/cli.js"
+    "ocdb-apply": "./dist/cli.js",
+    "ocdb-photos": "./dist/photos-cli.js"
   },
   "engines": {
     "node": ">=22.12"
