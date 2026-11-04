@@ -12,11 +12,7 @@ import {
   type SafeSearchRatings,
   type StoredFeedback,
   type StoredOwnerSubmission,
-  firstProblem,
   isPlaceId,
-  newPlaceId,
-  tidyName,
-  tidyText,
 } from "@opencampingdb/feedback";
 import { AttestError, verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
 import { refuse, type RefusalBody } from "./refusal.js";
@@ -37,7 +33,6 @@ import {
 import {
   getPlace,
   insertEvidence,
-  insertPlace,
   listPlaces,
   MAX_BLOCKED_CONTRIBUTORS,
   MAX_REMOVE_IDS,
@@ -52,6 +47,8 @@ import {
   type StoredPlace,
 } from "./recent.js";
 import { cellHashes, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
+import { createChecks, pruneLiveCounts, type AiLike } from "./checks.js";
+import { decideAtSendTime, decidedHere, listChanges, pruneDecisions, UNAVAILABLE, type ItemState, type SendTimeDecision } from "./decide.js";
 import { ulid } from "./ulid.js";
 
 /** The part of an R2 bucket binding the photo upload uses. */
@@ -115,6 +112,10 @@ export interface Env {
    * Needs the GitHub App's `actions: write` on the inbox. Off when left out.
    */
   APPLY_WORKFLOW?: string;
+  /** Secret. The abuse.ch auth key for the URLhaus check on links. Without it, an item with a link is held. */
+  URLHAUS_KEY?: string;
+  /** Workers AI, for the Llama Guard check on free text. Without it, free text from a contributor without a track record is held. */
+  AI?: AiLike;
 }
 
 /** Key in the photo server's STATE that stops one photo being served. */
@@ -430,6 +431,13 @@ async function noteInboxWrite(env: Env, nowMs: number): Promise<void> {
 export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
   const github = new GitHubApp(deps.fetch, deps.now);
   return async function scheduled(env: Env): Promise<RunOutcome | "off"> {
+    if (env.RECENT_LIST) {
+      const db = env.RECENT_LIST;
+      const nowMs = deps.now();
+      await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs)]).catch((error: unknown) => {
+        console.warn(`pruning the recent list failed: ${String(error)}`);
+      });
+    }
     const workflow = env.APPLY_WORKFLOW;
     if (!workflow || !env.RECENT_LIST) return "off";
     return startApplyIfDue(
@@ -715,7 +723,8 @@ export function createHandler(deps: Deps) {
   }
 
   /**
-   * `GET /v1/places/recent`: new places that are `shown` or `confirmed`,
+   * `GET /v1/places/recent`: new places that are `shown` or `confirmed`, and
+   * the recent changes to released places (`changes`, see decide.ts),
    * optionally within `bbox=west,south,east,north` grown out to whole
    * degrees. Public, like the data, and cached at the edge by that box, so the
    * recent list is read at most once per cache period for each box in each location.
@@ -736,8 +745,9 @@ export function createHandler(deps: Deps) {
     const cacheKey = new Request(`${url.origin}${url.pathname}${bbox ? `?bbox=${bbox.join(",")}` : ""}`, { method: "GET" });
     const hit = await deps.cache?.match(cacheKey);
     if (hit) return withCors(hit);
-    const places = await listPlaces(env.RECENT_LIST, new Date(deps.now()).toISOString(), bbox);
-    const response = json(200, { places }, { "cache-control": `public, max-age=${RECENT_CACHE_SECONDS}` });
+    const nowMs = deps.now();
+    const [places, changes] = await Promise.all([listPlaces(env.RECENT_LIST, new Date(nowMs).toISOString(), bbox), listChanges(env.RECENT_LIST, nowMs, bbox)]);
+    const response = json(200, { places, changes }, { "cache-control": `public, max-age=${RECENT_CACHE_SECONDS}` });
     await deps.cache?.put(cacheKey, response.clone());
     return withCors(response);
   }
@@ -1031,16 +1041,36 @@ export function createHandler(deps: Deps) {
       ...("photo_report" in rest ? { photo_report: rest.photo_report } : {}),
     } as StoredFeedback;
 
+    // Decided before the inbox write and recorded after it, so a failed write leaves nothing in D1.
+    let decision: SendTimeDecision | undefined;
+    if (env.RECENT_LIST && decidedHere(stored)) {
+      const db = env.RECENT_LIST;
+      // Without a contributor, the hashed install stands in for one, as it does for a signed-out install's new places.
+      const who = contributor ?? `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
+      const checks = createChecks({ db, fetch: deps.fetch, urlhausKey: env.URLHAUS_KEY, ai: env.AI, now: deps.now });
+      decision = await decideAtSendTime({ db, checks, item: stored, submission: submission as FeedbackSubmission, contributor: who }).catch(
+        (error: unknown) => {
+          console.warn(`deciding ${id} failed: ${String(error)}`);
+          return { answer: UNAVAILABLE, writes: () => [] };
+        },
+      );
+    }
+
     try {
       await write(stored);
     } catch {
       return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
     }
     // The item is in the inbox already, so a failed store write still reaches the apply run.
+    let state: ItemState | undefined;
     if (env.RECENT_LIST) {
-      await updateRecent(env.RECENT_LIST, submission as FeedbackSubmission, { id, received, device, contributor, attestKey, proof, target }).catch(
-        () => undefined,
-      );
+      const db = env.RECENT_LIST;
+      await updateRecent(db, submission as FeedbackSubmission, { id, received, device, target }).catch(() => undefined);
+      if (decision) {
+        const writes = decision.writes(db);
+        const answer = decision.answer;
+        state = writes.length === 0 ? answer : await db.batch(writes).then(() => answer, () => UNAVAILABLE);
+      }
     }
     // An illegal-content report withholds the photo before a person sees it. The
     // report is in the inbox already, so a failed write here still reaches a person.
@@ -1048,45 +1078,21 @@ export function createHandler(deps: Deps) {
       const value = JSON.stringify({ feedback: id, at: received });
       await env.PHOTO_STATE.put(withheldKey(stored.photo_report.photo), value).catch(() => undefined);
     }
-    return json(202, { id }, cors);
+    return json(202, state ? { id, ...state } : { id }, cors);
   };
 }
 
 /**
- * Keeps the recent list up to date with an accepted item: a new place
- * from an attested install whose note passes the text checks once its contact
- * details are stripped (as the inbox stores it) goes in, and a check, removal
- * report or withdraw on a stored place is added as evidence of its own.
+ * Adds a check, removal report or withdraw on a new place the recent list
+ * holds as evidence of its own. New places go on the list through the
+ * send-time decision (decide.ts).
  */
 async function updateRecent(
   db: D1Like,
   submission: FeedbackSubmission,
-  item: {
-    id: string;
-    received: string;
-    device: string;
-    contributor: string | undefined;
-    attestKey: string | undefined;
-    proof: { attested: string } | undefined;
-    target: StoredPlace | undefined;
-  },
+  item: { id: string; received: string; device: string; target: StoredPlace | undefined },
 ): Promise<void> {
-  const { id, received, device, contributor, attestKey, proof, target } = item;
-  if (submission.type === "report" && submission.report.kind === "new_place") {
-    const { note, place_kind, name } = submission.report;
-    if (!proof || !contributor || !submission.location || firstProblem(note === undefined ? undefined : tidyText(stripContactDetails(note)))) return;
-    await insertPlace(db, {
-      id: newPlaceId(id),
-      location: submission.location,
-      kind: place_kind ?? null,
-      name: name === undefined ? null : tidyName(name),
-      added: received,
-      contributor,
-      device,
-      ...(attestKey ? { attest_key: attestKey } : {}),
-    });
-    return;
-  }
+  const { id, received, device, target } = item;
   if (!target) return;
   if (submission.type === "check") {
     // A check carries no location: only the app's word that the phone was near the place.

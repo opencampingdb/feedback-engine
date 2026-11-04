@@ -67,7 +67,9 @@ migrations_dir = "migrations"
 # binding = "PHOTO_STATE"
 # id = "REPLACE_ME_PHOTO_STATE_KV_NAMESPACE_ID"
 
-# Workers AI, for the Llama Guard check on free text (src/checks.ts). The
-# account needs Workers AI. Uncomment when the checks are wired in.
-# [ai]
-# binding = "AI"
+# Workers AI, for the Llama Guard check on free text (src/checks.ts), which
+# the send-time decision runs with RECENT_LIST (src/decide.ts). The account
+# needs Workers AI. Without it, free text from a contributor without a track
+# record is held.
+[ai]
+binding = "AI"
