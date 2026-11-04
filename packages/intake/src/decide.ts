@@ -15,6 +15,7 @@ import {
   type ContactFactName,
   type FactValue,
   type FeedbackSubmission,
+  type RecentChange,
   type ReportBody,
   type StoredFeedback,
 } from "@opencampingdb/feedback";
@@ -68,17 +69,8 @@ export interface SendTimeDecision {
 /** The answer when the decision could not be made or recorded. */
 export const UNAVAILABLE: ItemState = { state: "held", held_reason: "check_unavailable" };
 
-/** A recent change as `GET /v1/places/recent` serves it. */
-export interface RecentChange {
-  place: string;
-  fact: string;
-  /** The fact's new value, or null when the change takes it down. */
-  value: FactValue | null;
-  /** When the intake accepted it. */
-  accepted: string;
-  /** When the apply put it into the data, or null until it has. */
-  in_data_at: string | null;
-}
+/** A recent change as `GET /v1/places/recent` serves it: the SDK's type, so apps read what the intake writes. */
+export type { RecentChange };
 
 /** Whether the intake decides `item` at send time. */
 export function decidedHere(item: StoredFeedback): item is ReportItem {

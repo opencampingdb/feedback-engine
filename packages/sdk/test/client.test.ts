@@ -10,6 +10,8 @@ import {
   tidyName,
   tidyText,
   type Answer,
+  HELD_REASONS,
+  itemDecision,
   keyIsUnusable,
   type RefusalReason,
   type StorageAdapter,
@@ -367,6 +369,44 @@ describe("a caller's own ref and onAnswered", () => {
     expect(answers).toEqual([{ ref: "old", type: "check", outcome: { kind: "dropped", httpStatus: 0 } }]);
   });
 
+  it("passes on an older intake's bare id with no state", async () => {
+    const answers: Answer[] = [];
+    const { client } = setup([{ status: 202, body: { id: "fb_old" } }], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    expect(await client.check({ ...check, ref: "r-old" })).toEqual({ status: "sent", id: "fb_old" });
+    expect(answers).toEqual([{ ref: "r-old", type: "check", outcome: { kind: "sent", id: "fb_old" } }]);
+    expect(answers[0]!.outcome).not.toHaveProperty("state");
+    expect(answers[0]!.outcome).not.toHaveProperty("heldReason");
+  });
+
+  const toilets = { place: PLACE, report: { kind: "fact", fact: "toilets", value: true }, consent: true } as const;
+
+  it("tells onAnswered and the caller that a change is live", async () => {
+    const answers: Answer[] = [];
+    const { client } = setup([{ status: 202, body: { id: "fb_live", state: "live" } }], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    expect(await client.report({ ...toilets, ref: "r-live" })).toEqual({ status: "sent", id: "fb_live", state: "live" });
+    expect(answers).toEqual([{ ref: "r-live", type: "report", outcome: { kind: "sent", id: "fb_live", state: "live" } }]);
+  });
+
+  it("tells onAnswered that a change is held, with the reason, on a later flush", async () => {
+    const answers: Answer[] = [];
+    const { client, advance } = setup(["network", { status: 202, body: { id: "fb_held", state: "held", held_reason: "owner_value" } }], 1_000_000, {
+      onAnswered: (a) => void answers.push(a),
+    });
+    expect(await client.report({ ...toilets, ref: "r-held" })).toEqual({ status: "queued" });
+    advance(60_000);
+    await client.flush();
+    expect(answers).toEqual([{ ref: "r-held", type: "report", outcome: { kind: "sent", id: "fb_held", state: "held", heldReason: "owner_value" } }]);
+  });
+
+  it("keeps held but leaves out a held reason this SDK does not know", async () => {
+    const answers: Answer[] = [];
+    const { client } = setup([{ status: 202, body: { id: "fb_x", state: "held", held_reason: "a_newer_code" } }], 1_000_000, {
+      onAnswered: (a) => void answers.push(a),
+    });
+    expect(await client.report(toilets)).toEqual({ status: "sent", id: "fb_x", state: "held" });
+    expect(answers[0]!.outcome).toEqual({ kind: "sent", id: "fb_x", state: "held" });
+  });
+
   it("keeps sending when onAnswered throws", async () => {
     const answers: Answer[] = [];
     const { client, calls, advance } = setup(["network", "network", 202], 1_000_000, {
@@ -433,3 +473,36 @@ describe("a caller's own ref and onAnswered", () => {
   });
 });
 
+
+describe("itemDecision", () => {
+  it("reads live, held with each known reason, and nothing else", () => {
+    expect(itemDecision({ id: "fb_1" })).toEqual({});
+    expect(itemDecision({ id: "fb_1", state: "live" })).toEqual({ state: "live" });
+    expect(itemDecision({ id: "fb_1", state: "live", held_reason: "text_check" })).toEqual({ state: "live" });
+    for (const reason of HELD_REASONS) expect(itemDecision({ id: "fb_1", state: "held", held_reason: reason })).toEqual({ state: "held", heldReason: reason });
+    expect(itemDecision({ id: "fb_1", state: "held" })).toEqual({ state: "held" });
+    expect(itemDecision({ id: "fb_1", state: "held", held_reason: 7 })).toEqual({ state: "held" });
+    expect(itemDecision({ id: "fb_1", state: "pending" })).toEqual({});
+    expect(itemDecision(null)).toEqual({});
+    expect(itemDecision("fb_1")).toEqual({});
+  });
+
+  it("lists the fourteen codes the intake sends", () => {
+    expect(HELD_REASONS).toEqual([
+      "not_attested",
+      "owner_value",
+      "disagreement",
+      "link_check",
+      "text_check",
+      "unconfirmed",
+      "no_contributor",
+      "daily_cap",
+      "ai_check",
+      "check_unavailable",
+      "unknown_place",
+      "blocked",
+      "no_value",
+      "invalid_value",
+    ]);
+  });
+});

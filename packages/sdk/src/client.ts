@@ -300,8 +300,12 @@ export type PhotoPassResult =
   | { status: "rejected"; httpStatus: number; error?: string }
   | { status: "offline" };
 
+/**
+ * What a report, review, check, review report, fee or withdraw came to. On
+ * `sent`, `state` and `heldReason` are the intake's decision (`ItemDecision`).
+ */
 export type SubmitResult =
-  | { status: "sent"; id: string }
+  | ({ status: "sent"; id: string } & ItemDecision)
   | { status: "queued" }
   | { status: "rejected"; httpStatus: number };
 
@@ -451,11 +455,75 @@ interface QueueItem {
 
 /**
  * What became of a queued item. `id` is the intake's id for it (for a new
- * place, the id to pass to `newPlaceId`). `httpStatus` is the intake's refusal,
+ * place, the id to pass to `newPlaceId`), and `state` and `heldReason` say
+ * whether it went live or is held (`ItemDecision`). `httpStatus` is the intake's refusal,
  * or 0 when the SDK dropped the item unsent because it grew too old or the
  * queue was full.
  */
-export type AnswerOutcome = { kind: "sent"; id: string } | { kind: "dropped"; httpStatus: number };
+export type AnswerOutcome = ({ kind: "sent"; id: string } & ItemDecision) | { kind: "dropped"; httpStatus: number };
+
+/**
+ * The intake's codes for why it held an item at send time. Adding a code is
+ * additive; renaming or removing one is a breaking change.
+ *
+ * - `not_attested`: the report was not from an attested install, so a person
+ *   reads it (a contact) or a second device has to agree (any other fact).
+ * - `owner_value`: the place's owner set the value.
+ * - `disagreement`: another source sent a different value within 90 days.
+ * - `link_check`: a link failed the link rules or the malware check.
+ * - `text_check`: free text failed the text checks.
+ * - `unconfirmed`: a contact report from one source, or with none attested.
+ * - `no_contributor`: a new place sent without a contributor.
+ * - `daily_cap`: the contributor has had 50 live changes this UTC day.
+ * - `ai_check`: the AI check flagged free text.
+ * - `check_unavailable`: a check could not run, so the item waits.
+ * - `unknown_place`: the intake does not have the place yet.
+ * - `blocked`: the contributor is blocked.
+ * - `no_value`: a contact report about a contact the place does not have.
+ * - `invalid_value`: not a valid value for the fact.
+ */
+export const HELD_REASONS = [
+  "not_attested",
+  "owner_value",
+  "disagreement",
+  "link_check",
+  "text_check",
+  "unconfirmed",
+  "no_contributor",
+  "daily_cap",
+  "ai_check",
+  "check_unavailable",
+  "unknown_place",
+  "blocked",
+  "no_value",
+  "invalid_value",
+] as const;
+
+/** Why the intake held an item at send time. */
+export type HeldReason = (typeof HELD_REASONS)[number];
+
+const KNOWN_HELD_REASONS: ReadonlySet<string> = new Set<string>(HELD_REASONS);
+
+/**
+ * What the intake decided about a sent item. `state` is `live` when the change
+ * shows at once (on the recent list), or `held` when it waits for a reviewer,
+ * with `heldReason`. Both are absent when the intake did not decide the item at
+ * send time (the apply decides it later), and from intakes older than 0.10.0.
+ * `heldReason` is also absent when the intake sent a code this SDK does not know.
+ */
+export interface ItemDecision {
+  state?: "live" | "held";
+  heldReason?: HeldReason;
+}
+
+/** The decision in an accepted item's answer, as `ItemDecision`. Empty when the answer has none this SDK can read. */
+export function itemDecision(answer: unknown): ItemDecision {
+  if (typeof answer !== "object" || answer === null) return {};
+  const { state, held_reason } = answer as { state?: unknown; held_reason?: unknown };
+  if (state === "live") return { state: "live" };
+  if (state !== "held") return {};
+  return typeof held_reason === "string" && KNOWN_HELD_REASONS.has(held_reason) ? { state: "held", heldReason: held_reason as HeldReason } : { state: "held" };
+}
 
 /** What `onAnswered` is told when a queued item is settled. */
 export interface Answer {
@@ -594,13 +662,15 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
     }
     if (res.status >= 200 && res.status < 300) {
       let id = "";
+      let decision: ItemDecision = {};
       try {
         const body = (await res.json()) as { id?: unknown };
         if (typeof body.id === "string") id = body.id;
+        decision = itemDecision(body);
       } catch {
         // A 2xx without a readable body still means the intake has it.
       }
-      record(item, { kind: "sent", id });
+      record(item, { kind: "sent", id, ...decision });
       return "sent";
     }
     if (res.status === 429) {
@@ -726,7 +796,10 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
     const outcome = outcomes.get(localId);
     outcomes.delete(localId);
     if (!outcome) return { status: "queued" } as const;
-    if (outcome.kind === "sent") return { status: "sent", id: outcome.id } as const;
+    if (outcome.kind === "sent") {
+      const { kind: _kind, ...sent } = outcome;
+      return { status: "sent", ...sent } as const;
+    }
     return { status: "rejected", httpStatus: outcome.httpStatus } as const;
   }
 
