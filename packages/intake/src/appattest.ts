@@ -130,6 +130,32 @@ function parseAuthData(data: Uint8Array): AuthData {
 }
 
 /**
+ * An assertion's authenticator data: the rpId hash, the flags and the counter,
+ * then any extensions. An assertion never carries attested credential data, so
+ * its flag is ignored: iOS 27 sets it on assertions. Whatever follows the first
+ * 37 bytes is read as the extensions map, whichever flags are set.
+ */
+function parseAssertionData(data: Uint8Array): AuthData {
+  const shape = `${data.length} bytes, flags 0x${(data[32] ?? 0).toString(16).padStart(2, "0")}`;
+  if (data.length < 37) throw new AttestError("malformed", `authenticator data too short (${shape})`);
+  const out: AuthData = {
+    rpIdHash: data.subarray(0, 32),
+    counter: new DataView(data.buffer, data.byteOffset + 33, 4).getUint32(0),
+  };
+  if (data.length === 37) return out;
+  let extensions: { value: CborValue; end: number };
+  try {
+    extensions = decodeCbor(data, 37);
+  } catch {
+    throw new AttestError("malformed", `unreadable extensions in the authenticator data (${shape})`);
+  }
+  if (!(extensions.value instanceof Map)) throw new AttestError("malformed", `bad extensions (${shape})`);
+  if (extensions.end !== data.length) throw new AttestError("malformed", `trailing authenticator data (${shape})`);
+  out.extensions = extensions.value;
+  return out;
+}
+
+/**
  * The launch validation category as a number. iOS 27 sends it as a byte string
  * holding a little-endian integer (TestFlight arrives as 02 00 00 00).
  */
@@ -243,7 +269,7 @@ async function assertion(input: Parameters<typeof verifyAssertion>[0]): Promise<
   if (!(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, ecdsaDerToRaw(signature, 32), nonce))) {
     throw new AttestError("bad_signature", "signature does not match");
   }
-  const auth = parseAuthData(authBytes);
+  const auth = parseAssertionData(authBytes);
   if (!equal(auth.rpIdHash, await sha256(input.config.app_id))) throw new AttestError("wrong_app", "assertion is for another app");
   if (auth.counter <= input.key.counter) throw new AttestError("counter_not_increased", "counter did not increase");
   checkCategory(auth, input.config.environment ?? "production");

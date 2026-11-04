@@ -226,6 +226,26 @@ describe("App Attest", () => {
   });
 
   it.each([
+    ["the attested data flag and the extensions flag", 0xc1],
+    ["the attested data flag without the extensions flag", 0x41],
+  ])("accepts an assertion whose flags carry %s, as iOS 27 sends", async (_, flagsByte) => {
+    expect((await registered({ category: new Uint8Array([2, 0, 0, 0]) })).status).toBe(201);
+    const res = await send(reviewBody(), 1, { category: new Uint8Array([2, 0, 0, 0]), flags: flagsByte });
+    expect(res.status).toBe(202);
+  });
+
+  it("says how long the authenticator data was and its flags when an assertion's data cannot be read", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect((await registered()).status).toBe(201);
+    const res = await send(reviewBody(), 1, { category: new Uint8Array([2, 0, 0, 0]), flags: 0x80, trailing: new Uint8Array([0xff]) });
+    warn.mockRestore();
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { reason: string; details: string[] };
+    expect(body.reason).toBe("malformed");
+    expect(body.details.join(" ")).toMatch(/\d+ bytes, flags 0x80/);
+  });
+
+  it.each([
     ["a development build sent as bytes", { category: new Uint8Array([3, 0, 0, 0]) }, "category 3,0,0,0", "category_not_accepted"],
     ["another app", { appId: "ZZZZZ99999.other.app" }, "another app", "wrong_app"],
     ["a used key", { counter: 3 }, "counter", "counter_not_increased"],

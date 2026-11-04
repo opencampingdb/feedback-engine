@@ -96,7 +96,7 @@ export interface Device {
   rootPem: string;
   keyId: string;
   attest(challenge: string, options?: { appId?: string; counter?: number; aaguid?: string; category?: number | Uint8Array; keyIdOverride?: string }): Uint8Array;
-  assert(body: string, counter: number, options?: { appId?: string; category?: number | Uint8Array }): Uint8Array;
+  assert(body: string, counter: number, options?: { appId?: string; category?: number | Uint8Array; flags?: number; trailing?: Uint8Array }): Uint8Array;
 }
 
 const flags = (attested: boolean, extensions: boolean) => (attested ? 0x40 : 0) | (extensions ? 0x80 : 0);
@@ -167,9 +167,10 @@ export function makeDevice(now: number): Device {
       const ext = extensionsFor(options.category);
       const authenticatorData = Buffer.concat([
         sha256(options.appId ?? APP_ID),
-        new Uint8Array([flags(false, ext.length > 0)]),
+        new Uint8Array([options.flags ?? flags(false, ext.length > 0)]),
         counterBytes(counter),
         ext,
+        options.trailing ?? new Uint8Array(),
       ]);
       const nonce = sha256(Buffer.concat([authenticatorData, sha256(body)]));
       const signature = sign("sha256", nonce, leafKey);
