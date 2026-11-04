@@ -18,7 +18,10 @@
 # so the data PRs trigger the data repository's CI.
 #
 # With intake-url and the places-token secret, each run also keeps the
-# intake's recent places store in step with the data on the base branch.
+# intake's recent places store and recent changes in step with the data on the
+# base branch: it tells the intake which applied changes the base branch now
+# holds (so a change counts only once its PR has merged, at the next run), and
+# which items it decided other than applying them, which leave the list at once.
 #
 # With release-workflow set, a run that opened or added to the automatic PR
 # waits for it to merge, then starts the data repository's release workflow,
@@ -66,7 +69,9 @@ on:
           https://intake.example.org. Set it with the places-token secret and
           each run takes places now in the data on the base branch, and
           withdrawn ones, out of the intake's recent places store, and sends
-          it the block list.
+          it the block list. It also tells the intake which applied fact and
+          contact reports the base branch now holds, and which items the run
+          decided other than applying them.
         type: string
         default: ""
       recent-places-url:

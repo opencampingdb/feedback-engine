@@ -49,7 +49,18 @@ import {
 } from "./recent.js";
 import { cellHashes, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
 import { createChecks, pruneLiveCounts, type AiLike } from "./checks.js";
-import { decideAtSendTime, decidedHere, listChanges, pruneDecisions, UNAVAILABLE, type ItemState, type SendTimeDecision } from "./decide.js";
+import {
+  decideAtSendTime,
+  decidedHere,
+  isFeedbackId,
+  listChanges,
+  markInData,
+  overrule,
+  pruneDecisions,
+  UNAVAILABLE,
+  type ItemState,
+  type SendTimeDecision,
+} from "./decide.js";
 import { ulid } from "./ulid.js";
 
 /** The part of an R2 bucket binding the photo upload uses. */
@@ -895,6 +906,50 @@ export function createHandler(deps: Deps) {
     return json(200, { blocked: new Set(contributors).size }, cors);
   }
 
+  /** The `ids` of a call from the apply run: 1 to 500 feedback ids. A Response when they are not. */
+  function feedbackIds(body: Record<string, unknown>, cors: Record<string, string>): string[] | Response {
+    const ids = body.ids;
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_REMOVE_IDS || !ids.every(isFeedbackId)) {
+      return json(400, { error: "invalid", details: [`ids must be 1 to ${MAX_REMOVE_IDS} feedback ids`] }, cors);
+    }
+    return ids as string[];
+  }
+
+  /**
+   * `POST /v1/places/recent/in-data`, for the apply run once the data's main
+   * branch holds the changes: `{ "ids": [...], "at": "<ISO time>" }`, the
+   * feedback ids and the run's time, with `authorization: Bearer
+   * <PLACES_TOKEN>`. Their recent changes are kept for 7 days from `at`, or
+   * from now when `at` is later.
+   */
+  async function inDataRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 4);
+    if (call instanceof Response) return call;
+    const ids = feedbackIds(call.body, cors);
+    if (ids instanceof Response) return ids;
+    const at = call.body.at;
+    if (typeof at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(at) || Number.isNaN(Date.parse(at))) {
+      return json(400, { error: "invalid", details: ["at must be an ISO 8601 UTC time"] }, cors);
+    }
+    const nowMs = deps.now();
+    const when = new Date(Math.min(Date.parse(at), nowMs)).toISOString().replace(/\.\d{3}Z$/, "Z");
+    return json(200, { marked: await markInData(call.db, ids, when) }, cors);
+  }
+
+  /**
+   * `POST /v1/places/recent/overruled`, for the apply run: `{ "ids": [...] }`,
+   * the feedback ids it decided other than applying them, with
+   * `authorization: Bearer <PLACES_TOKEN>`. Their recent changes leave the
+   * list at once.
+   */
+  async function overruledRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 4);
+    if (call instanceof Response) return call;
+    const ids = feedbackIds(call.body, cors);
+    if (ids instanceof Response) return ids;
+    return json(200, { removed: await overrule(call.db, ids) }, cors);
+  }
+
   return async function handle(request: Request, env: Env): Promise<Response> {
     const cors = corsHeaders(request, env);
     const url = new URL(request.url);
@@ -918,6 +973,14 @@ export function createHandler(deps: Deps) {
     if (route === "/v1/places/recent/remove") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return removeRecent(request, env, cors);
+    }
+    if (route === "/v1/places/recent/in-data") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return inDataRecent(request, env, cors);
+    }
+    if (route === "/v1/places/recent/overruled") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return overruledRecent(request, env, cors);
     }
     if (route === "/v1/places/recent/block") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });

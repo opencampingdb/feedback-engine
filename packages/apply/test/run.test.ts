@@ -116,6 +116,8 @@ describe("run", () => {
     const summary = await run({ inbox, data, now: NOW });
 
     expect(summary.counts).toEqual({ applied: 3, refused: 1, needs_review: 0, waiting: 1, awaiting_approval: 0 });
+    // Refused, but not the item still waiting, which a later run decides.
+    expect(summary.not_applied).toEqual([id(4)]);
     expect(summary.auto_changed).toBe(true);
     expect(summary.review_changed).toBe(false);
     expect([...summary.auto_files].sort()).toEqual([`places/za/${PLACE}.json`, `reviews/${PLACE}.ndjson`]);
