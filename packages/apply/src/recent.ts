@@ -10,6 +10,7 @@ import type { Place } from "./types.js";
  * data, or apps would lose it for a while.
  */
 export interface RecentStore {
+  /** The data holds these places, or their adder withdrew them. The intake keeps them, with their standing, for 7 days from then. */
   remove(ids: readonly string[]): Promise<void>;
   /** Replaces the intake's block list with these hashed contributor ids. */
   block(contributors: readonly string[]): Promise<void>;
@@ -31,7 +32,7 @@ export interface RecentChangeStore {
   overruled(ids: readonly string[], refused: readonly string[]): Promise<void>;
 }
 
-/** The ids of the new places on the intake's recent list. */
+/** The ids of the new places on the intake's recent list that the apply run is not done with yet. */
 export interface RecentList {
   /** Throws when the list cannot be read. */
   ids(): Promise<ReadonlySet<string>>;
@@ -39,8 +40,10 @@ export interface RecentList {
 
 /**
  * The intake's public `GET /v1/places/recent`, which lists new places that
- * are `shown` or `confirmed` until they are in the data. Withdrawn and hidden
- * places are not on it.
+ * are `shown` or `confirmed` until they are in the data, and then for 7 days
+ * with `in_data_at` and whatever their standing. `ids` leaves out the places
+ * with `in_data_at`, which this store has already been told about, so only the
+ * places waiting for the data count.
  */
 export function intakeRecentList(baseUrl: string, fetcher: typeof fetch = fetch): RecentList {
   const url = new URL("/v1/places/recent", baseUrl).toString();
@@ -54,6 +57,7 @@ export function intakeRecentList(baseUrl: string, fetcher: typeof fetch = fetch)
       for (const place of body.places) {
         const id = (place as { id?: unknown } | null)?.id;
         if (typeof id !== "string") throw new Error("a place on the intake's recent list has no id");
+        if (typeof (place as { in_data_at?: unknown }).in_data_at === "string") continue;
         ids.add(id);
       }
       return ids;
@@ -125,10 +129,11 @@ export interface SettleOptions {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Takes out of the recent store every new place from the last 90 days that
- * is now in the data on `main`, and every place its adder withdrew. Places
- * held for a person stay until the review PR that writes them is merged.
- * Returns the ids sent, sorted.
+ * Tells the recent store about every new place from the last 90 days that is
+ * now in the data on `main`, and every place its adder withdrew. The store
+ * lists each for 7 more days with its standing and then drops it. Places held
+ * for a person stay until the review PR that writes them is merged. Returns
+ * the ids sent, sorted.
  */
 export async function settleRecentPlaces(options: SettleOptions): Promise<string[]> {
   const now = options.now ?? new Date();

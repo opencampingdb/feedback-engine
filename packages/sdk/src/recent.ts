@@ -3,8 +3,9 @@ import type { ContactFactName, FactValue, FeeValue, LatLon } from "./types.js";
 
 /**
  * A new place on the recent list (`GET /v1/places/recent`), shown until a data
- * release has it. Never the note. The description, fee and contacts are there
- * only when the report carried them and they passed the checks.
+ * release has it and then listed for 7 more days with its current standing.
+ * Never the note. The description, fee and contacts are there only when the
+ * report carried them and they passed the checks.
  */
 export interface RecentPlace {
   id: string;
@@ -21,6 +22,13 @@ export interface RecentPlace {
   fee?: FeeValue;
   /** The contact facts and the address. */
   contacts?: Partial<Record<ContactFactName, FactValue>>;
+  /**
+   * When the apply run put the place into the data (or settled its adder's
+   * withdraw), ISO 8601 UTC. Absent until then, and from intakes older than
+   * SDK 0.10.1. Once it is set the place is listed for 7 days whatever its
+   * standing, so a `hidden` or `withdrawn` place reaches apps whose release has it.
+   */
+  in_data_at?: string;
 }
 
 /**

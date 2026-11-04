@@ -26,7 +26,7 @@ export interface D1Like {
 export type { RecentPlace };
 
 /** A new place as the recent list keeps it. Written once, when the place is added. */
-export interface StoredPlace extends Omit<RecentPlace, "standing"> {
+export interface StoredPlace extends Omit<RecentPlace, "standing" | "in_data_at"> {
   /** The adder's hashed device. */
   device: string;
   /** The adder's hashed App Attest key, when the report was attested with one. */
@@ -49,8 +49,12 @@ export const RECENT_CACHE_SECONDS = 30;
 export const MAX_REMOVE_IDS = 500;
 /** Most contributors the block list may hold. */
 export const MAX_BLOCKED_CONTRIBUTORS = 5000;
+/** Days a new place stays on the recent list after the apply run is done with it. */
+export const KEEP_PLACE_IN_DATA_DAYS = 7;
 /** D1 allows 100 bound values in one statement. */
 const MAX_BOUND = 100;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const isoSeconds = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 
 /** `items` in runs of at most `size`. */
 export const chunks = <T>(items: readonly T[], size: number): T[][] =>
@@ -130,6 +134,7 @@ interface PlaceRow {
   description: string | null;
   fee: string | null;
   contacts: string | null;
+  in_data_at: string | null;
 }
 
 const fromRow = (row: PlaceRow): StoredPlace => ({
@@ -165,15 +170,50 @@ export async function removePlaces(db: D1Like, ids: readonly string[]): Promise<
   ]);
 }
 
+/**
+ * Records that the apply run is done with these places, as of `at`: the data
+ * holds them, or their adder withdrew them. They stay on the recent list, with
+ * their evidence still counting, for 7 days from then, so a hide or withdraw
+ * after that still reaches apps. A place already marked keeps its first time,
+ * so the apply can send the same ids on every run. Returns the places marked.
+ */
+export async function markPlacesInData(db: D1Like, ids: readonly string[], at: string): Promise<number> {
+  const results = await db.batch(
+    chunks([...new Set(ids)], MAX_BOUND - 1).map((part) =>
+      db.prepare(`UPDATE new_places SET in_data_at = ? WHERE in_data_at IS NULL AND id IN (${marks(part.length)})`).bind(at, ...part),
+    ),
+  );
+  return results.reduce<number>((sum, result) => sum + ((result as { meta?: { changes?: number } } | null)?.meta?.changes ?? 0), 0);
+}
+
+/**
+ * The statements that delete new places the apply run was done with more than
+ * 7 days before `now`, with their evidence, and any evidence whose place has
+ * already gone. The evidence goes first, while its place can still be found.
+ * For the scheduled job's prune.
+ */
+export function prunePlaceStatements(db: D1Like, now: number): D1Statement[] {
+  const before = isoSeconds(now - KEEP_PLACE_IN_DATA_DAYS * DAY_MS);
+  return [
+    db.prepare("DELETE FROM evidence WHERE place_id IN (SELECT id FROM new_places WHERE in_data_at IS NOT NULL AND in_data_at < ?)").bind(before),
+    db.prepare("DELETE FROM new_places WHERE in_data_at IS NOT NULL AND in_data_at < ?").bind(before),
+    db.prepare("DELETE FROM evidence WHERE place_id NOT IN (SELECT id FROM new_places)"),
+  ];
+}
+
 /** West, south, east, north. */
 export type Bbox = [number, number, number, number];
 
 type ListedRow = PlaceRow & { blocked: number; evidence_kind: Evidence["kind"] | null; evidence_data: string | null };
 
 /**
- * Every `shown` or `confirmed` new place in id order, within `bbox` when given, read in
- * one query with its evidence. Each standing is worked out at `now` from the
- * evidence and the block list, so nothing is written back.
+ * The new places on the recent list in id order, within `bbox` when given,
+ * read in one query with their evidence: those the apply run is not done with
+ * yet while they are `shown` or `confirmed`, and those it was done with in the
+ * last 7 days whatever their standing, with `in_data_at`, so a hide or
+ * withdraw after the data has a place still reaches apps. Each standing is
+ * worked out at `now` from the evidence and the block list, so nothing is
+ * written back.
  */
 export async function listPlaces(db: D1Like, now: string, bbox?: Bbox): Promise<RecentPlace[]> {
   const query = db.prepare(
@@ -185,10 +225,14 @@ export async function listPlaces(db: D1Like, now: string, bbox?: Bbox): Promise<
   );
   const { results } = await (bbox ? query.bind(bbox[1], bbox[3], bbox[0], bbox[2]) : query).all<ListedRow>();
 
-  const places = new Map<string, { place: StoredPlace; blocked: boolean; checks: NewPlaceCheck[]; reports: NewPlaceReport[]; withdrawn: string[] }>();
+  // Kept until the scheduled job prunes it, but not listed past its 7 days should a prune be late.
+  const kept = isoSeconds(Date.parse(now) - KEEP_PLACE_IN_DATA_DAYS * DAY_MS);
+  type Entry = { place: StoredPlace; inDataAt: string | null; blocked: boolean; checks: NewPlaceCheck[]; reports: NewPlaceReport[]; withdrawn: string[] };
+  const places = new Map<string, Entry>();
   for (const row of results) {
+    if (row.in_data_at !== null && row.in_data_at < kept) continue;
     let entry = places.get(row.id);
-    if (!entry) places.set(row.id, (entry = { place: fromRow(row), blocked: row.blocked === 1, checks: [], reports: [], withdrawn: [] }));
+    if (!entry) places.set(row.id, (entry = { place: fromRow(row), inDataAt: row.in_data_at, blocked: row.blocked === 1, checks: [], reports: [], withdrawn: [] }));
     if (row.evidence_kind === null || row.evidence_data === null) continue;
     const data: unknown = JSON.parse(row.evidence_data);
     if (row.evidence_kind === "check") entry.checks.push(data as NewPlaceCheck);
@@ -197,7 +241,7 @@ export async function listPlaces(db: D1Like, now: string, bbox?: Bbox): Promise<
   }
 
   const out: RecentPlace[] = [];
-  for (const { place, blocked, checks, reports, withdrawn } of places.values()) {
+  for (const { place, inDataAt, blocked, checks, reports, withdrawn } of places.values()) {
     const standing = newPlaceStanding({
       added: place.added,
       // The intake has no place history: the apply run settles first places.
@@ -209,7 +253,7 @@ export async function listPlaces(db: D1Like, now: string, bbox?: Bbox): Promise<
       moderator: null,
       now,
     });
-    if (standing !== "shown" && standing !== "confirmed") continue;
+    if (inDataAt === null && standing !== "shown" && standing !== "confirmed") continue;
     const { id, location, kind, name, added, contributor, description, fee, contacts } = place;
     out.push({
       id,
@@ -222,6 +266,7 @@ export async function listPlaces(db: D1Like, now: string, bbox?: Bbox): Promise<
       ...(description !== undefined ? { description } : {}),
       ...(fee !== undefined ? { fee } : {}),
       ...(contacts !== undefined ? { contacts } : {}),
+      ...(inDataAt !== null ? { in_data_at: inDataAt } : {}),
     });
   }
   return out;

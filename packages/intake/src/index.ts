@@ -40,7 +40,7 @@ import {
   NEW_PLACE_DAILY_LIMIT,
   parseBbox,
   RECENT_CACHE_SECONDS,
-  removePlaces,
+  markPlacesInData,
   setBlockList,
   snapBbox,
   WITHDRAW_WINDOW_MS,
@@ -950,7 +950,10 @@ export function createHandler(deps: Deps) {
 
   /**
    * `POST /v1/places/recent/remove`, for the apply run once the places are in
-   * the data: `{ "ids": [...] }` with `authorization: Bearer <PLACES_TOKEN>`.
+   * the data or withdrawn: `{ "ids": [...] }` with `authorization: Bearer
+   * <PLACES_TOKEN>`. Each place is marked with `in_data_at`, from the intake's
+   * clock the first time only, and stays on the list with its current standing
+   * for 7 days from then, when the scheduled job deletes it.
    */
   async function removeRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
     const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 4);
@@ -959,7 +962,7 @@ export function createHandler(deps: Deps) {
     if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_REMOVE_IDS || !ids.every(isPlaceId)) {
       return json(400, { error: "invalid", details: [`ids must be 1 to ${MAX_REMOVE_IDS} place ids`] }, cors);
     }
-    await removePlaces(call.db, ids as string[]);
+    await markPlacesInData(call.db, ids as string[], new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z"));
     return json(200, { removed: ids.length }, cors);
   }
 
