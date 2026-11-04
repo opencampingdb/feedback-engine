@@ -6,6 +6,10 @@ import {
   FeedbackValidationError,
   type FeedbackClientOptions,
   type FetchLike,
+  sdkCoordinate,
+  tidyName,
+  tidyText,
+  type Answer,
   keyIsUnusable,
   type RefusalReason,
   type StorageAdapter,
@@ -316,3 +320,116 @@ describe("keyIsUnusable", () => {
     expect(keyIsUnusable(undefined)).toBe(false);
   });
 });
+
+describe("a caller's own ref and onAnswered", () => {
+  it("keeps the ref with the queued item and never sends it", async () => {
+    const { client, calls, storage } = setup(["network", 202]);
+    expect(await client.check({ ...check, ref: "my-record-1" })).toEqual({ status: "queued" });
+    expect(calls[0]!.body).not.toHaveProperty("ref");
+    const queued = JSON.parse(storage.data.get("ocdb.feedback.queue")!);
+    expect(queued[0].ref).toBe("my-record-1");
+    expect(queued[0].body).not.toHaveProperty("ref");
+  });
+
+  it("tells onAnswered the ref and id of an item sent at once", async () => {
+    const answers: Answer[] = [];
+    const { client } = setup([202], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    expect(await client.check({ ...check, ref: "my-record-1" })).toEqual({ status: "sent", id: "fb_1" });
+    expect(answers).toEqual([{ ref: "my-record-1", type: "check", outcome: { kind: "sent", id: "fb_1" } }]);
+  });
+
+  it("tells onAnswered the ref and id of a new place sent by a later flush", async () => {
+    const answers: Answer[] = [];
+    const { client, advance } = setup(["network", { status: 202, body: { id: "fb_new" } }], 1_000_000, {
+      onAnswered: (a) => void answers.push(a),
+    });
+    const newPlace = { place: null, location: { lat: -36.8, lon: 144.5 }, report: { kind: "new_place", name: "River Bend", place_kind: "campground" }, consent: true } as const;
+    expect(await client.report({ ...newPlace, ref: "draft-7" })).toEqual({ status: "queued" });
+    expect(answers).toEqual([]);
+    advance(60_000);
+    await client.flush();
+    expect(answers).toEqual([{ ref: "draft-7", type: "report", outcome: { kind: "sent", id: "fb_new" } }]);
+  });
+
+  it("tells onAnswered the status of a dropped item", async () => {
+    const answers: Answer[] = [];
+    const { client } = setup([400], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    expect(await client.check({ ...check, ref: "r-1" })).toEqual({ status: "rejected", httpStatus: 400 });
+    expect(answers).toEqual([{ ref: "r-1", type: "check", outcome: { kind: "dropped", httpStatus: 400 } }]);
+  });
+
+  it("tells onAnswered with status 0 when an item grows too old to send", async () => {
+    const answers: Answer[] = [];
+    const { client, advance } = setup(["network"], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    await client.check({ ...check, ref: "old" });
+    advance(31 * 24 * 60 * 60 * 1000);
+    await client.flush();
+    expect(answers).toEqual([{ ref: "old", type: "check", outcome: { kind: "dropped", httpStatus: 0 } }]);
+  });
+
+  it("keeps sending when onAnswered throws", async () => {
+    const answers: Answer[] = [];
+    const { client, calls, advance } = setup(["network", "network", 202], 1_000_000, {
+      onAnswered: (a) => {
+        answers.push(a);
+        throw new Error("app record store failed");
+      },
+    });
+    await client.check({ ...check, ref: "a" });
+    await client.check({ ...check, ref: "b" });
+    advance(60 * 60 * 1000);
+    expect(await client.flush()).toEqual({ sent: 2, dropped: 0, remaining: 0 });
+    expect(answers.map((a) => a.ref)).toEqual(["a", "b"]);
+    expect(calls).toHaveLength(4);
+    expect(await client.pending()).toBe(0);
+  });
+
+  it("sends an item queued before refs existed and answers it without a ref", async () => {
+    const answers: Answer[] = [];
+    const { client, storage, calls } = setup([202], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    const body = { type: "check", place: PLACE, device: "d-1", app_version: "1.2.2", consent: true, check: check.check };
+    storage.data.set("ocdb.feedback.queue", JSON.stringify([{ localId: "old-1", body, queuedAt: 1_000_000, attempts: 1, nextAttemptAt: 0 }]));
+    expect(await client.flush()).toEqual({ sent: 1, dropped: 0, remaining: 0 });
+    expect(calls[0]!.body).toEqual(body);
+    expect(answers).toEqual([{ type: "check", outcome: { kind: "sent", id: "fb_1" } }]);
+  });
+
+  it("refuses a ref that is empty or longer than 100 characters", async () => {
+    const { client, calls } = setup([202]);
+    await expect(client.check({ ...check, ref: "" })).rejects.toBeInstanceOf(FeedbackValidationError);
+    await expect(client.check({ ...check, ref: "x".repeat(101) })).rejects.toBeInstanceOf(FeedbackValidationError);
+    expect(await client.check({ ...check, ref: "x".repeat(100) })).toEqual({ status: "sent", id: "fb_1" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("carries a ref on review reports and withdraws without sending it", async () => {
+    const answers: Answer[] = [];
+    const { client, calls } = setup([202], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    await client.reportReview({ place: PLACE, review: "rev_01JBXK3M8Q4R5S6T7V8W9X0YZA", reason: "spam_ad", consent: true, ref: "rr" });
+    await client.withdraw({ place: PLACE, consent: true, ref: "wd" });
+    expect(calls.every((c) => !("ref" in (c.body as object)))).toBe(true);
+    expect(answers.map((a) => [a.ref, a.type])).toEqual([["rr", "review_report"], ["wd", "withdraw"]]);
+  });
+
+  it("queues the location as sdkCoordinate rounds it and a tidied name and text as given", async () => {
+    const { client, storage } = setup(["network"]);
+    const location = { lat: -36.81234567, lon: 144.50000049 };
+    const name = tidyName("  RIVER   BEND ");
+    const note = tidyText("FLAT SITES  BY THE RIVER!!!!  ");
+    await client.report({ place: null, location, report: { kind: "new_place", name, place_kind: "campground", note }, consent: true, ref: "n" });
+    const [item] = JSON.parse(storage.data.get("ocdb.feedback.queue")!);
+    expect(item.body.location).toEqual({ lat: sdkCoordinate(location.lat), lon: sdkCoordinate(location.lon) });
+    expect(item.body.location).toEqual({ lat: -36.812346, lon: 144.5 });
+    expect(item.body.report.name).toBe("River Bend");
+    expect(item.body.report.name).toBe(name);
+    expect(item.body.report.note).toBe(note);
+  });
+
+  it("trims a name it was given untidied", async () => {
+    const { client, storage } = setup(["network"]);
+    await client.report({ place: null, location: { lat: -36.8, lon: 144.5 }, report: { kind: "new_place", name: "  River   Bend ", place_kind: "campground" }, consent: true });
+    const [item] = JSON.parse(storage.data.get("ocdb.feedback.queue")!);
+    expect(item.body.report.name).toBe("River   Bend");
+  });
+});
+

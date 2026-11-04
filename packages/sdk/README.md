@@ -47,4 +47,32 @@ A hook written for one argument still works. `keyIsUnusable(reason)` is the one 
 
 Key registration refusals use the same codes. Registration also answers `malformed` for an unknown or used challenge (`401`) and for a key that is already registered (`409`), `counter_not_increased` when a new key's counter is not 0, and `category_not_accepted` when the key is not from this app key's environment. The reason type is exported as `RefusalReason`, and the second argument of the hook as `AttestationRefusal`. Adding a code later is additive; a code this version does not know is left out of `reason`, and its `details` still reach the hook.
 
+## What is queued, and connecting answers to your records
+
+The client normalises a submission before it queues it, so the queue can hold something other than what you passed in. A location is rounded to 6 decimal places (`sdkCoordinate`), and names are trimmed. To keep exactly what was queued, tidy the traveller's words with `tidyName` and `tidyText` before you submit them, round with `sdkCoordinate`, and store those values. Never match an answer to your own record by comparing content: a value you held before normalising will not match.
+
+A new place's id arrives only to the send that carried it. When the place is sent at once, `report()` answers `{ status: "sent", id }`. When it was queued, the id comes back later to whichever `flush()` sends it, and `flush()` itself returns only counts.
+
+To connect answers to your records, give each submission a `ref` of your own (1 to 100 characters, such as your record's id) and pass `onAnswered`. The client keeps `ref` with the queued item and never sends it to the intake. `onAnswered` is called once for each queued item when it is settled, whether by the call that submitted it or by a later flush, after the queue is saved:
+
+```ts
+import type { Answer } from "@opencampingdb/feedback";
+
+const feedback = createFeedbackClient({
+  // ...
+  onAnswered: async ({ ref, type, outcome }: Answer) => {
+    if (!ref) return; // items queued before 0.8.0 have no ref
+    if (outcome.kind === "sent") {
+      await markSent(ref, type, outcome.id); // for a new place, newPlaceId(outcome.id) is its place id
+    } else {
+      await markDropped(ref, outcome.httpStatus); // 0 when it grew too old or the queue was full
+    }
+  },
+});
+
+await feedback.report({ place: null, location, report: { kind: "new_place", name }, consent: true, ref: draft.id });
+```
+
+`outcome` is `{ kind: "sent", id }` or `{ kind: "dropped", httpStatus }`. `httpStatus` is the intake's refusal, or 0 when the client dropped the item unsent because it was older than `maxQueueAgeMs` or pushed out past `maxQueueLength`. An item still waiting to be retried has no answer yet. Errors thrown by the hook are caught and never stop the queue. `ref` works on every call that queues: `report`, `review`, `check`, `fee`, `reportReview`, `withdraw`, and on the photo client `reportPhoto` and `erasePhotos`. Owner requests and photo uploads are sent at once and answer directly, so they take no `ref`.
+
 The full guide is [docs/integration.md](../../docs/integration.md). Licence: Apache 2.0.

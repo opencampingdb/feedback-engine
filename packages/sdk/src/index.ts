@@ -7,12 +7,15 @@ export {
   backoffDelay,
   isJpeg,
   keyIsUnusable,
+  MAX_REF_LENGTH,
   ConsentRequiredError,
   FeedbackValidationError,
   OwnerRequestError,
   OwnerTermsRequiredError,
 } from "./client.js";
 export type {
+  Answer,
+  AnswerOutcome,
   AttestationError,
   AttestationRefusal,
   CheckInput,
@@ -72,6 +75,7 @@ export {
   isReviewId,
   isValidFactValue,
   newPlaceId,
+  sdkCoordinate,
   validateSubmission,
 } from "./validate.js";
 export type { ValidationResult } from "./validate.js";
