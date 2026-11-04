@@ -15,6 +15,7 @@ import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
 import { autoPrBody, reviewPrBody } from "./prbody.js";
 import { checkProof as realCheckProof, type ProofResult } from "./proof.js";
 import { applyEdit, applyHeldReview, applyRules, newPlaceIdOf, resolvePlace, WINDOW_DAYS, type Decision } from "./rules.js";
+import type { RecentList } from "./recent.js";
 import type { Fee, Place, Review } from "./types.js";
 
 export interface RunOptions {
@@ -49,6 +50,13 @@ export interface RunOptions {
   places?: string;
   /** Licence id for new photo lines. Defaults to CC-BY-4.0. */
   photoLicence?: string;
+  /**
+   * The intake's recent list. Feedback about a new place on it that is not in
+   * the data yet stays in `pending/`, and so does all feedback about places
+   * not in the data when the list cannot be read. Left out, that feedback is
+   * refused.
+   */
+  recentList?: RecentList;
 }
 
 export interface RunSummary {
@@ -163,6 +171,16 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   );
   const everyPlace = aboutNewPlaces && !photosOnly ? await auto.allPlaces() : undefined;
 
+  // The recent list, asked for only when something is about a place not in the data.
+  const aboutMissingPlace = crowd.some((p) => typeof p.place === "string" && !places.has(p.place));
+  const recent: ReadonlySet<string> | "unreadable" | undefined =
+    options.recentList && aboutMissingPlace
+      ? await options.recentList.ids().catch((error: unknown) => {
+          console.warn(`the recent list could not be read, so feedback about places not in the data waits: ${String(error)}`);
+          return "unreadable" as const;
+        })
+      : undefined;
+
   const crowdResult = applyRules({
     now: runAt,
     pending: crowd,
@@ -176,6 +194,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     photos,
     ...(options.photoLicence ? { photoLicence: options.photoLicence } : {}),
     ...(everyPlace ? { everyPlace } : {}),
+    ...(recent !== undefined ? { recent } : {}),
   });
 
   // Proof pages for claims and listings still in pending/, oldest first, within

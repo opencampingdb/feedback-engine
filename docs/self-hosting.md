@@ -210,6 +210,8 @@ The review PR body lists every held new place under "Held new places", one line 
 
 With `intake-url` set, each run passes `--main <checkout of data main> --intake <intake URL>` and the `PLACES_TOKEN` secret to `ocdb-apply`. It takes new places off the intake's recent list once the PR that writes them is merged, and withdrawn ones at once, then sends the intake the contributors in `moderation/blocked_contributors.json` on `main`, so a blocked contributor's new places leave the recent list.
 
+With `recent-places-url` set to an intake's base URL, each run passes `--recent-places <url>` to `ocdb-apply`, which reads that intake's public `GET /v1/places/recent`. Feedback about a new place on that list that is not in the data yet waits in `pending/` for a later run instead of being refused, and while the list can't be read, all feedback about places not in the data waits. An app's own photo inbox needs this, see [photos.md](photos.md). Off when empty.
+
 When a PR from either branch is already open, later runs add a commit and a comment to it. Once a PR is merged or closed, the next run starts the branch again from `main`. With nothing to do the workflow ends without changes.
 
 ## 10. Pass changes to OpenStreetMap (optional)

@@ -2,7 +2,7 @@
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import type { ReviewPr } from "./owners.js";
-import { intakeRecentStore, sendBlockList, settleRecentPlaces } from "./recent.js";
+import { intakeRecentList, intakeRecentStore, sendBlockList, settleRecentPlaces } from "./recent.js";
 import { run } from "./run.js";
 
 const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>]
@@ -10,6 +10,7 @@ const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>
                   [--review-prs <file>] [--bot-login <login>]
                   [--summary <file>] [--now <ISO time>] [--places <dir>]
                   [--photo-licence <id>] [--main <dir> --intake <url>]
+                  [--recent-places <url>]
 
 Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
@@ -25,6 +26,10 @@ Open Camping DB data checkout in <dir>, and anything but photos is refused.
 withdrawn ones, out of the intake's recent places store, and send it the
 contributors blocked on main, with the token in PLACES_TOKEN. <dir> is a checkout of the data repository's main branch, so a
 place leaves the store only once the PR that writes it is merged.
+--recent-places reads the recent list at GET <url>/v1/places/recent, with no
+token. Feedback about a new place on it that is not in the data yet stays in
+<inbox>/pending for a later run, instead of being refused. While the list
+cannot be read, all feedback about places not in the data stays there.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
 
@@ -44,6 +49,7 @@ async function main(): Promise<number> {
       "photo-licence": { type: "string" },
       main: { type: "string" },
       intake: { type: "string" },
+      "recent-places": { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -57,6 +63,10 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  if (values["recent-places"] !== undefined && !URL.canParse(values["recent-places"])) {
+    console.error(`--recent-places is not a URL: ${values["recent-places"]}`);
+    return 2;
+  }
   const token = process.env.PLACES_TOKEN;
   if ((values.main === undefined) !== (values.intake === undefined) || (values.intake && !token)) {
     console.error("--main and --intake go together, and need PLACES_TOKEN");
@@ -75,6 +85,7 @@ async function main(): Promise<number> {
     ...(now ? { now } : {}),
     ...(values.places ? { places: values.places } : {}),
     ...(values["photo-licence"] ? { photoLicence: values["photo-licence"] } : {}),
+    ...(values["recent-places"] ? { recentList: intakeRecentList(values["recent-places"]) } : {}),
   });
 
   if (values["auto-pr-body"]) await writeFile(values["auto-pr-body"], summary.auto_pr_body, "utf8");
