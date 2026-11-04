@@ -22,6 +22,7 @@ import { AttestError, verifyAssertion, verifyAttestation, type AttestedKey, type
 import { refuse, type RefusalBody } from "./refusal.js";
 import { fromBase64, hex, sha256, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
+import { recordInboxWrite, startApplyIfDue, type RunOutcome } from "./runs.js";
 import { IntegrityError, IntegrityUnavailable, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
 import { SafeSearch, verdict } from "./safesearch.js";
 import { jpegSize } from "./jpeg.js";
@@ -105,6 +106,13 @@ export interface Env {
   RECENT_LIST?: D1Like;
   /** Secret. Lets the apply run remove places from RECENT_LIST and send the block list. */
   PLACES_TOKEN?: string;
+  /**
+   * The inbox's apply workflow, by file name (`apply-feedback.yml`) or id.
+   * With RECENT_LIST, the scheduled job starts it on INBOX_BRANCH once the
+   * inbox has had no new write for 2 minutes, at most once every 10 minutes.
+   * Needs the GitHub App's `actions: write` on the inbox. Off when left out.
+   */
+  APPLY_WORKFLOW?: string;
 }
 
 /** Key in the photo server's STATE that stops one photo being served. */
@@ -395,6 +403,42 @@ function readKeyRecord(saved: string): AttestedKey | undefined {
   return { app, public_key, counter };
 }
 
+/** The inbox the intake writes to, as the GitHub App sees it. */
+function inboxConfig(env: Env): GitHubAppConfig {
+  return { appId: env.GH_APP_ID, privateKeyPem: env.GH_APP_PRIVATE_KEY, installationId: env.GH_INSTALLATION_ID, repo: env.INBOX_REPO };
+}
+
+/**
+ * Records an inbox write for the scheduled job, when it starts the apply.
+ * The item is in the inbox already, so a failed record only leaves the run to
+ * the apply's own schedule.
+ */
+async function noteInboxWrite(env: Env, nowMs: number): Promise<void> {
+  if (!env.APPLY_WORKFLOW || !env.RECENT_LIST) return;
+  await recordInboxWrite(env.RECENT_LIST, nowMs).catch((error: unknown) => {
+    console.warn(`recording an inbox write failed: ${String(error)}`);
+  });
+}
+
+/**
+ * The scheduled job, run every minute: starts the inbox's apply workflow when
+ * it is due (see runs.ts). A failed start, such as the GitHub App missing
+ * `actions: write`, is logged and tried again on the next tick.
+ */
+export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
+  const github = new GitHubApp(deps.fetch, deps.now);
+  return async function scheduled(env: Env): Promise<RunOutcome | "off"> {
+    const workflow = env.APPLY_WORKFLOW;
+    if (!workflow || !env.RECENT_LIST) return "off";
+    return startApplyIfDue(
+      env.RECENT_LIST,
+      deps.now(),
+      () => github.dispatchWorkflow(inboxConfig(env), workflow, env.INBOX_BRANCH ?? "main"),
+      (error) => console.warn(`starting ${workflow} failed, trying again next minute: ${String(error)}`),
+    );
+  };
+}
+
 export function createHandler(deps: Deps) {
   const github = new GitHubApp(deps.fetch, deps.now);
   const integrity = new PlayIntegrity(deps.fetch, deps.now);
@@ -603,12 +647,7 @@ export function createHandler(deps: Deps) {
       await env.PHOTOS_PENDING.put(keys[0]!, full, { httpMetadata: { contentType: "image/jpeg" }, customMetadata });
       await env.PHOTOS_PENDING.put(keys[1]!, thumb, { httpMetadata: { contentType: "image/jpeg" }, customMetadata });
       await github.createFile(
-        {
-          appId: env.GH_APP_ID,
-          privateKeyPem: env.GH_APP_PRIVATE_KEY,
-          installationId: env.GH_INSTALLATION_ID,
-          repo: env.INBOX_REPO,
-        },
+        inboxConfig(env),
         env.INBOX_BRANCH ?? "main",
         `pending/${day}/${id}.json`,
         `${JSON.stringify(stored, null, 2)}\n`,
@@ -619,6 +658,7 @@ export function createHandler(deps: Deps) {
       await env.PHOTOS_PENDING.delete(keys).catch(() => undefined);
       return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
     }
+    await noteInboxWrite(env, deps.now());
     return json(202, { id: photoId }, cors);
   }
 
@@ -898,20 +938,16 @@ export function createHandler(deps: Deps) {
     if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
 
     const id = `fb_${ulid(nowMs, deps.randomBytes)}`;
-    const config: GitHubAppConfig = {
-      appId: env.GH_APP_ID,
-      privateKeyPem: env.GH_APP_PRIVATE_KEY,
-      installationId: env.GH_INSTALLATION_ID,
-      repo: env.INBOX_REPO,
-    };
-    const write = (stored: unknown) =>
-      github.createFile(
-        config,
+    const write = async (stored: unknown) => {
+      await github.createFile(
+        inboxConfig(env),
         env.INBOX_BRANCH ?? "main",
         `pending/${day}/${id}.json`,
         `${JSON.stringify(stored, null, 2)}\n`,
         `Add ${id}`,
       );
+      await noteInboxWrite(env, deps.now());
+    };
 
     if (isOwner) {
       const secrets = submission.type === "owner_update" ? undefined : newOwnerSecrets(random);
@@ -1023,8 +1059,14 @@ const handle = createHandler({
   ...(typeof caches === "undefined" ? {} : { cache: (caches as unknown as { default: CacheLike }).default }),
 });
 
+const scheduled = createScheduled({ fetch: (input, init) => fetch(input, init), now: () => Date.now() });
+
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
     return handle(request, env);
+  },
+  /** The cron trigger in wrangler.toml, every minute. */
+  async scheduled(_controller: unknown, env: Env): Promise<void> {
+    await scheduled(env);
   },
 };

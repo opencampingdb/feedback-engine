@@ -5,6 +5,13 @@
 # Replace REPLACE_WITH_INTAKE_URL with the intake's base URL, or remove the
 # intake-url and places-token lines when the intake has no RECENT_LIST.
 #
+# release-workflow starts the data repository's release once the automatic PR
+# has merged. It needs Actions: Read and write on the bot App. Remove the line
+# to leave releases to their own schedule.
+#
+# The hourly schedule is a back-up. An intake with APPLY_WORKFLOW set starts
+# this workflow through workflow_dispatch a few minutes after feedback arrives.
+#
 # Repository secrets in the inbox:
 #   OCDB_BOT_CLIENT_ID    Client ID of the opencampingdb-bot GitHub App
 #   OCDB_BOT_PRIVATE_KEY  Private key of the opencampingdb-bot GitHub App
@@ -26,6 +33,7 @@ jobs:
     with:
       engine-ref: REPLACE_WITH_ENGINE_SHA
       intake-url: REPLACE_WITH_INTAKE_URL
+      release-workflow: release.yml
     secrets:
       app-client-id: ${{ secrets.OCDB_BOT_CLIENT_ID }}
       app-private-key: ${{ secrets.OCDB_BOT_PRIVATE_KEY }}
