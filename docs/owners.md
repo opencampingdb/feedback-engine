@@ -36,7 +36,7 @@ Applied directly, each with the source `owner`:
 
 Sent to a person instead: a new name, a new location, and reopening a place that is `closed`.
 
-Owners never change reviews, ratings or checks. When two devices report a value that differs from one the owner set, a person decides. When two devices report that an `owner_verified` place, or one whose status the owner set, has closed, a person decides too. One report changes nothing.
+Owners never change reviews, ratings or checks. When a device reports a value that differs from one the owner set, a person decides, and the owner's value stays until then. When two devices report that an `owner_verified` place, or one whose status the owner set, has closed, a person decides too. One report changes nothing.
 
 ## Private property listings
 
