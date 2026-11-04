@@ -3,10 +3,9 @@ import {
   type ContactFactName,
   type FactValue,
   type FeeValue,
-  type LatLon,
   type NewPlaceCheck,
   type NewPlaceReport,
-  type NewPlaceStanding,
+  type RecentPlace,
 } from "@opencampingdb/feedback";
 
 /** A prepared D1 statement: the part of the Workers D1 API the recent list uses. */
@@ -23,27 +22,8 @@ export interface D1Like {
   batch(statements: D1Statement[]): Promise<unknown[]>;
 }
 
-/**
- * What the recent list serves for a place. Never the note. The description,
- * fee and contacts are there only when the report carried them and they passed
- * the checks, as the place is published with them.
- */
-export interface RecentPlace {
-  id: string;
-  location: LatLon;
-  kind: string | null;
-  /** The name the traveller gave, or null when the report carried none. */
-  name: string | null;
-  standing: NewPlaceStanding;
-  added: string;
-  /** The hashed contributor id, so apps can hide what a hidden contributor added. */
-  contributor: string;
-  /** The description, tidied. */
-  description?: string;
-  fee?: FeeValue;
-  /** The contact facts and the address. */
-  contacts?: Partial<Record<ContactFactName, FactValue>>;
-}
+/** What the recent list serves for a place: the SDK's type, so apps read what the intake writes. */
+export type { RecentPlace };
 
 /** A new place as the recent list keeps it. Written once, when the place is added. */
 export interface StoredPlace extends Omit<RecentPlace, "standing"> {

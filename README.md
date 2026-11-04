@@ -31,7 +31,7 @@ const feedback = createFeedbackClient({
 await feedback.check({ place: "ocdb_01JBX...", check: { visited: "2026-10-30", still_there: true }, consent: true });
 ```
 
-Show `ATTRIBUTION` wherever the data appears, and call `feedback.flush()` when the app returns to the foreground. [docs/integration.md](docs/integration.md) walks through an Expo app step by step. To get an app key, open an issue with the **App key** form in this repository.
+Show `ATTRIBUTION` wherever the data appears, and call `feedback.flush()` when the app returns to the foreground. The intake answers a fact report, contact report or new place `live` or `held` (with a reason code) as it arrives, and a live change reaches every app within about 30 seconds on the recent list, which apps lay over their release with `withRecentChanges`. [docs/integration.md](docs/integration.md) walks through an Expo app step by step. To get an app key, open an issue with the **App key** form in this repository.
 
 ## Reviews
 

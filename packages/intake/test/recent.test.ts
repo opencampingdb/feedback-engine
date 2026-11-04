@@ -1,5 +1,7 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { beforeEach, describe, expect, it } from "vitest";
+import type { HeldReason as SdkHeldReason } from "@opencampingdb/feedback";
+import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
+import type { HeldReason } from "../src/decide.js";
 import { createHandler, createScheduled, type CacheLike, type Env } from "../src/index.js";
 import { insertPlace, type D1Like, type D1Statement } from "../src/recent.js";
 import { fakeD1 } from "./fake-d1.js";
@@ -661,6 +663,10 @@ describe("send-time decisions", () => {
   }
 
   const held = (reason: string) => ({ state: "held", held_reason: reason });
+
+  it("holds only with the codes the SDK lists, so apps can read every one", () => {
+    expectTypeOf<HeldReason>().toEqualTypeOf<SdkHeldReason>();
+  });
 
   it("puts an attested fact live at once, as a recent change, and still writes it to the inbox", async () => {
     const answer = await send(fact(PLACE, "toilets", true));

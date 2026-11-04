@@ -10,6 +10,8 @@ export {
   MAX_REF_LENGTH,
   ConsentRequiredError,
   FeedbackValidationError,
+  HELD_REASONS,
+  itemDecision,
   OwnerRequestError,
   OwnerTermsRequiredError,
 } from "./client.js";
@@ -24,6 +26,8 @@ export type {
   FeedbackClientOptions,
   FetchLike,
   FlushResult,
+  HeldReason,
+  ItemDecision,
   OwnerClaimInput,
   OwnerListingInput,
   OwnerUpdateInput,
@@ -85,6 +89,8 @@ export {
   validateSubmission,
 } from "./validate.js";
 export type { ValidationResult } from "./validate.js";
+export { dataVersionTime, withRecentChanges } from "./recent.js";
+export type { RecentChange, RecentList, RecentPlace, ReleasePlace } from "./recent.js";
 export { sha256Hex, sha256HexBytes } from "./sha256.js";
 export { REMOVED_MARKER, findContactDetails, findContactDetailsInHours, stripContactDetails } from "./text.js";
 export type { ContactDetailKind } from "./text.js";
