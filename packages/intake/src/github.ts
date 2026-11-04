@@ -1,6 +1,7 @@
 /**
- * GitHub App authentication with WebCrypto (RS256 JWT, installation token
- * cached until near expiry) and file creation through the contents API.
+ * GitHub App authentication with WebCrypto (RS256 JWT, installation tokens
+ * cached until near expiry), file creation through the contents API, and
+ * starting a workflow through the Actions API.
  */
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
@@ -16,6 +17,14 @@ export interface GitHubAppConfig {
 const API = "https://api.github.com";
 const USER_AGENT = "opencampingdb-feedback-intake";
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+/** Permissions an installation token asks for, as the access_tokens endpoint takes them. */
+export type TokenPermissions = Partial<Record<"contents" | "actions", "read" | "write">>;
+
+/** What writing to the inbox needs. */
+const CONTENTS_WRITE: TokenPermissions = { contents: "write" };
+/** What starting a workflow needs, and nothing else. */
+const ACTIONS_WRITE: TokenPermissions = { actions: "write" };
 
 function base64url(bytes: Uint8Array | string): string {
   const data = typeof bytes === "string" ? new TextEncoder().encode(bytes) : bytes;
@@ -70,7 +79,6 @@ export async function createAppJwt(appId: string, key: CryptoKey, nowMs: number)
 interface CachedToken {
   token: string;
   expiresAt: number;
-  cacheKey: string;
 }
 
 export class GitHubError extends Error {
@@ -83,7 +91,7 @@ export class GitHubError extends Error {
 }
 
 export class GitHubApp {
-  #cached: CachedToken | undefined;
+  #cached = new Map<string, CachedToken>();
   #key: { pem: string; key: Promise<CryptoKey> } | undefined;
 
   constructor(
@@ -96,11 +104,16 @@ export class GitHubApp {
     return this.#key.key;
   }
 
-  /** Returns an installation token limited to the configured repository and `contents: write`. */
-  async token(config: GitHubAppConfig): Promise<string> {
-    const cacheKey = `${config.appId}/${config.installationId}/${config.repo}`;
-    const cached = this.#cached;
-    if (cached && cached.cacheKey === cacheKey && cached.expiresAt - this.now() > REFRESH_MARGIN_MS) {
+  /**
+   * Returns an installation token limited to the configured repository and
+   * the given permissions (`contents: write` by default). Each set of
+   * permissions gets a token of its own, so a permission the App lacks never
+   * stops the inbox writes.
+   */
+  async token(config: GitHubAppConfig, permissions: TokenPermissions = CONTENTS_WRITE): Promise<string> {
+    const cacheKey = `${config.appId}/${config.installationId}/${config.repo}/${JSON.stringify(permissions)}`;
+    const cached = this.#cached.get(cacheKey);
+    if (cached && cached.expiresAt - this.now() > REFRESH_MARGIN_MS) {
       return cached.token;
     }
     const jwt = await createAppJwt(config.appId, await this.#importKey(config.privateKeyPem), this.now());
@@ -114,16 +127,16 @@ export class GitHubApp {
         "user-agent": USER_AGENT,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ repositories: [repoName], permissions: { contents: "write" } }),
+      body: JSON.stringify({ repositories: [repoName], permissions }),
     });
     if (!res.ok) throw new GitHubError(`installation token request failed with ${res.status}`, res.status);
     const body = (await res.json()) as { token: string; expires_at: string };
-    this.#cached = { token: body.token, expiresAt: Date.parse(body.expires_at), cacheKey };
+    this.#cached.set(cacheKey, { token: body.token, expiresAt: Date.parse(body.expires_at) });
     return body.token;
   }
 
   forgetToken(): void {
-    this.#cached = undefined;
+    this.#cached.clear();
   }
 
   /** Creates a file. Fails if the path already exists. Retries once with a new token on 401. */
@@ -147,6 +160,34 @@ export class GitHubApp {
         continue;
       }
       throw new GitHubError(`creating ${path} failed with ${res.status}`, res.status);
+    }
+  }
+
+  /**
+   * Starts a workflow that runs on `workflow_dispatch`, named by its file name
+   * (`apply-feedback.yml`) or its id, on `ref`. Needs the App's `actions: write`.
+   * Retries once with a new token on 401.
+   */
+  async dispatchWorkflow(config: GitHubAppConfig, workflow: string, ref: string): Promise<void> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const token = await this.token(config, ACTIONS_WRITE);
+      const res = await this.fetchImpl(`${API}/repos/${config.repo}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "x-github-api-version": "2022-11-28",
+          "user-agent": USER_AGENT,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ ref }),
+      });
+      if (res.ok) return;
+      if (res.status === 401 && attempt === 0) {
+        this.forgetToken();
+        continue;
+      }
+      throw new GitHubError(`starting ${workflow} failed with ${res.status}`, res.status);
     }
   }
 }

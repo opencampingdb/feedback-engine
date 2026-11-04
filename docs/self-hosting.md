@@ -96,10 +96,12 @@ In the organisation settings, under Developer settings, create a GitHub App:
 - Name: `opencampingdb-intake` (or your own name for the same role).
 - Homepage URL: your intake URL or this repository.
 - Webhook: off.
-- Repository permissions: **Contents: Read and write**. Nothing else.
+- Repository permissions: **Contents: Read and write**, and **Actions: Read and write** when the intake starts the apply (below). Nothing else.
 - Where can it be installed: only this account.
 
 Generate a private key and download the `.pem` file. This key goes only into the Worker (step 5), never into GitHub Actions. Note the App ID. Install the App on the organisation, choosing **Only select repositories** and only `inbox`. The installation id is the number at the end of the installation page URL (`.../settings/installations/<id>`).
+
+**Starting the apply from the intake.** With `RECENT_LIST` and the `APPLY_WORKFLOW` variable set to the inbox's apply workflow file (`apply-feedback.yml`), the intake's scheduled job runs every minute and starts that workflow on `INBOX_BRANCH` once the inbox has had no new write for 2 minutes, at most once every 10 minutes. It asks for a token with only `actions: write` on `inbox` for this, apart from the `contents: write` token it writes with. Adding the Actions permission to an installed App asks the organisation owner to accept it on the installation page before it takes effect. Until then each start fails, is logged as a warning in the Worker's logs, and is tried again the next minute, while feedback still reaches the inbox and the workflow's hourly schedule still runs. The job keeps its times in the `runs` table, so apply the migrations (step 2) before deploying.
 
 ## 5. Set the Worker secrets
 
@@ -179,9 +181,9 @@ The apply workflow uses a second App. Its tokens open PRs that trigger the data 
 
 - Name: `opencampingdb-bot` (or your own name for the same role).
 - Webhook: off.
-- Repository permissions: **Contents: Read and write** and **Pull requests: Read and write**. Nothing else.
+- Repository permissions: **Contents: Read and write** and **Pull requests: Read and write**, and **Actions: Read and write** when the workflow starts the data release (`release-workflow`, step 9). Nothing else.
 
-Install it on only `inbox` and `data`. The workflow asks for a token limited to `contents: write` on `inbox`, and a second token for `data` with `contents: write` and `pull_requests: write`. Generate a private key and note the App's **Client ID**. This key goes only into the inbox repository's Actions secrets (step 9), never into the Worker.
+Install it on only `inbox` and `data`. The workflow asks for a token limited to `contents: write` on `inbox`, and a second token for `data` with `contents: write` and `pull_requests: write`. With `release-workflow` set it asks for a third, with only `actions: write` on `data`. Generate a private key and note the App's **Client ID**. This key goes only into the inbox repository's Actions secrets (step 9), never into the Worker.
 
 ## 8. Prepare the data repository
 
@@ -213,6 +215,8 @@ A `contact_withdrawn` case is a contact taken off a place after reports from two
 With `intake-url` set, each run passes `--main <checkout of data main> --intake <intake URL>` and the `PLACES_TOKEN` secret to `ocdb-apply`. It takes new places off the intake's recent list once the PR that writes them is merged, and withdrawn ones at once, then sends the intake the contributors in `moderation/blocked_contributors.json` on `main`, so a blocked contributor's new places leave the recent list.
 
 With `recent-places-url` set to an intake's base URL, each run passes `--recent-places <url>` to `ocdb-apply`, which reads that intake's public `GET /v1/places/recent`. Feedback about a new place on that list that is not in the data yet waits in `pending/` for a later run instead of being refused, and while the list can't be read, all feedback about places not in the data waits. An app's own photo inbox needs this, see [photos.md](photos.md). Off when empty.
+
+With `release-workflow` set to the data repository's release workflow file (`release.yml`), a run that opened or added to `feedback/auto` waits up to 10 minutes for that PR to merge, then starts the release workflow on `data-base-branch`, so the change reaches apps without waiting for the release's own schedule. A PR without auto-merge, one still waiting after 10 minutes, a missing Actions permission or a failed start leaves the change to the release's schedule, with a notice or warning on the run, and never fails it. The release workflow must run on `workflow_dispatch`. Off when empty.
 
 When a PR from either branch is already open, later runs add a commit and a comment to it. Once a PR is merged or closed, the next run starts the branch again from `main`. With nothing to do the workflow ends without changes.
 
