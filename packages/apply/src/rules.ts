@@ -879,6 +879,13 @@ export function applyRules(input: RulesInput): RulesOutput {
     }
   }
 
+  /** Fact reports about a place applied in earlier runs. */
+  function factHistory(placeId: string, fact: string): ReportItem[] {
+    return input.history.filter(
+      (h): h is ReportItem => h.type === "report" && h.report.kind === "fact" && h.place === placeId && h.report.fact === fact && wasApplied(h),
+    );
+  }
+
   function applyFacts(items: ReportItem[]): void {
     const groups = new Map<string, ReportItem[]>();
     for (const item of items) {
@@ -921,6 +928,33 @@ export function applyRules(input: RulesInput): RulesOutput {
           continue;
         }
         const at = time(item);
+        if (item.attested !== undefined && place.fact_sources[fact] === "owner") {
+          // The owner's value stands until a person decides between them.
+          open.delete(item);
+          edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
+          note(placeId, `${fact}: a device reports ${JSON.stringify(value)}, the owner set ${JSON.stringify(current())}`, false, [item]);
+          decide(item, "needs_review", `${fact} was set by the owner, so a person decides`);
+          continue;
+        }
+        if (item.attested !== undefined) {
+          // One attested report sets the fact at once. A different value from
+          // another source within 90 days means they disagree, so a person decides.
+          open.delete(item);
+          const source = item.origin ?? item.device;
+          const disagrees = [...factHistory(placeId, fact), ...reports].some(
+            (r) => r !== item && (r.origin ?? r.device) !== source && r.report.value !== value && inWindow(r, at),
+          );
+          if (disagrees) {
+            edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
+            note(placeId, `${fact} set to ${JSON.stringify(value)}, which another device disagrees with (check before merging)`, false, [item]);
+            decide(item, "needs_review", `another device reported a different ${fact}, so a person decides`);
+            continue;
+          }
+          setFact(value);
+          note(placeId, `${fact} set to ${JSON.stringify(value)} (one attested report)`, true, [item]);
+          decide(item, "applied", `${fact} set to ${JSON.stringify(value)}`);
+          continue;
+        }
         const agreeing = [...open].filter((r) => r.report.value === value && inWindow(r, at));
         if (distinctDevices(agreeing) < 2) continue;
         if (place.fact_sources[fact] === "owner") {

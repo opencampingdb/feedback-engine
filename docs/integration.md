@@ -66,7 +66,7 @@ An invalid payload throws `FeedbackValidationError` with the reasons, before any
 ```ts
 const place = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 
-// A fact: two devices must agree before it changes.
+// A fact: an attested report changes it at once.
 await feedback.report({
   place,
   report: { kind: "fact", fact: "power", value: true },
@@ -116,7 +116,7 @@ Facts a report may name:
 - contacts: `website`, `facebook`, `instagram`, `tiktok` and `x` (https only), `phone`, `phone_2` and `email`
 - `address`, an object (`PlaceAddress`) with a `street` or, for a rural address, a named `place`, and any of `unit`, `housenumber`, `suburb`, `state` (one of `ADDRESS_STATES`: `NSW`, `VIC`, `QLD`, `SA`, `WA`, `TAS`, `NT`, `ACT`) and `postcode` (four digits)
 
-A fact two devices agree on within 90 days is applied. Contact changes (website, phones, email and social pages) and addresses are checked by a person, even from one report. `booking_url` comes only from the owner.
+A fact from an attested report is applied at once, unless another device reported a different value within 90 days or the owner set it: then a person decides. Without attestation, two devices must agree within 90 days. Contact changes (website, phones, email and social pages) and addresses are checked by a person, even from one report. `booking_url` comes only from the owner.
 
 Three more report kinds let a traveller fix what Edit site covers on other apps. Each goes to a person, who accepts or rejects it on the review PR:
 

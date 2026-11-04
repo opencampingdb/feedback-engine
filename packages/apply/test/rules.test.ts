@@ -114,6 +114,62 @@ function run(
   return { ...out, outcome, after: (id = PLACE) => out.places.get(id) };
 }
 
+describe("attested fact reports", () => {
+  const attested = (item: StoredFeedback) => ({ ...item, attested: "app_attest", contributor: ctr(item.device) }) as StoredFeedback;
+
+  it("one attested report changes a fact at once", () => {
+    const r = attested(fact(0, "dev-a", "power", true));
+    const out = run([r]);
+    expect(out.outcome(r)).toBe("applied");
+    expect(out.after()?.facts).toMatchObject({ power: true });
+    expect(out.after()?.fact_sources).toMatchObject({ power: "feedback" });
+  });
+
+  it("a later report from the same device changes it again", () => {
+    const a = attested(fact(0, "dev-a", "power", true));
+    const b = attested(fact(1, "dev-a", "power", false));
+    const out = run([a, b], { now: 2 });
+    expect(out.outcome(b)).toBe("applied");
+    expect(out.after()?.facts).toMatchObject({ power: false });
+  });
+
+  it("sends a value another device disagrees with in the same run to a person", () => {
+    const a = attested(fact(0, "dev-a", "power", true));
+    const b = attested(fact(1, "dev-b", "power", false));
+    const out = run([a, b], { now: 2 });
+    expect(out.outcome(a)).toBe("applied");
+    expect(out.outcome(b)).toBe("needs_review");
+    expect(out.after()?.facts).toMatchObject({ power: true });
+  });
+
+  it("sends a value another device disagreed with in an earlier run to a person", () => {
+    const earlier = applied(attested(fact(0, "dev-a", "power", true)));
+    const r = attested(fact(5, "dev-b", "power", false));
+    const out = run([r], { now: 6, history: [earlier], places: [place({ facts: { power: true } })] });
+    expect(out.outcome(r)).toBe("needs_review");
+  });
+
+  it("applies a value once the disagreeing report is more than 90 days old", () => {
+    const earlier = applied(attested(fact(0, "dev-a", "power", true)));
+    const r = attested(fact(95, "dev-b", "power", false));
+    const out = run([r], { now: 96, history: [earlier], places: [place({ facts: { power: true } })] });
+    expect(out.after()?.facts).toMatchObject({ power: false });
+    expect(out.outcome(r)).toBe("applied");
+  });
+
+  it("sends a report against a fact the owner set to a person at once", () => {
+    const r = attested(fact(0, "dev-a", "power", true));
+    const out = run([r], { places: [place({ fact_sources: { power: "owner" } })] });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("still waits for a second device on a report without attestation", () => {
+    const r = fact(0, "dev-a", "power", true);
+    expect(run([r]).outcome(r)).toBe("waiting");
+  });
+});
+
 describe("fact reports", () => {
   it("one report does not change a fact", () => {
     const r = fact(0, "dev-a", "power", true);
