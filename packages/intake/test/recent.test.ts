@@ -62,10 +62,12 @@ const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 /** GitHub and Play Integrity. A token `ok:<hash>` decodes to a sound verdict for the body with that hash. */
 function fakeServices() {
   const writes: Record<string, unknown>[] = [];
+  const state = { failWrites: false };
   const fetch = async (url: string, init?: RequestInit) => {
     if (url.endsWith("/access_tokens")) {
       return new Response(JSON.stringify({ token: "ghs_x", expires_at: new Date(NOW + 100 * HOUR).toISOString() }), { status: 201 });
     }
+    if (url.includes("/contents/") && state.failWrites) return new Response("{}", { status: 502 });
     if (url.includes("/contents/")) {
       const body = JSON.parse(String(init?.body)) as { content: string };
       writes.push(JSON.parse(Buffer.from(body.content, "base64").toString("utf8")) as Record<string, unknown>);
@@ -93,7 +95,7 @@ function fakeServices() {
     }
     return new Response("not found", { status: 404 });
   };
-  return { fetch, writes };
+  return { fetch, writes, state };
 }
 
 let clock = NOW;
@@ -992,6 +994,30 @@ describe("send-time decisions", () => {
     await createScheduled({ fetch: services.fetch, now: () => clock })(e);
     expect(store.db.prepare("SELECT count(*) AS n FROM report_evidence").get()).toEqual({ n: 0 });
     expect(await send(contact(PLACE, "phone", { device: otherDevice(1), contributor: "acct_second_person_01" }))).toMatchObject(held("unconfirmed"));
+  });
+
+  it("gives the daily cap's place back when the inbox write or the decision's record fails", async () => {
+    const count = () => store.db.prepare("SELECT contributor, count FROM live_counts ORDER BY contributor").all();
+    services.state.failWrites = true;
+    const res = await handle(feedback(fact(PLACE, "toilets", true), { "cf-connecting-ip": "203.0.113.7" }), e);
+    expect(res.status).toBe(503);
+    expect(count().every((row) => (row as { count: number }).count === 0)).toBe(true);
+    services.state.failWrites = false;
+
+    const failing: D1Like = {
+      prepare: (sql) => store.prepare(sql),
+      batch: async () => {
+        throw new Error("D1 is down");
+      },
+    };
+    expect(await send(fact(PLACE, "toilets", true), { ...e, RECENT_LIST: failing })).toMatchObject(held("check_unavailable"));
+    expect(count().every((row) => (row as { count: number }).count === 0)).toBe(true);
+    // A change that is recorded keeps its place.
+    await send(fact(PLACE, "toilets", true));
+    expect(count()).toEqual([
+      { contributor: expect.stringMatching(/^ctr_/), count: 1 },
+      { contributor: expect.stringMatching(/^org_/), count: 0 },
+    ]);
   });
 
   it("answers held when the decision can't be recorded", async () => {

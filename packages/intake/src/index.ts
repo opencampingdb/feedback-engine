@@ -48,7 +48,7 @@ import {
   type StoredPlace,
 } from "./recent.js";
 import { cellHashes, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
-import { createChecks, pruneLiveCounts, type AiLike } from "./checks.js";
+import { createChecks, pruneLiveCounts, releaseLive, type AiLike } from "./checks.js";
 import {
   decideAtSendTime,
   decidedHere,
@@ -1169,9 +1169,14 @@ export function createHandler(deps: Deps) {
       stored.intake = decision.answer;
     }
 
+    // A live change that is not recorded gives its place in the daily caps back.
+    const giveBack = async () => {
+      if (env.RECENT_LIST && decision?.slot) await releaseLive(env.RECENT_LIST, decision.slot).catch(() => undefined);
+    };
     try {
       await write(stored);
     } catch {
+      await giveBack();
       return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
     }
     // The item is in the inbox already, so a failed store write still reaches the apply run.
@@ -1182,7 +1187,7 @@ export function createHandler(deps: Deps) {
       if (decision) {
         const writes = decision.writes(db);
         const answer = decision.answer;
-        state = writes.length === 0 ? answer : await db.batch(writes).then(() => answer, () => UNAVAILABLE);
+        state = writes.length === 0 ? answer : await db.batch(writes).then(() => answer, async () => (await giveBack(), UNAVAILABLE));
       }
     }
     // An illegal-content report withholds the photo before a person sees it. The

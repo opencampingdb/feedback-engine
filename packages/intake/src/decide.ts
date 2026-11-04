@@ -19,7 +19,7 @@ import {
   type ReportBody,
   type StoredFeedback,
 } from "@opencampingdb/feedback";
-import type { CheckContributor, Checks, HeldReason as ChecksHeldReason } from "./checks.js";
+import type { CheckContributor, Checks, HeldReason as ChecksHeldReason, LiveSlot } from "./checks.js";
 import { getIndexedPlace, type Cell } from "./place-index.js";
 import { chunks, placeStatement, type Bbox, type D1Like, type D1Statement, type StoredPlace } from "./recent.js";
 
@@ -64,6 +64,8 @@ export type ItemState = { state: "live" } | { state: "held"; held_reason: HeldRe
 export interface SendTimeDecision {
   answer: ItemState;
   writes: (db: D1Like) => D1Statement[];
+  /** The live change the checks took from the daily caps, to give back with `releaseLive` when the item is not recorded. */
+  slot?: LiveSlot;
 }
 
 /** The answer when the decision could not be made or recorded. */
@@ -195,7 +197,7 @@ const held = (reason: HeldReason, writes: SendTimeDecision["writes"] = () => [])
   answer: { state: "held", held_reason: reason },
   writes,
 });
-const live = (writes: SendTimeDecision["writes"]): SendTimeDecision => ({ answer: { state: "live" }, writes });
+const live = (writes: SendTimeDecision["writes"], slot?: LiveSlot): SendTimeDecision => ({ answer: { state: "live" }, writes, ...(slot ? { slot } : {}) });
 
 /** Decides one item that `decidedHere` says the intake decides. Reads D1 and runs the checks, and writes nothing. */
 export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDecision> {
@@ -229,7 +231,7 @@ export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDeci
         .bind(item.id, change.place, change.fact, change.value === null ? null : JSON.stringify(change.value), item.received, cellLon, cellLat, contributor),
     ),
     acceptedStatement(d, contributor),
-  ]);
+  ], checked.slot);
 }
 
 /**
@@ -278,7 +280,7 @@ async function decideNewPlace({ checks, item, submission }: DecideInput, record:
     ...(fields.fee !== undefined ? { fee: fields.fee } : {}),
     ...(Object.keys(contacts).length > 0 ? { contacts } : {}),
   };
-  return live((d) => [placeStatement(d, place), acceptedStatement(d, record.id)]);
+  return live((d) => [placeStatement(d, place), acceptedStatement(d, record.id)], checked.slot);
 }
 
 interface ChangeRow {
