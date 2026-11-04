@@ -77,7 +77,7 @@ Each run keeps at most two open PRs to `data`, on fixed branches:
 
 When a PR from that branch is already open, the run adds a commit and a comment to it instead of opening another. Runs are idempotent: running again with no new inbox files changes nothing and opens nothing, and a run repeated after a failed inbox push writes nothing it already wrote.
 
-The intake and the workflow use two GitHub Apps. `opencampingdb-intake` is installed on `inbox` only with `contents: write`, plus `actions: write` when it starts the apply workflow, and its key lives in the Worker. `opencampingdb-bot` has `contents: write` on `inbox` and `contents: write` plus `pull_requests: write` on `data`, plus `actions: write` when it starts the data release, and its key lives only in GitHub Actions secrets.
+The intake and the workflow use two GitHub Apps. `opencampingdb-intake` is installed on `inbox` with `contents: write`, plus `actions: write` when it starts the apply workflow, and on `data` with `contents: write` and `pull_requests: write` when the AI reviewer is on, and its key lives in the Worker. `opencampingdb-bot` has `contents: write` on `inbox` and `contents: write` plus `pull_requests: write` on `data`, plus `actions: write` when it starts the data release, and its key lives only in GitHub Actions secrets.
 
 ## Develop
 

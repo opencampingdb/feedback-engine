@@ -5,7 +5,8 @@
     "types": ["node"],
     "paths": {
       "@opencampingdb/feedback": ["./../sdk/src/index.ts"],
-      "@opencampingdb/apply/decide": ["./../apply/src/decide.ts"]
+      "@opencampingdb/apply/decide": ["./../apply/src/decide.ts"],
+      "@opencampingdb/apply/review": ["./../apply/src/review.ts"]
     },
     "noEmit": true
   },

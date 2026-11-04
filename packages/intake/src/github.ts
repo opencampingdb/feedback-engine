@@ -1,7 +1,8 @@
 /**
  * GitHub App authentication with WebCrypto (RS256 JWT, installation tokens
- * cached until near expiry), file creation through the contents API, and
- * starting a workflow through the Actions API.
+ * cached until near expiry), file creation through the contents API,
+ * starting a workflow through the Actions API, and the calls the AI reviewer
+ * makes on the data repository's review PR.
  */
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
@@ -19,12 +20,32 @@ const USER_AGENT = "opencampingdb-feedback-intake";
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
 /** Permissions an installation token asks for, as the access_tokens endpoint takes them. */
-export type TokenPermissions = Partial<Record<"contents" | "actions", "read" | "write">>;
+export type TokenPermissions = Partial<Record<"contents" | "actions" | "pull_requests", "read" | "write">>;
 
 /** What writing to the inbox needs. */
 const CONTENTS_WRITE: TokenPermissions = { contents: "write" };
 /** What starting a workflow needs, and nothing else. */
 const ACTIONS_WRITE: TokenPermissions = { actions: "write" };
+/** What the AI reviewer needs on the data repository: commits to the review branch and comments on its PR. */
+const REVIEW_WRITE: TokenPermissions = { contents: "write", pull_requests: "write" };
+
+/** An open pull request, as the reviewer reads it. */
+export interface PullRequest {
+  number: number;
+  body: string;
+}
+
+/** A comment on a pull request, with who wrote it. */
+export interface IssueComment {
+  body: string;
+  /** `Bot` for a GitHub App. */
+  userType: string;
+  /** `OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `NONE` and so on. */
+  association: string;
+}
+
+/** Comments read from one PR at most, 100 a page. */
+const MAX_COMMENT_PAGES = 10;
 
 function base64url(bytes: Uint8Array | string): string {
   const data = typeof bytes === "string" ? new TextEncoder().encode(bytes) : bytes;
@@ -189,5 +210,78 @@ export class GitHubApp {
       }
       throw new GitHubError(`starting ${workflow} failed with ${res.status}`, res.status);
     }
+  }
+  /** One REST call with a token for `permissions`. Retries once with a new token on 401. */
+  async #call(config: GitHubAppConfig, permissions: TokenPermissions, method: string, path: string, body?: unknown): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      const token = await this.token(config, permissions);
+      const res = await this.fetchImpl(`${API}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/vnd.github+json",
+          "x-github-api-version": "2022-11-28",
+          "user-agent": USER_AGENT,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      if (res.status === 401 && attempt === 0) {
+        this.forgetToken();
+        continue;
+      }
+      return res;
+    }
+  }
+
+  /** The open PR from `branch` in the configured repository, or null when there is none. */
+  async openPullRequest(config: GitHubAppConfig, branch: string): Promise<PullRequest | null> {
+    const owner = config.repo.split("/")[0];
+    const head = encodeURIComponent(`${owner}:${branch}`);
+    const res = await this.#call(config, REVIEW_WRITE, "GET", `/repos/${config.repo}/pulls?head=${head}&state=open&per_page=1`);
+    if (!res.ok) throw new GitHubError(`listing PRs from ${branch} failed with ${res.status}`, res.status);
+    const list = (await res.json()) as { number: number; body: string | null }[];
+    const pr = list[0];
+    return pr ? { number: pr.number, body: pr.body ?? "" } : null;
+  }
+
+  /** Comments on PR `number`, oldest first, up to 1,000. */
+  async pullRequestComments(config: GitHubAppConfig, number: number): Promise<IssueComment[]> {
+    const out: IssueComment[] = [];
+    for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
+      const res = await this.#call(config, REVIEW_WRITE, "GET", `/repos/${config.repo}/issues/${number}/comments?per_page=100&page=${page}`);
+      if (!res.ok) throw new GitHubError(`reading comments on #${number} failed with ${res.status}`, res.status);
+      const list = (await res.json()) as { body?: string | null; user?: { type?: string } | null; author_association?: string }[];
+      for (const c of list) out.push({ body: c.body ?? "", userType: c.user?.type ?? "", association: c.author_association ?? "NONE" });
+      if (list.length < 100) break;
+    }
+    return out;
+  }
+
+  /** A text file on `ref`, with the blob sha an update needs, or null when there is none. */
+  async readFile(config: GitHubAppConfig, path: string, ref: string): Promise<{ text: string; sha: string } | null> {
+    const res = await this.#call(config, REVIEW_WRITE, "GET", `/repos/${config.repo}/contents/${path}?ref=${encodeURIComponent(ref)}`);
+    if (res.status === 404) return null;
+    if (!res.ok) throw new GitHubError(`reading ${path} failed with ${res.status}`, res.status);
+    const body = (await res.json()) as { content?: string; encoding?: string; sha: string };
+    if (body.encoding !== "base64" || typeof body.content !== "string") throw new GitHubError(`reading ${path} gave no content`, res.status);
+    const bytes = Uint8Array.from(atob(body.content.replace(/\s+/g, "")), (c) => c.charCodeAt(0));
+    return { text: new TextDecoder().decode(bytes), sha: body.sha };
+  }
+
+  /**
+   * Commits a new version of an existing file to `branch`. `sha` is the blob
+   * the change was made against: GitHub answers 409 when the file has moved
+   * on since, which throws a GitHubError with that status.
+   */
+  async updateFile(config: GitHubAppConfig, branch: string, path: string, content: string, sha: string, message: string): Promise<void> {
+    const res = await this.#call(config, REVIEW_WRITE, "PUT", `/repos/${config.repo}/contents/${path}`, { message, content: base64Utf8(content), sha, branch });
+    if (!res.ok) throw new GitHubError(`updating ${path} failed with ${res.status}`, res.status);
+  }
+
+  /** Adds a comment to PR `number`. */
+  async commentOnPullRequest(config: GitHubAppConfig, number: number, body: string): Promise<void> {
+    const res = await this.#call(config, REVIEW_WRITE, "POST", `/repos/${config.repo}/issues/${number}/comments`, { body });
+    if (!res.ok) throw new GitHubError(`commenting on #${number} failed with ${res.status}`, res.status);
   }
 }

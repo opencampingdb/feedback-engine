@@ -88,3 +88,23 @@ export async function startApplyIfDue(
     return "failed";
   }
 }
+
+/** The shortest time between two runs of the AI reviewer. */
+export const REVIEW_EVERY_MS = 10 * 60 * 1000;
+/** The row in `runs` for the AI reviewer. Only `last_start` is used. */
+export const REVIEW = "review";
+
+/**
+ * Claims a run of the AI reviewer at `nowMs`, when the last one started at
+ * least REVIEW_EVERY_MS ago. False when it is not due, so two ticks at once
+ * start one run.
+ */
+export async function claimReviewRun(db: D1Like, nowMs: number): Promise<boolean> {
+  const row = await db
+    .prepare(
+      "INSERT INTO runs (name, last_start) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET last_start = excluded.last_start WHERE runs.last_start IS NULL OR runs.last_start <= ? RETURNING name",
+    )
+    .bind(REVIEW, nowMs, nowMs - REVIEW_EVERY_MS)
+    .first<string>("name");
+  return row !== null;
+}
