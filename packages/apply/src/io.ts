@@ -1,37 +1,10 @@
-import {
-  mkdir,
-  readdir,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import {
-  isOwnerSubmission,
-  type StoredFeedback,
-  type StoredSubmission,
-} from "@opencampingdb/feedback";
+import { isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
 import type { AwaitingClaim, OwnerRecord } from "./owners.js";
 import type { Decision } from "./rules.js";
-import {
-  dumpFeeLine,
-  dumpPhotoLine,
-  dumpPlace,
-  dumpReviewLine,
-  feePath,
-  photoPath,
-  placePath,
-  reviewPath,
-} from "./serialise.js";
-import type {
-  BlockedList,
-  Fee,
-  Photo,
-  Place,
-  RemovedPhotos,
-  Review,
-} from "./types.js";
+import { dumpFeeLine, dumpPhotoLine, dumpPlace, dumpReviewLine, feePath, photoPath, placePath, reviewPath } from "./serialise.js";
+import type { BlockedList, Fee, Photo, Place, RemovedPhotos, Review } from "./types.js";
 
 export interface PendingFile {
   path: string;
@@ -51,24 +24,12 @@ const RECEIVED = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
  * Why `item` cannot be used, or undefined when it has a feedback id (equal to
  * `expectedId` when given) and an ISO 8601 UTC `received`.
  */
-function storedProblem(
-  item: StoredSubmission,
-  expectedId?: string,
-): string | undefined {
-  if (typeof item !== "object" || item === null)
-    return "the file is not a JSON object";
-  if (
-    typeof item.id !== "string" ||
-    !FEEDBACK_ID.test(item.id) ||
-    (expectedId !== undefined && item.id !== expectedId)
-  ) {
+function storedProblem(item: StoredSubmission, expectedId?: string): string | undefined {
+  if (typeof item !== "object" || item === null) return "the file is not a JSON object";
+  if (typeof item.id !== "string" || !FEEDBACK_ID.test(item.id) || (expectedId !== undefined && item.id !== expectedId)) {
     return "id does not match the file name";
   }
-  if (
-    typeof item.received !== "string" ||
-    !RECEIVED.test(item.received) ||
-    Number.isNaN(Date.parse(item.received))
-  ) {
+  if (typeof item.received !== "string" || !RECEIVED.test(item.received) || Number.isNaN(Date.parse(item.received))) {
     return "received is not an ISO 8601 UTC time";
   }
   return undefined;
@@ -95,16 +56,10 @@ async function exists(path: string): Promise<boolean> {
 async function dayFolders(root: string): Promise<string[]> {
   if (!(await exists(root))) return [];
   const entries = await readdir(root, { withFileTypes: true });
-  return entries
-    .filter((e) => e.isDirectory() && DAY_FOLDER.test(e.name))
-    .map((e) => e.name)
-    .sort();
+  return entries.filter((e) => e.isDirectory() && DAY_FOLDER.test(e.name)).map((e) => e.name).sort();
 }
 
-async function readFeedbackFolder(
-  root: string,
-  day: string,
-): Promise<{ files: PendingFile[]; malformed: MalformedFile[] }> {
+async function readFeedbackFolder(root: string, day: string): Promise<{ files: PendingFile[]; malformed: MalformedFile[] }> {
   const folder = join(root, day);
   const files: PendingFile[] = [];
   const malformed: MalformedFile[] = [];
@@ -116,13 +71,7 @@ async function readFeedbackFolder(
     try {
       item = JSON.parse(raw) as StoredSubmission;
     } catch {
-      malformed.push({
-        path,
-        day,
-        name,
-        raw,
-        reason: "the file is not valid JSON",
-      });
+      malformed.push({ path, day, name, raw, reason: "the file is not valid JSON" });
       continue;
     }
     const problem = storedProblem(item, name.slice(0, -5));
@@ -133,9 +82,7 @@ async function readFeedbackFolder(
 }
 
 /** Every file in `pending/`. Files whose content cannot be used are returned apart, for `refuseMalformed`. */
-export async function readPending(
-  inbox: string,
-): Promise<{ files: PendingFile[]; malformed: MalformedFile[] }> {
+export async function readPending(inbox: string): Promise<{ files: PendingFile[]; malformed: MalformedFile[] }> {
   const root = join(inbox, "pending");
   const files: PendingFile[] = [];
   const malformed: MalformedFile[] = [];
@@ -148,30 +95,19 @@ export async function readPending(
 }
 
 /** Moves pending files whose content cannot be used to `refused/<day>/<file name>`, with the reason. */
-export async function refuseMalformed(
-  inbox: string,
-  malformed: readonly MalformedFile[],
-  runAt: string,
-): Promise<number> {
+export async function refuseMalformed(inbox: string, malformed: readonly MalformedFile[], runAt: string): Promise<number> {
   for (const file of malformed) {
     const target = join(inbox, "refused", file.day, file.name);
     await mkdir(dirname(target), { recursive: true });
-    const outcome = {
-      result: "refused",
-      reason: `the inbox file could not be used: ${file.reason}`,
-      run: runAt,
-    };
+    const outcome = { result: "refused", reason: `the inbox file could not be used: ${file.reason}`, run: runAt };
     let parsed: unknown;
     try {
       parsed = JSON.parse(file.raw);
     } catch {
       parsed = undefined;
     }
-    const isObject =
-      typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
-    const body = isObject
-      ? { ...(parsed as Record<string, unknown>), outcome }
-      : { raw: file.raw, outcome };
+    const isObject = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+    const body = isObject ? { ...(parsed as Record<string, unknown>), outcome } : { raw: file.raw, outcome };
     await writeFile(target, `${JSON.stringify(body, null, 2)}\n`, "utf8");
     await rm(file.path);
   }
@@ -179,18 +115,13 @@ export async function refuseMalformed(
 }
 
 /** Items in `applied/` (or `refused/`) from day folders on or after `sinceDay`, as evidence for the rules. */
-export async function readHistory(
-  inbox: string,
-  sinceDay: string,
-  folder: "applied" | "refused" = "applied",
-): Promise<StoredFeedback[]> {
+export async function readHistory(inbox: string, sinceDay: string, folder: "applied" | "refused" = "applied"): Promise<StoredFeedback[]> {
   const root = join(inbox, folder);
   const out: StoredFeedback[] = [];
   for (const day of await dayFolders(root)) {
     if (day < sinceDay) continue;
     const read = await readFeedbackFolder(root, day);
-    for (const bad of read.malformed)
-      console.warn(`skipping ${bad.path}: ${bad.reason}`);
+    for (const bad of read.malformed) console.warn(`skipping ${bad.path}: ${bad.reason}`);
     for (const file of read.files) {
       if (!isOwnerSubmission(file.item)) out.push(file.item as StoredFeedback);
     }
@@ -204,36 +135,23 @@ async function readJsonFolder<T>(folder: string, name: RegExp): Promise<T[]> {
   if (!(await exists(folder))) return [];
   const out: T[] = [];
   for (const file of (await readdir(folder)).sort()) {
-    if (name.test(file))
-      out.push(JSON.parse(await readFile(join(folder, file), "utf8")) as T);
+    if (name.test(file)) out.push(JSON.parse(await readFile(join(folder, file), "utf8")) as T);
   }
   return out;
 }
 
 /** Approved owners: `owners/<place id>.json`. */
-export async function readOwners(
-  inbox: string,
-): Promise<Map<string, OwnerRecord>> {
-  const records = await readJsonFolder<OwnerRecord>(
-    join(inbox, "owners"),
-    PLACE_FILE,
-  );
+export async function readOwners(inbox: string): Promise<Map<string, OwnerRecord>> {
+  const records = await readJsonFolder<OwnerRecord>(join(inbox, "owners"), PLACE_FILE);
   return new Map(records.map((r) => [r.place, r]));
 }
 
 /** Writes owner records, replacing any earlier owner of the same place. */
-export async function writeOwners(
-  inbox: string,
-  owners: Iterable<OwnerRecord>,
-): Promise<number> {
+export async function writeOwners(inbox: string, owners: Iterable<OwnerRecord>): Promise<number> {
   let written = 0;
   for (const owner of owners) {
     await mkdir(join(inbox, "owners"), { recursive: true });
-    await writeFile(
-      join(inbox, "owners", `${owner.place}.json`),
-      `${JSON.stringify(owner, null, 2)}\n`,
-      "utf8",
-    );
+    await writeFile(join(inbox, "owners", `${owner.place}.json`), `${JSON.stringify(owner, null, 2)}\n`, "utf8");
     written += 1;
   }
   return written;
@@ -251,10 +169,7 @@ export async function readAwaiting(inbox: string): Promise<AwaitingClaim[]> {
     let waiting: AwaitingClaim | undefined;
     try {
       waiting = JSON.parse(await readFile(path, "utf8")) as AwaitingClaim;
-      problem = storedProblem(
-        waiting?.item as StoredSubmission,
-        name.slice(0, -5),
-      );
+      problem = storedProblem(waiting?.item as StoredSubmission, name.slice(0, -5));
     } catch {
       problem = "the file is not valid JSON";
     }
@@ -270,11 +185,7 @@ export async function readAwaiting(inbox: string): Promise<AwaitingClaim[]> {
  */
 export async function settleAwaiting(
   inbox: string,
-  approvals: readonly {
-    claim: string;
-    outcome: "approved" | "refused";
-    reason: string;
-  }[],
+  approvals: readonly { claim: string; outcome: "approved" | "refused"; reason: string }[],
   runAt: string,
 ): Promise<number> {
   let moved = 0;
@@ -283,23 +194,10 @@ export async function settleAwaiting(
     if (!(await exists(source))) continue;
     const waiting = JSON.parse(await readFile(source, "utf8")) as AwaitingClaim;
     const folder = a.outcome === "approved" ? "applied" : "refused";
-    const target = join(
-      inbox,
-      folder,
-      waiting.item.received.slice(0, 10),
-      `${a.claim}.json`,
-    );
+    const target = join(inbox, folder, waiting.item.received.slice(0, 10), `${a.claim}.json`);
     await mkdir(dirname(target), { recursive: true });
-    const withOutcome = {
-      ...waiting.item,
-      proof: waiting.proof,
-      outcome: { result: a.outcome, reason: a.reason, run: runAt },
-    };
-    await writeFile(
-      target,
-      `${JSON.stringify(withOutcome, null, 2)}\n`,
-      "utf8",
-    );
+    const withOutcome = { ...waiting.item, proof: waiting.proof, outcome: { result: a.outcome, reason: a.reason, run: runAt } };
+    await writeFile(target, `${JSON.stringify(withOutcome, null, 2)}\n`, "utf8");
     await rm(source);
     moved += 1;
   }
@@ -333,19 +231,8 @@ export async function moveDecided(
     const folder = decision.outcome === "refused" ? "refused" : "applied";
     const target = join(inbox, folder, file.day, basename(file.path));
     await mkdir(dirname(target), { recursive: true });
-    const withOutcome = {
-      ...file.item,
-      outcome: {
-        result: decision.outcome,
-        reason: decision.reason,
-        run: runAt,
-      },
-    };
-    await writeFile(
-      target,
-      `${JSON.stringify(withOutcome, null, 2)}\n`,
-      "utf8",
-    );
+    const withOutcome = { ...file.item, outcome: { result: decision.outcome, reason: decision.reason, run: runAt } };
+    await writeFile(target, `${JSON.stringify(withOutcome, null, 2)}\n`, "utf8");
     await rm(file.path);
     moved += 1;
   }
@@ -353,8 +240,7 @@ export async function moveDecided(
   const pendingRoot = join(inbox, "pending");
   for (const day of await dayFolders(pendingRoot)) {
     const folder = join(pendingRoot, day);
-    if ((await readdir(folder)).length === 0)
-      await rm(folder, { recursive: true });
+    if ((await readdir(folder)).length === 0) await rm(folder, { recursive: true });
   }
   return moved;
 }
@@ -366,13 +252,9 @@ export class DataRepo {
   constructor(readonly root: string) {}
 
   /** `relativePath` under the checkout, which must stay inside `folder`. */
-  #inside(
-    folder: "places" | "reviews" | "fees" | "photos",
-    relativePath: string,
-  ): string {
+  #inside(folder: "places" | "reviews" | "fees" | "photos", relativePath: string): string {
     const path = join(this.root, relativePath);
-    if (!resolve(path).startsWith(resolve(this.root, folder) + sep))
-      throw new Error(`refusing to write outside ${folder}/: ${relativePath}`);
+    if (!resolve(path).startsWith(resolve(this.root, folder) + sep)) throw new Error(`refusing to write outside ${folder}/: ${relativePath}`);
     return path;
   }
 
@@ -384,8 +266,7 @@ export class DataRepo {
       for (const entry of await readdir(dir, { withFileTypes: true })) {
         const path = join(dir, entry.name);
         if (entry.isDirectory()) await walk(path);
-        else if (entry.name.endsWith(".json"))
-          index.set(entry.name.slice(0, -5), path);
+        else if (entry.name.endsWith(".json")) index.set(entry.name.slice(0, -5), path);
       }
     };
     await walk(join(this.root, "places"));
@@ -397,9 +278,7 @@ export class DataRepo {
   async kinds(): Promise<Map<string, string> | undefined> {
     const path = join(this.root, "schema", "kinds.json");
     if (!(await exists(path))) return undefined;
-    const file = JSON.parse(await readFile(path, "utf8")) as {
-      kinds?: { code: string; group: string }[];
-    };
+    const file = JSON.parse(await readFile(path, "utf8")) as { kinds?: { code: string; group: string }[] };
     return new Map((file.kinds ?? []).map((k) => [k.code, k.group]));
   }
 
@@ -478,17 +357,13 @@ export class DataRepo {
    * trailing newline. Returns the path, or undefined when the file already
    * holds exactly that.
    */
-  async writeReviews(
-    placeId: string,
-    reviews: readonly Review[],
-  ): Promise<string | undefined> {
+  async writeReviews(placeId: string, reviews: readonly Review[]): Promise<string | undefined> {
     const path = this.#inside("reviews", reviewPath(placeId));
     const text = [...reviews]
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .map((r) => `${dumpReviewLine(r)}\n`)
       .join("");
-    if ((await exists(path)) && (await readFile(path, "utf8")) === text)
-      return undefined;
+    if ((await exists(path)) && (await readFile(path, "utf8")) === text) return undefined;
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, text, "utf8");
     return reviewPath(placeId);
@@ -508,17 +383,13 @@ export class DataRepo {
    * trailing newline. Returns the path, or undefined when the file already
    * holds exactly that.
    */
-  async writeFees(
-    placeId: string,
-    fees: readonly Fee[],
-  ): Promise<string | undefined> {
+  async writeFees(placeId: string, fees: readonly Fee[]): Promise<string | undefined> {
     const path = this.#inside("fees", feePath(placeId));
     const text = [...fees]
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .map((f) => `${dumpFeeLine(f)}\n`)
       .join("");
-    if ((await exists(path)) && (await readFile(path, "utf8")) === text)
-      return undefined;
+    if ((await exists(path)) && (await readFile(path, "utf8")) === text) return undefined;
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, text, "utf8");
     return feePath(placeId);
@@ -540,9 +411,7 @@ export class DataRepo {
     const out: Photo[] = [];
     for (const name of (await readdir(folder)).sort()) {
       if (!name.endsWith(".ndjson")) continue;
-      for (const line of (await readFile(join(folder, name), "utf8")).split(
-        "\n",
-      )) {
+      for (const line of (await readFile(join(folder, name), "utf8")).split("\n")) {
         if (line.trim()) out.push(JSON.parse(line) as Photo);
       }
     }
@@ -553,10 +422,7 @@ export class DataRepo {
    * Writes every photo line of a place, sorted by id. Removes the file when
    * no lines are left. Returns the path, or undefined when nothing changed.
    */
-  async writePhotos(
-    placeId: string,
-    photos: readonly Photo[],
-  ): Promise<string | undefined> {
+  async writePhotos(placeId: string, photos: readonly Photo[]): Promise<string | undefined> {
     const path = this.#inside("photos", photoPath(placeId));
     const there = await exists(path);
     if (photos.length === 0) {
@@ -578,10 +444,7 @@ export class DataRepo {
   async removedPhotos(): Promise<RemovedPhotos["photos"]> {
     const path = join(this.root, "moderation", "removed_photos.json");
     if (!(await exists(path))) return [];
-    return (
-      (JSON.parse(await readFile(path, "utf8")) as Partial<RemovedPhotos>)
-        .photos ?? []
-    );
+    return (JSON.parse(await readFile(path, "utf8")) as Partial<RemovedPhotos>).photos ?? [];
   }
 
   /**
@@ -589,19 +452,13 @@ export class DataRepo {
    * for an id and sorting by id. Returns the path, or undefined when nothing
    * was added.
    */
-  async addRemovedPhotos(
-    entries: readonly RemovedPhotos["photos"][number][],
-  ): Promise<string | undefined> {
+  async addRemovedPhotos(entries: readonly RemovedPhotos["photos"][number][]): Promise<string | undefined> {
     const current = await this.removedPhotos();
     const known = new Set(current.map((e) => e.photo));
-    const added = entries.filter(
-      (e) => !known.has(e.photo) && (known.add(e.photo), true),
-    );
+    const added = entries.filter((e) => !known.has(e.photo) && (known.add(e.photo), true));
     if (added.length === 0) return undefined;
     // Keys in sorted order, as Python's json.dumps(sort_keys=True) writes them.
-    const photos = [...current, ...added]
-      .map((e) => ({ photo: e.photo, reason: e.reason, removed: e.removed }))
-      .sort((a, b) => (a.photo < b.photo ? -1 : a.photo > b.photo ? 1 : 0));
+    const photos = [...current, ...added].map((e) => ({ photo: e.photo, reason: e.reason, removed: e.removed })).sort((a, b) => (a.photo < b.photo ? -1 : a.photo > b.photo ? 1 : 0));
     const path = join(this.root, "moderation", "removed_photos.json");
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, `${JSON.stringify({ photos }, null, 2)}\n`, "utf8");
@@ -612,9 +469,7 @@ export class DataRepo {
   async blocked(): Promise<Set<string>> {
     const path = join(this.root, "moderation", "blocked_contributors.json");
     if (!(await exists(path))) return new Set();
-    const list = JSON.parse(
-      await readFile(path, "utf8"),
-    ) as Partial<BlockedList>;
+    const list = JSON.parse(await readFile(path, "utf8")) as Partial<BlockedList>;
     return new Set((list.contributors ?? []).map((entry) => entry.contributor));
   }
 
@@ -628,17 +483,10 @@ export class DataRepo {
     if (!(await exists(folder))) return out;
     for (const name of await readdir(folder)) {
       if (!name.endsWith(".ndjson")) continue;
-      for (const line of (await readFile(join(folder, name), "utf8")).split(
-        "\n",
-      )) {
+      for (const line of (await readFile(join(folder, name), "utf8")).split("\n")) {
         if (!line.trim()) continue;
         const review = JSON.parse(line) as Review;
-        if (
-          review.hidden === undefined &&
-          review.contributor &&
-          !blocked.has(review.contributor)
-        )
-          out.add(review.contributor);
+        if (review.hidden === undefined && review.contributor && !blocked.has(review.contributor)) out.add(review.contributor);
       }
     }
     return out;
