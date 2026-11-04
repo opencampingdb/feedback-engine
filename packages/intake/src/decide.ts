@@ -20,7 +20,7 @@ import {
 } from "@opencampingdb/feedback";
 import type { CheckContributor, Checks, HeldReason as ChecksHeldReason } from "./checks.js";
 import { getIndexedPlace, type Cell } from "./place-index.js";
-import { placeStatement, type Bbox, type D1Like, type D1Statement, type StoredPlace } from "./recent.js";
+import { chunks, placeStatement, type Bbox, type D1Like, type D1Statement, type StoredPlace } from "./recent.js";
 
 /**
  * The intake deciding an item at send time, with the apply's own rules
@@ -333,6 +333,53 @@ export async function listChanges(db: D1Like, now: number, bbox?: Bbox): Promise
     accepted: row.accepted,
     in_data_at: row.in_data_at,
   }));
+}
+
+/** A feedback id, as the intake makes them. */
+export const isFeedbackId = (value: unknown): value is string => typeof value === "string" && /^fb_[0-9A-HJKMNP-TV-Z]{26}$/.test(value);
+
+/** D1 allows 100 bound values in one statement. */
+const MAX_BOUND = 100;
+const marks = (n: number) => Array.from({ length: n }, () => "?").join(", ");
+const changesOf = (result: unknown) => (result as { meta?: { changes?: number } } | null)?.meta?.changes ?? 0;
+
+/**
+ * Records that the apply has put the recent changes from these feedback items
+ * into the data, from `at`. A change already marked keeps its first time, so
+ * the apply can send the same ids on every run. Ids with no recent change are
+ * skipped. Returns the recent changes marked.
+ */
+export async function markInData(db: D1Like, ids: readonly string[], at: string): Promise<number> {
+  const results = await db.batch(
+    chunks([...new Set(ids)], MAX_BOUND - 1).map((part) =>
+      db.prepare(`UPDATE recent_changes SET in_data_at = ? WHERE in_data_at IS NULL AND feedback_id IN (${marks(part.length)})`).bind(at, ...part),
+    ),
+  );
+  return results.reduce<number>((sum, result) => sum + changesOf(result), 0);
+}
+
+/**
+ * The apply decided these feedback items other than applying them, though the
+ * intake may have put them live. Their recent changes leave the list at once,
+ * their report evidence counts as held, and each contributor whose change is
+ * taken down has it counted against their track record. All in one
+ * transaction, and counted from the changes deleted, so sending the same ids
+ * again changes nothing. Returns the recent changes deleted.
+ */
+export async function overrule(db: D1Like, ids: readonly string[]): Promise<number> {
+  const statements = chunks([...new Set(ids)], MAX_BOUND).flatMap((part) => [
+    db
+      .prepare(
+        `INSERT INTO contributor_records (contributor, taken_down)
+         SELECT contributor, COUNT(DISTINCT feedback_id) FROM recent_changes WHERE feedback_id IN (${marks(part.length)}) GROUP BY contributor
+         ON CONFLICT (contributor) DO UPDATE SET taken_down = taken_down + excluded.taken_down`,
+      )
+      .bind(...part),
+    db.prepare(`UPDATE report_evidence SET state = 'held' WHERE state = 'live' AND feedback_id IN (${marks(part.length)})`).bind(...part),
+    db.prepare(`DELETE FROM recent_changes WHERE feedback_id IN (${marks(part.length)})`).bind(...part),
+  ]);
+  const results = await db.batch(statements);
+  return results.filter((_, i) => i % 3 === 2).reduce<number>((sum, result) => sum + changesOf(result), 0);
 }
 
 /** Deletes recent changes the data has held for more than 7 days, and report evidence older than the rules' 90 days. For the scheduled job. */

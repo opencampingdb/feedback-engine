@@ -843,6 +843,108 @@ describe("send-time decisions", () => {
     expect(store.db.prepare("SELECT place FROM recent_changes ORDER BY place").all()).toEqual([{ place: PLACE }, { place: PLACE }]);
   });
 
+  describe("what the apply tells it", () => {
+    const call = (route: "in-data" | "overruled", body: unknown, token = TOKEN) =>
+      new Request(`https://intake.example/v1/places/recent/${route}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+    const answer = async (request: Request, to: Env = e) => {
+      const res = await handle(request, to);
+      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+    };
+    const record = () => store.db.prepare("SELECT accepted, taken_down FROM contributor_records").all();
+    const evidence = () => store.db.prepare("SELECT feedback_id, state FROM report_evidence ORDER BY received").all();
+
+    it("keeps a change for 7 days from when the apply says the data has it, and keeps the first time it was told", async () => {
+      await send(fact(PLACE, "toilets", true));
+      const first = services.writes[0]!.id as string;
+      await send(fact(ELSEWHERE, "toilets", true));
+      clock += HOUR;
+      // An id with no recent change is skipped.
+      const other = "fb_01JC0000000000000000000099";
+      expect(await answer(call("in-data", { ids: [first, other], at: "2026-11-03T09:30:00Z" }))).toEqual({ status: 200, body: { marked: 1 } });
+      // Sent again by the next run: the first time stays.
+      expect(await answer(call("in-data", { ids: [first], at: "2026-11-03T10:00:00Z" }))).toEqual({ status: 200, body: { marked: 0 } });
+      expect((await listing()).changes.map((c) => [c.place, c.in_data_at])).toEqual([
+        [PLACE, "2026-11-03T09:30:00Z"],
+        [ELSEWHERE, null],
+      ]);
+      clock = Date.parse("2026-11-10T09:31:00Z");
+      await createScheduled({ fetch: services.fetch, now: () => clock })(e);
+      expect(store.db.prepare("SELECT place FROM recent_changes").all()).toEqual([{ place: ELSEWHERE }]);
+    });
+
+    it("takes a time later than its own clock as now", async () => {
+      await send(fact(PLACE, "toilets", true));
+      const id = services.writes[0]!.id as string;
+      expect((await answer(call("in-data", { ids: [id], at: "2027-01-01T00:00:00Z" }))).status).toBe(200);
+      expect((await listing()).changes[0]).toMatchObject({ in_data_at: "2026-11-03T09:00:00Z" });
+    });
+
+    it("takes an overruled change off the list at once, counts it against the contributor, and counts it once", async () => {
+      await send(fact(PLACE, "toilets", true));
+      const earlier = services.writes[0]!.id as string;
+      clock += HOUR;
+      await send(fact(PLACE, "toilets", false));
+      const overruled = services.writes[1]!.id as string;
+      expect((await listing()).changes).toMatchObject([{ place: PLACE, fact: "toilets", value: false }]);
+      expect(record()).toEqual([{ accepted: 2, taken_down: 0 }]);
+
+      expect(await answer(call("overruled", { ids: [overruled] }))).toEqual({ status: 200, body: { removed: 1 } });
+      // The change it replaced is the latest again.
+      expect((await listing()).changes).toEqual([{ place: PLACE, fact: "toilets", value: true, accepted: "2026-11-03T09:00:00Z", in_data_at: null }]);
+      expect(record()).toEqual([{ accepted: 2, taken_down: 1 }]);
+      expect(evidence()).toEqual([
+        { feedback_id: earlier, state: "live" },
+        { feedback_id: overruled, state: "held" },
+      ]);
+
+      // Sent again, as a failed run's items are decided again: nothing more changes.
+      expect(await answer(call("overruled", { ids: [overruled] }))).toEqual({ status: 200, body: { removed: 0 } });
+      expect(record()).toEqual([{ accepted: 2, taken_down: 1 }]);
+      // With a change taken down, five accepted items are no longer a track record, so the AI checks their free text.
+      store.db.prepare("UPDATE contributor_records SET accepted = 5").run();
+      await send(fact(PLACE, "showers", true, { note: "Hot and clean" }));
+      expect(safeAi.runs).toBe(1);
+      store.db.prepare("UPDATE contributor_records SET taken_down = 0").run();
+      await send(fact(PLACE, "drinking_water", true, { note: "Tank by the shed" }));
+      expect(safeAi.runs).toBe(1);
+    });
+
+    it("leaves held items and ids it doesn't know as they are", async () => {
+      expect(await send(contact(PLACE, "phone"))).toMatchObject(held("unconfirmed"));
+      const heldId = services.writes[0]!.id as string;
+      expect(await answer(call("overruled", { ids: [heldId, "fb_01JC0000000000000000000099"] }))).toEqual({ status: 200, body: { removed: 0 } });
+      expect(evidence()).toEqual([{ feedback_id: heldId, state: "held" }]);
+      expect(store.db.prepare("SELECT count(*) AS n FROM contributor_records").get()).toEqual({ n: 0 });
+    });
+
+    it("takes 500 ids in one call", async () => {
+      await send(fact(PLACE, "toilets", true));
+      const id = services.writes[0]!.id as string;
+      const many = [id, ...Array.from({ length: 499 }, (_, n) => `fb_01JC${String(n).padStart(22, "0")}`)];
+      expect(await answer(call("in-data", { ids: many, at: "2026-11-03T09:00:00Z" }))).toEqual({ status: 200, body: { marked: 1 } });
+      expect(await answer(call("overruled", { ids: many }))).toEqual({ status: 200, body: { removed: 1 } });
+    });
+
+    it("refuses a wrong token and a bad body, and is not served without a token configured", async () => {
+      const id = "fb_01JC0000000000000000000001";
+      expect((await answer(call("in-data", { ids: [id], at: "2026-11-03T09:00:00Z" }, "not-the-token"))).status).toBe(401);
+      expect((await answer(call("overruled", { ids: [id] }, "not-the-token"))).status).toBe(401);
+      expect((await answer(call("in-data", { ids: [id] }))).status).toBe(400);
+      expect((await answer(call("in-data", { ids: [id], at: "yesterday" }))).status).toBe(400);
+      expect((await answer(call("in-data", { ids: ["ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA"], at: "2026-11-03T09:00:00Z" }))).status).toBe(400);
+      expect((await answer(call("overruled", { ids: [] }))).status).toBe(400);
+      expect((await answer(call("overruled", { ids: Array.from({ length: 501 }, () => id) }))).status).toBe(400);
+      const { PLACES_TOKEN: _, ...noToken } = e;
+      expect((await answer(call("overruled", { ids: [id] }), noToken)).status).toBe(404);
+      const get = await handle(new Request("https://intake.example/v1/places/recent/overruled"), e);
+      expect(get.status).toBe(405);
+    });
+  });
+
   it("forgets held evidence after 90 days", async () => {
     expect(await send(contact(PLACE, "phone"))).toMatchObject(held("unconfirmed"));
     clock += 91 * 24 * HOUR;
