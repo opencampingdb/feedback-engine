@@ -50,6 +50,7 @@ import {
   type D1Like,
   type StoredPlace,
 } from "./recent.js";
+import { cellHashes, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
 import { ulid } from "./ulid.js";
 
 /** The part of an R2 bucket binding the photo upload uses. */
@@ -103,7 +104,7 @@ export interface Env {
    * routes answer 404.
    */
   RECENT_LIST?: D1Like;
-  /** Secret. Lets the apply run remove places from RECENT_LIST and send the block list. */
+  /** Secret. Lets the apply run remove places from RECENT_LIST and send the block list, and the data release load the place index. */
   PLACES_TOKEN?: string;
 }
 
@@ -701,6 +702,45 @@ export function createHandler(deps: Deps) {
   }
 
   /**
+   * Checks a call from the apply run or the data release: `authorization:
+   * Bearer <PLACES_TOKEN>`. The recent list's database, or a Response when the call is refused.
+   */
+  async function placesDb(request: Request, env: Env, cors: Record<string, string>): Promise<D1Like | Response> {
+    if (!env.RECENT_LIST || !env.PLACES_TOKEN) return json(404, { error: "not_found" }, cors);
+    const given = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1] ?? "";
+    // Compared as hashes, so the time taken says nothing about the token.
+    if (hex(await sha256(given)) !== hex(await sha256(env.PLACES_TOKEN))) return json(401, { error: "unauthorised" }, cors);
+    return env.RECENT_LIST;
+  }
+
+  /**
+   * `GET /v1/place-index/cells`, for the data release: the hash of every map
+   * cell the place index holds, so the release sends only the cells that changed.
+   */
+  async function placeIndexCells(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const db = await placesDb(request, env, cors);
+    if (db instanceof Response) return db;
+    return json(200, { cells: await cellHashes(db) }, cors);
+  }
+
+  /**
+   * `PUT /v1/place-index`, for the data release: the cells of the place index
+   * that changed, as NDJSON (gzipped or not) with `authorization: Bearer
+   * <PLACES_TOKEN>`. Each named cell is replaced in one transaction.
+   */
+  async function putPlaceIndex(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const db = await placesDb(request, env, cors);
+    if (db instanceof Response) return db;
+    const text = await readIndexBody(request, MAX_PLACE_INDEX_BYTES);
+    if (text === "too_large") return json(413, { error: "too_large" }, cors);
+    if (text === "invalid") return json(400, { error: "invalid", details: ["the body does not gunzip"] }, cors);
+    const update = parsePlaceIndex(text);
+    if ("problems" in update) return json(400, { error: "invalid", details: update.problems }, cors);
+    await replaceCells(db, update);
+    return json(200, { cells: update.cells.length, places: update.places }, cors);
+  }
+
+  /**
    * Reads the body of a call from the apply run, after checking its
    * `authorization: Bearer <PLACES_TOKEN>`. A Response when the call is refused.
    */
@@ -710,10 +750,8 @@ export function createHandler(deps: Deps) {
     cors: Record<string, string>,
     maxBytes: number,
   ): Promise<{ db: D1Like; body: Record<string, unknown> } | Response> {
-    if (!env.RECENT_LIST || !env.PLACES_TOKEN) return json(404, { error: "not_found" }, cors);
-    const given = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1] ?? "";
-    // Compared as hashes, so the time taken says nothing about the token.
-    if (hex(await sha256(given)) !== hex(await sha256(env.PLACES_TOKEN))) return json(401, { error: "unauthorised" }, cors);
+    const db = await placesDb(request, env, cors);
+    if (db instanceof Response) return db;
     const text = await request.text();
     if (new TextEncoder().encode(text).length > maxBytes) return json(413, { error: "too_large" }, cors);
     let body: unknown;
@@ -722,7 +760,7 @@ export function createHandler(deps: Deps) {
     } catch {
       body = undefined;
     }
-    return { db: env.RECENT_LIST, body: typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {} };
+    return { db, body: typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {} };
   }
 
   /**
@@ -785,6 +823,14 @@ export function createHandler(deps: Deps) {
     if (route === "/v1/places/recent/block") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return blockRecent(request, env, cors);
+    }
+    if (route === "/v1/place-index/cells") {
+      if (request.method !== "GET") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "GET" });
+      return placeIndexCells(request, env, cors);
+    }
+    if (route === "/v1/place-index") {
+      if (request.method !== "PUT") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "PUT" });
+      return putPlaceIndex(request, env, cors);
     }
     if (
       route !== "/v1/feedback" &&

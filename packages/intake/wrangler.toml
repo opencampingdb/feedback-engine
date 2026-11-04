@@ -7,7 +7,8 @@
 #   GH_INSTALLATION_ID  installation id of the App on the inbox repository
 #   PHOTO_PASS_SECRET   signs photo passes, the same secret as the photo server's. Only for /v1/photos/pass
 #   GOOGLE_SERVICE_ACCOUNT  Google service account key file (JSON), only for app keys with "android"
-#   PLACES_TOKEN        lets the apply run remove places from RECENT_LIST and send the block list. Only with RECENT_LIST
+#   PLACES_TOKEN        lets the apply run remove places from RECENT_LIST and send the block list, and the data
+#                       release load the place index. Only with RECENT_LIST
 
 name = "ocdb-feedback-intake"
 main = "src/index.ts"
@@ -33,7 +34,8 @@ binding = "ATTEST"
 id = "REPLACE_ME_ATTEST_KV_NAMESPACE_ID"
 
 # The recent list: new places served by GET /v1/places/recent until the apply
-# run writes them into the data, with their evidence and the block list. Apply
+# run writes them into the data, with their evidence and the block list, and the
+# place index each data release loads through PUT /v1/place-index. Apply
 # the schema with the deploy copy of this file, once it holds the database_id:
 # `npx wrangler d1 migrations apply RECENT_LIST --remote -c wrangler.deploy.toml`.
 [[d1_databases]]
