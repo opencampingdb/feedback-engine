@@ -26,8 +26,14 @@ function label(placeId: string, places: ReadonlyMap<string, Place>): string {
   return name ? `\`${placeId}\` ${safeSummary(name)}` : `\`${placeId}\``;
 }
 
-const line = (c: Change, places: ReadonlyMap<string, Place>) =>
-  `- ${label(c.place, places)}: ${safeSummary(c.summary)} (${c.feedback.join(", ")})`;
+/** A preview link for a held photo, from `previews` (photo id to URL); none when previews are off. */
+const preview = (c: Change, previews: ReadonlyMap<string, string>) => {
+  const url = c.photo ? previews.get(c.photo) : undefined;
+  return url ? ` [View the photo](${url})` : "";
+};
+
+const line = (c: Change, places: ReadonlyMap<string, Place>, previews: ReadonlyMap<string, string> = new Map()) =>
+  `- ${label(c.place, places)}: ${safeSummary(c.summary)} (${c.feedback.join(", ")})${preview(c, previews)}`;
 
 const FOOTER =
   "Written by the Open Camping DB apply-feedback workflow. No names, emails or device ids are written to this repository.";
@@ -105,6 +111,7 @@ export function reviewPrBody(
   places: ReadonlyMap<string, Place>,
   claims: readonly ClaimForReview[] = [],
   held: readonly HeldCase[] = [],
+  previews: ReadonlyMap<string, string> = new Map(),
 ): string {
   const lines = [`Feedback from ${runAt}.`, ""];
   if (changes.length > 0) {
@@ -116,9 +123,12 @@ export function reviewPrBody(
       "",
       "## For a person to check",
       "",
-      ...changes.map((c) => line(c, places)),
+      ...changes.map((c) => line(c, places, previews)),
       "",
     );
+    if (changes.some((c) => preview(c, previews))) {
+      lines.push("Photo links show a held photo to anyone who has them and stop working after 30 days.", "");
+    }
   }
   if (claims.length > 0) {
     lines.push(
