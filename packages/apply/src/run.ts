@@ -83,6 +83,8 @@ export interface RunSummary {
    * live for one of them off the list.
    */
   not_applied: string[];
+  /** The ones among `not_applied` this run refused. Only these count against a contributor's track record at the intake. */
+  refused: string[];
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -348,5 +350,6 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     review_pr_body: reviewChanged ? reviewPrBody(runAt, reviewChanges, allPlaces, ownerResult.forReview, held) : "",
     new_places: newPlaces,
     not_applied: [...new Set(decisions.filter((d) => d.outcome !== "applied" && d.outcome !== "waiting").map((d) => d.id))].sort(),
+    refused: [...new Set(decisions.filter((d) => d.outcome === "refused").map((d) => d.id))].sort(),
   };
 }

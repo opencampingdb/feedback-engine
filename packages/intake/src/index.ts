@@ -952,17 +952,22 @@ export function createHandler(deps: Deps) {
   }
 
   /**
-   * `POST /v1/places/recent/overruled`, for the apply run: `{ "ids": [...] }`,
-   * the feedback ids it decided other than applying them, with
-   * `authorization: Bearer <PLACES_TOKEN>`. Their recent changes leave the
-   * list at once.
+   * `POST /v1/places/recent/overruled`, for the apply run: `{ "ids": [...],
+   * "refused": [...] }`, the feedback ids it decided other than applying them
+   * and, among them, the ones it refused, with `authorization: Bearer
+   * <PLACES_TOKEN>`. Their recent changes leave the list at once, and only the
+   * refused ones count against their contributor. `refused` may be left out.
    */
   async function overruledRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
-    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 4);
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 8);
     if (call instanceof Response) return call;
     const ids = feedbackIds(call.body, cors);
     if (ids instanceof Response) return ids;
-    return json(200, { removed: await overrule(call.db, ids) }, cors);
+    const refused = call.body.refused ?? [];
+    if (!Array.isArray(refused) || refused.length > MAX_REMOVE_IDS || !refused.every(isFeedbackId)) {
+      return json(400, { error: "invalid", details: [`refused must be up to ${MAX_REMOVE_IDS} feedback ids`] }, cors);
+    }
+    return json(200, { removed: await overrule(call.db, ids, refused as string[]) }, cors);
   }
 
   return async function handle(request: Request, env: Env): Promise<Response> {

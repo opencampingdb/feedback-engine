@@ -369,14 +369,18 @@ export async function markInData(db: D1Like, ids: readonly string[], at: string)
 
 /**
  * The apply decided these feedback items other than applying them, though the
- * intake may have put them live. Their recent changes leave the list at once,
- * their report evidence counts as held, and each contributor whose change is
- * taken down has it counted against their track record. All in one
- * transaction, and counted from the changes deleted, so sending the same ids
- * again changes nothing. Returns the recent changes deleted.
+ * intake may have put them live. Their recent changes leave the list at once
+ * and their report evidence counts as held. Only the ones among `takenDown`
+ * (items the apply refused) count against their contributor's track record:
+ * an item that went to a person, for a disagreement or an owner's value, says
+ * nothing bad about who sent it. All in one transaction, and counted from the
+ * changes deleted, so sending the same ids again changes nothing. Returns the
+ * recent changes deleted.
  */
-export async function overrule(db: D1Like, ids: readonly string[]): Promise<number> {
-  const statements = chunks([...new Set(ids)], MAX_BOUND).flatMap((part) => [
+export async function overrule(db: D1Like, ids: readonly string[], takenDown: readonly string[] = []): Promise<number> {
+  const unique = [...new Set(ids)];
+  const counted = [...new Set(takenDown)].filter((id) => unique.includes(id));
+  const records = chunks(counted, MAX_BOUND).map((part) =>
     db
       .prepare(
         `INSERT INTO contributor_records (contributor, taken_down)
@@ -384,11 +388,14 @@ export async function overrule(db: D1Like, ids: readonly string[]): Promise<numb
          ON CONFLICT (contributor) DO UPDATE SET taken_down = taken_down + excluded.taken_down`,
       )
       .bind(...part),
+  );
+  const removals = chunks(unique, MAX_BOUND).flatMap((part) => [
     db.prepare(`UPDATE report_evidence SET state = 'held' WHERE state = 'live' AND feedback_id IN (${marks(part.length)})`).bind(...part),
     db.prepare(`DELETE FROM recent_changes WHERE feedback_id IN (${marks(part.length)})`).bind(...part),
   ]);
-  const results = await db.batch(statements);
-  return results.filter((_, i) => i % 3 === 2).reduce<number>((sum, result) => sum + changesOf(result), 0);
+  // The track records are counted before the changes they count are deleted.
+  const results = await db.batch([...records, ...removals]);
+  return results.slice(records.length).filter((_, i) => i % 2 === 1).reduce<number>((sum, result) => sum + changesOf(result), 0);
 }
 
 /** Deletes recent changes the data has held for more than 7 days, and report evidence older than the rules' 90 days. For the scheduled job. */

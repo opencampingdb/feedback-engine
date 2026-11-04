@@ -23,8 +23,12 @@ export interface RecentStore {
 export interface RecentChangeStore {
   /** The data's main branch holds these items' changes, as of `at`. The intake keeps them for 7 days from then. */
   inData(ids: readonly string[], at: string): Promise<void>;
-  /** The apply decided these items other than applying them. Their recent changes leave the list at once. */
-  overruled(ids: readonly string[]): Promise<void>;
+  /**
+   * The apply decided these items other than applying them. Their recent
+   * changes leave the list at once. Those among `refused` were refused, and
+   * count against their contributor; the rest went to a person or wait.
+   */
+  overruled(ids: readonly string[], refused: readonly string[]): Promise<void>;
 }
 
 /** The ids of the new places on the intake's recent list. */
@@ -69,20 +73,25 @@ const REMOVE_BATCH = 500;
 export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeof fetch = fetch): RecentStore & RecentChangeStore {
   const url = new URL("/v1/places/recent/remove", baseUrl).toString();
   const blockUrl = new URL("/v1/places/recent/block", baseUrl).toString();
-  const post = async (path: string, ids: readonly string[], extra: Record<string, unknown>, what: string) => {
+  const post = async (path: string, ids: readonly string[], extra: (part: readonly string[]) => Record<string, unknown>, what: string) => {
     const target = new URL(path, baseUrl).toString();
     for (let start = 0; start < ids.length; start += REMOVE_BATCH) {
+      const part = ids.slice(start, start + REMOVE_BATCH);
       const response = await fetcher(target, {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: JSON.stringify({ ids: ids.slice(start, start + REMOVE_BATCH), ...extra }),
+        body: JSON.stringify({ ids: part, ...extra(part) }),
       });
       if (!response.ok) throw new Error(`the intake refused ${what}: ${response.status} ${await response.text()}`);
     }
   };
   return {
-    inData: (ids, at) => post("/v1/places/recent/in-data", ids, { at }, "the recent changes in the data"),
-    overruled: (ids) => post("/v1/places/recent/overruled", ids, {}, "the overruled recent changes"),
+    inData: (ids, at) => post("/v1/places/recent/in-data", ids, () => ({ at }), "the recent changes in the data"),
+    overruled: (ids, refused) => {
+      const isRefused = new Set(refused);
+      // Each call names the refused ids among its own ids.
+      return post("/v1/places/recent/overruled", ids, (part) => ({ refused: part.filter((id) => isRefused.has(id)) }), "the overruled recent changes");
+    },
     async block(contributors) {
       const response = await fetcher(blockUrl, {
         method: "POST",
@@ -196,11 +205,13 @@ export async function settleRecentChanges(options: Omit<SettleOptions, "store"> 
 /**
  * Tells the intake every item this run decided other than applying it
  * (refused, for a person, or an owner claim sent), so any recent change it
- * put live for one of them leaves the list and counts against its
- * contributor. Returns the ids sent, sorted.
+ * put live for one of them leaves the list, and which of them it refused,
+ * which count against their contributor. Returns the ids sent, sorted.
  */
-export async function sendOverruled(options: { ids: readonly string[]; store: RecentChangeStore }): Promise<string[]> {
+export async function sendOverruled(options: { ids: readonly string[]; refused: readonly string[]; store: RecentChangeStore }): Promise<string[]> {
   const ids = [...new Set(options.ids)].sort();
-  if (ids.length > 0) await options.store.overruled(ids);
+  const sent = new Set(ids);
+  const refused = [...new Set(options.refused)].filter((id) => sent.has(id)).sort();
+  if (ids.length > 0) await options.store.overruled(ids, refused);
   return ids;
 }

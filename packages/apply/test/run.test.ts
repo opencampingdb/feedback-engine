@@ -118,6 +118,7 @@ describe("run", () => {
     expect(summary.counts).toEqual({ applied: 3, refused: 1, needs_review: 0, waiting: 1, awaiting_approval: 0 });
     // Refused, but not the item still waiting, which a later run decides.
     expect(summary.not_applied).toEqual([id(4)]);
+    expect(summary.refused).toEqual([id(4)]);
     expect(summary.auto_changed).toBe(true);
     expect(summary.review_changed).toBe(false);
     expect([...summary.auto_files].sort()).toEqual([`places/za/${PLACE}.json`, `reviews/${PLACE}.ndjson`]);
@@ -474,6 +475,9 @@ describe("run", () => {
     await pending(40, `${day}T01:00:00Z`, "aaaa", { ...attested, intake: { state: "held", held_reason: "ai_check" } });
     const summary = await run({ inbox, data, now: NOW });
     expect(summary.counts).toMatchObject({ applied: 0, needs_review: 1 });
+    // For a person, not refused: it says nothing against its contributor.
+    expect(summary.not_applied).toEqual([id(40)]);
+    expect(summary.refused).toEqual([]);
     expect(summary.auto_changed).toBe(false);
     const moved = JSON.parse(await readFile(join(inbox, "applied", day, `${id(40)}.json`), "utf8")) as Record<string, unknown>;
     expect(moved).toMatchObject({ intake: { state: "held", held_reason: "ai_check" }, outcome: { result: "needs_review" } });

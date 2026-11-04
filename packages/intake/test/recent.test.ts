@@ -983,7 +983,7 @@ describe("send-time decisions", () => {
       expect((await listing()).changes).toMatchObject([{ place: PLACE, fact: "toilets", value: false }]);
       expect(record()).toEqual([{ accepted: 2, taken_down: 0 }]);
 
-      expect(await answer(call("overruled", { ids: [overruled] }))).toEqual({ status: 200, body: { removed: 1 } });
+      expect(await answer(call("overruled", { ids: [overruled], refused: [overruled] }))).toEqual({ status: 200, body: { removed: 1 } });
       // The change it replaced is the latest again.
       expect((await listing()).changes).toEqual([{ place: PLACE, fact: "toilets", value: true, accepted: "2026-11-03T09:00:00Z", in_data_at: null }]);
       expect(record()).toEqual([{ accepted: 2, taken_down: 1 }]);
@@ -993,7 +993,7 @@ describe("send-time decisions", () => {
       ]);
 
       // Sent again, as a failed run's items are decided again: nothing more changes.
-      expect(await answer(call("overruled", { ids: [overruled] }))).toEqual({ status: 200, body: { removed: 0 } });
+      expect(await answer(call("overruled", { ids: [overruled], refused: [overruled] }))).toEqual({ status: 200, body: { removed: 0 } });
       expect(record()).toEqual([{ accepted: 2, taken_down: 1 }]);
       // With a change taken down, five accepted items are no longer a track record, so the AI checks their free text.
       store.db.prepare("UPDATE contributor_records SET accepted = 5").run();
@@ -1002,6 +1002,29 @@ describe("send-time decisions", () => {
       store.db.prepare("UPDATE contributor_records SET taken_down = 0").run();
       await send(fact(PLACE, "drinking_water", true, { note: "Tank by the shed" }));
       expect(safeAi.runs).toBe(1);
+    });
+
+    it("takes a change the apply sent to a person off the list without counting it against the contributor", async () => {
+      await send(fact(PLACE, "toilets", true));
+      const forPerson = services.writes[0]!.id as string;
+      await send(fact(PLACE, "showers", true));
+      const refused = services.writes[1]!.id as string;
+      // Only the refused one counts, and only when it is one of the ids.
+      expect(await answer(call("overruled", { ids: [forPerson], refused: [refused] }))).toEqual({ status: 200, body: { removed: 1 } });
+      expect(record()).toEqual([{ accepted: 2, taken_down: 0 }]);
+      expect((await listing()).changes.map((c) => c.fact)).toEqual(["showers"]);
+      // An apply that sends no refused list counts nothing.
+      expect(await answer(call("overruled", { ids: [refused] }))).toEqual({ status: 200, body: { removed: 1 } });
+      expect(record()).toEqual([{ accepted: 2, taken_down: 0 }]);
+    });
+
+    it("counts each refused item once, across calls", async () => {
+      await send(fact(PLACE, "toilets", true));
+      const a = services.writes[0]!.id as string;
+      await send(fact(PLACE, "showers", true));
+      const b = services.writes[1]!.id as string;
+      expect(await answer(call("overruled", { ids: [a, b], refused: [a, b] }))).toEqual({ status: 200, body: { removed: 2 } });
+      expect(record()).toEqual([{ accepted: 2, taken_down: 2 }]);
     });
 
     it("leaves held items and ids it doesn't know as they are", async () => {
@@ -1017,7 +1040,8 @@ describe("send-time decisions", () => {
       const id = services.writes[0]!.id as string;
       const many = [id, ...Array.from({ length: 499 }, (_, n) => `fb_01JC${String(n).padStart(22, "0")}`)];
       expect(await answer(call("in-data", { ids: many, at: "2026-11-03T09:00:00Z" }))).toEqual({ status: 200, body: { marked: 1 } });
-      expect(await answer(call("overruled", { ids: many }))).toEqual({ status: 200, body: { removed: 1 } });
+      expect(await answer(call("overruled", { ids: many, refused: many }))).toEqual({ status: 200, body: { removed: 1 } });
+      expect(record()).toEqual([{ accepted: 1, taken_down: 1 }]);
     });
 
     it("refuses a wrong token and a bad body, and is not served without a token configured", async () => {
@@ -1029,6 +1053,8 @@ describe("send-time decisions", () => {
       expect((await answer(call("in-data", { ids: ["ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA"], at: "2026-11-03T09:00:00Z" }))).status).toBe(400);
       expect((await answer(call("overruled", { ids: [] }))).status).toBe(400);
       expect((await answer(call("overruled", { ids: Array.from({ length: 501 }, () => id) }))).status).toBe(400);
+      expect((await answer(call("overruled", { ids: [id], refused: "all" }))).status).toBe(400);
+      expect((await answer(call("overruled", { ids: [id], refused: ["ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA"] }))).status).toBe(400);
       const { PLACES_TOKEN: _, ...noToken } = e;
       expect((await answer(call("overruled", { ids: [id] }), noToken)).status).toBe(404);
       const get = await handle(new Request("https://intake.example/v1/places/recent/overruled"), e);

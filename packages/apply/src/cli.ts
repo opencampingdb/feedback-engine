@@ -111,7 +111,7 @@ async function main(): Promise<number> {
     console.log(`${settled.length} new place(s) taken out of the recent places store`);
     const blocked = await sendBlockList({ main: values.main, store });
     console.log(`block list of ${blocked.length} contributor(s) sent to the intake`);
-    const overruled = await sendOverruled({ ids: summary.not_applied, store });
+    const overruled = await sendOverruled({ ids: summary.not_applied, refused: summary.refused, store });
     console.log(`${overruled.length} item(s) decided other than applied sent to the intake`);
     const inData = await settleRecentChanges({ inbox: values.inbox, main: values.main, store, ...(now ? { now } : {}) });
     console.log(`${inData.length} applied report(s) in the data on main sent to the intake`);

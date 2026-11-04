@@ -89,7 +89,7 @@ describe("settleRecentChanges", () => {
   const onMain = (place: Place) => put(join(main, "places", "za", `${PLACE}.json`), place);
   const fact = (name: string, value: unknown) => ({ type: "report", place: PLACE, attested: "apple", report: { kind: "fact", fact: name, value } });
   const contact = (name: string) => ({ type: "report", place: PLACE, report: { kind: "contact", fact: name, reason: "wrong" } });
-  const store = () => ({ inData: vi.fn(async (_ids: readonly string[], _at: string) => {}), overruled: vi.fn(async (_ids: readonly string[]) => {}) });
+  const store = () => ({ inData: vi.fn(async (_ids: readonly string[], _at: string) => {}), overruled: vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {}) });
 
   it("sends a fact report once main has the fact from that run or later, with the time of this run", async () => {
     await decided("applied", 1, "2026-10-28T00:00:00Z", fact("power", true));
@@ -159,15 +159,20 @@ describe("settleRecentChanges", () => {
 });
 
 describe("sendOverruled", () => {
-  it("sends the items the run decided other than applying them", async () => {
-    const overruled = vi.fn(async (_ids: readonly string[]) => {});
-    expect(await sendOverruled({ ids: [id(2), id(1), id(2)], store: { inData: async () => {}, overruled } })).toEqual([id(1), id(2)]);
-    expect(overruled).toHaveBeenCalledWith([id(1), id(2)]);
+  it("sends the items the run decided other than applying them, and which of them it refused", async () => {
+    const overruled = vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {});
+    expect(await sendOverruled({ ids: [id(2), id(1), id(2), id(3)], refused: [id(3), id(9)], store: { inData: async () => {}, overruled } })).toEqual([
+      id(1),
+      id(2),
+      id(3),
+    ]);
+    // A refused id that is not among the ids is not sent.
+    expect(overruled).toHaveBeenCalledWith([id(1), id(2), id(3)], [id(3)]);
   });
 
   it("calls nothing when every item was applied", async () => {
-    const overruled = vi.fn(async (_ids: readonly string[]) => {});
-    expect(await sendOverruled({ ids: [], store: { inData: async () => {}, overruled } })).toEqual([]);
+    const overruled = vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {});
+    expect(await sendOverruled({ ids: [], refused: [], store: { inData: async () => {}, overruled } })).toEqual([]);
     expect(overruled).not.toHaveBeenCalled();
   });
 });
@@ -226,11 +231,14 @@ describe("intakeRecentStore", () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ marked: 1 }), { status: 200 }));
     const store = intakeRecentStore("https://intake.example.org/", "secret", fetch);
     await store.inData(Array.from({ length: 501 }, (_, n) => id(n)), "2026-10-30T00:00:00Z");
-    await store.overruled([id(7)]);
+    await store.overruled([id(7)], []);
+    await store.overruled(Array.from({ length: 501 }, (_, n) => id(n)), [id(3), id(500)]);
     const calls = fetch.mock.calls as unknown as [string, RequestInit][];
     expect(calls.map(([url]) => url)).toEqual([
       "https://intake.example.org/v1/places/recent/in-data",
       "https://intake.example.org/v1/places/recent/in-data",
+      "https://intake.example.org/v1/places/recent/overruled",
+      "https://intake.example.org/v1/places/recent/overruled",
       "https://intake.example.org/v1/places/recent/overruled",
     ]);
     for (const [, init] of calls) {
@@ -241,14 +249,17 @@ describe("intakeRecentStore", () => {
     expect(bodies[0]!.ids).toHaveLength(500);
     expect(bodies[0]!.at).toBe("2026-10-30T00:00:00Z");
     expect(bodies[1]).toEqual({ ids: [id(500)], at: "2026-10-30T00:00:00Z" });
-    expect(bodies[2]).toEqual({ ids: [id(7)] });
+    expect(bodies[2]).toEqual({ ids: [id(7)], refused: [] });
+    // Each call names the refused ids among its own.
+    expect((bodies[3] as { refused?: string[] }).refused).toEqual([id(3)]);
+    expect(bodies[4]).toEqual({ ids: [id(500)], refused: [id(500)] });
   });
 
   it("throws when the intake refuses the recent changes", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ error: "unauthorised" }), { status: 401 }));
     const store = intakeRecentStore("https://intake.example.org", "wrong", fetch);
     await expect(store.inData([id(1)], "2026-10-30T00:00:00Z")).rejects.toThrow(/401/);
-    await expect(store.overruled([id(1)])).rejects.toThrow(/401/);
+    await expect(store.overruled([id(1)], [])).rejects.toThrow(/401/);
   });
 
   it("throws when the intake refuses", async () => {
