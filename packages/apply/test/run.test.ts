@@ -483,6 +483,29 @@ describe("run", () => {
     expect(moved).toMatchObject({ intake: { state: "held", held_reason: "ai_check" }, outcome: { result: "needs_review" } });
   });
 
+  it("skips and logs a pending item whose id is already in applied/ or refused/, so it is never decided twice", async () => {
+    const day = "2026-10-29";
+    const power = { type: "report", report: { kind: "fact", fact: "power", value: true } };
+    await pending(50, `${day}T01:00:00Z`, "aaaa", power);
+    await pending(51, `${day}T01:00:00Z`, "bbbb", power);
+    await pending(52, `${day}T01:00:00Z`, "cccc", { type: "report", report: { kind: "closed" } });
+    // Copies written again after an earlier run moved them.
+    await put(join(inbox, "applied", "2026-10-28", `${id(50)}.json`), { ...item(50, `${day}T01:00:00Z`, "aaaa", power), outcome: { result: "applied" } });
+    await put(join(inbox, "refused", day, `${id(51)}.json`), { ...item(51, `${day}T01:00:00Z`, "bbbb", power), outcome: { result: "refused" } });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const summary = await run({ inbox, data, now: NOW });
+      expect(summary.counts.waiting + summary.counts.applied + summary.counts.refused + summary.counts.needs_review).toBe(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(`${id(50)} was decided already`));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(`${id(51)} was decided already`));
+    } finally {
+      warn.mockRestore();
+    }
+    // The earlier decisions are left as they were.
+    const applied = JSON.parse(await readFile(join(inbox, "applied", "2026-10-28", `${id(50)}.json`), "utf8")) as { outcome: { result: string } };
+    expect(applied.outcome.result).toBe("applied");
+  });
+
   it("does nothing when the inbox is empty", async () => {
     const summary = await run({ inbox, data, now: NOW });
     expect(summary).toMatchObject({

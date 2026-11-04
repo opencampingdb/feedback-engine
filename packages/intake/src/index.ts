@@ -62,7 +62,7 @@ import {
   type ItemState,
   type SendTimeDecision,
 } from "./decide.js";
-import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, type FlushResult } from "./inbox-queue.js";
+import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult } from "./inbox-queue.js";
 import { ulid } from "./ulid.js";
 
 /** The part of an R2 bucket binding the photo upload uses. */
@@ -503,7 +503,7 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now">) {
  * their changes are live. "off" without RECENT_LIST.
  */
 export function createFlush(deps: Pick<Deps, "fetch" | "now">) {
-  const github = new GitHubApp(deps.fetch, deps.now);
+  const github = new GitHubApp(timedFetch(deps.fetch), deps.now);
   return async function flush(env: Env): Promise<FlushResult | "off" | "failed"> {
     if (!env.RECENT_LIST) return "off";
     const db = env.RECENT_LIST;
@@ -514,8 +514,10 @@ export function createFlush(deps: Pick<Deps, "fetch" | "now">) {
         github,
         inbox: inboxConfig(env),
         branch: env.INBOX_BRANCH ?? "main",
+        now: deps.now,
         onWritten: () => noteInboxWrite(env, deps.now()),
       });
+      if (result.outcome === "expired") console.error("writing the queued items to the inbox ran out of time and stopped before moving the branch. Trying again next minute.");
       if (result.outcome === "conflict") console.error("writing the queued items to the inbox gave up: the branch kept moving. Trying again next minute.");
     } catch (error) {
       console.error(`writing the queued items to the inbox failed, trying again next minute: ${String(error)}`);

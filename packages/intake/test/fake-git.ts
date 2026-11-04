@@ -20,6 +20,10 @@ export function fakeGit(options: { repo?: string; branch?: string; now?: () => n
   const control = {
     refStatus: [] as number[],
     beforeRefUpdate: undefined as (() => void) | undefined,
+    /** Runs before each tree is created, to act as another writer would meanwhile. */
+    beforeTree: undefined as (() => void | Promise<void>) | undefined,
+    /** Calls whose URL contains this never answer, until aborted. */
+    hang: undefined as string | undefined,
     /** Answers every Git Data and contents call with this status while set. */
     down: undefined as number | undefined,
   };
@@ -71,6 +75,9 @@ export function fakeGit(options: { repo?: string; branch?: string; now?: () => n
     const method = init?.method ?? "GET";
     const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
     calls.push({ method, url: input, ...(body ? { body } : {}) });
+    if (control.hang !== undefined && input.includes(control.hang)) {
+      return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+    }
     const url = new URL(input);
     if (url.pathname.endsWith("/access_tokens")) {
       return json(201, { token: "ghs_test", expires_at: new Date((options.now?.() ?? Date.now()) + 3_600_000).toISOString() });
@@ -96,6 +103,7 @@ export function fakeGit(options: { repo?: string; branch?: string; now?: () => n
       return commit ? json(200, { sha: match[1], tree: { sha: commit.tree }, parents: commit.parents.map((sha) => ({ sha })) }) : json(404, {});
     }
     if (method === "POST" && rest === "git/trees") {
+      await control.beforeTree?.();
       const base = trees.get(body!.base_tree as string);
       if (!base) return json(422, {});
       const next = new Map(base);

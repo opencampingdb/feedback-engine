@@ -1,7 +1,16 @@
 import { generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GitHubApp } from "../src/github.js";
-import { FLUSH_ATTEMPTS, flushInbox, MAX_FLUSH_BYTES, MAX_FLUSH_ITEMS, queueStatement, type QueuedFile } from "../src/inbox-queue.js";
+import {
+  FLUSH_ATTEMPTS,
+  FLUSH_LEASE_MS,
+  flushInbox,
+  MAX_FLUSH_BYTES,
+  MAX_FLUSH_ITEMS,
+  queueStatement,
+  timedFetch,
+  type QueuedFile,
+} from "../src/inbox-queue.js";
 import { createHandler, createScheduled, type Env } from "../src/index.js";
 import type { D1Like } from "../src/recent.js";
 import { fakeD1 } from "./fake-d1.js";
@@ -31,8 +40,10 @@ describe("the inbox queue", () => {
   let git: ReturnType<typeof fakeGit>;
   let github: GitHubApp;
   let written: number;
+  let clock: number;
 
   beforeEach(() => {
+    clock = NOW;
     db = fakeD1();
     git = fakeGit({ now: () => NOW });
     github = new GitHubApp(git.fetch, () => NOW);
@@ -42,7 +53,7 @@ describe("the inbox queue", () => {
   const queue = async (...files: QueuedFile[]) => {
     for (const [i, f] of files.entries()) await queueStatement(db, f, NOW + i).run();
   };
-  const flush = (to: D1Like = db) => flushInbox({ db: to, github, inbox: INBOX, branch: "main", onWritten: async () => void (written += 1) });
+  const flush = (to: D1Like = db) => flushInbox({ db: to, github, inbox: INBOX, branch: "main", now: () => clock, onWritten: async () => void (written += 1) });
   const queued = () => (db.db.prepare("SELECT id FROM inbox_queue ORDER BY rowid").all() as { id: string }[]).map((r) => r.id);
   const writes = () => git.calls.filter((c) => c.method !== "GET" && !c.url.endsWith("/access_tokens"));
 
@@ -151,6 +162,77 @@ describe("the inbox queue", () => {
     expect(await flush()).toMatchObject({ outcome: "committed", items: 1 });
     expect(git.pending().map((p) => p.id)).toEqual([id(1)]);
     expect(queued()).toEqual([]);
+  });
+
+  it("runs one flush at a time, under a lease in runs that a stalled flush loses after 5 minutes", async () => {
+    await queue(file(1));
+    const lease = () => db.db.prepare("SELECT last_start FROM runs WHERE name = 'flush'").get();
+    // A flush that started and never finished holds the lease.
+    db.db.prepare("INSERT INTO runs (name, last_start) VALUES ('flush', ?)").run(clock);
+    clock += FLUSH_LEASE_MS - 1;
+    expect(await flush()).toEqual({ outcome: "busy" });
+    expect(git.calls).toEqual([]);
+    clock += 1;
+    expect(await flush()).toMatchObject({ outcome: "committed", items: 1 });
+    // Given back at the end, so the next minute's flush runs.
+    expect(lease()).toEqual({ last_start: null });
+    await queue(file(2));
+    expect(await flush()).toMatchObject({ outcome: "committed" });
+  });
+
+  it("gives the lease back when the flush fails", async () => {
+    await queue(file(1));
+    git.control.down = 503;
+    await expect(flush()).rejects.toThrow(/503/);
+    expect(db.db.prepare("SELECT last_start FROM runs WHERE name = 'flush'").get()).toEqual({ last_start: null });
+  });
+
+  it("fails a GitHub call that takes longer than its timeout, and keeps the items", async () => {
+    await queue(file(1));
+    github = new GitHubApp(timedFetch(git.fetch, 20), () => NOW);
+    git.control.hang = "/git/trees";
+    await expect(flush()).rejects.toThrow(/took longer than 20 ms/);
+    git.control.hang = undefined;
+    expect(queued()).toEqual([id(1)]);
+    expect(await flush()).toMatchObject({ outcome: "committed", items: 1 });
+  });
+
+  it("stops before moving the branch when its lease is nearly over", async () => {
+    await queue(file(1));
+    git.control.beforeTree = () => void (clock += FLUSH_LEASE_MS);
+    expect(await flush()).toEqual({ outcome: "expired" });
+    expect(git.pending()).toEqual([]);
+    expect(queued()).toEqual([id(1)]);
+  });
+
+  it("reads the marks again just before each tree, so it never writes a row another flush already wrote", async () => {
+    await queue(file(1), file(2));
+    // The first attempt loses to a moved branch. Meanwhile another flush, stalled past its lease, wrote item 1
+    // and deleted its row, and the apply may already have moved it out of pending/.
+    git.control.refStatus = [422];
+    git.control.beforeRefUpdate = () => {
+      git.control.beforeRefUpdate = undefined;
+      db.db.prepare("DELETE FROM inbox_queue WHERE id = ?").run(id(1));
+    };
+    expect(await flush()).toMatchObject({ outcome: "committed", items: 1 });
+    expect(git.pending().map((p) => p.id)).toEqual([id(2)]);
+    const trees = writes().filter((c) => c.url.endsWith("/git/trees"));
+    expect(trees.map((c) => (c.body!.tree as unknown[]).length)).toEqual([2, 1]);
+  });
+
+  it("deletes, without writing it again, a row another flush marked with a commit the branch now holds", async () => {
+    await queue(file(1), file(2));
+    git.control.beforeTree = async () => {
+      git.control.beforeTree = undefined;
+      // Another flush commits item 1 and marks its row, then stalls before deleting it.
+      git.commitOnBranch(file(1).path, file(1).content);
+      const sha = git.branches.get("main")!;
+      db.db.prepare("UPDATE inbox_queue SET commit_sha = ? WHERE id = ?").run(sha, id(1));
+    };
+    git.control.refStatus = [422];
+    expect(await flush()).toMatchObject({ outcome: "committed", items: 1 });
+    expect(queued()).toEqual([]);
+    expect(git.log()[0]!.message).toBe(`Add ${id(2)}`);
   });
 
   it("writes at most MAX_FLUSH_ITEMS a flush, oldest first, and the rest on the next", async () => {

@@ -282,7 +282,7 @@ describe("the scheduled job", () => {
     clock += QUIET_MS;
     expect(await scheduled(rest)).toBe("off");
     const db = env.RECENT_LIST as ReturnType<typeof fakeD1>;
-    expect(db.db.prepare("SELECT count(*) AS n FROM runs").get()).toEqual({ n: 0 });
+    expect(db.db.prepare("SELECT count(*) AS n FROM runs WHERE name = 'apply'").get()).toEqual({ n: 0 });
     expect(gh.calls.some((c) => c.url.endsWith("/dispatches"))).toBe(false);
   });
 });
