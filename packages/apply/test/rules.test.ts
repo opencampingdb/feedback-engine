@@ -939,6 +939,22 @@ describe("new places", () => {
     }) as StoredFeedback;
   const idOf = (item: StoredFeedback) => `ocdb_${item.id.slice(3)}`;
 
+  it("leaves feedback about a new place added in the same run waiting for the data", () => {
+    const item = added();
+    const about = { ...fact(1, "dev-a", "power", true, OTHER), place: idOf(item) } as StoredFeedback;
+    const out = run([item, about]);
+    expect(out.outcome(item)).toBe("applied");
+    expect(out.outcome(about)).toBe("waiting");
+    expect(out.decisions.find((d) => d.id === about.id)?.reason).toBe(`place ${idOf(item)} is a new place not in the data yet`);
+  });
+
+  it("leaves feedback about a new place added in an earlier run waiting while it is not in the data", () => {
+    const item = added();
+    const about = { ...fact(1, "dev-a", "power", true, OTHER), place: idOf(item) } as StoredFeedback;
+    const out = run([about], { history: [item] });
+    expect(out.outcome(about)).toBe("waiting");
+  });
+
   it("publishes a new place at once, marked shown", () => {
     const item = added();
     const out = run([item]);
