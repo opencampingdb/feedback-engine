@@ -939,7 +939,19 @@ describe("send-time decisions", () => {
     clock = Date.parse("2026-11-10T11:01:00Z");
     expect((await listing()).changes.map((c) => c.place)).toEqual([PLACE]);
     await createScheduled({ fetch: services.fetch, now: () => clock })(e);
-    expect(store.db.prepare("SELECT place FROM recent_changes ORDER BY place").all()).toEqual([{ place: PLACE }, { place: PLACE }]);
+    // The data has held ELSEWHERE's change for 7 days, and PLACE's changes were accepted more than 7 days ago and never reached it.
+    expect(store.db.prepare("SELECT place FROM recent_changes ORDER BY place").all()).toEqual([]);
+  });
+
+  it("drops a change the data never took 7 days after it was accepted", async () => {
+    await send(fact(PLACE, "toilets", true));
+    const prune = () => createScheduled({ fetch: services.fetch, now: () => clock })(e);
+    clock = Date.parse("2026-11-10T08:59:00Z");
+    await prune();
+    expect((await listing()).changes.map((c) => c.place)).toEqual([PLACE]);
+    clock = Date.parse("2026-11-10T09:01:00Z");
+    await prune();
+    expect(store.db.prepare("SELECT count(*) AS n FROM recent_changes").get()).toEqual({ n: 0 });
   });
 
   describe("what the apply tells it", () => {
@@ -970,7 +982,9 @@ describe("send-time decisions", () => {
         [PLACE, "2026-11-03T09:30:00Z"],
         [ELSEWHERE, null],
       ]);
-      clock = Date.parse("2026-11-10T09:31:00Z");
+      // A tick before ELSEWHERE's unmarked change is 7 days old, and after PLACE's 7 days in the data.
+      clock = Date.parse("2026-11-10T08:59:00Z");
+      store.db.prepare("UPDATE recent_changes SET in_data_at = ? WHERE place = ?").run("2026-11-03T08:58:00Z", PLACE);
       await createScheduled({ fetch: services.fetch, now: () => clock })(e);
       expect(store.db.prepare("SELECT place FROM recent_changes").all()).toEqual([{ place: ELSEWHERE }]);
     });

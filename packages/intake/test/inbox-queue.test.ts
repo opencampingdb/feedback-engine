@@ -280,16 +280,71 @@ describe("queued writes through the intake", () => {
     expect(git.calls.some((c) => c.method === "PUT" && c.url.includes("/contents/pending/"))).toBe(true);
   });
 
+  it("logs an error when the flush fails, when it gives up on a moving branch, and on every tick while the queue is 15 minutes behind", async () => {
+    const handle = createHandler({ fetch: git.fetch, now: () => clock });
+    const scheduled = createScheduled({ fetch: git.fetch, now: () => clock });
+    await handle(post(review(1)), env);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      // The App lost contents: write, or a ruleset refuses it.
+      git.control.down = 403;
+      await scheduled(env);
+      expect(error).toHaveBeenCalledWith(expect.stringMatching(/writing the queued items to the inbox failed.*403/));
+      expect(error.mock.calls.some(([m]) => String(m).includes("behind"))).toBe(false);
+      git.control.down = undefined;
+      error.mockClear();
+      git.control.refStatus = [422, 422, 422];
+      clock += 16 * MINUTE;
+      await scheduled(env);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("gave up"));
+      expect(error).toHaveBeenCalledWith(expect.stringMatching(/the inbox queue is behind: 1 item\(s\) waiting, the oldest for 16 minutes/));
+      error.mockClear();
+      git.control.down = 503;
+      clock += MINUTE;
+      await scheduled(env);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("the inbox queue is behind"));
+      // Once the item is written, the ticks are quiet again.
+      git.control.down = undefined;
+      error.mockClear();
+      clock += MINUTE;
+      await scheduled(env);
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("shows the queue's backlog on GET /v1/health/queue, behind the places token", async () => {
+    const health = (token?: string) =>
+      new Request("https://intake.example/v1/health/queue", token ? { headers: { authorization: `Bearer ${token}` } } : {});
+    const handle = createHandler({ fetch: git.fetch, now: () => clock });
+    const guarded = { ...env, PLACES_TOKEN: "places-token-for-the-apply-run" };
+    expect((await handle(health(), guarded)).status).toBe(401);
+    expect((await handle(health("wrong"), guarded)).status).toBe(401);
+    expect((await handle(health("places-token-for-the-apply-run"), env)).status).toBe(404);
+    const read = async () => (await handle(health("places-token-for-the-apply-run"), guarded)).json();
+    expect(await read()).toEqual({ queued: 0, oldest_age_seconds: null, stale: false });
+    await handle(post(review(1)), guarded);
+    clock += 30_000;
+    await handle(post(review(2)), guarded);
+    clock += 30_000;
+    expect(await read()).toEqual({ queued: 2, oldest_age_seconds: 60, stale: false });
+    clock += 15 * MINUTE;
+    expect(await read()).toMatchObject({ queued: 2, stale: true });
+  });
+
   it("keeps queued items while GitHub is down, logs it, and writes them once it is back", async () => {
     const handle = createHandler({ fetch: git.fetch, now: () => clock });
     await handle(post(review(1)), env);
     git.control.down = 503;
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       await createScheduled({ fetch: git.fetch, now: () => clock })(env);
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining("writing the queued items to the inbox failed"));
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("writing the queued items to the inbox failed"));
     } finally {
-      warn.mockRestore();
+      error.mockRestore();
     }
     expect(db.db.prepare("SELECT count(*) AS n FROM inbox_queue").get()).toEqual({ n: 1 });
     git.control.down = undefined;

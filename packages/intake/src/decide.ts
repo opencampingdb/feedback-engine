@@ -45,6 +45,12 @@ import { chunks, placeStatement, type Bbox, type D1Like, type D1Statement, type 
 
 /** Days a recent change is kept after the apply has put it into the data. */
 export const KEEP_IN_DATA_DAYS = 7;
+/**
+ * Days a recent change is kept after it was accepted while the apply has not
+ * put it into the data, so a change whose item never reached the data (an
+ * inbox that stopped taking writes, say) does not stay on the list for ever.
+ */
+export const KEEP_NOT_IN_DATA_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -398,10 +404,15 @@ export async function overrule(db: D1Like, ids: readonly string[], takenDown: re
   return results.slice(records.length).filter((_, i) => i % 2 === 1).reduce<number>((sum, result) => sum + changesOf(result), 0);
 }
 
-/** Deletes recent changes the data has held for more than 7 days, and report evidence older than the rules' 90 days. For the scheduled job. */
+/**
+ * Deletes recent changes the data has held for more than 7 days, those
+ * accepted more than 7 days ago that the data still does not hold, and report
+ * evidence older than the rules' 90 days. For the scheduled job.
+ */
 export async function pruneDecisions(db: D1Like, now: number): Promise<void> {
   await db.batch([
     db.prepare("DELETE FROM recent_changes WHERE in_data_at IS NOT NULL AND in_data_at < ?").bind(isoSeconds(now - KEEP_IN_DATA_DAYS * DAY_MS)),
+    db.prepare("DELETE FROM recent_changes WHERE in_data_at IS NULL AND accepted < ?").bind(isoSeconds(now - KEEP_NOT_IN_DATA_DAYS * DAY_MS)),
     db.prepare("DELETE FROM report_evidence WHERE received < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
   ]);
 }

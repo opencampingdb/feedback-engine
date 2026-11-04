@@ -62,7 +62,7 @@ import {
   type ItemState,
   type SendTimeDecision,
 } from "./decide.js";
-import { flushInbox, queueStatement, type FlushResult } from "./inbox-queue.js";
+import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, type FlushResult } from "./inbox-queue.js";
 import { ulid } from "./ulid.js";
 
 /** The part of an R2 bucket binding the photo upload uses. */
@@ -496,25 +496,37 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now">) {
 
 /**
  * Writes the queued items to the inbox as one commit (inbox-queue.ts). A flush
- * counts as an inbox write for the run triggers. A failure is logged, and the
- * items wait for the next minute. "off" without RECENT_LIST.
+ * counts as an inbox write for the run triggers. A flush that fails, or gives
+ * up on a branch that keeps moving, is logged as an error and the items wait
+ * for the next minute. While the oldest queued item is more than
+ * STALE_QUEUE_MS old, every tick logs an error too, since apps are still told
+ * their changes are live. "off" without RECENT_LIST.
  */
 export function createFlush(deps: Pick<Deps, "fetch" | "now">) {
   const github = new GitHubApp(deps.fetch, deps.now);
   return async function flush(env: Env): Promise<FlushResult | "off" | "failed"> {
     if (!env.RECENT_LIST) return "off";
+    const db = env.RECENT_LIST;
+    let result: FlushResult | "failed";
     try {
-      return await flushInbox({
-        db: env.RECENT_LIST,
+      result = await flushInbox({
+        db,
         github,
         inbox: inboxConfig(env),
         branch: env.INBOX_BRANCH ?? "main",
         onWritten: () => noteInboxWrite(env, deps.now()),
       });
+      if (result.outcome === "conflict") console.error("writing the queued items to the inbox gave up: the branch kept moving. Trying again next minute.");
     } catch (error) {
-      console.warn(`writing the queued items to the inbox failed, trying again next minute: ${String(error)}`);
-      return "failed";
+      console.error(`writing the queued items to the inbox failed, trying again next minute: ${String(error)}`);
+      result = "failed";
     }
+    const backlog = await queueBacklog(db, deps.now()).catch(() => undefined);
+    if (backlog && backlog.oldest_age_ms !== null && backlog.oldest_age_ms > STALE_QUEUE_MS) {
+      const minutes = Math.floor(backlog.oldest_age_ms / 60_000);
+      console.error(`the inbox queue is behind: ${backlog.queued} item(s) waiting, the oldest for ${minutes} minutes. See GET /v1/health/queue.`);
+    }
+    return result;
   };
 }
 
@@ -870,6 +882,19 @@ export function createHandler(deps: Deps) {
   }
 
   /**
+   * `GET /v1/health/queue`, with `authorization: Bearer <PLACES_TOKEN>`: how
+   * far behind the inbox queue is, `{ "queued", "oldest_age_seconds" }`
+   * (null when nothing waits), and `stale` once the oldest has waited more
+   * than 15 minutes.
+   */
+  async function queueHealth(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const db = await placesDb(request, env, cors);
+    if (db instanceof Response) return db;
+    const { queued, oldest_age_ms: age } = await queueBacklog(db, deps.now());
+    return json(200, { queued, oldest_age_seconds: age === null ? null : Math.floor(age / 1000), stale: age !== null && age > STALE_QUEUE_MS }, cors);
+  }
+
+  /**
    * `GET /v1/place-index/cells`, for the data release: the hash of every map
    * cell the place index holds, so the release sends only the cells that changed.
    */
@@ -1036,6 +1061,10 @@ export function createHandler(deps: Deps) {
     if (route === "/v1/places/recent/block") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return blockRecent(request, env, cors);
+    }
+    if (route === "/v1/health/queue") {
+      if (request.method !== "GET") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "GET" });
+      return queueHealth(request, env, cors);
     }
     if (route === "/v1/place-index/cells") {
       if (request.method !== "GET") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "GET" });

@@ -27,6 +27,9 @@ export const MAX_FLUSH_BYTES = 2 * 1024 * 1024;
 /** Times a flush starts again from a branch that moved on before it gives up until the next minute. */
 export const FLUSH_ATTEMPTS = 3;
 
+/** Queued items older than this mean the flush is failing: the scheduled job logs an error on every tick until they are written. */
+export const STALE_QUEUE_MS = 15 * 60 * 1000;
+
 /** D1 allows 100 bound values in one statement. */
 const MAX_BOUND = 100;
 const marks = (n: number) => Array.from({ length: n }, () => "?").join(", ");
@@ -148,4 +151,16 @@ export async function flushInbox(deps: FlushDeps): Promise<FlushResult> {
     return { outcome: "committed", commit, items: ids.length };
   }
   return { outcome: "conflict" };
+}
+
+/** How far behind the queue is: how many items wait, and how long the oldest has waited (null when none). */
+export interface QueueBacklog {
+  queued: number;
+  oldest_age_ms: number | null;
+}
+
+export async function queueBacklog(db: D1Like, nowMs: number): Promise<QueueBacklog> {
+  const row = await db.prepare("SELECT count(*) AS queued, min(queued) AS oldest FROM inbox_queue").first<{ queued: number; oldest: number | null }>();
+  const oldest = row?.oldest ?? null;
+  return { queued: row?.queued ?? 0, oldest_age_ms: oldest === null ? null : Math.max(0, nowMs - oldest) };
 }
