@@ -2,7 +2,7 @@
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import type { ReviewPr } from "./owners.js";
-import { intakeRecentList, intakeRecentStore, sendBlockList, settleRecentPlaces } from "./recent.js";
+import { intakeRecentList, intakeRecentStore, sendBlockList, sendOverruled, settleRecentChanges, settleRecentPlaces } from "./recent.js";
 import { run } from "./run.js";
 
 const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>]
@@ -25,7 +25,11 @@ Open Camping DB data checkout in <dir>, and anything but photos is refused.
 --main and --intake take new places that are now in the data on main, and
 withdrawn ones, out of the intake's recent places store, and send it the
 contributors blocked on main, with the token in PLACES_TOKEN. <dir> is a checkout of the data repository's main branch, so a
-place leaves the store only once the PR that writes it is merged.
+place leaves the store only once the PR that writes it is merged. They also
+tell the intake which applied fact and contact reports now have their change
+on main, so it keeps those recent changes for 7 days from this run, and which
+items this run decided other than applying them, so their recent changes leave
+the list.
 --recent-places reads the recent list at GET <url>/v1/places/recent, with no
 token. Feedback about a new place on it that is not in the data yet stays in
 <inbox>/pending for a later run, instead of being refused. While the list
@@ -107,6 +111,10 @@ async function main(): Promise<number> {
     console.log(`${settled.length} new place(s) taken out of the recent places store`);
     const blocked = await sendBlockList({ main: values.main, store });
     console.log(`block list of ${blocked.length} contributor(s) sent to the intake`);
+    const overruled = await sendOverruled({ ids: summary.not_applied, refused: summary.refused, store });
+    console.log(`${overruled.length} item(s) decided other than applied sent to the intake`);
+    const inData = await settleRecentChanges({ inbox: values.inbox, main: values.main, store, ...(now ? { now } : {}) });
+    console.log(`${inData.length} applied report(s) in the data on main sent to the intake`);
   }
   const c = summary.counts;
   console.log(

@@ -7,7 +7,9 @@
 #   GH_INSTALLATION_ID  installation id of the App on the inbox repository
 #   PHOTO_PASS_SECRET   signs photo passes, the same secret as the photo server's. Only for /v1/photos/pass
 #   GOOGLE_SERVICE_ACCOUNT  Google service account key file (JSON), only for app keys with "android"
-#   PLACES_TOKEN        lets the apply run remove places from RECENT_LIST and send the block list. Only with RECENT_LIST
+#   PLACES_TOKEN        lets the apply run remove places from RECENT_LIST and send the block list, and the data
+#                       release load the place index. Only with RECENT_LIST
+#   URLHAUS_KEY         abuse.ch auth key, for the URLhaus check on links (src/checks.ts)
 
 name = "ocdb-feedback-intake"
 main = "src/index.ts"
@@ -22,6 +24,30 @@ ALLOWED_ORIGINS = "*"
 # "on" checks each uploaded photo with Google Cloud Vision SafeSearch, as the
 # GOOGLE_SERVICE_ACCOUNT secret (its project needs the Cloud Vision API turned on).
 SAFESEARCH = "off"
+# The inbox's apply workflow, by file name or id. With RECENT_LIST, the job
+# below starts it once the inbox has had no new write for 2 minutes, or once
+# the oldest waiting write is 10 minutes old, at most once every 10 minutes. The GitHub App needs Actions: Read and write on the
+# inbox for it. Until it has that, each start fails, is logged, and is tried
+# again the next minute, and the apply's hourly schedule still runs.
+# APPLY_WORKFLOW = "apply-feedback.yml"
+# The AI reviewer (src/reviewer.ts): "on" reviews the held cases on the open
+# feedback/review PR of DATA_REPO at most once every 10 minutes, with the AI
+# binding below. The GitHub App needs the data repository in its installation,
+# with Contents and Pull requests: Read and write. REVIEW_MODEL defaults to
+# @cf/meta/llama-3.3-70b-instruct-fp8-fast. REVIEW_BOT_LOGINS lists the bot
+# logins whose PR comments count: the apply's GitHub App (it posts held cases)
+# and this intake's own (it posts the decisions), comma separated. Off when
+# AI_REVIEWER or REVIEW_BOT_LOGINS is left out.
+# AI_REVIEWER = "on"
+# DATA_REPO = "opencampingdb/data"
+# REVIEW_BOT_LOGINS = "example-bot[bot]"
+# REVIEW_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+
+# Every minute: writes the queued items to the inbox, starts the apply when it
+# is due, and runs the AI reviewer when it is on and due. Does nothing without
+# RECENT_LIST, APPLY_WORKFLOW or AI_REVIEWER.
+[triggers]
+crons = ["* * * * *"]
 
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
@@ -33,9 +59,12 @@ binding = "ATTEST"
 id = "REPLACE_ME_ATTEST_KV_NAMESPACE_ID"
 
 # The recent list: new places served by GET /v1/places/recent until the apply
-# run writes them into the data, with their evidence and the block list. Apply
+# run writes them into the data, with their evidence and the block list, and the
+# place index each data release loads through PUT /v1/place-index. Apply
 # the schema with the deploy copy of this file, once it holds the database_id:
 # `npx wrangler d1 migrations apply RECENT_LIST --remote -c wrangler.deploy.toml`.
+# With it bound, feedback and owner submissions are queued here and the job
+# below writes them to the inbox once a minute as one commit (src/inbox-queue.ts).
 [[d1_databases]]
 binding = "RECENT_LIST"
 database_name = "ocdb-recent-list"
@@ -53,3 +82,10 @@ migrations_dir = "migrations"
 # [[kv_namespaces]]
 # binding = "PHOTO_STATE"
 # id = "REPLACE_ME_PHOTO_STATE_KV_NAMESPACE_ID"
+
+# Workers AI, for the Llama Guard check on free text (src/checks.ts), which
+# the send-time decision runs with RECENT_LIST (src/decide.ts), and for the AI
+# reviewer (src/reviewer.ts) when AI_REVIEWER is on. The account needs Workers
+# AI. Without it, free text from a contributor without a track record is held.
+[ai]
+binding = "AI"

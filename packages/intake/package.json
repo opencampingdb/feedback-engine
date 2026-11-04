@@ -11,7 +11,8 @@
     "copy-to-d1": "esbuild scripts/copy-to-d1.ts --bundle --platform=node --format=esm --external:wrangler --outfile=.wrangler/copy-to-d1.mjs --log-level=warning && node .wrangler/copy-to-d1.mjs"
   },
   "dependencies": {
-    "@opencampingdb/feedback": "0.9.0"
+    "@opencampingdb/apply": "0.1.0",
+    "@opencampingdb/feedback": "0.10.0"
   },
   "devDependencies": {
     "esbuild": "0.28.2",

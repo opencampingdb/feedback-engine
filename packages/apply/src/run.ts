@@ -77,6 +77,14 @@ export interface RunSummary {
   review_pr_body: string;
   /** New places this run wrote into the automatic checkout for the first time. */
   new_places: string[];
+  /**
+   * Feedback this run decided other than applying it: refused, for a person,
+   * or an owner claim sent. Sorted. The intake takes any recent change it put
+   * live for one of them off the list.
+   */
+  not_applied: string[];
+  /** The ones among `not_applied` this run refused. Only these count against a contributor's track record at the intake. */
+  refused: string[];
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -341,5 +349,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     auto_pr_body: autoChanged ? autoPrBody(runAt, autoChanges, decisions, allPlaces) : "",
     review_pr_body: reviewChanged ? reviewPrBody(runAt, reviewChanges, allPlaces, ownerResult.forReview, held) : "",
     new_places: newPlaces,
+    not_applied: [...new Set(decisions.filter((d) => d.outcome !== "applied" && d.outcome !== "waiting").map((d) => d.id))].sort(),
+    refused: [...new Set(decisions.filter((d) => d.outcome === "refused").map((d) => d.id))].sort(),
   };
 }

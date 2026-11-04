@@ -81,14 +81,36 @@ async function readFeedbackFolder(root: string, day: string): Promise<{ files: P
   return { files, malformed };
 }
 
-/** Every file in `pending/`. Files whose content cannot be used are returned apart, for `refuseMalformed`. */
+/** The feedback ids already decided: every `fb_` file name in `applied/` and `refused/`. */
+async function decidedIds(inbox: string): Promise<Set<string>> {
+  const ids = new Set<string>();
+  for (const folder of ["applied", "refused"]) {
+    const root = join(inbox, folder);
+    for (const day of await dayFolders(root)) {
+      for (const name of await readdir(join(root, day))) if (FEEDBACK_FILE.test(name)) ids.add(name.slice(0, -5));
+    }
+  }
+  return ids;
+}
+
+/**
+ * Every file in `pending/`. Files whose content cannot be used are returned
+ * apart, for `refuseMalformed`. A file whose id is already in `applied/` or
+ * `refused/` is skipped and logged: an item is decided once, so a copy the
+ * intake wrote again after the apply moved it is never decided twice.
+ */
 export async function readPending(inbox: string): Promise<{ files: PendingFile[]; malformed: MalformedFile[] }> {
   const root = join(inbox, "pending");
   const files: PendingFile[] = [];
   const malformed: MalformedFile[] = [];
-  for (const day of await dayFolders(root)) {
+  const days = await dayFolders(root);
+  const decided = days.length > 0 ? await decidedIds(inbox) : new Set<string>();
+  for (const day of days) {
     const read = await readFeedbackFolder(root, day);
-    files.push(...read.files);
+    for (const file of read.files) {
+      if (decided.has(file.item.id)) console.warn(`skipping ${file.path}: ${file.item.id} was decided already`);
+      else files.push(file);
+    }
     malformed.push(...read.malformed);
   }
   return { files, malformed };

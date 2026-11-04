@@ -18,7 +18,17 @@
 # so the data PRs trigger the data repository's CI.
 #
 # With intake-url and the places-token secret, each run also keeps the
-# intake's recent places store in step with the data on the base branch.
+# intake's recent places store and recent changes in step with the data on the
+# base branch: it tells the intake which applied changes the base branch now
+# holds (so a change counts only once its PR has merged, at the next run), and
+# which items it decided other than applying them, which leave the list at once.
+#
+# With release-workflow set, a run that opened or added to the automatic PR
+# waits for it to merge, then starts the data repository's release workflow,
+# so the change reaches apps without waiting for the release's own schedule.
+# The bot GitHub App needs Actions: Read and write on the data repository for
+# that. Without it the run logs a warning and the release's schedule picks the
+# change up.
 
 name: Apply feedback
 
@@ -59,7 +69,9 @@ on:
           https://intake.example.org. Set it with the places-token secret and
           each run takes places now in the data on the base branch, and
           withdrawn ones, out of the intake's recent places store, and sends
-          it the block list.
+          it the block list. It also tells the intake which applied fact and
+          contact reports the base branch now holds, and which items the run
+          decided other than applying them.
         type: string
         default: ""
       recent-places-url:
@@ -69,6 +81,13 @@ on:
           reports about a new place on that list that is not in the data yet
           wait in pending/ for a later run instead of being refused. An app's
           own photo inbox sets it to Open Camping DB's intake. Off when empty.
+        type: string
+        default: ""
+      release-workflow:
+        description: >-
+          File name or id of the data repository's release workflow, for
+          example release.yml. When set, a run that changed the data starts it
+          on data-base-branch once the automatic PR has merged. Off when empty.
         type: string
         default: ""
     secrets:
@@ -93,7 +112,7 @@ jobs:
   apply:
     name: Apply feedback
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Token for the inbox
         id: inbox-token
@@ -266,6 +285,7 @@ jobs:
           --summary "$RUNNER_TEMP/summary.json"
 
       - name: Publish automatic changes
+        id: publish-auto
         if: steps.apply.outputs.auto_changed == 'true'
         env:
           GH_TOKEN: ${{ steps.data-token.outputs.token }}
@@ -281,11 +301,13 @@ jobs:
           if [ "$PR_OPEN" = "true" ]; then
             git push origin HEAD:refs/heads/feedback/auto
             gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$RUNNER_TEMP/auto-pr-body.md"
+            echo "pr=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           else
             # No open PR uses the branch, so it can be replaced.
             git push --force origin HEAD:refs/heads/feedback/auto
             url="$(gh pr create --repo "$DATA_REPO" --base "$BASE_BRANCH" --head feedback/auto \
               --title "Feedback: automatic changes" --body-file "$RUNNER_TEMP/auto-pr-body.md")"
+            echo "pr=${url}" >> "$GITHUB_OUTPUT"
             # Repositories without auto-merge (or branch protection) merge by hand.
             gh pr merge "$url" --auto --squash ||
               echo "::notice::Auto-merge is not available on ${DATA_REPO}, so merge ${url} by hand."
@@ -308,7 +330,24 @@ jobs:
             if ! git diff --cached --quiet; then
               git commit -m "Feedback for review (run ${RUN_ID})"
             fi
-            git push origin HEAD:refs/heads/feedback/review
+            # The intake's AI reviewer commits to this branch at any time. Rebase
+            # onto its commits and retry, keeping the merge of the base branch
+            # made above.
+            pushed=false
+            for attempt in 1 2 3 4 5; do
+              if git fetch origin "+refs/heads/feedback/review:refs/remotes/origin/feedback/review" &&
+                git rebase --rebase-merges origin/feedback/review &&
+                git push origin HEAD:refs/heads/feedback/review; then
+                pushed=true
+                break
+              fi
+              git rebase --abort 2>/dev/null || true
+              sleep $((attempt * 5))
+            done
+            if [ "$pushed" != "true" ]; then
+              echo "::error::could not push to feedback/review after 5 attempts"
+              exit 1
+            fi
             gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$RUNNER_TEMP/review-pr-body.md"
             if [ "$OWNER_CLAIMS" = "true" ]; then
               gh pr edit "$PR_NUMBER" --repo "$DATA_REPO" --add-label owner-claim
@@ -352,3 +391,54 @@ jobs:
           done
           echo "::error::could not record the inbox moves after 5 attempts"
           exit 1
+
+      # The release builds from the base branch, so it starts only once the
+      # automatic PR has merged. A missing permission, a PR still waiting or a
+      # failed start leaves the change to the release's own schedule and never
+      # fails the run.
+      - name: Token to start the data release
+        id: release-token
+        if: inputs.release-workflow != '' && steps.publish-auto.outputs.pr != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.data-repository-name }}
+          permission-actions: write
+
+      - name: Start the data release
+        if: inputs.release-workflow != '' && steps.publish-auto.outputs.pr != ''
+        continue-on-error: true
+        timeout-minutes: 12
+        env:
+          GH_TOKEN: ${{ steps.data-token.outputs.token }}
+          RELEASE_TOKEN: ${{ steps.release-token.outputs.token }}
+          DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
+          BASE_BRANCH: ${{ inputs.data-base-branch }}
+          RELEASE_WORKFLOW: ${{ inputs.release-workflow }}
+          PR: ${{ steps.publish-auto.outputs.pr }}
+        run: |
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "::warning::No token with Actions: Read and write on ${DATA_REPO}, so the release's schedule will publish this change. Give the bot GitHub App that permission."
+            exit 0
+          fi
+          # Data CI usually takes two to three minutes before the PR merges itself.
+          # A PR without auto-merge waits for a person, so the run stops waiting.
+          state=""
+          for _ in $(seq 1 40); do
+            state="$(gh pr view "$PR" --repo "$DATA_REPO" --json state,autoMergeRequest \
+              --jq 'if .state == "OPEN" and .autoMergeRequest == null then "MANUAL" else .state end')" || state=""
+            if [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ] || [ "$state" = "MANUAL" ]; then break; fi
+            sleep 15
+          done
+          if [ "$state" != "MERGED" ]; then
+            echo "::notice::The automatic PR is ${state:-unknown}, not merged, so the release's schedule will publish it."
+            exit 0
+          fi
+          if GH_TOKEN="$RELEASE_TOKEN" gh workflow run "$RELEASE_WORKFLOW" --repo "$DATA_REPO" --ref "$BASE_BRANCH"; then
+            echo "Started ${RELEASE_WORKFLOW} on ${DATA_REPO}@${BASE_BRANCH}."
+          else
+            echo "::warning::Starting ${RELEASE_WORKFLOW} on ${DATA_REPO} failed, so the release's schedule will publish this change."
+          fi

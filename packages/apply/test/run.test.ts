@@ -116,6 +116,9 @@ describe("run", () => {
     const summary = await run({ inbox, data, now: NOW });
 
     expect(summary.counts).toEqual({ applied: 3, refused: 1, needs_review: 0, waiting: 1, awaiting_approval: 0 });
+    // Refused, but not the item still waiting, which a later run decides.
+    expect(summary.not_applied).toEqual([id(4)]);
+    expect(summary.refused).toEqual([id(4)]);
     expect(summary.auto_changed).toBe(true);
     expect(summary.review_changed).toBe(false);
     expect([...summary.auto_files].sort()).toEqual([`places/za/${PLACE}.json`, `reviews/${PLACE}.ndjson`]);
@@ -464,6 +467,43 @@ describe("run", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("reads the intake's decision from the inbox file and keeps it when it moves the item", async () => {
+    const day = "2026-10-29";
+    const attested = { type: "report", contributor: NEWCOMER, attested: "play_integrity", report: { kind: "fact", fact: "power", value: true } };
+    await pending(40, `${day}T01:00:00Z`, "aaaa", { ...attested, intake: { state: "held", held_reason: "ai_check" } });
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.counts).toMatchObject({ applied: 0, needs_review: 1 });
+    // For a person, not refused: it says nothing against its contributor.
+    expect(summary.not_applied).toEqual([id(40)]);
+    expect(summary.refused).toEqual([]);
+    expect(summary.auto_changed).toBe(false);
+    const moved = JSON.parse(await readFile(join(inbox, "applied", day, `${id(40)}.json`), "utf8")) as Record<string, unknown>;
+    expect(moved).toMatchObject({ intake: { state: "held", held_reason: "ai_check" }, outcome: { result: "needs_review" } });
+  });
+
+  it("skips and logs a pending item whose id is already in applied/ or refused/, so it is never decided twice", async () => {
+    const day = "2026-10-29";
+    const power = { type: "report", report: { kind: "fact", fact: "power", value: true } };
+    await pending(50, `${day}T01:00:00Z`, "aaaa", power);
+    await pending(51, `${day}T01:00:00Z`, "bbbb", power);
+    await pending(52, `${day}T01:00:00Z`, "cccc", { type: "report", report: { kind: "closed" } });
+    // Copies written again after an earlier run moved them.
+    await put(join(inbox, "applied", "2026-10-28", `${id(50)}.json`), { ...item(50, `${day}T01:00:00Z`, "aaaa", power), outcome: { result: "applied" } });
+    await put(join(inbox, "refused", day, `${id(51)}.json`), { ...item(51, `${day}T01:00:00Z`, "bbbb", power), outcome: { result: "refused" } });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const summary = await run({ inbox, data, now: NOW });
+      expect(summary.counts.waiting + summary.counts.applied + summary.counts.refused + summary.counts.needs_review).toBe(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(`${id(50)} was decided already`));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(`${id(51)} was decided already`));
+    } finally {
+      warn.mockRestore();
+    }
+    // The earlier decisions are left as they were.
+    const applied = JSON.parse(await readFile(join(inbox, "applied", "2026-10-28", `${id(50)}.json`), "utf8")) as { outcome: { result: string } };
+    expect(applied.outcome.result).toBe("applied");
   });
 
   it("does nothing when the inbox is empty", async () => {

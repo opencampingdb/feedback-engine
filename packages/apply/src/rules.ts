@@ -1,24 +1,33 @@
 import {
-  contactProblem,
-  isContactFact,
-  isFactName,
-  firstProblem,
-  isValidFactValue,
   newPlaceStanding,
-  tidyText,
   safeSearchVerdict,
   type ContactFactName,
   type ContactReportReason,
   type FactName,
   type FactValue,
-  type NewPlaceContacts,
   type NewPlaceReportReason,
   type StoredFeedback,
 } from "@opencampingdb/feedback";
+import {
+  decideContactReport,
+  decideFact,
+  distinctSources as distinctDevices,
+  factRefusal,
+  heldForCheck,
+  inWindow,
+  newPlaceFields,
+  newPlaceListing,
+  REVIEWED_FACTS,
+  WINDOW_DAYS,
+  type ItemDecision,
+} from "./decide.js";
 import { moderateReview } from "./moderation.js";
+import type { HeldCase } from "./review.js";
 import { roundCoord } from "./serialise.js";
 import { setSource } from "./sources.js";
 import type { Fee, Photo, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
+
+export type { HeldCase };
 
 /**
  * The apply-feedback rules from SPEC "Apply feedback", as pure functions.
@@ -34,27 +43,10 @@ import type { Fee, Photo, Place, RemovedPhotos, Review, Source, SourceKey } from
  * never get a new decision, but count as evidence for closures and reopenings.
  */
 
-export const WINDOW_DAYS = 90;
+/** The rules for one item against one place live in `decide.ts`, shared with the intake. */
+export { inWindow, REVIEWED_FACTS, WINDOW_DAYS };
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WINDOW_MS = WINDOW_DAYS * DAY_MS;
-
-/**
- * Facts a report without attestation cannot change on its own: a single
- * report proposes the change on the PR for a person. An attested report of a
- * contact fact or the address applies at once when it passes `contactProblem`,
- * as other facts do; any other fact here always goes to a person.
- */
-export const REVIEWED_FACTS: ReadonlySet<FactName> = new Set<FactName>([
-  "website",
-  "phone",
-  "phone_2",
-  "email",
-  "facebook",
-  "instagram",
-  "tiktok",
-  "x",
-  "address",
-]);
 
 /** Kind given to a draft record for a `new_place` report until a person sets it. */
 export const DRAFT_KIND = "campground";
@@ -188,45 +180,6 @@ export interface RulesOutput {
   needsReview: boolean;
 }
 
-/**
- * One case for a person, a bot or an AI reviewer to look at, listed in the
- * review PR body as JSON. `duplicate`: a new place held as a possible
- * duplicate of `duplicate_of`. `hidden`: a new place hidden by `reports`
- * reports for `reasons`, or because its contributor is `blocked`. `contacts`:
- * a new place published without the contact facts and address named in
- * `contacts`, which failed the link checks and wait in the inbox for a person.
- * `description`: a new place published without its description, which failed
- * the text checks for `problem` and waits in the inbox. `first_place`: the
- * first place from its contributor, published. `contact_withdrawn`: the
- * contact `fact` taken off a place after reports from two sources for
- * `reasons`; `value` is what the place published, and a reviewer restores it
- * by setting the fact back on the place in the review PR. Contact values a
- * traveller sent, notes and device ids are never in it.
- */
-export interface HeldCase {
-  case: "duplicate" | "hidden" | "contacts" | "description" | "first_place" | "contact_withdrawn";
-  place: string;
-  /** The place's standing. Left out for a place travellers did not add. */
-  standing?: "shown" | "confirmed" | "held" | "hidden";
-  location: { lat: number; lon: number };
-  kind: string;
-  duplicate_of?: string;
-  distance_m?: number;
-  reports?: number;
-  reasons?: string[];
-  blocked?: true;
-  contacts?: string[];
-  /** On `description`: the text check it failed. */
-  problem?: string;
-  /** On `contact_withdrawn`: the contact taken off the place. */
-  fact?: ContactFactName;
-  /** On `contact_withdrawn`: the value the place published. */
-  value?: FactValue;
-  contributor?: string;
-  /** The feedback ids the case comes from, to read in the inbox. */
-  feedback: string[];
-}
-
 type ReportItem = Extract<StoredFeedback, { type: "report" }>;
 type ReviewItem = Extract<StoredFeedback, { type: "review" }>;
 type CheckItem = Extract<StoredFeedback, { type: "check" }>;
@@ -276,20 +229,6 @@ function wasApplied(item: StoredFeedback): boolean {
 /** Review text with case, spacing and punctuation removed, to spot one text sent for several places. */
 const sameText = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "");
 
-/**
- * Independent sources among `items`. Items from one client network count once,
- * whatever device ids they carry. Items stored without a network count by device.
- */
-function distinctDevices(items: readonly StoredFeedback[]): number {
-  return new Set(items.map((i) => i.origin ?? i.device)).size;
-}
-
-/** Whether `item` arrived at or before `at`, and no more than 90 days before it. */
-export function inWindow(item: StoredFeedback, at: number): boolean {
-  const t = time(item);
-  return t <= at && at - t <= WINDOW_MS;
-}
-
 /** Closure evidence: a closed report, or a check that found the place gone. */
 function isClosureEvidence(item: StoredFeedback): boolean {
   return (
@@ -329,9 +268,6 @@ function distanceM(a: { lat: number; lon: number }, b: { lat: number; lon: numbe
     Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(((b.lon - a.lon) * rad) / 2) ** 2;
   return 2 * 6_371_008.8 * Math.asin(Math.sqrt(h));
 }
-
-/** Two fact values are the same: an address is compared field by field. */
-const sameValue = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
 
 const quote = (text: string | undefined) => (text ? `: "${text}"` : "");
 
@@ -916,12 +852,12 @@ export function applyRules(input: RulesInput): RulesOutput {
   function applyFacts(items: ReportItem[]): void {
     const groups = new Map<string, ReportItem[]>();
     for (const item of items) {
-      const { fact, value } = item.report;
-      if (!isFactName(fact) || !isValidFactValue(fact, value)) {
-        decide(item, "refused", `${String(fact)} = ${JSON.stringify(value)} is not a valid fact`);
+      const refusal = factRefusal(item);
+      if (refusal !== null) {
+        decide(item, "refused", refusal.why);
         continue;
       }
-      const key = `${item.place}\u0000${fact}`;
+      const key = `${item.place}\u0000${item.report.fact}`;
       groups.set(key, [...(groups.get(key) ?? []), item]);
     }
 
@@ -935,85 +871,60 @@ export function applyRules(input: RulesInput): RulesOutput {
         setSource(place, fact, "feedback", nowIso);
       };
 
-      if (REVIEWED_FACTS.has(fact)) {
-        for (const item of reports) {
-          const value = item.report.value as FactValue;
-          const toPerson = (summary: string, why: string) => {
-            edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
-            note(placeId, summary, false, [item]);
-            decide(item, "needs_review", why);
-          };
-          if (!isContactFact(fact) || item.attested === undefined) {
-            toPerson(`${fact} set to ${JSON.stringify(value)} (check before merging)`, `${fact} changes are checked by a person`);
-            continue;
-          }
-          // An attested contact report follows the attested fact rule, once it passes the link and spam checks.
-          if (sameValue(current(), value)) {
-            decide(item, "applied", `${fact} is already ${JSON.stringify(value)}`);
-            continue;
-          }
-          if (place.fact_sources[fact] === "owner") {
-            toPerson(`${fact}: a device reports ${JSON.stringify(value)}, the owner set ${JSON.stringify(current())}`, `${fact} was set by the owner, so a person decides`);
-            continue;
-          }
-          const problem = contactProblem(fact, value);
-          if (problem !== null) {
-            toPerson(`${fact} set to ${JSON.stringify(value)}, which fails the link checks: ${problem} (check before merging)`, `${fact} fails the link checks (${problem}), so a person checks it`);
-            continue;
-          }
-          const at = time(item);
-          const source = item.origin ?? item.device;
-          const disagrees = [...factHistory(placeId, fact), ...reports].some(
-            (r) => r !== item && (r.origin ?? r.device) !== source && !sameValue(r.report.value, value) && inWindow(r, at),
-          );
-          if (disagrees) {
-            toPerson(`${fact} set to ${JSON.stringify(value)}, which another device disagrees with (check before merging)`, `another device reported a different ${fact}, so a person decides`);
-            continue;
-          }
-          setFact(value);
-          note(placeId, `${fact} set to ${JSON.stringify(value)} (one attested report)`, true, [item]);
-          decide(item, "applied", `${fact} set to ${JSON.stringify(value)}`);
+      // The shared rules decide each report on its own: an attested report, a
+      // contact fact's report and a report of the value the place already has.
+      const evidence = [...factHistory(placeId, fact), ...reports];
+      const settle = (item: ReportItem, decision: ItemDecision) => {
+        const value = item.report.value as FactValue;
+        if (decision.verdict === "refused") {
+          decide(item, "refused", decision.why);
+          return;
         }
+        const check = heldForCheck(item);
+        if (decision.verdict === "live" && decision.changes.length > 0 && check !== null) {
+          edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
+          note(placeId, `${fact} set to ${JSON.stringify(value)}, which the intake held for ${check} (check before merging)`, false, [item]);
+          decide(item, "needs_review", `the intake held it for ${check}, so a person checks it`);
+          return;
+        }
+        if (decision.verdict === "live") {
+          if (decision.changes.length > 0) {
+            setFact(value);
+            note(placeId, `${fact} set to ${JSON.stringify(value)} (one attested report)`, true, [item]);
+          }
+          decide(item, "applied", decision.why);
+          return;
+        }
+        const summary =
+          decision.reason === "owner_value"
+            ? `${fact}: a device reports ${JSON.stringify(value)}, the owner set ${JSON.stringify(current())}`
+            : decision.reason === "link_check"
+              ? `${fact} set to ${JSON.stringify(value)}, which fails the link checks: ${decision.problem} (check before merging)`
+              : decision.reason === "disagreement"
+                ? `${fact} set to ${JSON.stringify(value)}, which another device disagrees with (check before merging)`
+                : `${fact} set to ${JSON.stringify(value)} (check before merging)`;
+        edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
+        note(placeId, summary, false, [item]);
+        decide(item, "needs_review", decision.why);
+      };
+
+      if (REVIEWED_FACTS.has(fact)) {
+        for (const item of reports) settle(item, decideFact({ item, place, earlier: evidence }));
         continue;
       }
 
+      // A report without attestation of any other fact waits for a second device to agree.
       const open = new Set(reports);
       for (const item of reports) {
         if (!open.has(item)) continue;
         const value = item.report.value as FactValue;
-        if (current() === value) {
+        const decision = decideFact({ item, place, earlier: evidence });
+        if (decision.verdict !== "held" || decision.reason !== "not_attested") {
           open.delete(item);
-          decide(item, "applied", `${fact} is already ${JSON.stringify(value)}`);
+          settle(item, decision);
           continue;
         }
         const at = time(item);
-        if (item.attested !== undefined && place.fact_sources[fact] === "owner") {
-          // The owner's value stands until a person decides between them.
-          open.delete(item);
-          edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
-          note(placeId, `${fact}: a device reports ${JSON.stringify(value)}, the owner set ${JSON.stringify(current())}`, false, [item]);
-          decide(item, "needs_review", `${fact} was set by the owner, so a person decides`);
-          continue;
-        }
-        if (item.attested !== undefined) {
-          // One attested report sets the fact at once. A different value from
-          // another source within 90 days means they disagree, so a person decides.
-          open.delete(item);
-          const source = item.origin ?? item.device;
-          const disagrees = [...factHistory(placeId, fact), ...reports].some(
-            (r) => r !== item && (r.origin ?? r.device) !== source && r.report.value !== value && inWindow(r, at),
-          );
-          if (disagrees) {
-            edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
-            note(placeId, `${fact} set to ${JSON.stringify(value)}, which another device disagrees with (check before merging)`, false, [item]);
-            decide(item, "needs_review", `another device reported a different ${fact}, so a person decides`);
-            continue;
-          }
-          setFact(value);
-          note(placeId, `${fact} set to ${JSON.stringify(value)} (one attested report)`, true, [item]);
-          decide(item, "applied", `${fact} set to ${JSON.stringify(value)}`);
-          continue;
-        }
         const agreeing = [...open].filter((r) => r.report.value === value && inWindow(r, at));
         if (distinctDevices(agreeing) < 2) continue;
         if (place.fact_sources[fact] === "owner") {
@@ -1113,11 +1024,8 @@ export function applyRules(input: RulesInput): RulesOutput {
       const published = (standing === "shown" || standing === "confirmed") && unlisted === undefined;
       // Contact facts and the address. A published place carries those that pass
       // the link and spam checks; the rest wait for a person. A draft for a person carries them all.
-      const heldFacts: Partial<Record<keyof NewPlaceContacts | "address", FactValue>> = { ...origin.report.contacts, ...(origin.report.address ? { address: origin.report.address } : {}) };
+      const { contacts: heldFacts, failing, descriptionProblem } = newPlaceFields(origin);
       const contacts = Object.keys(heldFacts) as (keyof typeof heldFacts)[];
-      const failing = contacts.filter((fact) => contactProblem(fact, heldFacts[fact]) !== null);
-      const description = origin.report.description;
-      const descriptionProblem = description === undefined ? null : firstProblem(tidyText(description));
       const where = `${origin.location!.lat}, ${origin.location!.lon}`;
       const against = [...earlier, ...mine].filter((i) => i.type === "report" || (i.type === "check" && !i.check.still_there));
       const reasons = [...new Set(against.map((i) => (i.type === "report" ? i.report.reason! : "not_there")))].sort();
@@ -1195,12 +1103,10 @@ export function applyRules(input: RulesInput): RulesOutput {
     return { action: decision.action, at: decision.at };
   }
 
-  /** Why the intake would not list a new place, or undefined when it would. */
+  /** Why the intake would not list a new place or did not, or undefined when it would. */
   function whyNotListed(item: ReportItem): string | undefined {
-    if (item.attested === undefined) return "not proven by attestation";
-    if (item.contributor === undefined) return "no contributor";
-    const problem = item.report.note === undefined ? null : firstProblem(tidyText(item.report.note));
-    return problem === null ? undefined : `note fails the text checks (${problem})`;
+    const check = heldForCheck(item);
+    return newPlaceListing(item)?.why ?? (check === null ? undefined : `held by the intake for ${check}`);
   }
 
   /** A new place's record as its report describes it, with no standing yet. */
@@ -1222,13 +1128,13 @@ export function applyRules(input: RulesInput): RulesOutput {
       fact_dates: name === null ? { location: nowIso } : { location: nowIso, name: nowIso },
       updated: nowIso,
     };
-    if (item.report.fee !== undefined) {
-      draft.facts.fee = item.report.fee;
+    const { fee, description } = newPlaceFields(item);
+    if (fee !== undefined) {
+      draft.facts.fee = fee;
       setSource(draft, "fee", "feedback", nowIso);
     }
     // The description is written as the text checks read it, and left off when it fails them.
-    const description = item.report.description === undefined ? undefined : tidyText(item.report.description);
-    if (description !== undefined && description.length > 0 && firstProblem(description) === null) {
+    if (description !== undefined) {
       draft.description = description;
       setSource(draft, "description", "feedback", nowIso);
     }
@@ -1244,8 +1150,6 @@ export function applyRules(input: RulesInput): RulesOutput {
    * before the contact was last set are about an older value and do not count.
    */
   function applyContactReports(items: ReportItem[]): void {
-    const isAbout = (r: StoredFeedback, placeId: string, fact: string): r is ReportItem =>
-      r.type === "report" && r.report.kind === "contact" && r.place === placeId && r.report.fact === fact;
     const takenDown = new Map<string, HeldCase>();
     // What a single report sent to a person, to take back if a later report in this run takes the contact down.
     const sentToPerson = new Map<string, { edit: ReviewEdit; change: Change }>();
@@ -1263,36 +1167,35 @@ export function applyRules(input: RulesInput): RulesOutput {
         continue;
       }
       const place = record(placeId);
-      const value = (place.facts as Record<string, FactValue | undefined>)[fact];
-      if (value === undefined) {
-        decide(item, "refused", `place has no ${fact}`);
+      // Reports refused earlier in this run do not count.
+      const earlier = [...input.history, ...items].filter((r) => r === item || decisions.get(r.id)?.outcome !== "refused");
+      const decision = decideContactReport({ item, place, earlier });
+      if (decision.verdict === "refused") {
+        decide(item, "refused", decision.why);
         continue;
       }
-      if (place.fact_sources[fact] === "owner") {
+      if (decision.verdict === "held" && decision.reason === "owner_value") {
         edits.push({ kind: "note", place: placeId, feedback: item.id });
         note(placeId, `${fact} reported as ${reason}, but the owner set it (decide: keep it or remove it)`, false, [item]);
-        decide(item, "needs_review", `${fact} was set by the owner, so a person decides`);
+        decide(item, "needs_review", decision.why);
         continue;
       }
-      const at = time(item);
-      const setAt = place.fact_dates?.[fact];
-      const since = setAt === undefined ? -Infinity : Date.parse(setAt);
-      const reports = [...input.history, ...items].filter(
-        (r): r is ReportItem => isAbout(r, placeId, fact) && inWindow(r, at) && time(r) >= since && (r === item || decisions.get(r.id)?.outcome !== "refused"),
-      );
-      if (distinctDevices(reports) >= 2 && reports.some((r) => r.attested !== undefined)) {
+      // A report the intake held for a check takes nothing down on its own, though it still counts as a source.
+      const check = heldForCheck(item);
+      if (decision.verdict === "live" && decision.takedown && check === null) {
+        const { value, sources, reasons, feedback } = decision.takedown;
+        const reports = earlier.filter((r) => feedback.includes(r.id));
         delete (place.facts as Record<string, FactValue | undefined>)[fact];
         setSource(place, fact, "feedback", nowIso);
-        const reasons = [...new Set(reports.map((r) => r.report.reason as ContactReportReason))].sort();
-        note(placeId, `${fact} taken down after reports from ${distinctDevices(reports)} sources within ${WINDOW_DAYS} days (${reasons.join(", ")})`, true, reports);
+        note(placeId, `${fact} taken down after reports from ${sources} sources within ${WINDOW_DAYS} days (${reasons.join(", ")})`, true, reports);
         for (const r of reports) {
-          if (!items.includes(r)) continue;
+          if (!items.includes(r as ReportItem) || heldForCheck(r) !== null) continue;
           const sent = sentToPerson.get(r.id);
           if (sent) {
             edits.splice(edits.indexOf(sent.edit), 1);
             changes.splice(changes.indexOf(sent.change), 1);
           }
-          decide(r, "applied", `${fact} taken down after reports from two sources`);
+          decide(r, "applied", decision.why);
         }
         const heldCase: HeldCase = {
           case: "contact_withdrawn",
@@ -1303,7 +1206,7 @@ export function applyRules(input: RulesInput): RulesOutput {
           fact,
           value,
           reasons,
-          feedback: reports.map((r) => r.id),
+          feedback: [...feedback],
         };
         held.push(heldCase);
         takenDown.set(key, heldCase);
@@ -1311,9 +1214,10 @@ export function applyRules(input: RulesInput): RulesOutput {
       }
       const edit: ReviewEdit = { kind: "note", place: placeId, feedback: item.id };
       edits.push(edit);
-      note(placeId, `${fact} reported as ${reason} (decide: keep it or remove it)`, false, [item]);
+      const heldBy = check === null ? "" : `, held by the intake for ${check}`;
+      note(placeId, `${fact} reported as ${reason}${heldBy} (decide: keep it or remove it)`, false, [item]);
       sentToPerson.set(item.id, { edit, change: changes[changes.length - 1]! });
-      decide(item, "needs_review", `a report that the ${fact} is ${reason} is read by a person`);
+      decide(item, "needs_review", check === null ? decision.why : `the intake held it for ${check}, so a person checks it`);
     }
   }
 

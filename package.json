@@ -15,7 +15,7 @@
   ],
   "scripts": {
     "build": "npm run build -w packages/sdk && npm run build -w packages/apply && npm run build -w packages/osm-notes",
-    "typecheck": "tsc -p packages/sdk --noEmit && tsc -p packages/intake --noEmit && tsc -p packages/photos --noEmit && tsc -p packages/apply --noEmit && tsc -p packages/osm-notes --noEmit",
+    "typecheck": "tsc -p packages/sdk --noEmit && tsc -p packages/intake --noEmit && tsc -p packages/photos --noEmit && tsc -p packages/apply --noEmit && tsc -p packages/apply/tsconfig.decide.json && tsc -p packages/osm-notes --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },

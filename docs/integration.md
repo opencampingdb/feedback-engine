@@ -212,7 +212,7 @@ await feedback.withdraw({ place: newPlace, consent: true });
 
 It is sent to `/v1/feedback` with `type: "withdraw"`, from the same install and with the same attestation as the report. Within 24 hours of the report the place is withdrawn. While the place is on the recent list, the intake answers `403 not_your_place` to any other install and `409 withdraw_window_closed` after 24 hours. After 24 hours send a `remove` report instead, which counts as one more report.
 
-**The recent places list.** A new place shows to everyone within about 30 seconds of its report, without waiting for the apply run:
+**The recent list.** A new place, and a change that went live (see "Live or held" below), shows to everyone within about 30 seconds of its report, without waiting for the apply run or the next data release:
 
 ```sh
 curl "https://<intake>/v1/places/recent?bbox=146.5,-37.2,147.5,-36.0"
@@ -222,10 +222,26 @@ It needs no app key. `bbox` is optional: west, south, east and north in degrees.
 
 ```json
 {"places": [{"id": "ocdb_01JC...", "location": {"lat": -36.12345, "lon": 146.88765}, "kind": "free_camp",
-  "name": "Creek Bend Free Camp", "standing": "shown", "added": "2026-11-03T09:00:00Z", "contributor": "ctr_5d1c0e2a9b7f4436"}]}
+  "name": "Creek Bend Free Camp", "standing": "shown", "added": "2026-11-03T09:00:00Z", "contributor": "ctr_5d1c0e2a9b7f4436",
+  "description": "Flat sites beside the creek.", "fee": false, "contacts": {"phone": "+61 3 5555 0100"}}],
+ "changes": [{"place": "ocdb_01JB...", "fact": "toilets", "value": true, "accepted": "2026-11-03T09:00:00Z", "in_data_at": null},
+  {"place": "ocdb_01JB...", "fact": "website", "value": null, "accepted": "2026-11-03T09:05:00Z", "in_data_at": "2026-11-03T10:00:00Z"}]}
 ```
 
-A place is listed when its report came from an attested install (an app key with `requires_attestation`) and its note, with contact details stripped as the inbox keeps it, passes `textProblem`. A report without a `contributor` is listed under the attested key's contributor id on iOS, and on Android under one the intake makes from the hashed install, so a moderator can still block that install. Other new places reach a person through the apply run as before. `kind` is the code the traveller picked, or `null`; look its group up in `data/schema/kinds.json`. `name` is the report's `name` after `tidyName`, or `null` when it had none. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive, so a place two other devices report leaves the list on the next refresh. Only `still_there` checks with `nearby: true` count towards `confirmed`. The list never carries the note, the contacts, the address or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. The intake also keeps the block list the apply run sends: a blocked contributor's new places leave the list, and later ones are accepted to the inbox but not listed. A place leaves the list once the apply run has written it into the data, where apps find it with the rest.
+The SDK types the answer as `RecentList`, with `RecentPlace` and `RecentChange`.
+
+A place is listed when its report came from an attested install (an app key with `requires_attestation`) and its note, with contact details stripped as the inbox keeps it, passes `textProblem`. A report without a `contributor` is listed under the attested key's contributor id on iOS, and on Android under one the intake makes from the hashed install, so a moderator can still block that install. Other new places reach a person through the apply run as before. `kind` is the code the traveller picked, or `null`; look its group up in `data/schema/kinds.json`. `name` is the report's `name` after `tidyName`, or `null` when it had none. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive, so a place two other devices report leaves the list on the next refresh. Only `still_there` checks with `nearby: true` count towards `confirmed`. `description`, `fee` and `contacts` (the contact facts and the `address`) are there when the report carried them and they passed the checks, as the place will be published with them. The list never carries the note or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. The intake also keeps the block list the apply run sends: a blocked contributor's new places leave the list, and later ones are accepted to the inbox but not listed. A place leaves the list once the apply run has written it into the data, where apps find it with the rest.
+
+**Recent changes.** `changes` holds the changes to released places that went live: for each place and fact, the latest one, by map area like the places. `value` is the fact's new value, or `null` when the change takes the fact down (a contact taken down after reports). `accepted` is when the intake accepted it, and `in_data_at` when the apply run put it into the data, or `null` until it has. A change stays on the list for 7 days after it reaches the data, so an app with an older release still shows it. Changes from a blocked contributor leave the list. Intakes from before SDK 0.10.0 have no `changes`.
+
+Lay the changes over each place of your release with `withRecentChanges(place, changes, dataVersion)`, where `dataVersion` is the `data_version` of the release you have. It sets each fact (with `fact_sources` `feedback` and the `fact_dates` entry the time it was accepted), takes off a fact whose value is `null`, and skips changes your release already has: those whose `in_data_at` is earlier than the commit time at the front of `dataVersion` (`20261030T160000Z-abc1234` is 16:00 UTC on 30 October 2026; `dataVersionTime` reads it). When the version is not in that form, every change is laid over. It returns a new record, or the same one when no change applies, and leaves the release record as it was.
+
+```ts
+import { withRecentChanges, type RecentList } from "@opencampingdb/feedback";
+
+const recent = (await (await fetch(`${endpoint}/v1/places/recent?bbox=${bbox}`)).json()) as RecentList;
+const shown = places.map((place) => withRecentChanges(place, recent.changes ?? [], manifest.data_version));
+```
 
 Each contributor (or install, without one) may send 3 new places a day. The fourth gets `429 rate_limited`.
 
@@ -312,7 +328,7 @@ Items older than 30 days, or past the 100 newest, are dropped unsent.
 
 **Connecting answers to your own records.** The client normalises a submission before it queues it: a location is rounded to 6 decimal places and names are trimmed. So what was queued can differ from what you passed in, and matching an answer to your record by content fails. Tidy what the traveller typed with `tidyName` and `tidyText`, round a location with `sdkCoordinate`, and store those values if you keep a copy.
 
-A new place's id arrives only to the send that carried it: the `report()` call when it went at once, or a later `flush()` when it was queued. To receive it either way, pass a `ref` of your own (1 to 100 characters) with each submission, and an `onAnswered` hook when you create the client. The client keeps `ref` with the queued item and never sends it. `onAnswered({ ref, type, outcome })` is called once for each queued item when it is settled, after the queue is saved, with `outcome` either `{ kind: "sent", id }` or `{ kind: "dropped", httpStatus }` (0 when the item was dropped unsent for its age or a full queue). Errors in the hook are caught, so they never stop the queue.
+A new place's id arrives only to the send that carried it: the `report()` call when it went at once, or a later `flush()` when it was queued. To receive it either way, pass a `ref` of your own (1 to 100 characters) with each submission, and an `onAnswered` hook when you create the client. The client keeps `ref` with the queued item and never sends it. `onAnswered({ ref, type, outcome })` is called once for each queued item when it is settled, after the queue is saved, with `outcome` either `{ kind: "sent", id, state?, heldReason? }` or `{ kind: "dropped", httpStatus }` (0 when the item was dropped unsent for its age or a full queue). Errors in the hook are caught, so they never stop the queue.
 
 ```ts
 export const feedback = createFeedbackClient({
@@ -327,6 +343,38 @@ export const feedback = createFeedbackClient({
 
 await feedback.report({ place: null, location, report: { kind: "new_place", name: tidyName(name) }, consent: true, ref: draft.id });
 ```
+
+**Live or held.** The intake decides fact reports, contact reports and new places when they arrive, with the apply run's own rules and then its checks, and says what it decided. A `sent` outcome, and the `sent` result of a call that sent at once, then carries `state`: `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`. Every other kind of item, and every item sent to an intake from before SDK 0.10.0, comes back with neither, and the apply run decides it as before. The apply still writes every item into the data, and may yet decide a live item differently, for example when two reports collide in one run; the change then leaves the recent list.
+
+```ts
+onAnswered: async ({ ref, outcome }) => {
+  if (!ref || outcome.kind !== "sent") return;
+  if (outcome.state === "live") await drafts.markLive(ref);
+  else if (outcome.state === "held") await drafts.markHeld(ref, outcome.heldReason); // undefined for a code this SDK does not know
+  else await drafts.markSent(ref);
+},
+```
+
+The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your own message for each:
+
+| `heldReason` | Why |
+| --- | --- |
+| `not_attested` | The report was not from an attested install: a person reads a contact, and a second device has to agree on any other fact. |
+| `owner_value` | The place's owner set the value. |
+| `disagreement` | Another source reported a different value within 90 days. |
+| `link_check` | A link failed `contactProblem` or the malware check. |
+| `text_check` | Free text failed the text checks. |
+| `unconfirmed` | A contact report from one source, or with none attested. |
+| `no_contributor` | A new place sent without a contributor. |
+| `daily_cap` | The contributor, their network or their install's App Attest key has had 50 live changes today (UTC). |
+| `ai_check` | The AI check flagged its free text. |
+| `check_unavailable` | A check could not run, so it waits rather than going live unchecked. |
+| `unknown_place` | The intake does not have the place yet, such as a place newer than the last release. |
+| `blocked` | The contributor is blocked. |
+| `no_value` | A contact report about a contact the place does not have. |
+| `invalid_value` | Not a valid value for the fact. |
+
+Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. Adding a code later is additive. A code this version does not know is left out of `heldReason`, and `state` is still `held`. `itemDecision(answer)` reads `state` and `heldReason` from an intake answer you fetched yourself.
 
 ## 9. Show the attribution
 

@@ -1,3 +1,5 @@
+import type { HeldReason } from "./client.js";
+
 /**
  * Payload types for the Open Camping DB feedback submission
  * (`POST /v1/feedback`), matching SPEC.md "Feedback submission".
@@ -533,7 +535,7 @@ export type StoredOwnerSubmission =
   | (Omit<OwnerListingSubmission, "device"> & OwnerStoredFields & { code: string; token_sha256: string })
   | (Omit<OwnerUpdateSubmission, "device" | "token"> & OwnerStoredFields & { token_sha256: string });
 
-type OwnerStoredFields = Omit<StoredFields, "contributor" | "attested" | "attest_key">;
+type OwnerStoredFields = Omit<StoredFields, "contributor" | "attested" | "attest_key" | "intake">;
 
 /** Everything that can be in `inbox/pending/`. */
 export type StoredSubmission = StoredFeedback | StoredOwnerSubmission;
@@ -565,7 +567,18 @@ interface StoredFields {
   attested?: "app_attest" | "play_integrity";
   /** `ak_` and 16 hex characters of the salted App Attest key id: a second signal beside the contributor. */
   attest_key?: string;
+  /**
+   * What the intake decided at send time, on the fact reports, contact
+   * reports and new places it decides. An item it held for a check
+   * (`text_check`, `link_check`, `ai_check`, `daily_cap` or
+   * `check_unavailable`) goes to a person, never into the data on its own.
+   * Absent on other items and on items stored before the intake decided any.
+   */
+  intake?: StoredIntakeDecision;
 }
+
+/** The intake's send-time decision, as the inbox stores it. */
+export type StoredIntakeDecision = { state: "live" } | { state: "held"; held_reason: HeldReason };
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 

@@ -5,6 +5,16 @@
   "description": "Applies Open Camping DB feedback from the inbox repository to a checkout of the data repository.",
   "license": "Apache-2.0",
   "type": "module",
+  "exports": {
+    "./decide": {
+      "types": "./dist/decide.d.ts",
+      "default": "./dist/decide.js"
+    },
+    "./review": {
+      "types": "./dist/review.d.ts",
+      "default": "./dist/review.js"
+    }
+  },
   "bin": {
     "ocdb-apply": "./dist/cli.js",
     "ocdb-photos": "./dist/photos-cli.js"
@@ -17,6 +27,6 @@
     "apply": "node dist/cli.js"
   },
   "dependencies": {
-    "@opencampingdb/feedback": "0.9.0"
+    "@opencampingdb/feedback": "0.10.0"
   }
 }

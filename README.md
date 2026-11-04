@@ -31,7 +31,7 @@ const feedback = createFeedbackClient({
 await feedback.check({ place: "ocdb_01JBX...", check: { visited: "2026-10-30", still_there: true }, consent: true });
 ```
 
-Show `ATTRIBUTION` wherever the data appears, and call `feedback.flush()` when the app returns to the foreground. [docs/integration.md](docs/integration.md) walks through an Expo app step by step. To get an app key, open an issue with the **App key** form in this repository.
+Show `ATTRIBUTION` wherever the data appears, and call `feedback.flush()` when the app returns to the foreground. The intake answers a fact report, contact report or new place `live` or `held` (with a reason code) as it arrives, and a live change reaches every app within about 30 seconds on the recent list, which apps lay over their release with `withRecentChanges`. [docs/integration.md](docs/integration.md) walks through an Expo app step by step. To get an app key, open an issue with the **App key** form in this repository.
 
 ## Reviews
 
@@ -77,7 +77,7 @@ Each run keeps at most two open PRs to `data`, on fixed branches:
 
 When a PR from that branch is already open, the run adds a commit and a comment to it instead of opening another. Runs are idempotent: running again with no new inbox files changes nothing and opens nothing, and a run repeated after a failed inbox push writes nothing it already wrote.
 
-The intake and the workflow use two GitHub Apps. `opencampingdb-intake` is installed on `inbox` only with `contents: write`, and its key lives in the Worker. `opencampingdb-bot` has `contents: write` on `inbox` and `contents: write` plus `pull_requests: write` on `data`, and its key lives only in GitHub Actions secrets.
+The intake and the workflow use two GitHub Apps. `opencampingdb-intake` is installed on `inbox` with `contents: write`, plus `actions: write` when it starts the apply workflow, and on `data` with `contents: write` and `pull_requests: write` when the AI reviewer is on, and its key lives in the Worker. `opencampingdb-bot` has `contents: write` on `inbox` and `contents: write` plus `pull_requests: write` on `data`, plus `actions: write` when it starts the data release, and its key lives only in GitHub Actions secrets.
 
 ## Develop
 

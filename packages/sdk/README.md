@@ -73,6 +73,10 @@ const feedback = createFeedbackClient({
 await feedback.report({ place: null, location, report: { kind: "new_place", name }, consent: true, ref: draft.id });
 ```
 
-`outcome` is `{ kind: "sent", id }` or `{ kind: "dropped", httpStatus }`. `httpStatus` is the intake's refusal, or 0 when the client dropped the item unsent because it was older than `maxQueueAgeMs` or pushed out past `maxQueueLength`. An item still waiting to be retried has no answer yet. Errors thrown by the hook are caught and never stop the queue. `ref` works on every call that queues: `report`, `review`, `check`, `fee`, `reportReview`, `withdraw`, and on the photo client `reportPhoto` and `erasePhotos`. Owner requests and photo uploads are sent at once and answer directly, so they take no `ref`.
+`outcome` is `{ kind: "sent", id, state?, heldReason? }` or `{ kind: "dropped", httpStatus }`. On a fact report, contact report or new place, `state` is `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`, one of `HELD_REASONS` (absent for a code this version does not know). Other items, and items sent to an intake from before 0.10.0, have neither. `httpStatus` is the intake's refusal, or 0 when the client dropped the item unsent because it was older than `maxQueueAgeMs` or pushed out past `maxQueueLength`. An item still waiting to be retried has no answer yet. Errors thrown by the hook are caught and never stop the queue. `ref` works on every call that queues: `report`, `review`, `check`, `fee`, `reportReview`, `withdraw`, and on the photo client `reportPhoto` and `erasePhotos`. Owner requests and photo uploads are sent at once and answer directly, so they take no `ref`.
+
+## Recent changes
+
+`GET /v1/places/recent` on the intake answers a `RecentList`: new places not yet in a release, and `changes`, the changes to released places that went live. Lay them over a release place record with `withRecentChanges(place, changes, dataVersion)`, passing the `data_version` of the release you have. A change with `value` null takes the fact off. Changes the release already has, those whose `in_data_at` is earlier than the commit time at the front of `dataVersion` (`dataVersionTime` reads it), are skipped.
 
 The full guide is [docs/integration.md](../../docs/integration.md). Licence: Apache 2.0.

@@ -12,16 +12,14 @@ import {
   type SafeSearchRatings,
   type StoredFeedback,
   type StoredOwnerSubmission,
-  firstProblem,
   isPlaceId,
-  newPlaceId,
-  tidyName,
-  tidyText,
 } from "@opencampingdb/feedback";
 import { AttestError, verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
 import { refuse, type RefusalBody } from "./refusal.js";
 import { fromBase64, hex, sha256, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
+import { recordInboxWrite, startApplyIfDue, type RunOutcome } from "./runs.js";
+import { DEFAULT_REVIEW_MODEL, parseBotLogins, REVIEW_BRANCH, reviewHeldCases, type ReviewResult } from "./reviewer.js";
 import { IntegrityError, IntegrityUnavailable, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
 import { SafeSearch, verdict } from "./safesearch.js";
 import { jpegSize } from "./jpeg.js";
@@ -36,7 +34,6 @@ import {
 import {
   getPlace,
   insertEvidence,
-  insertPlace,
   listPlaces,
   MAX_BLOCKED_CONTRIBUTORS,
   MAX_REMOVE_IDS,
@@ -48,8 +45,24 @@ import {
   snapBbox,
   WITHDRAW_WINDOW_MS,
   type D1Like,
+  type D1Statement,
   type StoredPlace,
 } from "./recent.js";
+import { cellHashes, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
+import { createChecks, pruneLiveCounts, releaseLive, type AiLike } from "./checks.js";
+import {
+  decideAtSendTime,
+  decidedHere,
+  isFeedbackId,
+  listChanges,
+  markInData,
+  overrule,
+  pruneDecisions,
+  UNAVAILABLE,
+  type ItemState,
+  type SendTimeDecision,
+} from "./decide.js";
+import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult } from "./inbox-queue.js";
 import { ulid } from "./ulid.js";
 
 /** The part of an R2 bucket binding the photo upload uses. */
@@ -100,11 +113,45 @@ export interface Env {
    * The recent list (D1): new places from attested installs, with their
    * evidence and the block list, served by `GET /v1/places/recent` until the
    * apply run has written them into the data. Without it the recent-list
-   * routes answer 404.
+   * routes answer 404. With it, feedback and owner submissions are queued
+   * here and written to the inbox once a minute as one commit
+   * (inbox-queue.ts); without it each is a commit of its own.
    */
   RECENT_LIST?: D1Like;
-  /** Secret. Lets the apply run remove places from RECENT_LIST and send the block list. */
+  /** Secret. Lets the apply run remove places from RECENT_LIST and send the block list, and the data release load the place index. */
   PLACES_TOKEN?: string;
+  /**
+   * The inbox's apply workflow, by file name (`apply-feedback.yml`) or id.
+   * With RECENT_LIST, the scheduled job starts it on INBOX_BRANCH once the
+   * inbox has had no new write for 2 minutes, or once the oldest waiting write
+   * is 10 minutes old, at most once every 10 minutes.
+   * Needs the GitHub App's `actions: write` on the inbox. Off when left out.
+   */
+  APPLY_WORKFLOW?: string;
+  /** Secret. The abuse.ch auth key for the URLhaus check on links. Without it, an item with a link is held. */
+  URLHAUS_KEY?: string;
+  /** Workers AI, for the Llama Guard check on free text and the AI reviewer. Without it, free text from a contributor without a track record is held. */
+  AI?: AiLike;
+  /**
+   * `on` runs the AI reviewer from the scheduled job, at most once every 10
+   * minutes, on the held cases in the open PR from `feedback/review` on
+   * DATA_REPO. Needs AI, RECENT_LIST and DATA_REPO, and the GitHub App
+   * installed on DATA_REPO (in the same installation as the inbox) with
+   * `contents: write` and `pull_requests: write`. Off when left out.
+   */
+  AI_REVIEWER?: string;
+  /** The Workers AI model the reviewer asks. Defaults to DEFAULT_REVIEW_MODEL. */
+  REVIEW_MODEL?: string;
+  /**
+   * Comma separated bot logins (`<app slug>[bot]`) whose comments on the
+   * review PR the AI reviewer reads: the apply's GitHub App, which posts held
+   * cases, and the intake's own, which posts the reviewer's decisions.
+   * Comments from any other GitHub App are ignored. The reviewer is off
+   * without it.
+   */
+  REVIEW_BOT_LOGINS?: string;
+  /** `owner/name` of the data repository, for the AI reviewer. */
+  DATA_REPO?: string;
 }
 
 /** Key in the photo server's STATE that stops one photo being served. */
@@ -395,6 +442,134 @@ function readKeyRecord(saved: string): AttestedKey | undefined {
   return { app, public_key, counter };
 }
 
+/** The inbox the intake writes to, as the GitHub App sees it. */
+function inboxConfig(env: Env): GitHubAppConfig {
+  return { appId: env.GH_APP_ID, privateKeyPem: env.GH_APP_PRIVATE_KEY, installationId: env.GH_INSTALLATION_ID, repo: env.INBOX_REPO };
+}
+
+/**
+ * Records an inbox write for the scheduled job, when it starts the apply: a
+ * flush of the queue, or a photo written at once. The items are in the inbox
+ * already, so a failed record only leaves the run to the apply's own schedule.
+ */
+async function noteInboxWrite(env: Env, nowMs: number): Promise<void> {
+  if (!env.APPLY_WORKFLOW || !env.RECENT_LIST) return;
+  await recordInboxWrite(env.RECENT_LIST, nowMs).catch((error: unknown) => {
+    console.warn(`recording an inbox write failed: ${String(error)}`);
+  });
+}
+
+/**
+ * The AI reviewer, when it is on (see AI_REVIEWER), or "off". A failure is
+ * logged and the reviewer tries again on its next run.
+ */
+export function createReviewer(deps: Pick<Deps, "fetch" | "now">) {
+  const github = new GitHubApp(deps.fetch, deps.now);
+  return async function review(env: Env): Promise<ReviewResult | "off" | "failed"> {
+    if (env.AI_REVIEWER !== "on" || !env.AI || !env.RECENT_LIST || !env.DATA_REPO) return "off";
+    const botLogins = parseBotLogins(env.REVIEW_BOT_LOGINS);
+    if (botLogins.length === 0) {
+      // Without its own login it would not read its own decisions, and would decide every case again each run.
+      console.warn("the AI reviewer is off: set REVIEW_BOT_LOGINS to the bot logins whose comments count");
+      return "off";
+    }
+    const data = { ...inboxConfig(env), repo: env.DATA_REPO };
+    const warn = (error: unknown) => console.warn(`the AI reviewer stopped, trying again next run: ${String(error)}`);
+    try {
+      return await reviewHeldCases({
+        github,
+        data,
+        branch: REVIEW_BRANCH,
+        ai: env.AI,
+        model: env.REVIEW_MODEL || DEFAULT_REVIEW_MODEL,
+        db: env.RECENT_LIST,
+        botLogins,
+        now: deps.now,
+        onError: warn,
+      });
+    } catch (error) {
+      warn(error);
+      return "failed";
+    }
+  };
+}
+
+/**
+ * Writes the queued items to the inbox as one commit (inbox-queue.ts). A flush
+ * counts as an inbox write for the run triggers. A flush that fails, or gives
+ * up on a branch that keeps moving, is logged as an error and the items wait
+ * for the next minute. While the oldest queued item is more than
+ * STALE_QUEUE_MS old, every tick logs an error too, since apps are still told
+ * their changes are live. "off" without RECENT_LIST.
+ */
+export function createFlush(deps: Pick<Deps, "fetch" | "now">) {
+  const github = new GitHubApp(timedFetch(deps.fetch), deps.now);
+  return async function flush(env: Env): Promise<FlushResult | "off" | "failed"> {
+    if (!env.RECENT_LIST) return "off";
+    const db = env.RECENT_LIST;
+    let result: FlushResult | "failed";
+    try {
+      result = await flushInbox({
+        db,
+        github,
+        inbox: inboxConfig(env),
+        branch: env.INBOX_BRANCH ?? "main",
+        now: deps.now,
+        onWritten: () => noteInboxWrite(env, deps.now()),
+      });
+      if (result.outcome === "expired") console.error("writing the queued items to the inbox ran out of time and stopped before moving the branch. Trying again next minute.");
+      if (result.outcome === "conflict") console.error("writing the queued items to the inbox gave up: the branch kept moving. Trying again next minute.");
+    } catch (error) {
+      console.error(`writing the queued items to the inbox failed, trying again next minute: ${String(error)}`);
+      result = "failed";
+    }
+    const backlog = await queueBacklog(db, deps.now()).catch(() => undefined);
+    if (backlog && backlog.oldest_age_ms !== null && backlog.oldest_age_ms > STALE_QUEUE_MS) {
+      const minutes = Math.floor(backlog.oldest_age_ms / 60_000);
+      console.error(
+        `the inbox queue is behind: ${backlog.queued} item(s) waiting, the oldest for ${minutes} minutes, ${backlog.stuck} refused 5 times or more. See GET /v1/health/queue.`,
+      );
+    }
+    return result;
+  };
+}
+
+/**
+ * The scheduled job, run every minute: writes the queued items to the inbox,
+ * starts the inbox's apply workflow when it is due (see runs.ts), then runs
+ * the AI reviewer when it is on and due (see reviewer.ts). A failed start,
+ * such as the GitHub App missing `actions: write`, is logged and tried again
+ * on the next tick. Returns what became of the apply.
+ */
+export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
+  const github = new GitHubApp(deps.fetch, deps.now);
+  const review = createReviewer(deps);
+  const flush = createFlush(deps);
+  return async function scheduled(env: Env): Promise<RunOutcome | "off"> {
+    if (env.RECENT_LIST) {
+      const db = env.RECENT_LIST;
+      const nowMs = deps.now();
+      await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs)]).catch((error: unknown) => {
+        console.warn(`pruning the recent list failed: ${String(error)}`);
+      });
+    }
+    // Before the apply is started, so a run that starts now finds this minute's items.
+    await flush(env);
+    const workflow = env.APPLY_WORKFLOW;
+    const outcome =
+      workflow && env.RECENT_LIST
+        ? await startApplyIfDue(
+            env.RECENT_LIST,
+            deps.now(),
+            () => github.dispatchWorkflow(inboxConfig(env), workflow, env.INBOX_BRANCH ?? "main"),
+            (error) => console.warn(`starting ${workflow} failed, trying again next minute: ${String(error)}`),
+          )
+        : "off";
+    await review(env);
+    return outcome;
+  };
+}
+
 export function createHandler(deps: Deps) {
   const github = new GitHubApp(deps.fetch, deps.now);
   const integrity = new PlayIntegrity(deps.fetch, deps.now);
@@ -603,12 +778,7 @@ export function createHandler(deps: Deps) {
       await env.PHOTOS_PENDING.put(keys[0]!, full, { httpMetadata: { contentType: "image/jpeg" }, customMetadata });
       await env.PHOTOS_PENDING.put(keys[1]!, thumb, { httpMetadata: { contentType: "image/jpeg" }, customMetadata });
       await github.createFile(
-        {
-          appId: env.GH_APP_ID,
-          privateKeyPem: env.GH_APP_PRIVATE_KEY,
-          installationId: env.GH_INSTALLATION_ID,
-          repo: env.INBOX_REPO,
-        },
+        inboxConfig(env),
         env.INBOX_BRANCH ?? "main",
         `pending/${day}/${id}.json`,
         `${JSON.stringify(stored, null, 2)}\n`,
@@ -619,6 +789,7 @@ export function createHandler(deps: Deps) {
       await env.PHOTOS_PENDING.delete(keys).catch(() => undefined);
       return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
     }
+    await noteInboxWrite(env, deps.now());
     return json(202, { id: photoId }, cors);
   }
 
@@ -673,7 +844,8 @@ export function createHandler(deps: Deps) {
   }
 
   /**
-   * `GET /v1/places/recent`: new places that are `shown` or `confirmed`,
+   * `GET /v1/places/recent`: new places that are `shown` or `confirmed`, and
+   * the recent changes to released places (`changes`, see decide.ts),
    * optionally within `bbox=west,south,east,north` grown out to whole
    * degrees. Public, like the data, and cached at the edge by that box, so the
    * recent list is read at most once per cache period for each box in each location.
@@ -694,10 +866,63 @@ export function createHandler(deps: Deps) {
     const cacheKey = new Request(`${url.origin}${url.pathname}${bbox ? `?bbox=${bbox.join(",")}` : ""}`, { method: "GET" });
     const hit = await deps.cache?.match(cacheKey);
     if (hit) return withCors(hit);
-    const places = await listPlaces(env.RECENT_LIST, new Date(deps.now()).toISOString(), bbox);
-    const response = json(200, { places }, { "cache-control": `public, max-age=${RECENT_CACHE_SECONDS}` });
+    const nowMs = deps.now();
+    const [places, changes] = await Promise.all([listPlaces(env.RECENT_LIST, new Date(nowMs).toISOString(), bbox), listChanges(env.RECENT_LIST, nowMs, bbox)]);
+    const response = json(200, { places, changes }, { "cache-control": `public, max-age=${RECENT_CACHE_SECONDS}` });
     await deps.cache?.put(cacheKey, response.clone());
     return withCors(response);
+  }
+
+  /**
+   * Checks a call from the apply run or the data release: `authorization:
+   * Bearer <PLACES_TOKEN>`. The recent list's database, or a Response when the call is refused.
+   */
+  async function placesDb(request: Request, env: Env, cors: Record<string, string>): Promise<D1Like | Response> {
+    if (!env.RECENT_LIST || !env.PLACES_TOKEN) return json(404, { error: "not_found" }, cors);
+    const given = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1] ?? "";
+    // Compared as hashes, so the time taken says nothing about the token.
+    if (hex(await sha256(given)) !== hex(await sha256(env.PLACES_TOKEN))) return json(401, { error: "unauthorised" }, cors);
+    return env.RECENT_LIST;
+  }
+
+  /**
+   * `GET /v1/health/queue`, with `authorization: Bearer <PLACES_TOKEN>`: how
+   * far behind the inbox queue is, `{ "queued", "oldest_age_seconds" }`
+   * (null when nothing waits), `stale` once the oldest has waited more than
+   * 15 minutes, and `stuck`, the items GitHub has refused 5 times or more.
+   */
+  async function queueHealth(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const db = await placesDb(request, env, cors);
+    if (db instanceof Response) return db;
+    const { queued, oldest_age_ms: age, stuck } = await queueBacklog(db, deps.now());
+    return json(200, { queued, oldest_age_seconds: age === null ? null : Math.floor(age / 1000), stale: age !== null && age > STALE_QUEUE_MS, stuck }, cors);
+  }
+
+  /**
+   * `GET /v1/place-index/cells`, for the data release: the hash of every map
+   * cell the place index holds, so the release sends only the cells that changed.
+   */
+  async function placeIndexCells(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const db = await placesDb(request, env, cors);
+    if (db instanceof Response) return db;
+    return json(200, { cells: await cellHashes(db) }, cors);
+  }
+
+  /**
+   * `PUT /v1/place-index`, for the data release: the cells of the place index
+   * that changed, as NDJSON (gzipped or not) with `authorization: Bearer
+   * <PLACES_TOKEN>`. Each named cell is replaced in one transaction.
+   */
+  async function putPlaceIndex(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const db = await placesDb(request, env, cors);
+    if (db instanceof Response) return db;
+    const text = await readIndexBody(request, MAX_PLACE_INDEX_BYTES);
+    if (text === "too_large") return json(413, { error: "too_large" }, cors);
+    if (text === "invalid") return json(400, { error: "invalid", details: ["the body does not gunzip"] }, cors);
+    const update = parsePlaceIndex(text);
+    if ("problems" in update) return json(400, { error: "invalid", details: update.problems }, cors);
+    await replaceCells(db, update, new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z"));
+    return json(200, { cells: update.cells.length, places: update.places }, cors);
   }
 
   /**
@@ -710,10 +935,8 @@ export function createHandler(deps: Deps) {
     cors: Record<string, string>,
     maxBytes: number,
   ): Promise<{ db: D1Like; body: Record<string, unknown> } | Response> {
-    if (!env.RECENT_LIST || !env.PLACES_TOKEN) return json(404, { error: "not_found" }, cors);
-    const given = /^Bearer (.+)$/.exec(request.headers.get("authorization") ?? "")?.[1] ?? "";
-    // Compared as hashes, so the time taken says nothing about the token.
-    if (hex(await sha256(given)) !== hex(await sha256(env.PLACES_TOKEN))) return json(401, { error: "unauthorised" }, cors);
+    const db = await placesDb(request, env, cors);
+    if (db instanceof Response) return db;
     const text = await request.text();
     if (new TextEncoder().encode(text).length > maxBytes) return json(413, { error: "too_large" }, cors);
     let body: unknown;
@@ -722,7 +945,7 @@ export function createHandler(deps: Deps) {
     } catch {
       body = undefined;
     }
-    return { db: env.RECENT_LIST, body: typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {} };
+    return { db, body: typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {} };
   }
 
   /**
@@ -758,6 +981,55 @@ export function createHandler(deps: Deps) {
     return json(200, { blocked: new Set(contributors).size }, cors);
   }
 
+  /** The `ids` of a call from the apply run: 1 to 500 feedback ids. A Response when they are not. */
+  function feedbackIds(body: Record<string, unknown>, cors: Record<string, string>): string[] | Response {
+    const ids = body.ids;
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > MAX_REMOVE_IDS || !ids.every(isFeedbackId)) {
+      return json(400, { error: "invalid", details: [`ids must be 1 to ${MAX_REMOVE_IDS} feedback ids`] }, cors);
+    }
+    return ids as string[];
+  }
+
+  /**
+   * `POST /v1/places/recent/in-data`, for the apply run once the data's main
+   * branch holds the changes: `{ "ids": [...], "at": "<ISO time>" }`, the
+   * feedback ids and the run's time, with `authorization: Bearer
+   * <PLACES_TOKEN>`. Their recent changes are kept for 7 days from `at`, or
+   * from now when `at` is later.
+   */
+  async function inDataRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 4);
+    if (call instanceof Response) return call;
+    const ids = feedbackIds(call.body, cors);
+    if (ids instanceof Response) return ids;
+    const at = call.body.at;
+    if (typeof at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(at) || Number.isNaN(Date.parse(at))) {
+      return json(400, { error: "invalid", details: ["at must be an ISO 8601 UTC time"] }, cors);
+    }
+    const nowMs = deps.now();
+    const when = new Date(Math.min(Date.parse(at), nowMs)).toISOString().replace(/\.\d{3}Z$/, "Z");
+    return json(200, { marked: await markInData(call.db, ids, when) }, cors);
+  }
+
+  /**
+   * `POST /v1/places/recent/overruled`, for the apply run: `{ "ids": [...],
+   * "refused": [...] }`, the feedback ids it decided other than applying them
+   * and, among them, the ones it refused, with `authorization: Bearer
+   * <PLACES_TOKEN>`. Their recent changes leave the list at once, and only the
+   * refused ones count against their contributor. `refused` may be left out.
+   */
+  async function overruledRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 8);
+    if (call instanceof Response) return call;
+    const ids = feedbackIds(call.body, cors);
+    if (ids instanceof Response) return ids;
+    const refused = call.body.refused ?? [];
+    if (!Array.isArray(refused) || refused.length > MAX_REMOVE_IDS || !refused.every(isFeedbackId)) {
+      return json(400, { error: "invalid", details: [`refused must be up to ${MAX_REMOVE_IDS} feedback ids`] }, cors);
+    }
+    return json(200, { removed: await overrule(call.db, ids, refused as string[]) }, cors);
+  }
+
   return async function handle(request: Request, env: Env): Promise<Response> {
     const cors = corsHeaders(request, env);
     const url = new URL(request.url);
@@ -782,9 +1054,29 @@ export function createHandler(deps: Deps) {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return removeRecent(request, env, cors);
     }
+    if (route === "/v1/places/recent/in-data") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return inDataRecent(request, env, cors);
+    }
+    if (route === "/v1/places/recent/overruled") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return overruledRecent(request, env, cors);
+    }
     if (route === "/v1/places/recent/block") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return blockRecent(request, env, cors);
+    }
+    if (route === "/v1/health/queue") {
+      if (request.method !== "GET") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "GET" });
+      return queueHealth(request, env, cors);
+    }
+    if (route === "/v1/place-index/cells") {
+      if (request.method !== "GET") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "GET" });
+      return placeIndexCells(request, env, cors);
+    }
+    if (route === "/v1/place-index") {
+      if (request.method !== "PUT") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "PUT" });
+      return putPlaceIndex(request, env, cors);
     }
     if (
       route !== "/v1/feedback" &&
@@ -898,26 +1190,26 @@ export function createHandler(deps: Deps) {
     if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
 
     const id = `fb_${ulid(nowMs, deps.randomBytes)}`;
-    const config: GitHubAppConfig = {
-      appId: env.GH_APP_ID,
-      privateKeyPem: env.GH_APP_PRIVATE_KEY,
-      installationId: env.GH_INSTALLATION_ID,
-      repo: env.INBOX_REPO,
+    /**
+     * Stores the item for the inbox. With RECENT_LIST it is queued, in one D1
+     * batch with `alongside` (the send-time decision's rows), and the
+     * scheduled job writes it to the inbox within a minute (inbox-queue.ts).
+     * Without it the item is written to the inbox at once, as one commit.
+     */
+    const store = async (stored: unknown, alongside: D1Statement[] = []) => {
+      const file = { id, path: `pending/${day}/${id}.json`, content: `${JSON.stringify(stored, null, 2)}\n` };
+      if (env.RECENT_LIST) {
+        await env.RECENT_LIST.batch([queueStatement(env.RECENT_LIST, file, deps.now()), ...alongside]);
+        return;
+      }
+      await github.createFile(inboxConfig(env), env.INBOX_BRANCH ?? "main", file.path, file.content, `Add ${id}`);
     };
-    const write = (stored: unknown) =>
-      github.createFile(
-        config,
-        env.INBOX_BRANCH ?? "main",
-        `pending/${day}/${id}.json`,
-        `${JSON.stringify(stored, null, 2)}\n`,
-        `Add ${id}`,
-      );
 
     if (isOwner) {
       const secrets = submission.type === "owner_update" ? undefined : newOwnerSecrets(random);
       const stored = await storeOwner(submission, { id, received, app: app.app, device }, secrets);
       try {
-        await write(stored);
+        await store(stored);
       } catch {
         return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
       }
@@ -948,16 +1240,34 @@ export function createHandler(deps: Deps) {
       ...("photo_report" in rest ? { photo_report: rest.photo_report } : {}),
     } as StoredFeedback;
 
+    // Decided before the item is stored, and recorded in the same D1 batch that queues it.
+    let decision: SendTimeDecision | undefined;
+    if (env.RECENT_LIST && decidedHere(stored)) {
+      const db = env.RECENT_LIST;
+      // Without a contributor, the hashed install stands in for one, as it does for a signed-out install's new places.
+      const who = contributor ?? `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
+      const checks = createChecks({ db, fetch: deps.fetch, urlhausKey: env.URLHAUS_KEY, ai: env.AI, now: deps.now });
+      decision = await decideAtSendTime({ db, checks, item: stored, submission: submission as FeedbackSubmission, contributor: who }).catch(
+        (error: unknown) => {
+          console.warn(`deciding ${id} failed: ${String(error)}`);
+          return { answer: UNAVAILABLE, writes: () => [] };
+        },
+      );
+      // The apply reads it: an item held for a check goes to a person, never into the data on its own.
+      stored.intake = decision.answer;
+    }
+
     try {
-      await write(stored);
+      await store(stored, decision && env.RECENT_LIST ? decision.writes(env.RECENT_LIST) : []);
     } catch {
+      // A live change that is not stored gives its place in the daily caps back.
+      if (env.RECENT_LIST && decision?.slot) await releaseLive(env.RECENT_LIST, decision.slot).catch(() => undefined);
       return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
     }
-    // The item is in the inbox already, so a failed store write still reaches the apply run.
+    // The item is stored already, so a failed write here still reaches the apply run.
+    const state: ItemState | undefined = decision?.answer;
     if (env.RECENT_LIST) {
-      await updateRecent(env.RECENT_LIST, submission as FeedbackSubmission, { id, received, device, contributor, attestKey, proof, target }).catch(
-        () => undefined,
-      );
+      await updateRecent(env.RECENT_LIST, submission as FeedbackSubmission, { id, received, device, target }).catch(() => undefined);
     }
     // An illegal-content report withholds the photo before a person sees it. The
     // report is in the inbox already, so a failed write here still reaches a person.
@@ -965,45 +1275,21 @@ export function createHandler(deps: Deps) {
       const value = JSON.stringify({ feedback: id, at: received });
       await env.PHOTO_STATE.put(withheldKey(stored.photo_report.photo), value).catch(() => undefined);
     }
-    return json(202, { id }, cors);
+    return json(202, state ? { id, ...state } : { id }, cors);
   };
 }
 
 /**
- * Keeps the recent list up to date with an accepted item: a new place
- * from an attested install whose note passes the text checks once its contact
- * details are stripped (as the inbox stores it) goes in, and a check, removal
- * report or withdraw on a stored place is added as evidence of its own.
+ * Adds a check, removal report or withdraw on a new place the recent list
+ * holds as evidence of its own. New places go on the list through the
+ * send-time decision (decide.ts).
  */
 async function updateRecent(
   db: D1Like,
   submission: FeedbackSubmission,
-  item: {
-    id: string;
-    received: string;
-    device: string;
-    contributor: string | undefined;
-    attestKey: string | undefined;
-    proof: { attested: string } | undefined;
-    target: StoredPlace | undefined;
-  },
+  item: { id: string; received: string; device: string; target: StoredPlace | undefined },
 ): Promise<void> {
-  const { id, received, device, contributor, attestKey, proof, target } = item;
-  if (submission.type === "report" && submission.report.kind === "new_place") {
-    const { note, place_kind, name } = submission.report;
-    if (!proof || !contributor || !submission.location || firstProblem(note === undefined ? undefined : tidyText(stripContactDetails(note)))) return;
-    await insertPlace(db, {
-      id: newPlaceId(id),
-      location: submission.location,
-      kind: place_kind ?? null,
-      name: name === undefined ? null : tidyName(name),
-      added: received,
-      contributor,
-      device,
-      ...(attestKey ? { attest_key: attestKey } : {}),
-    });
-    return;
-  }
+  const { id, received, device, target } = item;
   if (!target) return;
   if (submission.type === "check") {
     // A check carries no location: only the app's word that the phone was near the place.
@@ -1023,8 +1309,14 @@ const handle = createHandler({
   ...(typeof caches === "undefined" ? {} : { cache: (caches as unknown as { default: CacheLike }).default }),
 });
 
+const scheduled = createScheduled({ fetch: (input, init) => fetch(input, init), now: () => Date.now() });
+
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
     return handle(request, env);
+  },
+  /** The cron trigger in wrangler.toml, every minute. */
+  async scheduled(_controller: unknown, env: Env): Promise<void> {
+    await scheduled(env);
   },
 };
