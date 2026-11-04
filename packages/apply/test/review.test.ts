@@ -98,7 +98,12 @@ describe("what the rules settle", () => {
     expect(settleByRules(duplicate, place())).toBeNull();
     expect(settleByRules(hidden, place({ standing: "hidden" }))).toBeNull();
     expect(settleByRules(firstPlace, place({ standing: "shown" }))).toBeNull();
-    expect(settleByRules(withdrawn, place({ standing: undefined }))).toBeNull();
+    expect(settleByRules({ ...withdrawn, reasons: ["wrong"] }, place({ standing: undefined }))).toBeNull();
+  });
+
+  it("leaves a contact taken down as spam to a person, whatever else it was reported as", () => {
+    expect(settleByRules(withdrawn, place({ standing: undefined }))?.reason).toContain("spam");
+    expect(settleByRules({ ...withdrawn, reasons: ["spam", "wrong"] }, place({ standing: undefined }))?.decision).toBe("leave");
   });
 });
 

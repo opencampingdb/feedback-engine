@@ -11,8 +11,8 @@ import type { Place } from "./types.js";
  * A reviewer decides `approve` (keep a held or hidden new place), `restore`
  * (put a withdrawn contact back), `take_down` (hide a new place that is clear
  * spam) or `leave` (a person decides). `settleByRules` settles what it can
- * before anyone is asked: owner-set values, blocked contributors and values
- * that wait in the inbox always go to a person.
+ * before anyone is asked: owner-set values, blocked contributors, values
+ * that wait in the inbox and contacts taken down as spam always go to a person.
  */
 
 export { dumpPlace, placePath };
@@ -138,6 +138,8 @@ export function settleByRules(c: HeldCase, place: Place | undefined): { decision
     if ((place.facts as Record<string, unknown>)[fact] !== undefined) return leave("the place has this contact again");
     const problem = contactProblem(fact, c.value);
     if (problem !== null) return leave(`the contact fails the link rules (${problem})`);
+    // A takedown for spam is only undone by a person, so a reviewer can't put spam back.
+    if (c.reasons?.includes("spam")) return leave("it was reported as spam, so only a person restores it");
     return null;
   }
   if (place.owner_verified === true) return leave("the place has a verified owner");

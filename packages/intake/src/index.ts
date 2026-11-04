@@ -19,7 +19,7 @@ import { refuse, type RefusalBody } from "./refusal.js";
 import { fromBase64, hex, sha256, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
 import { recordInboxWrite, startApplyIfDue, type RunOutcome } from "./runs.js";
-import { DEFAULT_REVIEW_MODEL, REVIEW_BRANCH, reviewHeldCases, type ReviewResult } from "./reviewer.js";
+import { DEFAULT_REVIEW_MODEL, parseBotLogins, REVIEW_BRANCH, reviewHeldCases, type ReviewResult } from "./reviewer.js";
 import { IntegrityError, IntegrityUnavailable, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
 import { SafeSearch, verdict } from "./safesearch.js";
 import { jpegSize } from "./jpeg.js";
@@ -138,6 +138,14 @@ export interface Env {
   AI_REVIEWER?: string;
   /** The Workers AI model the reviewer asks. Defaults to DEFAULT_REVIEW_MODEL. */
   REVIEW_MODEL?: string;
+  /**
+   * Comma separated bot logins (`<app slug>[bot]`) whose comments on the
+   * review PR the AI reviewer reads: the apply's GitHub App, which posts held
+   * cases, and the intake's own, which posts the reviewer's decisions.
+   * Comments from any other GitHub App are ignored. The reviewer is off
+   * without it.
+   */
+  REVIEW_BOT_LOGINS?: string;
   /** `owner/name` of the data repository, for the AI reviewer. */
   DATA_REPO?: string;
 }
@@ -455,6 +463,12 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now">) {
   const github = new GitHubApp(deps.fetch, deps.now);
   return async function review(env: Env): Promise<ReviewResult | "off" | "failed"> {
     if (env.AI_REVIEWER !== "on" || !env.AI || !env.RECENT_LIST || !env.DATA_REPO) return "off";
+    const botLogins = parseBotLogins(env.REVIEW_BOT_LOGINS);
+    if (botLogins.length === 0) {
+      // Without its own login it would not read its own decisions, and would decide every case again each run.
+      console.warn("the AI reviewer is off: set REVIEW_BOT_LOGINS to the bot logins whose comments count");
+      return "off";
+    }
     const data = { ...inboxConfig(env), repo: env.DATA_REPO };
     const warn = (error: unknown) => console.warn(`the AI reviewer stopped, trying again next run: ${String(error)}`);
     try {
@@ -465,6 +479,7 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now">) {
         ai: env.AI,
         model: env.REVIEW_MODEL || DEFAULT_REVIEW_MODEL,
         db: env.RECENT_LIST,
+        botLogins,
         now: deps.now,
         onError: warn,
       });

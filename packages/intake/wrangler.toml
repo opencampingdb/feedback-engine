@@ -34,9 +34,13 @@ SAFESEARCH = "off"
 # feedback/review PR of DATA_REPO at most once every 10 minutes, with the AI
 # binding below. The GitHub App needs the data repository in its installation,
 # with Contents and Pull requests: Read and write. REVIEW_MODEL defaults to
-# @cf/meta/llama-3.3-70b-instruct-fp8-fast. Off when left out.
+# @cf/meta/llama-3.3-70b-instruct-fp8-fast. REVIEW_BOT_LOGINS lists the bot
+# logins whose PR comments count: the apply's GitHub App (it posts held cases)
+# and this intake's own (it posts the decisions), comma separated. Off when
+# AI_REVIEWER or REVIEW_BOT_LOGINS is left out.
 # AI_REVIEWER = "on"
 # DATA_REPO = "opencampingdb/data"
+# REVIEW_BOT_LOGINS = "example-bot[bot]"
 # REVIEW_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 
 # Every minute: starts the apply when it is due, and runs the AI reviewer when

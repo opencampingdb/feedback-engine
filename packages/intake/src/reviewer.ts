@@ -14,9 +14,10 @@
  * person, and an answer the model isn't sure of, or one that can't be read,
  * is `leave`.
  *
- * Only held-case lines in the PR body and in comments from a GitHub App or
- * the repository's owners, members and collaborators count, so a stranger's
- * comment can't add a case. Decisions are recorded as `review-decision` lines
+ * Only held-case lines in the PR body and in comments from the bot logins the
+ * deployment lists (REVIEW_BOT_LOGINS: the apply's GitHub App and the
+ * reviewer's own) or the repository's owners, members and collaborators
+ * count, so a stranger's comment, or another GitHub App's, can't add a case. Decisions are recorded as `review-decision` lines
  * in the reviewer's comment, and a case with one is not asked about again.
  */
 
@@ -60,6 +61,8 @@ export interface ReviewerDeps {
   model: string;
   /** The intake's D1 database, with the `runs` table. */
   db: D1Like;
+  /** Bot logins (`<app slug>[bot]`) whose comments on the PR count, beside people who can write to the repository. */
+  botLogins: readonly string[];
   now: () => number;
   onError?: (error: unknown) => void;
 }
@@ -88,7 +91,17 @@ export type ReviewResult =
   | { outcome: "reviewed"; pr: number; decisions: ReviewRecord[] };
 
 const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
-const trusted = (c: IssueComment) => c.userType === "Bot" || TRUSTED.has(c.association);
+
+/** Whether a comment's lines count: from a listed bot login, or from a person who can write to the repository. Any other GitHub App's do not. */
+export function trusted(c: IssueComment, botLogins: readonly string[]): boolean {
+  if (c.userType === "Bot") return c.login !== "" && botLogins.includes(c.login);
+  return TRUSTED.has(c.association);
+}
+
+/** The bot logins in REVIEW_BOT_LOGINS: comma separated, spaces ignored. */
+export function parseBotLogins(text: string | undefined): string[] {
+  return (text ?? "").split(",").map((login) => login.trim()).filter((login) => login.length > 0);
+}
 
 const DECISION_LINE = /^- review-decision (\{.*\})\s*$/;
 
@@ -283,7 +296,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
   const pr = await github.openPullRequest(data, branch);
   if (!pr) return { outcome: "no_pr" };
 
-  const texts = [pr.body, ...(await github.pullRequestComments(data, pr.number)).filter(trusted).map((c) => c.body)];
+  const texts = [pr.body, ...(await github.pullRequestComments(data, pr.number)).filter((c) => trusted(c, deps.botLogins)).map((c) => c.body)];
   const decided = new Set(texts.flatMap(decidedKeys));
   const cases = new Map<string, HeldCase>();
   for (const c of texts.flatMap(parseHeldCases)) {

@@ -38,6 +38,8 @@ export interface PullRequest {
 /** A comment on a pull request, with who wrote it. */
 export interface IssueComment {
   body: string;
+  /** The author's login: `<app slug>[bot]` for a GitHub App. */
+  login: string;
   /** `Bot` for a GitHub App. */
   userType: string;
   /** `OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `NONE` and so on. */
@@ -251,8 +253,10 @@ export class GitHubApp {
     for (let page = 1; page <= MAX_COMMENT_PAGES; page++) {
       const res = await this.#call(config, REVIEW_WRITE, "GET", `/repos/${config.repo}/issues/${number}/comments?per_page=100&page=${page}`);
       if (!res.ok) throw new GitHubError(`reading comments on #${number} failed with ${res.status}`, res.status);
-      const list = (await res.json()) as { body?: string | null; user?: { type?: string } | null; author_association?: string }[];
-      for (const c of list) out.push({ body: c.body ?? "", userType: c.user?.type ?? "", association: c.author_association ?? "NONE" });
+      const list = (await res.json()) as { body?: string | null; user?: { login?: string; type?: string } | null; author_association?: string }[];
+      for (const c of list) {
+        out.push({ body: c.body ?? "", login: c.user?.login ?? "", userType: c.user?.type ?? "", association: c.author_association ?? "NONE" });
+      }
       if (list.length < 100) break;
     }
     return out;
