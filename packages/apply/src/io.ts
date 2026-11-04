@@ -13,6 +13,8 @@ export interface PendingFile {
   item: StoredSubmission;
 }
 
+/** How many place files `allPlaces` reads at once. */
+const PLACE_READS = 64;
 const DAY_FOLDER = /^\d{4}-\d{2}-\d{2}$/;
 const FEEDBACK_FILE = /^fb_[0-9A-HJKMNP-TV-Z]{26}\.json$/;
 const FEEDBACK_ID = /^fb_[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -293,8 +295,19 @@ export class DataRepo {
 
   /** Every place record in the checkout, for the duplicates check on new places. */
   async allPlaces(): Promise<Place[]> {
-    const index = await this.#placeIndex();
-    return Promise.all([...index.values()].map(async (path) => JSON.parse(await readFile(path, "utf8")) as Place));
+    const paths = [...(await this.#placeIndex()).values()];
+    const out: Place[] = new Array(paths.length);
+    // A few reads at a time: one open file per place exhausts the process's file handles on a full checkout.
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(PLACE_READS, paths.length) }, async () => {
+        while (next < paths.length) {
+          const i = next++;
+          out[i] = JSON.parse(await readFile(paths[i]!, "utf8")) as Place;
+        }
+      }),
+    );
+    return out;
   }
 
   /** Deletes a place record wherever it is. Returns its path, or undefined when there is none. */
