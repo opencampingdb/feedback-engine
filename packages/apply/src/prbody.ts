@@ -135,11 +135,14 @@ export function reviewPrBody(
   }
   if (held.length > 0) {
     lines.push(
-      "## Held new places",
+      "## Held cases",
       "",
-      "New places a person should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
-        "`contacts` or `first_place`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
-        "set its `standing` to `shown` in this PR. Contact details and addresses are in the inbox items, never here.",
+      "Cases a person, a bot or an AI reviewer should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
+        "`contacts`, `description`, `first_place` or `contact_withdrawn`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
+        "set its `standing` to `shown` in this PR. `contacts` and `description` name what was left off a published new place: " +
+        "contact details, addresses and descriptions travellers sent are in the inbox items, never here. " +
+        "`contact_withdrawn` is a contact taken off a place after reports from two sources: its `value` is the place's own published contact, " +
+        "not something a traveller sent, so it is shown here. To restore it, set `facts.<fact>` back to `value` on the place in this PR.",
       "",
       ...held.map(heldLine),
       "",

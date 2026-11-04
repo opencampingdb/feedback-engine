@@ -4,7 +4,10 @@ import type {
   AddressState,
   BrandValue,
   CheckBody,
+  ContactFactName,
+  ContactReportReason,
   FactName,
+  FeeValue,
   FeeBody,
   FeeSite,
   ReportFactName,
@@ -54,7 +57,33 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   "description",
   "kind",
   "remove",
+  "contact",
 ];
+/** The contact facts and the address, as a `contact` report may name them. */
+export const CONTACT_FACTS: readonly ContactFactName[] = ["website", "phone", "phone_2", "email", "facebook", "instagram", "tiktok", "x", "address"];
+export const CONTACT_REPORT_REASONS: readonly ContactReportReason[] = ["wrong", "spam"];
+/** Link shortener hosts, refused for a website or social page because they hide where the link goes. */
+export const LINK_SHORTENERS: readonly string[] = [
+  "bit.ly",
+  "tinyurl.com",
+  "t.co",
+  "goo.gl",
+  "ow.ly",
+  "is.gd",
+  "buff.ly",
+  "cutt.ly",
+  "rebrand.ly",
+  "shorturl.at",
+  "tiny.cc",
+  "rb.gy",
+];
+/** The hosts each social page must be on, with their subdomains such as www and m. */
+export const SOCIAL_HOSTS: Readonly<Record<"facebook" | "instagram" | "tiktok" | "x", readonly string[]>> = {
+  facebook: ["facebook.com", "fb.com"],
+  instagram: ["instagram.com"],
+  tiktok: ["tiktok.com"],
+  x: ["x.com", "twitter.com"],
+};
 export const NEW_PLACE_REPORT_REASONS: readonly NewPlaceReportReason[] = [
   "not_there",
   "fake",
@@ -409,10 +438,14 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
       out.fact = value.fact;
       out.value = value.value as FactValue;
     }
+  } else if (kind === "contact") {
+    if (!isContactFact(value.fact)) errors.push(`report.fact must be one of ${CONTACT_FACTS.join(", ")}`);
+    else out.fact = value.fact;
+    if (value.value !== undefined) errors.push("report.value is not allowed when report.kind is contact");
   } else if (kind === "name" || kind === "description") {
     const max = kind === "name" ? MAX_NAME_LENGTH : MAX_DESCRIPTION_LENGTH;
     const text = value.value;
-    if (value.fact !== undefined) errors.push("report.fact is only allowed when report.kind is fact");
+    if (value.fact !== undefined) errors.push("report.fact is only allowed when report.kind is fact or contact");
     if (typeof text !== "string" || text.trim().length === 0 || text.length > max) {
       errors.push(`report.value must be the ${kind}, 1 to ${max} characters`);
     } else if (findContactDetails(text).length > 0) {
@@ -421,7 +454,7 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
       out.value = text.trim();
     }
   } else if (value.fact !== undefined || value.value !== undefined) {
-    errors.push("report.fact and report.value are only allowed when report.kind is fact, name or description");
+    errors.push("report.fact and report.value are only allowed when report.kind is fact, name or description, and report.fact on contact");
   }
   const note = checkText(value.note, "report.note", errors, false);
   if (note !== undefined) out.note = note;
@@ -445,8 +478,12 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
     if (typeof value.reason !== "string" || !(NEW_PLACE_REPORT_REASONS as readonly string[]).includes(value.reason)) {
       errors.push(`report.reason must be one of ${NEW_PLACE_REPORT_REASONS.join(", ")}`);
     } else out.reason = value.reason as NewPlaceReportReason;
+  } else if (kind === "contact") {
+    if (typeof value.reason !== "string" || !(CONTACT_REPORT_REASONS as readonly string[]).includes(value.reason)) {
+      errors.push(`report.reason must be one of ${CONTACT_REPORT_REASONS.join(", ")}`);
+    } else out.reason = value.reason as ContactReportReason;
   } else if (value.reason !== undefined) {
-    errors.push("report.reason is only allowed when report.kind is remove");
+    errors.push("report.reason is only allowed when report.kind is remove or contact");
   }
   if (value.contacts !== undefined) {
     if (kind !== "new_place") errors.push("report.contacts is only allowed when report.kind is new_place");
@@ -462,6 +499,22 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
       if (problems.length > 0) errors.push(...problems);
       else out.address = trimmedAddress(value.address as PlaceAddress);
     }
+  }
+  if (value.description !== undefined) {
+    if (kind !== "new_place") errors.push("report.description is only allowed when report.kind is new_place");
+    else {
+      const text = value.description;
+      if (typeof text !== "string" || text.trim().length === 0 || text.length > MAX_DESCRIPTION_LENGTH) {
+        errors.push(`report.description must be the description, 1 to ${MAX_DESCRIPTION_LENGTH} characters`);
+      } else if (findContactDetails(text).length > 0) {
+        errors.push("report.description must not hold an email address, phone number or link");
+      } else out.description = text.trim();
+    }
+  }
+  if (value.fee !== undefined) {
+    if (kind !== "new_place") errors.push("report.fee is only allowed when report.kind is new_place");
+    else if (!FACTS.fee(value.fee)) errors.push("report.fee is not a valid value for fee");
+    else out.fee = value.fee as FeeValue;
   }
   return out;
 }
@@ -484,11 +537,11 @@ function checkNewPlaceName(value: unknown, errors: string[]): string | undefined
   return value.trim();
 }
 
-const CONTACT_FACTS = ["phone", "website", "email"] as const;
+const NEW_PLACE_CONTACTS = ["phone", "website", "email"] as const;
 
 function checkContacts(value: unknown, errors: string[]): NewPlaceContacts | undefined {
   const names = isObject(value) ? Object.keys(value) : [];
-  if (!isObject(value) || names.some((name) => !(CONTACT_FACTS as readonly string[]).includes(name))) {
+  if (!isObject(value) || names.some((name) => !(NEW_PLACE_CONTACTS as readonly string[]).includes(name))) {
     errors.push("report.contacts may hold only phone, website and email");
     return undefined;
   }
@@ -497,7 +550,7 @@ function checkContacts(value: unknown, errors: string[]): NewPlaceContacts | und
     return undefined;
   }
   const out: NewPlaceContacts = {};
-  for (const name of CONTACT_FACTS) {
+  for (const name of NEW_PLACE_CONTACTS) {
     if (value[name] === undefined) continue;
     if (!FACTS[name](value[name])) errors.push(`report.contacts.${name} is not a valid value for ${name}`);
     else out[name] = value[name] as string;
@@ -760,6 +813,39 @@ export function isPublicHttpsUrl(value: unknown): value is string {
   if (!host.includes(".") || /\.(local|localhost|internal|home|lan)$/.test(host)) return false;
   if (/^[\d.]+$/.test(host) || host.startsWith("[")) return false;
   return true;
+}
+
+/** Whether `host` is `domain` or one of its subdomains. */
+const onHost = (host: string, domain: string) => host === domain || host.endsWith(`.${domain}`);
+
+/**
+ * The link and spam checks a contact fact or the address must pass before it
+ * is published without a person: what is wrong with it, or null when it
+ * passes. A website or social page is an https address on a public host that
+ * is not a link shortener, and a social page is on its own network's host
+ * (facebook.com or fb.com, instagram.com, tiktok.com, x.com or twitter.com, or
+ * a subdomain of one). A phone or email passes the `FACTS` check, and an
+ * address passes `addressProblems`, whose text fields get the text checks.
+ * Apps can run it before sending; a contact that fails still goes to a person.
+ */
+export function contactProblem(fact: ContactFactName, value: unknown): string | null {
+  if (fact === "address") {
+    const problems = addressProblems(value);
+    return problems.length > 0 ? problems[0]! : null;
+  }
+  if (!FACTS[fact](value)) return `not a valid value for ${fact}`;
+  if (fact === "phone" || fact === "phone_2" || fact === "email") return null;
+  if (!isPublicHttpsUrl(value)) return "must be an https address on a public website";
+  const host = new URL(value).hostname.toLowerCase();
+  if (LINK_SHORTENERS.some((s) => onHost(host, s))) return "must not be a link shortener";
+  if (fact === "website") return null;
+  const hosts = SOCIAL_HOSTS[fact];
+  return hosts.some((h) => onHost(host, h)) ? null : `must be on ${hosts.join(" or ")}`;
+}
+
+/** Whether a fact is one of the contact facts or the address. */
+export function isContactFact(value: unknown): value is ContactFactName {
+  return typeof value === "string" && (CONTACT_FACTS as readonly string[]).includes(value);
 }
 
 function checkOwnerFacts(value: unknown, field: string, errors: string[]): OwnerFacts {

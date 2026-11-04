@@ -29,7 +29,16 @@ export type ReportKind =
   /** What the place is. `place_kind` is the kind code. A person checks it. */
   | "kind"
   /** A new place should come down. `reason` says why. */
-  | "remove";
+  | "remove"
+  /**
+   * A contact on a place is wrong or spam. `fact` names the contact and
+   * `reason` says which. One report goes to a person. Reports from two
+   * different sources within 90 days, at least one attested, take it down.
+   */
+  | "contact";
+
+/** Why a contact on a place is reported: `wrong` (it reaches someone else, or nobody) or `spam`. */
+export type ContactReportReason = "wrong" | "spam";
 
 /** Why a new place should come down. */
 export type NewPlaceReportReason = "not_there" | "fake" | "offensive" | "private_land" | "duplicate";
@@ -180,6 +189,8 @@ export interface PlaceFacts {
 export type FactName = keyof PlaceFacts;
 /** Facts an app report may name. booking_url comes only from owners. */
 export type ReportFactName = Exclude<FactName, "booking_url">;
+/** The contact facts and the address: checked with `contactProblem`, and what a `contact` report may name. */
+export type ContactFactName = Extract<FactName, "website" | "phone" | "phone_2" | "email" | "facebook" | "instagram" | "tiktok" | "x" | "address">;
 export type FactValue = boolean | string | PlaceAddress;
 
 export interface LatLon {
@@ -189,7 +200,7 @@ export interface LatLon {
 
 export interface ReportBody {
   kind: ReportKind;
-  /** Required when `kind` is `fact`. */
+  /** Required when `kind` is `fact`. Required on `contact` too, where it is one of the contact facts (`ContactFactName`). */
   fact?: ReportFactName;
   /** Required when `kind` is `fact`, `name` (the name) or `description` (the text). */
   value?: FactValue;
@@ -207,18 +218,28 @@ export interface ReportBody {
    * data does not know. Required on `kind`: the kind the place should be.
    */
   place_kind?: string;
-  /** Required on `remove`, and allowed only there. */
-  reason?: NewPlaceReportReason;
+  /** Required on `remove` (a `NewPlaceReportReason`) and `contact` (a `ContactReportReason`), and allowed only there. */
+  reason?: NewPlaceReportReason | ContactReportReason;
   /**
    * On `new_place` only: how to reach the place, each checked as a fact
-   * report of that name is. A person checks them before they are published.
+   * report of that name is. Each is published with the place when it passes
+   * `contactProblem`, and a person checks it otherwise.
    */
   contacts?: NewPlaceContacts;
   /**
    * On `new_place` only: the place's address, checked as an `address` fact
-   * report's value is. A person checks it before it is published.
+   * report's value is. It is published with the place when it passes
+   * `contactProblem`, and a person checks it otherwise.
    */
   address?: PlaceAddress;
+  /**
+   * On `new_place` only: a short description, 1 to 500 characters, checked
+   * as a `description` report's value is, then trimmed. It is published with
+   * the place when it passes the text checks, and a person checks it otherwise.
+   */
+  description?: string;
+  /** On `new_place` only: whether there is a charge, checked as a `fee` fact report's value is. Published with the place. */
+  fee?: FeeValue;
 }
 
 /** The contact facts a new place may carry. */
