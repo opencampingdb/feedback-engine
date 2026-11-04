@@ -31,7 +31,7 @@ describe("reports that a new place should come down", () => {
   it("refuses a reason on any other report", () => {
     expect(validateSubmission({ ...base, type: "report", place: PLACE, report: { kind: "closed", reason: "fake" } })).toEqual({
       ok: false,
-      errors: ["report.reason is only allowed when report.kind is remove"],
+      errors: ["report.reason is only allowed when report.kind is remove or contact"],
     });
   });
 

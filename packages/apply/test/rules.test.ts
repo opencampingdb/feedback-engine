@@ -170,6 +170,216 @@ describe("attested fact reports", () => {
   });
 });
 
+describe("attested contact fact reports", () => {
+  const attested = (item: StoredFeedback) => ({ ...item, attested: "app_attest", contributor: ctr(item.device) }) as StoredFeedback;
+  const addressReport = (day: number, device: string, value: object) =>
+    ({ ...base(day, device), type: "report", report: { kind: "fact", fact: "address", value } }) as StoredFeedback;
+
+  it("applies an attested contact that passes the link checks at once", () => {
+    for (const [name, value] of [
+      ["website", "https://park.example.org"],
+      ["phone", "03 5555 0100"],
+      ["phone_2", "03 5555 0101"],
+      ["email", "stay@park.example.org"],
+      ["facebook", "https://www.facebook.com/lakecamp"],
+      ["instagram", "https://instagram.com/lakecamp"],
+      ["tiktok", "https://www.tiktok.com/@lakecamp"],
+      ["x", "https://x.com/lakecamp"],
+    ] as const) {
+      const r = attested(fact(0, "dev-a", name, value));
+      const out = run([r]);
+      expect(out.outcome(r)).toBe("applied");
+      expect(out.after()?.facts).toMatchObject({ [name]: value });
+      expect(out.after()?.fact_sources).toMatchObject({ [name]: "feedback" });
+      expect(out.after()?.fact_dates).toMatchObject({ [name]: at(1) });
+      expect(out.edits).toEqual([]);
+    }
+  });
+
+  it("applies an attested address at once", () => {
+    const value = { housenumber: "12", street: "Lake Road", suburb: "Lakeside", state: "VIC", postcode: "3999" };
+    const r = attested(addressReport(0, "dev-a", value));
+    const out = run([r]);
+    expect(out.outcome(r)).toBe("applied");
+    expect(out.after()?.facts.address).toEqual(value);
+  });
+
+  it("accepts an address that is already the place's address", () => {
+    const value = { street: "Lake Road", suburb: "Lakeside" };
+    const r = attested(addressReport(0, "dev-a", { ...value }));
+    const out = run([r], { places: [place({ facts: { address: value } })] });
+    expect(out.outcome(r)).toBe("applied");
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("sends an attested contact that fails the link checks to a person", () => {
+    for (const [name, value] of [
+      ["website", "https://bit.ly/camp"],
+      ["website", "https://10.0.0.1/"],
+      ["facebook", "https://park.example.org/fb"],
+      ["instagram", "https://tinyurl.com/camp"],
+    ] as const) {
+      const r = attested(fact(0, "dev-a", name, value));
+      const out = run([r]);
+      expect(out.outcome(r)).toBe("needs_review");
+      expect(out.after()).toBeUndefined();
+      expect(out.edits).toEqual([{ kind: "fact", place: PLACE, fact: name, value, feedback: r.id }]);
+      expect(out.decisions[0]?.reason).toMatch(/fails the link checks/);
+    }
+  });
+
+  it("sends a contact another device disagreed with to a person", () => {
+    const earlier = applied(attested(fact(0, "dev-a", "website", "https://park.example.org")));
+    const r = attested(fact(5, "dev-b", "website", "https://other.example.org"));
+    const out = run([r], { now: 6, history: [earlier], places: [place({ facts: { website: "https://park.example.org" } })] });
+    expect(out.outcome(r)).toBe("needs_review");
+  });
+
+  it("sends an address another device disagrees with in the same run to a person", () => {
+    const a = attested(addressReport(0, "dev-a", { street: "Lake Road" }));
+    const b = attested(addressReport(1, "dev-b", { street: "Creek Road" }));
+    const out = run([a, b], { now: 2 });
+    expect(out.outcome(a)).toBe("applied");
+    expect(out.outcome(b)).toBe("needs_review");
+  });
+
+  it("sends a contact the owner set to a person", () => {
+    const r = attested(fact(0, "dev-a", "phone", "03 5555 0100"));
+    const out = run([r], { places: [place({ facts: { phone: "03 5555 0199" }, fact_sources: { phone: "owner" } })] });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("still sends a contact without attestation to a person", () => {
+    const r = fact(0, "dev-a", "website", "https://park.example.org");
+    const out = run([r]);
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.after()).toBeUndefined();
+  });
+});
+
+describe("contact reports", () => {
+  const withSite = () => place({ facts: { website: "https://spam.example.org", phone: "03 5555 0100" }, fact_sources: { website: "osm", phone: "osm" } });
+  const contactReport = (day: number, device: string, name: string, reason = "spam", extra: Record<string, unknown> = {}) =>
+    ({ ...base(day, device), type: "report", report: { kind: "contact", fact: name, reason }, ...extra }) as StoredFeedback;
+  const attested = (item: StoredFeedback) => ({ ...item, attested: "app_attest", contributor: ctr(item.device) }) as StoredFeedback;
+
+  it("sends one report to a person, naming the fact", () => {
+    const r = attested(contactReport(0, "dev-a", "website"));
+    const out = run([r], { places: [withSite()] });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.decisions[0]?.reason).toContain("website");
+    expect(out.after()).toBeUndefined();
+    expect(out.edits).toEqual([{ kind: "note", place: PLACE, feedback: r.id }]);
+    expect(out.changes).toEqual([expect.objectContaining({ automatic: false, summary: expect.stringContaining("website reported as spam") })]);
+    expect(out.held).toEqual([]);
+  });
+
+  it("takes a contact down on reports from two sources, one attested, and lists it for a reviewer", () => {
+    const a = attested(contactReport(0, "dev-a", "website", "spam"));
+    const b = contactReport(1, "dev-b", "website", "wrong");
+    const out = run([a, b], { now: 2, places: [withSite()] });
+    expect(out.outcome(a)).toBe("applied");
+    expect(out.outcome(b)).toBe("applied");
+    expect(out.after()?.facts).toEqual({ phone: "03 5555 0100" });
+    expect(out.after()?.fact_sources.website).toBe("feedback");
+    expect(out.after()?.fact_dates?.website).toBe(at(2));
+    expect(out.changes).toEqual([expect.objectContaining({ automatic: true, feedback: [a.id, b.id], summary: expect.stringContaining("website taken down") })]);
+    expect(out.held).toEqual([
+      {
+        case: "contact_withdrawn",
+        place: PLACE,
+        location: { lat: -36.85, lon: 144.55 },
+        kind: "free_camp",
+        fact: "website",
+        value: "https://spam.example.org",
+        reasons: ["spam", "wrong"],
+        feedback: [a.id, b.id],
+      },
+    ]);
+  });
+
+  it("counts a report from an earlier run within 90 days", () => {
+    const earlier = applied(attested(contactReport(0, "dev-a", "phone", "wrong")), "needs_review");
+    const r = contactReport(30, "dev-b", "phone", "wrong");
+    const out = run([r], { now: 31, history: [earlier], places: [withSite()] });
+    expect(out.outcome(r)).toBe("applied");
+    expect(out.after()?.facts.phone).toBeUndefined();
+    expect(out.held).toEqual([expect.objectContaining({ case: "contact_withdrawn", fact: "phone", value: "03 5555 0100", feedback: [earlier.id, r.id] })]);
+  });
+
+  it("does not count a report more than 90 days old", () => {
+    const earlier = applied(attested(contactReport(0, "dev-a", "phone")), "needs_review");
+    const r = contactReport(95, "dev-b", "phone");
+    const out = run([r], { now: 96, history: [earlier], places: [withSite()] });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("does not take a contact down on two sources neither of them attested", () => {
+    const out = run([contactReport(0, "dev-a", "website"), contactReport(1, "dev-b", "website")], { now: 2, places: [withSite()] });
+    expect(out.after()).toBeUndefined();
+    expect(out.decisions.map((d) => d.outcome)).toEqual(["needs_review", "needs_review"]);
+  });
+
+  it("counts two devices on one network as one source", () => {
+    const a = attested(contactReport(0, "dev-a", "website", "spam", { origin: "net-1" }));
+    const b = contactReport(1, "dev-b", "website", "spam", { origin: "net-1" });
+    const out = run([a, b], { now: 2, places: [withSite()] });
+    expect(out.after()).toBeUndefined();
+    expect(out.outcome(b)).toBe("needs_review");
+  });
+
+  it("does not count a report sent before the contact was last set", () => {
+    const earlier = applied(attested(contactReport(0, "dev-a", "website")), "needs_review");
+    const r = contactReport(10, "dev-b", "website");
+    const changed = place({ facts: { website: "https://park.example.org" }, fact_sources: { website: "feedback" }, fact_dates: { website: at(5) } });
+    const out = run([r], { now: 11, history: [earlier], places: [changed] });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("leaves a contact the owner set to a person, however many report it", () => {
+    const owned = place({ facts: { website: "https://park.example.org" }, fact_sources: { website: "owner" }, fact_dates: { website: at(-10) } });
+    const a = attested(contactReport(0, "dev-a", "website"));
+    const b = attested(contactReport(1, "dev-b", "website"));
+    const out = run([a, b], { now: 2, places: [owned] });
+    expect(out.outcome(a)).toBe("needs_review");
+    expect(out.outcome(b)).toBe("needs_review");
+    expect(out.decisions[0]?.reason).toMatch(/owner/);
+    expect(out.after()).toBeUndefined();
+    expect(out.held).toEqual([]);
+  });
+
+  it("refuses a report about a contact the place does not have", () => {
+    const r = attested(contactReport(0, "dev-a", "instagram"));
+    const out = run([r], { places: [withSite()] });
+    expect(out.outcome(r)).toBe("refused");
+    expect(out.decisions[0]?.reason).toBe("place has no instagram");
+  });
+
+  it("applies a third report about a contact taken down in the same run", () => {
+    const reports = [attested(contactReport(0, "dev-a", "website")), contactReport(1, "dev-b", "website"), contactReport(1.5, "dev-c", "website", "wrong")];
+    const out = run(reports, { now: 2, places: [withSite()] });
+    expect(out.decisions.map((d) => d.outcome)).toEqual(["applied", "applied", "applied"]);
+    expect(out.held).toEqual([expect.objectContaining({ case: "contact_withdrawn", reasons: ["spam", "wrong"], feedback: reports.map((r) => r.id) })]);
+  });
+
+  it("takes down an address", () => {
+    const address = { street: "Lake Road", suburb: "Lakeside" };
+    const p = place({ facts: { address }, fact_sources: { address: "feedback" }, fact_dates: { address: at(-30) } });
+    const out = run([attested(contactReport(0, "dev-a", "address", "wrong")), contactReport(1, "dev-b", "address", "wrong")], { now: 2, places: [p] });
+    expect(out.after()?.facts.address).toBeUndefined();
+    expect(out.held).toEqual([expect.objectContaining({ case: "contact_withdrawn", fact: "address", value: address })]);
+  });
+
+  it("names the standing of a new place whose contact is taken down", () => {
+    const p = place({ standing: "shown", osm: null, facts: { website: "https://spam.example.org" }, fact_sources: { location: "feedback", website: "feedback" }, fact_dates: { location: at(-5), website: at(-5) } });
+    const out = run([attested(contactReport(0, "dev-a", "website")), contactReport(1, "dev-b", "website")], { now: 2, places: [p] });
+    expect(out.held).toEqual([expect.objectContaining({ case: "contact_withdrawn", standing: "shown" })]);
+  });
+});
+
 describe("fact reports", () => {
   it("one report does not change a fact", () => {
     const r = fact(0, "dev-a", "power", true);
@@ -1169,25 +1379,86 @@ describe("new places", () => {
     expect(out.held).toContainEqual(expect.objectContaining({ case: "duplicate", place: idOf(second), duplicate_of: idOf(first), distance_m: 0 }));
   });
 
-  it("publishes a place with contacts but leaves the contacts for a person", () => {
+  it("publishes a place with the contacts that pass the link checks, and lists none for a person", () => {
     const item = added(0, "dev-a", { contacts: { phone: "03 5555 0100", website: "https://park.example.org" } });
     const history = [applied(added(-5, "dev-a", {}, { lat: -30, lon: 140 }))];
     const out = run([item], { history });
-    expect(out.after(idOf(item))?.facts).toEqual({});
-    expect(out.held).toEqual([
-      { case: "contacts", place: idOf(item), standing: "shown", location: SPOT, kind: "free_camp", contacts: ["phone", "website"], feedback: [item.id] },
-    ]);
-    expect(JSON.stringify(out.held)).not.toContain("5555");
+    expect(out.after(idOf(item))).toMatchObject({
+      facts: { phone: "03 5555 0100", website: "https://park.example.org" },
+      fact_sources: { phone: "feedback", website: "feedback" },
+      fact_dates: { phone: at(1), website: at(1) },
+    });
+    expect(out.held).toEqual([]);
+    expect(out.outcome(item)).toBe("applied");
   });
 
-  it("publishes a place with an address but leaves the address for a person", () => {
-    const address = { street: "Lake Road", suburb: "Lakeside", state: "VIC" };
-    const item = added(0, "dev-a", { address, contacts: { phone: "03 5555 0100" } });
+  it("leaves a contact that fails the link checks off the place, for a person", () => {
+    const item = added(0, "dev-a", { contacts: { phone: "03 5555 0100", website: "https://bit.ly/camp" } });
     const history = [applied(added(-5, "dev-a", {}, { lat: -30, lon: 140 }))];
     const out = run([item], { history });
-    expect(out.after(idOf(item))?.facts).toEqual({});
-    expect(out.held).toEqual([expect.objectContaining({ case: "contacts", place: idOf(item), contacts: ["phone", "address"] })]);
-    expect(JSON.stringify(out.held)).not.toContain("Lake Road");
+    expect(out.after(idOf(item))?.facts).toEqual({ phone: "03 5555 0100" });
+    expect(out.after(idOf(item))?.fact_sources.website).toBeUndefined();
+    expect(out.held).toEqual([
+      { case: "contacts", place: idOf(item), standing: "shown", location: SPOT, kind: "free_camp", contacts: ["website"], feedback: [item.id] },
+    ]);
+    expect(JSON.stringify(out.held)).not.toContain("bit.ly");
+  });
+
+  it("publishes a place with its address, and leaves a failing address for a person", () => {
+    const address = { street: "Lake Road", suburb: "Lakeside", state: "VIC" };
+    const history = [applied(added(-5, "dev-a", {}, { lat: -30, lon: 140 }))];
+    const good = added(0, "dev-a", { address, contacts: { phone: "03 5555 0100" } });
+    const out = run([good], { history });
+    expect(out.after(idOf(good))).toMatchObject({ facts: { address, phone: "03 5555 0100" }, fact_sources: { address: "feedback" }, fact_dates: { address: at(1) } });
+    expect(out.held).toEqual([]);
+    // An address stored before the address checks tightened can still fail them.
+    const bad = added(0, "dev-a", { address: { suburb: "Lakeside" } });
+    const held = run([bad], { history });
+    expect(held.after(idOf(bad))?.facts).toEqual({});
+    expect(held.held).toEqual([expect.objectContaining({ case: "contacts", place: idOf(bad), contacts: ["address"] })]);
+    expect(JSON.stringify(held.held)).not.toContain("Lakeside");
+  });
+
+  it("publishes a place with its description and fee", () => {
+    const item = added(0, "dev-a", { description: "Flat gravel sites, shade in the afternoon.", fee: "donation" });
+    const history = [applied(added(-5, "dev-a", {}, { lat: -30, lon: 140 }))];
+    const out = run([item], { history });
+    expect(out.after(idOf(item))).toMatchObject({
+      description: "Flat gravel sites, shade in the afternoon.",
+      facts: { fee: "donation" },
+      fact_sources: { description: "feedback", fee: "feedback" },
+      fact_dates: { description: at(1), fee: at(1) },
+    });
+    expect(out.held).toEqual([]);
+  });
+
+  it("writes the description as the text checks read it", () => {
+    const item = added(0, "dev-a", { description: "GREAT SPOT BY THE RIVER!!!!" });
+    const history = [applied(added(-5, "dev-a", {}, { lat: -30, lon: 140 }))];
+    expect(run([item], { history }).after(idOf(item))?.description).toBe("Great spot by the river!");
+  });
+
+  it("leaves a description that fails the text checks off the place, for a person", () => {
+    const item = added(0, "dev-a", { description: "Shit hole, buy now", fee: true });
+    const history = [applied(added(-5, "dev-a", {}, { lat: -30, lon: 140 }))];
+    const out = run([item], { history });
+    expect(out.outcome(item)).toBe("applied");
+    expect(out.after(idOf(item))?.description).toBeUndefined();
+    expect(out.after(idOf(item))?.fact_sources.description).toBeUndefined();
+    expect(out.after(idOf(item))?.facts).toEqual({ fee: true });
+    expect(out.held).toEqual([
+      { case: "description", place: idOf(item), standing: "shown", location: SPOT, kind: "free_camp", problem: "rude", feedback: [item.id] },
+    ]);
+    expect(JSON.stringify(out.held)).not.toContain("hole");
+  });
+
+  it("drafts a held place for a person with every contact, as before", () => {
+    const item = added(0, "dev-a", { contacts: { website: "https://bit.ly/camp", phone: "03 5555 0100" } });
+    const out = run([item, remove(0.1, "dev-b", item), remove(0.2, "dev-c", item)]);
+    expect(out.places.size).toBe(0);
+    const edit = out.edits[0];
+    expect(edit?.kind === "new_place" && edit.record.facts).toEqual({ website: "https://bit.ly/camp", phone: "03 5555 0100" });
+    expect(out.held.map((h) => h.case)).toEqual(["hidden", "first_place"]);
   });
 
   it("drafts a held place for a person with its address", () => {

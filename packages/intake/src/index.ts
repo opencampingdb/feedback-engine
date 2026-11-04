@@ -6,6 +6,7 @@ import {
   stripContactDetails,
   validateSubmission,
   type FeedbackSubmission,
+  type NewPlaceReportReason,
   type OwnerSubmission,
   type PhotoSubmission,
   type SafeSearchRatings,
@@ -1009,7 +1010,7 @@ async function updateRecent(
     const check = { device, stillThere: submission.check.still_there, nearby: submission.check.nearby === true, day: received };
     await insertEvidence(db, target.id, id, { kind: "check", check });
   } else if (submission.type === "report" && submission.report.kind === "remove" && submission.report.reason) {
-    const report = { device, reason: submission.report.reason, day: received };
+    const report = { device, reason: submission.report.reason as NewPlaceReportReason, day: received };
     await insertEvidence(db, target.id, id, { kind: "removal_report", report });
   } else if (submission.type === "withdraw") {
     await insertEvidence(db, target.id, id, { kind: "withdraw", at: received });
