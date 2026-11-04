@@ -8,6 +8,7 @@
 #   PHOTO_PASS_SECRET   signs photo passes, the same secret as the photo server's. Only for /v1/photos/pass
 #   GOOGLE_SERVICE_ACCOUNT  Google service account key file (JSON), only for app keys with "android"
 #   PLACES_TOKEN        lets the apply run remove places from RECENT_LIST and send the block list. Only with RECENT_LIST
+#   URLHAUS_KEY         abuse.ch auth key, for the URLhaus check on links (src/checks.ts)
 
 name = "ocdb-feedback-intake"
 main = "src/index.ts"
@@ -53,3 +54,8 @@ migrations_dir = "migrations"
 # [[kv_namespaces]]
 # binding = "PHOTO_STATE"
 # id = "REPLACE_ME_PHOTO_STATE_KV_NAMESPACE_ID"
+
+# Workers AI, for the Llama Guard check on free text (src/checks.ts). The
+# account needs Workers AI. Uncomment when the checks are wired in.
+# [ai]
+# binding = "AI"
