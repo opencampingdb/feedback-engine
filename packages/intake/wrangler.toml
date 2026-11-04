@@ -30,8 +30,17 @@ SAFESEARCH = "off"
 # inbox for it. Until it has that, each start fails, is logged, and is tried
 # again the next minute, and the apply's hourly schedule still runs.
 # APPLY_WORKFLOW = "apply-feedback.yml"
+# The AI reviewer (src/reviewer.ts): "on" reviews the held cases on the open
+# feedback/review PR of DATA_REPO at most once every 10 minutes, with the AI
+# binding below. The GitHub App needs the data repository in its installation,
+# with Contents and Pull requests: Read and write. REVIEW_MODEL defaults to
+# @cf/meta/llama-3.3-70b-instruct-fp8-fast. Off when left out.
+# AI_REVIEWER = "on"
+# DATA_REPO = "opencampingdb/data"
+# REVIEW_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 
-# Every minute: starts the apply when it is due. Does nothing without APPLY_WORKFLOW.
+# Every minute: starts the apply when it is due, and runs the AI reviewer when
+# it is on and due. Does nothing without APPLY_WORKFLOW or AI_REVIEWER.
 [triggers]
 crons = ["* * * * *"]
 
@@ -67,7 +76,8 @@ migrations_dir = "migrations"
 # binding = "PHOTO_STATE"
 # id = "REPLACE_ME_PHOTO_STATE_KV_NAMESPACE_ID"
 
-# Workers AI, for the Llama Guard check on free text (src/checks.ts). The
-# account needs Workers AI. Uncomment when the checks are wired in.
+# Workers AI, for the Llama Guard check on free text (src/checks.ts) and the
+# AI reviewer (src/reviewer.ts). The account needs Workers AI. Uncomment when
+# the checks are wired in or AI_REVIEWER is on.
 # [ai]
 # binding = "AI"

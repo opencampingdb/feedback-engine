@@ -23,6 +23,8 @@ import { refuse, type RefusalBody } from "./refusal.js";
 import { fromBase64, hex, sha256, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
 import { recordInboxWrite, startApplyIfDue, type RunOutcome } from "./runs.js";
+import type { AiLike } from "./checks.js";
+import { DEFAULT_REVIEW_MODEL, REVIEW_BRANCH, reviewHeldCases, type ReviewResult } from "./reviewer.js";
 import { IntegrityError, IntegrityUnavailable, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
 import { SafeSearch, verdict } from "./safesearch.js";
 import { jpegSize } from "./jpeg.js";
@@ -115,6 +117,20 @@ export interface Env {
    * Needs the GitHub App's `actions: write` on the inbox. Off when left out.
    */
   APPLY_WORKFLOW?: string;
+  /** Workers AI. The AI reviewer needs it, and so do the Llama Guard checks. */
+  AI?: AiLike;
+  /**
+   * `on` runs the AI reviewer from the scheduled job, at most once every 10
+   * minutes, on the held cases in the open PR from `feedback/review` on
+   * DATA_REPO. Needs AI, RECENT_LIST and DATA_REPO, and the GitHub App
+   * installed on DATA_REPO (in the same installation as the inbox) with
+   * `contents: write` and `pull_requests: write`. Off when left out.
+   */
+  AI_REVIEWER?: string;
+  /** The Workers AI model the reviewer asks. Defaults to DEFAULT_REVIEW_MODEL. */
+  REVIEW_MODEL?: string;
+  /** `owner/name` of the data repository, for the AI reviewer. */
+  DATA_REPO?: string;
 }
 
 /** Key in the photo server's STATE that stops one photo being served. */
@@ -423,21 +439,56 @@ async function noteInboxWrite(env: Env, nowMs: number): Promise<void> {
 }
 
 /**
+ * The AI reviewer, when it is on (see AI_REVIEWER), or "off". A failure is
+ * logged and the reviewer tries again on its next run.
+ */
+export function createReviewer(deps: Pick<Deps, "fetch" | "now">) {
+  const github = new GitHubApp(deps.fetch, deps.now);
+  return async function review(env: Env): Promise<ReviewResult | "off" | "failed"> {
+    if (env.AI_REVIEWER !== "on" || !env.AI || !env.RECENT_LIST || !env.DATA_REPO) return "off";
+    const data = { ...inboxConfig(env), repo: env.DATA_REPO };
+    const warn = (error: unknown) => console.warn(`the AI reviewer stopped, trying again next run: ${String(error)}`);
+    try {
+      return await reviewHeldCases({
+        github,
+        data,
+        branch: REVIEW_BRANCH,
+        ai: env.AI,
+        model: env.REVIEW_MODEL || DEFAULT_REVIEW_MODEL,
+        db: env.RECENT_LIST,
+        now: deps.now,
+        onError: warn,
+      });
+    } catch (error) {
+      warn(error);
+      return "failed";
+    }
+  };
+}
+
+/**
  * The scheduled job, run every minute: starts the inbox's apply workflow when
- * it is due (see runs.ts). A failed start, such as the GitHub App missing
- * `actions: write`, is logged and tried again on the next tick.
+ * it is due (see runs.ts), then runs the AI reviewer when it is on and due
+ * (see reviewer.ts). A failed start, such as the GitHub App missing
+ * `actions: write`, is logged and tried again on the next tick. Returns what
+ * became of the apply.
  */
 export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
   const github = new GitHubApp(deps.fetch, deps.now);
+  const review = createReviewer(deps);
   return async function scheduled(env: Env): Promise<RunOutcome | "off"> {
     const workflow = env.APPLY_WORKFLOW;
-    if (!workflow || !env.RECENT_LIST) return "off";
-    return startApplyIfDue(
-      env.RECENT_LIST,
-      deps.now(),
-      () => github.dispatchWorkflow(inboxConfig(env), workflow, env.INBOX_BRANCH ?? "main"),
-      (error) => console.warn(`starting ${workflow} failed, trying again next minute: ${String(error)}`),
-    );
+    const outcome =
+      workflow && env.RECENT_LIST
+        ? await startApplyIfDue(
+            env.RECENT_LIST,
+            deps.now(),
+            () => github.dispatchWorkflow(inboxConfig(env), workflow, env.INBOX_BRANCH ?? "main"),
+            (error) => console.warn(`starting ${workflow} failed, trying again next minute: ${String(error)}`),
+          )
+        : "off";
+    await review(env);
+    return outcome;
   };
 }
 

@@ -21,9 +21,12 @@ import {
   type ItemDecision,
 } from "./decide.js";
 import { moderateReview } from "./moderation.js";
+import type { HeldCase } from "./review.js";
 import { roundCoord } from "./serialise.js";
 import { setSource } from "./sources.js";
 import type { Fee, Photo, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
+
+export type { HeldCase };
 
 /**
  * The apply-feedback rules from SPEC "Apply feedback", as pure functions.
@@ -174,45 +177,6 @@ export interface RulesOutput {
   /** New places withdrawn by their adder whose records are to be deleted from the data. */
   removed: string[];
   needsReview: boolean;
-}
-
-/**
- * One case for a person, a bot or an AI reviewer to look at, listed in the
- * review PR body as JSON. `duplicate`: a new place held as a possible
- * duplicate of `duplicate_of`. `hidden`: a new place hidden by `reports`
- * reports for `reasons`, or because its contributor is `blocked`. `contacts`:
- * a new place published without the contact facts and address named in
- * `contacts`, which failed the link checks and wait in the inbox for a person.
- * `description`: a new place published without its description, which failed
- * the text checks for `problem` and waits in the inbox. `first_place`: the
- * first place from its contributor, published. `contact_withdrawn`: the
- * contact `fact` taken off a place after reports from two sources for
- * `reasons`; `value` is what the place published, and a reviewer restores it
- * by setting the fact back on the place in the review PR. Contact values a
- * traveller sent, notes and device ids are never in it.
- */
-export interface HeldCase {
-  case: "duplicate" | "hidden" | "contacts" | "description" | "first_place" | "contact_withdrawn";
-  place: string;
-  /** The place's standing. Left out for a place travellers did not add. */
-  standing?: "shown" | "confirmed" | "held" | "hidden";
-  location: { lat: number; lon: number };
-  kind: string;
-  duplicate_of?: string;
-  distance_m?: number;
-  reports?: number;
-  reasons?: string[];
-  blocked?: true;
-  contacts?: string[];
-  /** On `description`: the text check it failed. */
-  problem?: string;
-  /** On `contact_withdrawn`: the contact taken off the place. */
-  fact?: ContactFactName;
-  /** On `contact_withdrawn`: the value the place published. */
-  value?: FactValue;
-  contributor?: string;
-  /** The feedback ids the case comes from, to read in the inbox. */
-  feedback: string[];
 }
 
 type ReportItem = Extract<StoredFeedback, { type: "report" }>;

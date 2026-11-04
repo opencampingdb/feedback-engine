@@ -6,6 +6,7 @@ export default defineConfig({
     alias: {
       "@opencampingdb/feedback": fileURLToPath(new URL("./packages/sdk/src/index.ts", import.meta.url)),
       "@opencampingdb/apply/decide": fileURLToPath(new URL("./packages/apply/src/decide.ts", import.meta.url)),
+      "@opencampingdb/apply/review": fileURLToPath(new URL("./packages/apply/src/review.ts", import.meta.url)),
     },
   },
   test: {
