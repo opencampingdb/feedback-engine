@@ -377,7 +377,11 @@ export function applyRules(input: RulesInput): RulesOutput {
     const target = resolvePlace(item.place, input.places);
     const unknown = item.place !== null && !input.places.has(item.place);
     const recent = input.recent;
-    if (unknown && recent === "unreadable") {
+    if (unknown && origins.has(item.place!)) {
+      // A new place added in this run, or held for a person, is not in the data yet.
+      decide(item, "waiting", `place ${item.place} is a new place not in the data yet`);
+      waitingForData.add(item.id);
+    } else if (unknown && recent === "unreadable") {
       decide(item, "waiting", `place ${item.place} is not in the data, and the recent list could not be read`);
       waitingForData.add(item.id);
     } else if (unknown && recent !== undefined && recent !== "unreadable" && recent.has(item.place!)) {
