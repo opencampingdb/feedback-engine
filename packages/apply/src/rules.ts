@@ -111,6 +111,13 @@ export interface RulesInput {
   photoLicence?: string;
   /** Every record in the data, for the duplicates check on new places. None when left out. */
   everyPlace?: readonly Place[];
+  /**
+   * Ids on the intake's recent list, or "unreadable" when the list was asked
+   * for and could not be read. Feedback about a place on the list that is not
+   * in the data yet waits for it, and with an unreadable list all feedback
+   * about places not in the data waits. Left out, that feedback is refused.
+   */
+  recent?: ReadonlySet<string> | "unreadable";
 }
 
 /**
@@ -347,6 +354,8 @@ export function applyRules(input: RulesInput): RulesOutput {
   }
   const newPlaceEvidence: StoredFeedback[] = [];
   const known: StoredFeedback[] = [];
+  // Items about a place that is not in the data yet, left waiting for it.
+  const waitingForData = new Set<string>();
   for (const item of pending) {
     if (item.contributor !== undefined && blocked.has(item.contributor)) {
       decide(item, "refused", "the contributor is blocked");
@@ -366,7 +375,15 @@ export function applyRules(input: RulesInput): RulesOutput {
       continue;
     }
     const target = resolvePlace(item.place, input.places);
-    if (target === undefined) {
+    const unknown = item.place !== null && !input.places.has(item.place);
+    const recent = input.recent;
+    if (unknown && recent === "unreadable") {
+      decide(item, "waiting", `place ${item.place} is not in the data, and the recent list could not be read`);
+      waitingForData.add(item.id);
+    } else if (unknown && recent !== undefined && recent !== "unreadable" && recent.has(item.place!)) {
+      decide(item, "waiting", `place ${item.place} is a new place not in the data yet`);
+      waitingForData.add(item.id);
+    } else if (target === undefined) {
       const merged = item.place !== null && input.places.get(item.place)?.status === "merged";
       decide(item, "refused", merged ? `place ${item.place} was merged into a record that is not in the data` : `place ${item.place ?? "(none)"} is not in the data`);
     } else {
@@ -412,7 +429,13 @@ export function applyRules(input: RulesInput): RulesOutput {
   // Anything still waiting past the window can no longer be confirmed.
   for (const item of pending) {
     if (decisions.get(item.id)?.outcome === "waiting" && now - time(item) > WINDOW_MS) {
-      decide(item, "refused", `not confirmed by a second device within ${WINDOW_DAYS} days`);
+      decide(
+        item,
+        "refused",
+        waitingForData.has(item.id)
+          ? `place ${item.place} did not reach the data within ${WINDOW_DAYS} days`
+          : `not confirmed by a second device within ${WINDOW_DAYS} days`,
+      );
     }
   }
 

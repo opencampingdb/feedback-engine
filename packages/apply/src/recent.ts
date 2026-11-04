@@ -12,6 +12,36 @@ export interface RecentStore {
   block(contributors: readonly string[]): Promise<void>;
 }
 
+/** The ids of the new places on the intake's recent list. */
+export interface RecentList {
+  /** Throws when the list cannot be read. */
+  ids(): Promise<ReadonlySet<string>>;
+}
+
+/**
+ * The intake's public `GET /v1/places/recent`, which lists new places that
+ * are `shown` or `confirmed` until they are in the data. Withdrawn and hidden
+ * places are not on it.
+ */
+export function intakeRecentList(baseUrl: string, fetcher: typeof fetch = fetch): RecentList {
+  const url = new URL("/v1/places/recent", baseUrl).toString();
+  return {
+    async ids() {
+      const response = await fetcher(url, { headers: { accept: "application/json" } });
+      if (!response.ok) throw new Error(`the intake did not give the recent list: ${response.status}`);
+      const body = (await response.json()) as { places?: unknown };
+      if (!Array.isArray(body.places)) throw new Error("the intake's recent list has no places array");
+      const ids = new Set<string>();
+      for (const place of body.places) {
+        const id = (place as { id?: unknown } | null)?.id;
+        if (typeof id !== "string") throw new Error("a place on the intake's recent list has no id");
+        ids.add(id);
+      }
+      return ids;
+    },
+  };
+}
+
 /** The intake takes at most this many ids in one call. */
 const REMOVE_BATCH = 500;
 

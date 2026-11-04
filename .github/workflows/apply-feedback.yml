@@ -62,6 +62,15 @@ on:
           it the block list.
         type: string
         default: ""
+      recent-places-url:
+        description: >-
+          Base URL of an intake whose recent list (GET /v1/places/recent) the
+          run reads, for example https://intake.example.org. Photos and
+          reports about a new place on that list that is not in the data yet
+          wait in pending/ for a later run instead of being refused. An app's
+          own photo inbox sets it to Open Camping DB's intake. Off when empty.
+        type: string
+        default: ""
     secrets:
       app-client-id:
         description: Client ID of the bot GitHub App
@@ -239,11 +248,13 @@ jobs:
           PLACES_ARGS: ${{ inputs.places-repository != '' && '--places places' || '' }}
           PHOTO_LICENCE: ${{ inputs.photo-licence }}
           INTAKE_URL: ${{ inputs.intake-url }}
+          RECENT_PLACES_URL: ${{ inputs.recent-places-url }}
           PLACES_TOKEN: ${{ secrets.places-token }}
         run: >
           node engine/packages/apply/dist/cli.js
           $PLACES_ARGS
           ${INTAKE_URL:+--main data-main --intake "$INTAKE_URL"}
+          ${RECENT_PLACES_URL:+--recent-places "$RECENT_PLACES_URL"}
           --photo-licence "$PHOTO_LICENCE"
           --inbox inbox
           --data data-auto

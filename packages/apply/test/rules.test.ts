@@ -88,6 +88,7 @@ function run(
     fees?: Fee[];
     blocked?: string[];
     reviewers?: string[];
+    recent?: RulesInput["recent"];
   } = {},
 ) {
   const places = new Map((opts.places ?? [place()]).map((p) => [p.id, p]));
@@ -106,6 +107,7 @@ function run(
     ]),
     blocked: new Set(opts.blocked ?? []),
     reviewers: new Set(opts.reviewers ?? []),
+    ...(opts.recent !== undefined ? { recent: opts.recent } : {}),
   };
   const out = applyRules(input);
   const outcome = (item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.outcome;
@@ -851,6 +853,34 @@ describe("unknown places", () => {
     const out = run([r]);
     expect(out.outcome(r)).toBe("refused");
     expect(out.decisions[0]?.reason).toMatch(/not in the data/);
+  });
+
+  it("leaves feedback for a new place on the recent list waiting", () => {
+    const r = fact(0, "dev-a", "power", true, OTHER);
+    const out = run([r], { recent: new Set([OTHER]) });
+    expect(out.outcome(r)).toBe("waiting");
+    expect(out.decisions[0]?.reason).toBe(`place ${OTHER} is a new place not in the data yet`);
+  });
+
+  it("refuses feedback for a place on neither the data nor the recent list", () => {
+    const r = fact(0, "dev-a", "power", true, OTHER);
+    const out = run([r], { recent: new Set([PLACE]) });
+    expect(out.outcome(r)).toBe("refused");
+    expect(out.decisions[0]?.reason).toBe(`place ${OTHER} is not in the data`);
+  });
+
+  it("leaves feedback for a place not in the data waiting when the recent list could not be read", () => {
+    const r = fact(0, "dev-a", "power", true, OTHER);
+    const out = run([r], { recent: "unreadable" });
+    expect(out.outcome(r)).toBe("waiting");
+    expect(out.decisions[0]?.reason).toBe(`place ${OTHER} is not in the data, and the recent list could not be read`);
+  });
+
+  it("refuses feedback for a new place that is still not in the data after 90 days", () => {
+    const r = fact(0, "dev-a", "power", true, OTHER);
+    const out = run([r], { recent: new Set([OTHER]), now: 91 });
+    expect(out.outcome(r)).toBe("refused");
+    expect(out.decisions[0]?.reason).toBe(`place ${OTHER} did not reach the data within 90 days`);
   });
 });
 

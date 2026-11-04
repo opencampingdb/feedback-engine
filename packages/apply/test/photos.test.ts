@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StoredFeedback } from "@opencampingdb/feedback";
 import { applyRules, REPORTS_TO_HIDE } from "../src/rules.js";
 import { run } from "../src/run.js";
@@ -63,7 +63,10 @@ const photoLine = (n: number, who: string, extra: Partial<Photo> = {}): Photo =>
 });
 const applied = (item: StoredFeedback) => ({ ...item, outcome: { result: "applied", reason: "", run: NOW } }) as unknown as StoredFeedback;
 
-function rules(pending: StoredFeedback[], opts: { photos?: Photo[]; history?: StoredFeedback[]; blocked?: string[] } = {}) {
+function rules(
+  pending: StoredFeedback[],
+  opts: { photos?: Photo[]; history?: StoredFeedback[]; blocked?: string[]; recent?: ReadonlySet<string> | "unreadable" } = {},
+) {
   const out = applyRules({
     now: NOW,
     pending,
@@ -72,11 +75,29 @@ function rules(pending: StoredFeedback[], opts: { photos?: Photo[]; history?: St
     reviews: () => [],
     blocked: new Set(opts.blocked ?? []),
     photos: opts.photos ?? [],
+    ...(opts.recent !== undefined ? { recent: opts.recent } : {}),
   });
   return { ...out, outcome: (item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.outcome };
 }
 
 describe("photo rules", () => {
+  const NEW = "ocdb_01JC0000000000000000000NEW";
+
+  it("leaves a photo and a photo report for a new place on the recent list waiting", () => {
+    const p = upload("kim", 1, NEW);
+    const r = { ...report("sam", "pho_01JC0000000000000000000001"), place: NEW } as StoredFeedback;
+    const out = rules([p, r], { recent: new Set([NEW]) });
+    expect(out.outcome(p)).toBe("waiting");
+    expect(out.outcome(r)).toBe("waiting");
+    expect(out.edits).toEqual([]);
+  });
+
+  it("refuses a photo for a place on neither the data nor the recent list", () => {
+    const p = upload("kim", 1, NEW);
+    const out = rules([p], { recent: new Set([OTHER]) });
+    expect(out.outcome(p)).toBe("refused");
+  });
+
   it("holds a first photo from a contributor for a person", () => {
     const p = upload("kim");
     const out = rules([p]);
@@ -246,6 +267,69 @@ describe("photo run", () => {
     expect(await readFile(join(data, "moderation", "removed_photos.json"), "utf8")).toBe(
       `${JSON.stringify({ photos: [{ photo: photoLine(1, "sam").id, reason: "erased", removed: NOW }] }, null, 2)}\n`,
     );
+  });
+
+  describe("with the intake's recent list", () => {
+    const NEW = "ocdb_01JC0000000000000000000NEW";
+    let photosRepo: string;
+    let ocdb: string;
+
+    beforeEach(async () => {
+      photosRepo = join(root, "app-photos");
+      ocdb = join(root, "ocdb-data");
+      await put(join(ocdb, "places", "za", `${PLACE}.json`), dumpPlace(place()));
+      await put(join(photosRepo, "moderation", "blocked_contributors.json"), '{"contributors":[]}\n');
+    });
+
+    async function send(...items: StoredFeedback[]) {
+      for (const item of items) await put(join(inbox, "pending", "2026-11-02", `${item.id}.json`), JSON.stringify(item));
+    }
+    const isPending = (item: StoredFeedback) =>
+      readFile(join(inbox, "pending", "2026-11-02", `${item.id}.json`), "utf8").then(
+        () => true,
+        () => false,
+      );
+
+    it("keeps a photo of a new place on the list in pending/", async () => {
+      const p = upload("kim", 8, NEW);
+      await send(p);
+      const summary = await run({ inbox, data: photosRepo, places: ocdb, now: new Date(NOW), recentList: { ids: async () => new Set([NEW]) } });
+      expect(summary.counts).toMatchObject({ waiting: 1, refused: 0 });
+      expect(await isPending(p)).toBe(true);
+    });
+
+    it("refuses a photo of a place on neither the data nor the list", async () => {
+      const p = upload("kim", 8, NEW);
+      await send(p);
+      const summary = await run({ inbox, data: photosRepo, places: ocdb, now: new Date(NOW), recentList: { ids: async () => new Set([OTHER]) } });
+      expect(summary.counts).toMatchObject({ waiting: 0, refused: 1 });
+      expect(await isPending(p)).toBe(false);
+    });
+
+    it("keeps the photo in pending/ when the list cannot be read", async () => {
+      const p = upload("kim", 8, NEW);
+      await send(p);
+      const ids = async (): Promise<ReadonlySet<string>> => {
+        throw new Error("the intake is down");
+      };
+      const summary = await run({ inbox, data: photosRepo, places: ocdb, now: new Date(NOW), recentList: { ids } });
+      expect(summary.counts).toMatchObject({ waiting: 1, refused: 0 });
+      expect(await isPending(p)).toBe(true);
+    });
+
+    it("does not ask for the list when every place is in the data", async () => {
+      const ids = vi.fn(async () => new Set<string>());
+      await send(upload("kim", 8));
+      await run({ inbox, data: photosRepo, places: ocdb, now: new Date(NOW), recentList: { ids } });
+      expect(ids).not.toHaveBeenCalled();
+    });
+
+    it("refuses the photo as before without the list", async () => {
+      const p = upload("kim", 8, NEW);
+      await send(p);
+      const summary = await run({ inbox, data: photosRepo, places: ocdb, now: new Date(NOW) });
+      expect(summary.counts).toMatchObject({ waiting: 0, refused: 1 });
+    });
   });
 
   it("runs an app's own photo repository: places from a separate checkout, everything else refused", async () => {

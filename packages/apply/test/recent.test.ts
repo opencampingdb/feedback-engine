@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { intakeRecentStore, sendBlockList, settleRecentPlaces } from "../src/recent.js";
+import { intakeRecentList, intakeRecentStore, sendBlockList, settleRecentPlaces } from "../src/recent.js";
 
 let root: string;
 let inbox: string;
@@ -121,5 +121,27 @@ describe("intakeRecentStore", () => {
   it("throws when the intake refuses", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ error: "unauthorised" }), { status: 401 }));
     await expect(intakeRecentStore("https://intake.example.org", "wrong", fetch).remove([placeOf(1)])).rejects.toThrow(/401/);
+  });
+});
+
+describe("intakeRecentList", () => {
+  const answer = (status: number, body: unknown) => vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify(body), { status }));
+
+  it("reads the ids of the places on the intake's recent list, with no token", async () => {
+    const fetcher = answer(200, { places: [{ id: placeOf(1), standing: "shown" }, { id: placeOf(2), standing: "confirmed" }] });
+    const ids = await intakeRecentList("https://intake.example.org", fetcher as unknown as typeof fetch).ids();
+    expect([...ids].sort()).toEqual([placeOf(1), placeOf(2)]);
+    expect(fetcher.mock.calls[0]?.[0]).toBe("https://intake.example.org/v1/places/recent");
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).has("authorization")).toBe(false);
+  });
+
+  it("throws when the intake answers with an error", async () => {
+    const list = intakeRecentList("https://intake.example.org", answer(503, { error: "down" }) as unknown as typeof fetch);
+    await expect(list.ids()).rejects.toThrow(/503/);
+  });
+
+  it("throws when the answer is not a list of places", async () => {
+    const list = intakeRecentList("https://intake.example.org", answer(200, { nope: true }) as unknown as typeof fetch);
+    await expect(list.ids()).rejects.toThrow();
   });
 });

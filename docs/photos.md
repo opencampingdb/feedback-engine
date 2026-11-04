@@ -21,6 +21,19 @@ The app's photo service runs separately from the Open Camping DB intake. The app
 
 Nothing about a photo is public until step 3. A refused photo's files are deleted.
 
+### Photos of new places
+
+A traveller can photograph a new place minutes after it was added, before it is in Open Camping DB's data. The photo inbox never sees the new place's own report, so without help the apply run refuses the photo with "place ocdb_... is not in the data". Set `recent-places-url` on the Apply feedback workflow to the base URL of the intake that serves the recent list (Open Camping DB's intake), and the run passes `--recent-places <url>` to `ocdb-apply`. It then reads `GET <url>/v1/places/recent`, which needs no token, and:
+
+| The photo's place | What happens |
+|---|---|
+| In the data | The usual rules. |
+| On the recent list, not in the data yet | The photo waits in `pending/` with the reason "place ... is a new place not in the data yet", and is tried again each run. |
+| On neither, for example a withdrawn or hidden new place | Refused, as without the option. |
+| Not in the data, and the recent list can't be read | The photo waits, so a short intake outage refuses nothing. |
+
+A photo still waiting 90 days after it arrived is refused. The run asks for the recent list only when something in `pending/` is about a place not in the data. Photo reports work the same way. Without `recent-places-url` the run refuses these photos as before.
+
 ## Send a photo
 
 ```ts
@@ -153,7 +166,7 @@ You need a Cloudflare account with a zone for the photo hosts, a GitHub account 
 5. **Intake.** Deploy `packages/intake` under its own Worker name with its own configuration, as [self-hosting.md](self-hosting.md) describes, plus: the pending bucket as `PHOTOS_PENDING`, the photo server's state namespace as `PHOTO_STATE`, `INBOX_REPO` set to your inbox repository, a custom domain for uploads, and optionally `SAFESEARCH = "on"` with a `GOOGLE_SERVICE_ACCOUNT` that has the Cloud Vision API.
 6. **Pass secret and photo keys.** Make one long random secret, for example with `openssl rand -base64 48`, and set it as `PHOTO_PASS_SECRET` on both Workers. Set `PHOTO_KEYS` on the photo server, with JSON such as `{"<random key, 32 characters>": {"app": "example-app", "daily_limit": 100000}}`. The entry gives the app's daily limit to its passes as well. `daily_limit` counts the reads that reach R2, not those served from the cache. `DAILY_READ_CAP` caps all apps together. Changing `PHOTO_PASS_SECRET` on both Workers ends every pass at once.
 7. **Photo server.** Set `routes` in `packages/photos/wrangler.toml` (or an untracked deploy copy) to your photo host on a custom domain, bind the serving bucket as `PHOTOS` and the state namespace as `STATE`, and deploy. Serving only on the custom domain puts the edge cache in front of R2.
-8. **Workflows.** In the inbox repository, call the Apply feedback workflow hourly with `data-repository-name` set to your records repository, `places-repository: opencampingdb/data` and your `photo-licence`, passing the GitHub App's client id and key. In the records repository, call the Photo sync workflow on each push to `main` and once a day, with your bucket names and an R2 API token (Object Read and Write on both buckets) as `r2-account-id`, `r2-access-key-id` and `r2-secret-access-key`. Pin both to a feedback-engine commit.
+8. **Workflows.** In the inbox repository, call the Apply feedback workflow hourly with `data-repository-name` set to your records repository, `places-repository: opencampingdb/data`, your `photo-licence` and `recent-places-url` set to Open Camping DB's intake, passing the GitHub App's client id and key. In the records repository, call the Photo sync workflow on each push to `main` and once a day, with your bucket names and an R2 API token (Object Read and Write on both buckets) as `r2-account-id`, `r2-access-key-id` and `r2-secret-access-key`. Pin both to a feedback-engine commit.
 9. **Check it.** Upload a test photo from a development build, merge the review PR, wait for the sync, then load the place's records and the photo with a pass. Report it as `illegal` and see it withheld, then erase it and see it gone.
 
 To stop serving at once, put the key `off` in the photo server's state namespace: the server answers `503 paused` within a minute. Delete the key to start again. Removing the custom domain also stops all serving.
