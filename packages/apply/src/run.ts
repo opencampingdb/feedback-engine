@@ -13,8 +13,9 @@ import {
 } from "./io.js";
 import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
 import { autoPrBody, reviewPrBody } from "./prbody.js";
+import { previewUrl, PREVIEW_TTL_SECONDS } from "./preview.js";
 import { checkProof as realCheckProof, type ProofResult } from "./proof.js";
-import { applyEdit, applyHeldReview, applyRules, newPlaceIdOf, resolvePlace, WINDOW_DAYS, type Decision } from "./rules.js";
+import { applyEdit, applyHeldReview, applyRules, newPlaceIdOf, resolvePlace, WINDOW_DAYS, type Change, type Decision } from "./rules.js";
 import type { RecentList } from "./recent.js";
 import type { Fee, Place, Review } from "./types.js";
 
@@ -57,6 +58,13 @@ export interface RunOptions {
    * refused.
    */
   recentList?: RecentList;
+  /**
+   * Links to held photos in the review PR: the intake that serves them
+   * (`GET /v1/photos/review/...`) and the secret it checks them with. Only
+   * for a private data repository, since anyone who can read the PR can open
+   * the links. Off when left out.
+   */
+  reviewPreview?: { url: string; secret: string };
 }
 
 export interface RunSummary {
@@ -347,9 +355,22 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     auto_files: autoFiles,
     review_files: reviewFiles,
     auto_pr_body: autoChanged ? autoPrBody(runAt, autoChanges, decisions, allPlaces) : "",
-    review_pr_body: reviewChanged ? reviewPrBody(runAt, reviewChanges, allPlaces, ownerResult.forReview, held) : "",
+    review_pr_body: reviewChanged
+      ? reviewPrBody(runAt, reviewChanges, allPlaces, ownerResult.forReview, held, await previewLinks(reviewChanges, options.reviewPreview, now))
+      : "",
     new_places: newPlaces,
     not_applied: [...new Set(decisions.filter((d) => d.outcome !== "applied" && d.outcome !== "waiting").map((d) => d.id))].sort(),
     refused: [...new Set(decisions.filter((d) => d.outcome === "refused").map((d) => d.id))].sort(),
   };
+}
+
+/** A link to each held photo in `changes`, signed to work for 30 days from `now`. Empty when previews are off. */
+async function previewLinks(changes: readonly Change[], preview: RunOptions["reviewPreview"], now: Date): Promise<Map<string, string>> {
+  const links = new Map<string, string>();
+  if (!preview) return links;
+  const expires = Math.floor(now.getTime() / 1000) + PREVIEW_TTL_SECONDS;
+  for (const c of changes) {
+    if (c.photo && !links.has(c.photo)) links.set(c.photo, await previewUrl(preview.url, preview.secret, c.photo, "full", expires));
+  }
+  return links;
 }

@@ -31,3 +31,26 @@ describe("review PR body held cases", () => {
     expect(body).toContain("To restore it, set `facts.<fact>` back to `value` on the place in this PR.");
   });
 });
+
+describe("review PR photo previews", () => {
+  const held = {
+    place: "ocdb_01M6J07SRSHVX9P46W6ZVQGTNM",
+    summary: "photo pho_01M6JPNZNFN1MQN9GMCXFC7WCB (480 x 639), first photo from this contributor (look at it before merging)",
+    automatic: false,
+    feedback: ["fb_01M6JPNZNFN1MQN9GMCXFC7WCB"],
+    photo: "pho_01M6JPNZNFN1MQN9GMCXFC7WCB",
+  };
+
+  it("links each held photo when previews are on", () => {
+    const previews = new Map([[held.photo, "https://intake.example/v1/photos/review/pho_01M6JPNZNFN1MQN9GMCXFC7WCB/full.jpg?expires=1&sig=x"]]);
+    const body = reviewPrBody("2026-11-04T00:00:00Z", [held], new Map(), [], [], previews);
+    expect(body).toContain("[View the photo](https://intake.example/v1/photos/review/pho_01M6JPNZNFN1MQN9GMCXFC7WCB/full.jpg?expires=1&sig=x)");
+    expect(body).toContain("stop working after 30 days");
+  });
+
+  it("writes the line as before when previews are off", () => {
+    const body = reviewPrBody("2026-11-04T00:00:00Z", [held], new Map());
+    expect(body).not.toContain("View the photo");
+    expect(body).not.toContain("30 days");
+  });
+});

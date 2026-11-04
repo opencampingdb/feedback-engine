@@ -83,6 +83,16 @@ on:
           own photo inbox sets it to Open Camping DB's intake. Off when empty.
         type: string
         default: ""
+      review-preview-url:
+        description: >-
+          Base URL of the intake that serves held photos to the person
+          checking the review PR (GET /v1/photos/review/...), for example
+          https://photos-upload.example.org. Set it with the
+          review-preview-secret secret (the intake's REVIEW_PREVIEW_SECRET)
+          and each held photo in the review PR gets a link that works for 30
+          days. Only for a private data repository. Off when empty.
+        type: string
+        default: ""
       release-workflow:
         description: >-
           File name or id of the data repository's release workflow, for
@@ -99,6 +109,9 @@ on:
         required: true
       places-token:
         description: The intake's PLACES_TOKEN. Needed only with intake-url.
+        required: false
+      review-preview-secret:
+        description: The intake's REVIEW_PREVIEW_SECRET. Needed only with review-preview-url.
         required: false
 
 permissions:
@@ -269,11 +282,14 @@ jobs:
           INTAKE_URL: ${{ inputs.intake-url }}
           RECENT_PLACES_URL: ${{ inputs.recent-places-url }}
           PLACES_TOKEN: ${{ secrets.places-token }}
+          REVIEW_PREVIEW_URL: ${{ inputs.review-preview-url }}
+          REVIEW_PREVIEW_SECRET: ${{ secrets.review-preview-secret }}
         run: >
           node engine/packages/apply/dist/cli.js
           $PLACES_ARGS
           ${INTAKE_URL:+--main data-main --intake "$INTAKE_URL"}
           ${RECENT_PLACES_URL:+--recent-places "$RECENT_PLACES_URL"}
+          ${REVIEW_PREVIEW_URL:+--review-preview "$REVIEW_PREVIEW_URL"}
           --photo-licence "$PHOTO_LICENCE"
           --inbox inbox
           --data data-auto

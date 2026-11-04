@@ -13,6 +13,10 @@
     "./review": {
       "types": "./dist/review.d.ts",
       "default": "./dist/review.js"
+    },
+    "./preview": {
+      "types": "./dist/preview.d.ts",
+      "default": "./dist/preview.js"
     }
   },
   "bin": {

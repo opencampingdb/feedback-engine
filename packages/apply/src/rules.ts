@@ -89,6 +89,8 @@ export interface Change {
   /** False when a person has to check the change before merging. */
   automatic: boolean;
   feedback: string[];
+  /** The photo a person has to look at, for a held photo: the review PR links a preview of it when it can. */
+  photo?: string;
 }
 
 export interface RulesInput {
@@ -293,8 +295,8 @@ export function applyRules(input: RulesInput): RulesOutput {
     working.set(id, copy);
     return copy;
   };
-  const note = (place: string, summary: string, automatic: boolean, feedback: readonly StoredFeedback[]) => {
-    changes.push({ place, summary, automatic, feedback: feedback.map((f) => f.id) });
+  const note = (place: string, summary: string, automatic: boolean, feedback: readonly StoredFeedback[], photo?: string) => {
+    changes.push({ place, summary, automatic, feedback: feedback.map((f) => f.id), ...(photo ? { photo } : {}) });
   };
 
   const pending = [...input.pending].sort(byReceived);
@@ -625,7 +627,7 @@ export function applyRules(input: RulesInput): RulesOutput {
               : `SafeSearch rates it adult ${rated.adult}, violence ${rated.violence}, racy ${rated.racy}`
             : "first photo from this contributor";
         edits.push({ kind: "photo", place: item.place, photo, feedback: item.id });
-        note(item.place, `photo ${photoId} (${photo.width} x ${photo.height}), ${why} (look at it before merging)`, false, [item]);
+        note(item.place, `photo ${photoId} (${photo.width} x ${photo.height}), ${why} (look at it before merging)`, false, [item], photoId);
         decide(item, "needs_review", `${why}, so a person checks it`);
         continue;
       }

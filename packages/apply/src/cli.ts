@@ -10,7 +10,7 @@ const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>
                   [--review-prs <file>] [--bot-login <login>]
                   [--summary <file>] [--now <ISO time>] [--places <dir>]
                   [--photo-licence <id>] [--main <dir> --intake <url>]
-                  [--recent-places <url>]
+                  [--recent-places <url>] [--review-preview <url>]
 
 Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
@@ -34,6 +34,9 @@ the list.
 token. Feedback about a new place on it that is not in the data yet stays in
 <inbox>/pending for a later run, instead of being refused. While the list
 cannot be read, all feedback about places not in the data stays there.
+--review-preview puts a link to each held photo in the review PR body, served
+by the intake at that URL and signed with REVIEW_PREVIEW_SECRET. Use it only
+with a private data repository: anyone who can read the PR can open the links.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
 
@@ -54,6 +57,7 @@ async function main(): Promise<number> {
       main: { type: "string" },
       intake: { type: "string" },
       "recent-places": { type: "string" },
+      "review-preview": { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -69,6 +73,11 @@ async function main(): Promise<number> {
 
   if (values["recent-places"] !== undefined && !URL.canParse(values["recent-places"])) {
     console.error(`--recent-places is not a URL: ${values["recent-places"]}`);
+    return 2;
+  }
+  const previewSecret = process.env.REVIEW_PREVIEW_SECRET;
+  if (values["review-preview"] !== undefined && (!URL.canParse(values["review-preview"]) || !previewSecret)) {
+    console.error("--review-preview needs the intake's URL and REVIEW_PREVIEW_SECRET");
     return 2;
   }
   const token = process.env.PLACES_TOKEN;
@@ -90,6 +99,7 @@ async function main(): Promise<number> {
     ...(values.places ? { places: values.places } : {}),
     ...(values["photo-licence"] ? { photoLicence: values["photo-licence"] } : {}),
     ...(values["recent-places"] ? { recentList: intakeRecentList(values["recent-places"]) } : {}),
+    ...(values["review-preview"] && previewSecret ? { reviewPreview: { url: values["review-preview"], secret: previewSecret } } : {}),
   });
 
   if (values["auto-pr-body"]) await writeFile(values["auto-pr-body"], summary.auto_pr_body, "utf8");

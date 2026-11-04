@@ -64,11 +64,17 @@ import {
 } from "./decide.js";
 import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult } from "./inbox-queue.js";
 import { ulid } from "./ulid.js";
+import { verifyPreview } from "@opencampingdb/apply/preview";
+
+/** `GET /v1/photos/review/<photo id>/<full|thumb>.jpg`: one held photo for a person checking the review PR. */
+const REVIEW_ROUTE = /^\/v1\/photos\/review\/(pho_[0-9A-Z]{26})\/(full|thumb)\.jpg$/;
 
 /** The part of an R2 bucket binding the photo upload uses. */
 export interface BucketLike {
   put(key: string, value: Uint8Array, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }): Promise<unknown>;
   delete(keys: string | string[]): Promise<void>;
+  /** Reads one file back, for review previews. An R2 binding has it. */
+  get?(key: string): Promise<{ body: ReadableStream; size: number } | null>;
 }
 
 export interface Env {
@@ -98,6 +104,11 @@ export interface Env {
   PHOTOS_PENDING?: BucketLike;
   /** Secret, shared with the photo server. Signs photo passes. Needed for `/v1/photos/pass`. */
   PHOTO_PASS_SECRET?: string;
+  /**
+   * Secret, shared with the apply workflow. Checks review preview links
+   * (`GET /v1/photos/review/...`, preview.ts). Off when unset.
+   */
+  REVIEW_PREVIEW_SECRET?: string;
   /**
    * The photo server's STATE namespace. A photo reported as `illegal` gets a
    * `withheld:<photo id>` key there, and the photo server stops serving it.
@@ -794,6 +805,39 @@ export function createHandler(deps: Deps) {
   }
 
   /**
+   * `GET /v1/photos/review/<photo id>/<full|thumb>.jpg?expires=&sig=`: a held
+   * photo from the private pending bucket, for the person checking the review
+   * PR, when the link the apply run signed is good and current. Every refusal
+   * answers 404, so a link can't be told apart from a missing photo. Never
+   * cached, never indexed.
+   */
+  async function reviewPreview(env: Env, url: URL, photoId: string, size: "full" | "thumb"): Promise<Response> {
+    const missing = () => json(404, { error: "not_found" }, { "cache-control": "no-store" });
+    if (!env.REVIEW_PREVIEW_SECRET || !env.PHOTOS_PENDING?.get) return missing();
+    const good = await verifyPreview(
+      env.REVIEW_PREVIEW_SECRET,
+      photoId,
+      url.searchParams.get("expires") ?? "",
+      url.searchParams.get("sig") ?? "",
+      deps.now(),
+    );
+    if (!good) return missing();
+    const object = await env.PHOTOS_PENDING.get(`${photoId}/${size}.jpg`);
+    if (!object) return missing();
+    return new Response(object.body, {
+      status: 200,
+      headers: {
+        "content-type": "image/jpeg",
+        "content-length": String(object.size),
+        "cache-control": "private, no-store",
+        "x-robots-tag": "noindex, nofollow",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff",
+      },
+    });
+  }
+
+  /**
    * `POST /v1/photos/pass`: a photo pass for an attested install. The body is
    * `{ "type": "photo_pass", "device", "app_version", "time" }`, with `time`
    * the phone's clock, so a captured request stops working within minutes.
@@ -1068,6 +1112,11 @@ export function createHandler(deps: Deps) {
     if (route === "/v1/places/recent/block") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return blockRecent(request, env, cors);
+    }
+    const review = REVIEW_ROUTE.exec(route);
+    if (review) {
+      if (request.method !== "GET" && request.method !== "HEAD") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "GET" });
+      return reviewPreview(env, url, review[1]!, review[2] as "full" | "thumb");
     }
     if (route === "/v1/health/queue") {
       if (request.method !== "GET") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "GET" });
