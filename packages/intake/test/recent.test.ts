@@ -790,6 +790,54 @@ describe("send-time decisions", () => {
     expect((await listing()).changes).toEqual([]);
   });
 
+  it("decides against the index, not a blocked contributor's change", async () => {
+    await send(fact(PLACE, "toilets", true));
+    const blocked = services.writes[0]!.contributor as string;
+    const block = new Request("https://intake.example/v1/places/recent/block", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ contributors: [blocked] }),
+    });
+    expect((await handle(block, e)).status).toBe(200);
+    clock += HOUR;
+    // The index still has false, so true from someone else is a change of its own.
+    expect(await send(fact(PLACE, "toilets", true, { device: otherDevice(1), contributor: "acct_second_person_01" }))).toMatchObject({ state: "live" });
+    expect((await listing()).changes).toEqual([{ place: PLACE, fact: "toilets", value: true, accepted: "2026-11-03T10:00:00Z", in_data_at: null }]);
+  });
+
+  it("stops laying a change over the index once a release loaded the place's cell after the data had it", async () => {
+    const load = (facts: Record<string, unknown>) => {
+      const line = { id: PLACE, cell: [146, -37], facts, fact_sources: {}, fact_dates: {} };
+      const hash = sha(JSON.stringify(line));
+      return new Request("https://intake.example/v1/place-index", {
+        method: "PUT",
+        headers: { "content-type": "application/x-ndjson", authorization: `Bearer ${TOKEN}` },
+        body: `${JSON.stringify({ cells: [{ cell: [146, -37], hash }] })}\n${JSON.stringify(line)}\n`,
+      });
+    };
+    await send(fact(PLACE, "toilets", true));
+    const first = services.writes[0]!.id as string;
+    clock += HOUR;
+    // A release that does not hold the change yet: the change still lies over it.
+    expect((await handle(load({ toilets: false }), e)).status).toBe(200);
+    clock += HOUR;
+    const mark = new Request("https://intake.example/v1/places/recent/in-data", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ ids: [first], at: new Date(clock).toISOString() }),
+    });
+    expect((await handle(mark, e)).status).toBe(200);
+    expect(await send(fact(PLACE, "toilets", true, { device: otherDevice(1), contributor: "acct_second_person_01" }))).toMatchObject({ state: "live" });
+    expect(store.db.prepare("SELECT count(*) AS n FROM recent_changes").get()).toEqual({ n: 1 });
+
+    // A later release, after a person set it back to false on the data: the index is right, and the old change is not laid over it.
+    clock += HOUR;
+    expect((await handle(load({ toilets: false }), e)).status).toBe(200);
+    clock += HOUR;
+    expect(await send(fact(PLACE, "toilets", true, { device: otherDevice(2), contributor: "acct_third_person_01" }))).toMatchObject({ state: "live" });
+    expect(store.db.prepare("SELECT feedback_id FROM recent_changes ORDER BY accepted").all()).toHaveLength(2);
+  });
+
   it("skips Llama Guard for a contributor with a track record", async () => {
     await send(fact(PLACE, "toilets", true, { note: "Clean, and open all night" }));
     expect(safeAi.runs).toBe(1);

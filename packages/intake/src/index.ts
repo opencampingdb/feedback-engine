@@ -846,7 +846,7 @@ export function createHandler(deps: Deps) {
     if (text === "invalid") return json(400, { error: "invalid", details: ["the body does not gunzip"] }, cors);
     const update = parsePlaceIndex(text);
     if ("problems" in update) return json(400, { error: "invalid", details: update.problems }, cors);
-    await replaceCells(db, update);
+    await replaceCells(db, update, new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z"));
     return json(200, { cells: update.cells.length, places: update.places }, cors);
   }
 

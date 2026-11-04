@@ -104,13 +104,28 @@ function acceptedStatement(db: D1Like, contributor: string): D1Statement {
     .bind(contributor);
 }
 
-/** A released place as it is now: its facts in the place index, with the recent changes on it laid over in the order they were accepted. */
+/**
+ * A released place as it is now: its facts in the place index, with the
+ * recent changes on it laid over in the order they were accepted. Changes
+ * from a blocked contributor are left out, as apps leave them out, and so is
+ * a change the data already held when the release last loaded the place's
+ * cell: the index has it, or whatever has replaced it since.
+ */
 export async function placeNow(db: D1Like, id: string): Promise<(PlaceState & { cell: Cell }) | undefined> {
   const indexed = await getIndexedPlace(db, id);
   if (indexed === undefined) return undefined;
+  const [cellLon, cellLat] = indexed.cell;
   const { results } = await db
-    .prepare("SELECT fact, value, accepted FROM recent_changes WHERE place = ? ORDER BY accepted, feedback_id")
-    .bind(id)
+    .prepare(
+      `SELECT fact, value, accepted FROM recent_changes c
+       WHERE c.place = ?
+         AND NOT EXISTS (SELECT 1 FROM blocked_contributors b WHERE b.contributor = c.contributor)
+         AND NOT (c.in_data_at IS NOT NULL AND EXISTS (
+           SELECT 1 FROM place_index_cells i WHERE i.cell_lon = ? AND i.cell_lat = ? AND i.loaded_at > c.in_data_at
+         ))
+       ORDER BY accepted, feedback_id`,
+    )
+    .bind(id, cellLon, cellLat)
     .all<{ fact: string; value: string | null; accepted: string }>();
   const facts: Record<string, unknown> = { ...indexed.facts };
   const sources: Record<string, string> = { ...indexed.fact_sources };

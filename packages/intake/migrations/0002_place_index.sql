@@ -1,6 +1,7 @@
 -- The place index: every released place's facts and who set each one, loaded from each data release,
 -- so the intake can decide an item at send time. The release sends only the map cells that changed,
--- and place_index_cells keeps the hash of each cell as the intake holds it.
+-- and place_index_cells keeps the hash of each cell as the intake holds it, and when the release loaded it
+-- (an ISO 8601 UTC time), so a recent change the data already held at that load is not laid over it again.
 
 CREATE TABLE place_index (
   id TEXT PRIMARY KEY,
@@ -20,5 +21,6 @@ CREATE TABLE place_index_cells (
   cell_lon INTEGER NOT NULL,
   cell_lat INTEGER NOT NULL,
   hash TEXT NOT NULL,
+  loaded_at TEXT NOT NULL,
   PRIMARY KEY (cell_lon, cell_lat)
 ) WITHOUT ROWID;

@@ -122,10 +122,10 @@ const CELLS_JSON = (cells: CellUpdate[]) => JSON.stringify(cells.map(({ cell }) 
 
 /**
  * Replaces the named cells in one transaction: their places, then their
- * hashes. A place that moved to another cell is replaced where it now is,
- * whichever of its two cells arrives first.
+ * hashes and `loadedAt` (an ISO 8601 UTC time). A place that moved to another
+ * cell is replaced where it now is, whichever of its two cells arrives first.
  */
-export async function replaceCells(db: D1Like, update: PlaceIndexUpdate): Promise<void> {
+export async function replaceCells(db: D1Like, update: PlaceIndexUpdate, loadedAt: string): Promise<void> {
   const inCells = "(cell_lon, cell_lat) IN (SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]') FROM json_each(?))";
   const statements: D1Statement[] = [
     db.prepare(`DELETE FROM place_index WHERE ${inCells}`).bind(CELLS_JSON(update.cells)),
@@ -142,11 +142,11 @@ export async function replaceCells(db: D1Like, update: PlaceIndexUpdate): Promis
     db.prepare(`DELETE FROM place_index_cells WHERE ${inCells}`).bind(CELLS_JSON(update.cells)),
     db
       .prepare(
-        `INSERT INTO place_index_cells (cell_lon, cell_lat, hash)
-         SELECT json_extract(value, '$.cell[0]'), json_extract(value, '$.cell[1]'), json_extract(value, '$.hash')
+        `INSERT INTO place_index_cells (cell_lon, cell_lat, hash, loaded_at)
+         SELECT json_extract(value, '$.cell[0]'), json_extract(value, '$.cell[1]'), json_extract(value, '$.hash'), ?
          FROM json_each(?) WHERE json_extract(value, '$.hash') IS NOT NULL`,
       )
-      .bind(JSON.stringify(update.cells)),
+      .bind(loadedAt, JSON.stringify(update.cells)),
   ];
   await db.batch(statements);
 }
