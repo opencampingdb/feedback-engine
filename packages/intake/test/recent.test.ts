@@ -673,6 +673,8 @@ describe("send-time decisions", () => {
     expect(answer).toEqual({ id: services.writes[0]!.id, state: "live" });
     expect(services.writes[0]).toMatchObject({ type: "report", place: PLACE, report: { kind: "fact", fact: "toilets", value: true } });
     expect(services.writes[0]).not.toHaveProperty("state");
+    // The decision goes into the inbox with the item, for the apply.
+    expect(services.writes[0]!.intake).toEqual({ state: "live" });
     expect((await listing()).changes).toEqual([{ place: PLACE, fact: "toilets", value: true, accepted: "2026-11-03T09:00:00Z", in_data_at: null }]);
     // A fact with no free text never goes to the AI, and counts towards the contributor's track record.
     expect(safeAi.runs).toBe(0);
@@ -728,6 +730,25 @@ describe("send-time decisions", () => {
     expect(await send(fact(PLACE, "instagram", "https://www.instagram.com/lakecamp"), noUrlhaus)).toMatchObject(held("check_unavailable"));
     expect((await listing()).changes).toEqual([]);
     expect(services.writes).toHaveLength(6);
+    // Each hold goes into the inbox with the item, so the apply never publishes what a check held.
+    expect(services.writes.map((w) => w.intake)).toEqual(
+      ["owner_value", "link_check", "text_check", "ai_check", "unknown_place", "check_unavailable"].map(held),
+    );
+  });
+
+  it("stores no decision on items it doesn't decide, and stores a failed decision as check_unavailable", async () => {
+    await send(report(PLACE, { kind: "closed" }));
+    expect(services.writes[0]).not.toHaveProperty("intake");
+    const broken: D1Like = {
+      prepare: () => {
+        throw new Error("D1 is down");
+      },
+      batch: async () => {
+        throw new Error("D1 is down");
+      },
+    };
+    expect(await send(fact(PLACE, "toilets", true), { ...e, RECENT_LIST: broken })).toMatchObject(held("check_unavailable"));
+    expect(services.writes[1]!.intake).toEqual(held("check_unavailable"));
   });
 
   it("holds a fact past the contributor's 50 live changes for the day", async () => {

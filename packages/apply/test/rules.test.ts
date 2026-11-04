@@ -1584,3 +1584,93 @@ describe("new places", () => {
     });
   });
 });
+
+describe("items the intake held for a check", () => {
+  const SPOT = { lat: -35.1, lon: 149.2 };
+  const attested = (item: StoredFeedback) => ({ ...item, attested: "app_attest", contributor: ctr(item.device) }) as StoredFeedback;
+  const heldFor = (item: StoredFeedback, reason: string) => ({ ...item, intake: { state: "held", held_reason: reason } }) as StoredFeedback;
+  const contactReport = (day: number, device: string, name: string) =>
+    ({ ...base(day, device), type: "report", report: { kind: "contact", fact: name, reason: "spam" } }) as StoredFeedback;
+  const withSite = () => place({ facts: { website: "https://spam.example.org" }, fact_sources: { website: "osm" } });
+  const newPlace = (device: string) =>
+    ({
+      ...base(0, device, null),
+      contributor: ctr(device),
+      attested: "app_attest",
+      type: "report",
+      location: SPOT,
+      report: { kind: "new_place", place_kind: "free_camp", note: "Gravel pit off the highway" },
+    }) as StoredFeedback;
+  const idOf = (item: StoredFeedback) => `ocdb_${item.id.slice(3)}`;
+
+  for (const reason of ["text_check", "link_check", "ai_check", "daily_cap", "check_unavailable"]) {
+    it(`sends an attested fact held for ${reason} to a person instead of applying it`, () => {
+      const r = heldFor(attested(fact(0, "dev-a", "power", true)), reason);
+      const out = run([r]);
+      expect(out.outcome(r)).toBe("needs_review");
+      expect(out.decisions[0]?.reason).toContain(reason);
+      expect(out.after()).toBeUndefined();
+      expect(out.edits).toEqual([{ kind: "fact", place: PLACE, fact: "power", value: true, feedback: r.id }]);
+    });
+  }
+
+  it("sends a held fact for a reviewed fact, such as a website, to a person", () => {
+    const r = heldFor(attested(fact(0, "dev-a", "website", "https://camp.example.org")), "link_check");
+    const out = run([r]);
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("decides a fact the intake put live, or held for a rule, as before", () => {
+    const live = { ...attested(fact(0, "dev-a", "power", true)), intake: { state: "live" } } as StoredFeedback;
+    expect(run([live]).outcome(live)).toBe("applied");
+    const owner = heldFor(attested(fact(0, "dev-a", "power", true)), "owner_value");
+    expect(run([owner]).outcome(owner)).toBe("applied");
+    const unknown = heldFor(attested(fact(0, "dev-a", "power", true)), "unknown_place");
+    expect(run([unknown]).outcome(unknown)).toBe("applied");
+  });
+
+  it("applies a held fact the place already has, which changes nothing", () => {
+    const r = heldFor(attested(fact(0, "dev-a", "power", false)), "daily_cap");
+    expect(run([r]).outcome(r)).toBe("applied");
+  });
+
+  it("takes no contact down on a report held for a check, though it counts towards a later one", () => {
+    const a = attested(contactReport(0, "dev-a", "website"));
+    const b = heldFor(attested(contactReport(1, "dev-b", "website")), "daily_cap");
+    const held = run([a, b], { now: 2, places: [withSite()] });
+    expect(held.outcome(a)).toBe("needs_review");
+    expect(held.outcome(b)).toBe("needs_review");
+    expect(held.after()).toBeUndefined();
+    expect(held.held).toEqual([]);
+
+    const c = attested(contactReport(2, "dev-c", "website"));
+    const out = run([a, b, c], { now: 3, places: [withSite()] });
+    expect(out.after()?.facts).toEqual({});
+    expect(out.outcome(c)).toBe("applied");
+    // The held report stays with a person.
+    expect(out.outcome(b)).toBe("needs_review");
+    expect(out.edits).toEqual([{ kind: "note", place: PLACE, feedback: b.id }]);
+  });
+
+  it("drafts a new place held for a check for a person instead of publishing it", () => {
+    const item = heldFor(newPlace("dev-a"), "ai_check");
+    const out = run([item]);
+    expect(out.outcome(item)).toBe("needs_review");
+    expect(out.decisions[0]?.reason).toContain("ai_check");
+    expect(out.places.has(idOf(item))).toBe(false);
+    expect(out.edits).toEqual([expect.objectContaining({ kind: "new_place", feedback: item.id, record: expect.objectContaining({ standing: "held" }) })]);
+  });
+
+  it("publishes a new place held for a rule only, or put live, as before", () => {
+    const live = { ...newPlace("dev-a"), intake: { state: "live" } } as StoredFeedback;
+    expect(run([live]).outcome(live)).toBe("applied");
+    const old = newPlace("dev-b");
+    expect(run([old]).outcome(old)).toBe("applied");
+  });
+
+  it("reads a malformed intake field as no decision", () => {
+    const r = { ...attested(fact(0, "dev-a", "power", true)), intake: "held" } as unknown as StoredFeedback;
+    expect(run([r]).outcome(r)).toBe("applied");
+  });
+});

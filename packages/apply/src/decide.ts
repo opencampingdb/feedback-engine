@@ -66,6 +66,23 @@ export type PlaceState = Pick<Place, "facts" | "fact_sources" | "fact_dates">;
  */
 export type HeldReason = "not_attested" | "owner_value" | "disagreement" | "link_check" | "text_check" | "unconfirmed" | "no_contributor";
 
+/** The reasons the intake holds an item for one of its checks rather than for these rules. */
+export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "check_unavailable"];
+
+/**
+ * The check the intake held `item` for at send time (its `intake` field), or
+ * null when it did not hold it for one. The apply has none of those checks,
+ * so such an item goes to a person, never into the data on its own. Items the
+ * intake held for a reason of these rules, and items without the field, are
+ * decided here as before.
+ */
+export function heldForCheck(item: StoredFeedback): string | null {
+  const intake: unknown = (item as { intake?: unknown }).intake;
+  if (typeof intake !== "object" || intake === null) return null;
+  const { state, held_reason: reason } = intake as { state?: unknown; held_reason?: unknown };
+  return state === "held" && typeof reason === "string" && CHECK_HOLDS.includes(reason) ? reason : null;
+}
+
 /** Why an item is refused. `invalid_value`: not a valid fact value. `no_value`: a contact report about a contact the place does not have. */
 export type RefusedReason = "invalid_value" | "no_value";
 

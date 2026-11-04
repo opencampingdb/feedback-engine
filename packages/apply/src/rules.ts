@@ -13,6 +13,7 @@ import {
   decideFact,
   distinctSources as distinctDevices,
   factRefusal,
+  heldForCheck,
   inWindow,
   newPlaceFields,
   newPlaceListing,
@@ -879,6 +880,13 @@ export function applyRules(input: RulesInput): RulesOutput {
           decide(item, "refused", decision.why);
           return;
         }
+        const check = heldForCheck(item);
+        if (decision.verdict === "live" && decision.changes.length > 0 && check !== null) {
+          edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
+          note(placeId, `${fact} set to ${JSON.stringify(value)}, which the intake held for ${check} (check before merging)`, false, [item]);
+          decide(item, "needs_review", `the intake held it for ${check}, so a person checks it`);
+          return;
+        }
         if (decision.verdict === "live") {
           if (decision.changes.length > 0) {
             setFact(value);
@@ -1095,9 +1103,10 @@ export function applyRules(input: RulesInput): RulesOutput {
     return { action: decision.action, at: decision.at };
   }
 
-  /** Why the intake would not list a new place, or undefined when it would. */
+  /** Why the intake would not list a new place or did not, or undefined when it would. */
   function whyNotListed(item: ReportItem): string | undefined {
-    return newPlaceListing(item)?.why;
+    const check = heldForCheck(item);
+    return newPlaceListing(item)?.why ?? (check === null ? undefined : `held by the intake for ${check}`);
   }
 
   /** A new place's record as its report describes it, with no standing yet. */
@@ -1171,14 +1180,16 @@ export function applyRules(input: RulesInput): RulesOutput {
         decide(item, "needs_review", decision.why);
         continue;
       }
-      if (decision.verdict === "live" && decision.takedown) {
+      // A report the intake held for a check takes nothing down on its own, though it still counts as a source.
+      const check = heldForCheck(item);
+      if (decision.verdict === "live" && decision.takedown && check === null) {
         const { value, sources, reasons, feedback } = decision.takedown;
         const reports = earlier.filter((r) => feedback.includes(r.id));
         delete (place.facts as Record<string, FactValue | undefined>)[fact];
         setSource(place, fact, "feedback", nowIso);
         note(placeId, `${fact} taken down after reports from ${sources} sources within ${WINDOW_DAYS} days (${reasons.join(", ")})`, true, reports);
         for (const r of reports) {
-          if (!items.includes(r as ReportItem)) continue;
+          if (!items.includes(r as ReportItem) || heldForCheck(r) !== null) continue;
           const sent = sentToPerson.get(r.id);
           if (sent) {
             edits.splice(edits.indexOf(sent.edit), 1);
@@ -1203,9 +1214,10 @@ export function applyRules(input: RulesInput): RulesOutput {
       }
       const edit: ReviewEdit = { kind: "note", place: placeId, feedback: item.id };
       edits.push(edit);
-      note(placeId, `${fact} reported as ${reason} (decide: keep it or remove it)`, false, [item]);
+      const heldBy = check === null ? "" : `, held by the intake for ${check}`;
+      note(placeId, `${fact} reported as ${reason}${heldBy} (decide: keep it or remove it)`, false, [item]);
       sentToPerson.set(item.id, { edit, change: changes[changes.length - 1]! });
-      decide(item, "needs_review", decision.why);
+      decide(item, "needs_review", check === null ? decision.why : `the intake held it for ${check}, so a person checks it`);
     }
   }
 

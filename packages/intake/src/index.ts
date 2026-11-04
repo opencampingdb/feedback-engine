@@ -1165,6 +1165,8 @@ export function createHandler(deps: Deps) {
           return { answer: UNAVAILABLE, writes: () => [] };
         },
       );
+      // The apply reads it: an item held for a check goes to a person, never into the data on its own.
+      stored.intake = decision.answer;
     }
 
     try {
