@@ -4,7 +4,7 @@
  */
 
 /** Where a value in a place record came from. */
-export type Source = "osm" | "feedback" | "contributed" | "owner";
+export type Source = "osm" | "feedback" | "contributed" | "owner" | "community_report";
 
 export type OsmType = "node" | "way" | "relation";
 
