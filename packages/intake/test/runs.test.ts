@@ -4,6 +4,7 @@ import { createHandler, createScheduled, type Env } from "../src/index.js";
 import type { KVLike } from "../src/ratelimit.js";
 import { CAP_MS, MAX_WAIT_MS, QUIET_MS, recordInboxWrite, startApplyIfDue } from "../src/runs.js";
 import { fakeD1 } from "./fake-d1.js";
+import { fakeGit } from "./fake-git.js";
 
 const NOW = Date.parse("2026-11-04T09:00:00Z");
 const MINUTE = 60 * 1000;
@@ -151,6 +152,8 @@ function fakeGitHub(options: { dispatchStatus?: number[]; tokenStatus?: (permiss
   const calls: Call[] = [];
   const dispatchStatus = [...(options.dispatchStatus ?? [])];
   let tokens = 0;
+  // The inbox itself, which the scheduled job's flush writes to.
+  const inbox = fakeGit({ now: () => NOW });
   const fetch = async (url: string, init?: RequestInit) => {
     const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
     calls.push({ url, method: init?.method ?? "GET", body });
@@ -160,11 +163,10 @@ function fakeGitHub(options: { dispatchStatus?: number[]; tokenStatus?: (permiss
       tokens += 1;
       return new Response(JSON.stringify({ token: `ghs_${tokens}`, expires_at: new Date(NOW + 60 * MINUTE).toISOString() }), { status: 201 });
     }
-    if (url.includes("/contents/")) return new Response("{}", { status: 201 });
     if (url.endsWith("/dispatches")) return new Response(null, { status: dispatchStatus.shift() ?? 204 });
-    return new Response("not found", { status: 404 });
+    return inbox.fetch(url, init);
   };
-  return { fetch, calls };
+  return { fetch, calls, inbox };
 }
 
 function memoryKv(): KVLike {
@@ -213,11 +215,15 @@ describe("the scheduled job", () => {
     };
   });
 
-  it("starts the inbox's apply workflow 2 minutes after a write, with an actions-only token", async () => {
+  it("starts the inbox's apply workflow 2 minutes after the queued item reached the inbox, with an actions-only token", async () => {
     gh = fakeGitHub();
     const handle = createHandler({ fetch: gh.fetch, now: () => clock });
     const scheduled = createScheduled({ fetch: gh.fetch, now: () => clock });
     expect((await handle(post(), env)).status).toBe(202);
+    clock += MINUTE;
+    // This tick's flush writes the item to the inbox: that is the write the quiet spell counts from.
+    expect(await scheduled(env)).toBe("waiting_quiet");
+    expect(gh.inbox.pending()).toHaveLength(1);
     clock += MINUTE;
     expect(await scheduled(env)).toBe("waiting_quiet");
     clock += MINUTE;
@@ -239,16 +245,20 @@ describe("the scheduled job", () => {
     gh = fakeGitHub({ tokenStatus: (p) => ((p as Record<string, string>).actions && !actionsGranted ? 422 : 201) });
     const handle = createHandler({ fetch: gh.fetch, now: () => clock });
     const scheduled = createScheduled({ fetch: gh.fetch, now: () => clock });
+    // Each send is written to the inbox by the next tick's flush.
     expect((await handle(post(), env)).status).toBe(202);
+    expect(await scheduled(env)).toBe("waiting_quiet");
     clock += QUIET_MS;
     expect(await scheduled(env)).toBe("failed");
     expect((await handle(post(), env)).status).toBe(202);
+    expect(await scheduled(env)).toBe("waiting_quiet");
     clock += QUIET_MS;
     expect(await scheduled(env)).toBe("failed");
     actionsGranted = true;
     clock += MINUTE;
     expect(await scheduled(env)).toBe("started");
     expect(gh.calls.filter((c) => c.url.endsWith("/dispatches"))).toHaveLength(1);
+    expect(gh.inbox.pending()).toHaveLength(2);
   });
 
   it("retries a refused dispatch on the next tick", async () => {
@@ -256,6 +266,7 @@ describe("the scheduled job", () => {
     const handle = createHandler({ fetch: gh.fetch, now: () => clock });
     const scheduled = createScheduled({ fetch: gh.fetch, now: () => clock });
     await handle(post(), env);
+    await scheduled(env);
     clock += QUIET_MS;
     expect(await scheduled(env)).toBe("failed");
     clock += MINUTE;

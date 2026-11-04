@@ -42,6 +42,8 @@ npx wrangler d1 migrations apply RECENT_LIST --remote -c wrangler.deploy.toml
 
 The schema is kept as numbered migrations in `packages/intake/migrations`. After updating to a release that adds one, run the same `migrations apply` command before deploying. Without `RECENT_LIST` the recent-list routes answer `404` and feedback still reaches the inbox.
 
+**Batched inbox writes.** With `RECENT_LIST` bound, the intake does not write each item to the inbox as it arrives. It puts the stored feedback item or owner submission in the database's `inbox_queue` table, in the same transaction as its send-time decision, and answers `202` once that commits (`503 storage_unavailable` when it can't, as before). The scheduled job, every minute, writes up to 200 queued items (and at most 2 MiB of them) to `INBOX_BRANCH` as one commit through the Git Data API: it reads the branch head, creates a tree with the files on the head's tree, creates a commit and moves the branch to it, never by force, starting again from the new head when the branch has moved on. That is three content-creating requests a minute however busy the intake is, so the inbox takes up to 200 items a minute, 12,000 an hour, against GitHub's 80 a minute and 500 an hour for one commit per item. Queued items reach the inbox within about a minute, and a flush counts as the inbox write for starting the apply. While GitHub is down or refusing, items wait in the queue and are written once it answers again. Two writes stay direct, one commit per item: photo uploads (`POST /v1/photos`), whose files go to the pending bucket in the same request and are deleted when the item cannot be written, and which the photo caps keep to a few a day for each contributor; and everything on an intake without `RECENT_LIST`.
+
 Each new place, check, removal report or withdraw is one row written. Each refresh of the list that misses the edge cache is one query. The box a request names is grown out to whole degrees before the query and the cache, so map views in the same degrees share one cached answer for 30 seconds. This fits the D1 free plan.
 
 The apply run keeps the recent list in step with two calls, each with `authorization: Bearer <PLACES_TOKEN>`. `POST /v1/places/recent/remove` with `{"ids": [...]}` (1 to 500 place ids) takes places it has written into the data off the list, answering `{"removed": <count>}`. `POST /v1/places/recent/block` with `{"contributors": [...]}` (up to 5,000 hashed `ctr_` ids, `[]` for none) replaces the block list the intake keeps, answering `{"blocked": <count>}`. A blocked contributor's places leave the list and later ones aren't listed; one taken off the block list is listed again. Both answer `401` for a wrong token and `404` without `RECENT_LIST` or `PLACES_TOKEN`.
@@ -182,7 +184,7 @@ curl -i https://<your worker>/v1/feedback \
   -d '{"type":"check","place":"ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA","device":"3b241101-e2bb-4255-8caf-4136c566a962","app_version":"0.0.1","consent":true,"check":{"visited":"2026-10-30","still_there":true}}'
 ```
 
-A `202` with an `fb_` id means a file is now in `inbox/pending/`. To use your own domain, add a custom domain to the Worker in the Cloudflare dashboard.
+A `202` with an `fb_` id means a file is now in `inbox/pending/`, or, with `RECENT_LIST` bound, queued for it and written there within about a minute. To use your own domain, add a custom domain to the Worker in the Cloudflare dashboard.
 
 ## 7. Create the opencampingdb-bot GitHub App
 

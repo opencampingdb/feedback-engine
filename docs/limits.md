@@ -6,8 +6,8 @@ The limits the intake, the apply and the data release run into, on Workers Paid.
 
 | Limit | Allowance | What uses it |
 |---|---|---|
-| GitHub content-creating requests (secondary limit) | 80 a minute, 500 an hour, per app installation | Each accepted item is one commit to the inbox. 500 items an hour is the intake's ceiling. Past it, GitHub answers 403 or 429 and the intake answers 503 `storage_unavailable`, so apps retry. |
-| GitHub REST requests (primary limit) | At least 5,000 an hour per installation, rising with repositories and users up to 12,500 | Inbox writes, starting workflows and the AI reviewer's reads and commits. |
+| GitHub content-creating requests (secondary limit) | 80 a minute, 500 an hour, per app installation | With `RECENT_LIST`, accepted items are queued in D1 and the scheduled job writes up to 200 a minute to the inbox as one commit (a tree, a commit and a ref update: 3 requests, 180 an hour, plus a retry when the branch moved on). The intake's ceiling is 200 items a minute, 12,000 an hour; past it the queue grows and drains at that rate, and apps are never refused for it. Photo uploads, and every item on an intake without `RECENT_LIST`, stay one commit each, so there 500 items an hour is the ceiling, and past it GitHub answers 403 or 429 and the intake answers 503 `storage_unavailable`, so apps retry. The AI reviewer's commits to the data repository count against the same installation. |
+| GitHub REST requests (primary limit) | At least 5,000 an hour per installation, rising with repositories and users up to 12,500 | Inbox writes (a flush is about 6 requests a minute with items queued, 360 an hour), starting workflows and the AI reviewer's reads and commits. |
 | Workers AI free allocation | 10,000 Neurons a day, then US$0.011 per 1,000 Neurons | Llama Guard 3 costs about 44 Neurons per 1,000 input tokens, so an item of about 300 tokens is about 13 Neurons, and roughly 750 checks a day are free. The AI reviewer's Llama 3.3 70B costs about 27 Neurons per 1,000 input tokens and 205 per 1,000 output tokens, so a case of about 1,500 tokens in and 100 out is about 60 Neurons, and roughly 160 cases a day are free. |
 | KV writes to one key | 1 a second | Rate limits and challenges. The recent list is in D1 because of KV's limits (ADR 0001). |
 
@@ -34,7 +34,7 @@ The limits the intake, the apply and the data release run into, on Workers Paid.
 | Memory | 128 MB per isolate | Parsing a place index upload. |
 | Worker size | 64 MiB uncompressed | The intake bundle is about 150 KiB. |
 | Cron triggers | 250 per account | The intake uses one, every minute. |
-| D1 queries per invocation | 1,000 (a batch counts as one) | Place index uploads, the send-time decision. |
+| D1 queries per invocation | 1,000 (a batch counts as one) | Place index uploads, the send-time decision, the minute's inbox flush. |
 | D1 statement length | 100 KB | Batched inserts. |
 | D1 bound parameters | 100 per query | Batched inserts. |
 | D1 row or string size | 2 MB | A place index row. |

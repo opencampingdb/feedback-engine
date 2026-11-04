@@ -45,6 +45,7 @@ import {
   snapBbox,
   WITHDRAW_WINDOW_MS,
   type D1Like,
+  type D1Statement,
   type StoredPlace,
 } from "./recent.js";
 import { cellHashes, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
@@ -61,6 +62,7 @@ import {
   type ItemState,
   type SendTimeDecision,
 } from "./decide.js";
+import { flushInbox, queueStatement, type FlushResult } from "./inbox-queue.js";
 import { ulid } from "./ulid.js";
 
 /** The part of an R2 bucket binding the photo upload uses. */
@@ -111,7 +113,9 @@ export interface Env {
    * The recent list (D1): new places from attested installs, with their
    * evidence and the block list, served by `GET /v1/places/recent` until the
    * apply run has written them into the data. Without it the recent-list
-   * routes answer 404.
+   * routes answer 404. With it, feedback and owner submissions are queued
+   * here and written to the inbox once a minute as one commit
+   * (inbox-queue.ts); without it each is a commit of its own.
    */
   RECENT_LIST?: D1Like;
   /** Secret. Lets the apply run remove places from RECENT_LIST and send the block list, and the data release load the place index. */
@@ -444,9 +448,9 @@ function inboxConfig(env: Env): GitHubAppConfig {
 }
 
 /**
- * Records an inbox write for the scheduled job, when it starts the apply.
- * The item is in the inbox already, so a failed record only leaves the run to
- * the apply's own schedule.
+ * Records an inbox write for the scheduled job, when it starts the apply: a
+ * flush of the queue, or a photo written at once. The items are in the inbox
+ * already, so a failed record only leaves the run to the apply's own schedule.
  */
 async function noteInboxWrite(env: Env, nowMs: number): Promise<void> {
   if (!env.APPLY_WORKFLOW || !env.RECENT_LIST) return;
@@ -491,15 +495,40 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now">) {
 }
 
 /**
- * The scheduled job, run every minute: starts the inbox's apply workflow when
- * it is due (see runs.ts), then runs the AI reviewer when it is on and due
- * (see reviewer.ts). A failed start, such as the GitHub App missing
- * `actions: write`, is logged and tried again on the next tick. Returns what
- * became of the apply.
+ * Writes the queued items to the inbox as one commit (inbox-queue.ts). A flush
+ * counts as an inbox write for the run triggers. A failure is logged, and the
+ * items wait for the next minute. "off" without RECENT_LIST.
+ */
+export function createFlush(deps: Pick<Deps, "fetch" | "now">) {
+  const github = new GitHubApp(deps.fetch, deps.now);
+  return async function flush(env: Env): Promise<FlushResult | "off" | "failed"> {
+    if (!env.RECENT_LIST) return "off";
+    try {
+      return await flushInbox({
+        db: env.RECENT_LIST,
+        github,
+        inbox: inboxConfig(env),
+        branch: env.INBOX_BRANCH ?? "main",
+        onWritten: () => noteInboxWrite(env, deps.now()),
+      });
+    } catch (error) {
+      console.warn(`writing the queued items to the inbox failed, trying again next minute: ${String(error)}`);
+      return "failed";
+    }
+  };
+}
+
+/**
+ * The scheduled job, run every minute: writes the queued items to the inbox,
+ * starts the inbox's apply workflow when it is due (see runs.ts), then runs
+ * the AI reviewer when it is on and due (see reviewer.ts). A failed start,
+ * such as the GitHub App missing `actions: write`, is logged and tried again
+ * on the next tick. Returns what became of the apply.
  */
 export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
   const github = new GitHubApp(deps.fetch, deps.now);
   const review = createReviewer(deps);
+  const flush = createFlush(deps);
   return async function scheduled(env: Env): Promise<RunOutcome | "off"> {
     if (env.RECENT_LIST) {
       const db = env.RECENT_LIST;
@@ -508,6 +537,8 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
         console.warn(`pruning the recent list failed: ${String(error)}`);
       });
     }
+    // Before the apply is started, so a run that starts now finds this minute's items.
+    await flush(env);
     const workflow = env.APPLY_WORKFLOW;
     const outcome =
       workflow && env.RECENT_LIST
@@ -1126,22 +1157,26 @@ export function createHandler(deps: Deps) {
     if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
 
     const id = `fb_${ulid(nowMs, deps.randomBytes)}`;
-    const write = async (stored: unknown) => {
-      await github.createFile(
-        inboxConfig(env),
-        env.INBOX_BRANCH ?? "main",
-        `pending/${day}/${id}.json`,
-        `${JSON.stringify(stored, null, 2)}\n`,
-        `Add ${id}`,
-      );
-      await noteInboxWrite(env, deps.now());
+    /**
+     * Stores the item for the inbox. With RECENT_LIST it is queued, in one D1
+     * batch with `alongside` (the send-time decision's rows), and the
+     * scheduled job writes it to the inbox within a minute (inbox-queue.ts).
+     * Without it the item is written to the inbox at once, as one commit.
+     */
+    const store = async (stored: unknown, alongside: D1Statement[] = []) => {
+      const file = { id, path: `pending/${day}/${id}.json`, content: `${JSON.stringify(stored, null, 2)}\n` };
+      if (env.RECENT_LIST) {
+        await env.RECENT_LIST.batch([queueStatement(env.RECENT_LIST, file, deps.now()), ...alongside]);
+        return;
+      }
+      await github.createFile(inboxConfig(env), env.INBOX_BRANCH ?? "main", file.path, file.content, `Add ${id}`);
     };
 
     if (isOwner) {
       const secrets = submission.type === "owner_update" ? undefined : newOwnerSecrets(random);
       const stored = await storeOwner(submission, { id, received, app: app.app, device }, secrets);
       try {
-        await write(stored);
+        await store(stored);
       } catch {
         return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
       }
@@ -1172,7 +1207,7 @@ export function createHandler(deps: Deps) {
       ...("photo_report" in rest ? { photo_report: rest.photo_report } : {}),
     } as StoredFeedback;
 
-    // Decided before the inbox write and recorded after it, so a failed write leaves nothing in D1.
+    // Decided before the item is stored, and recorded in the same D1 batch that queues it.
     let decision: SendTimeDecision | undefined;
     if (env.RECENT_LIST && decidedHere(stored)) {
       const db = env.RECENT_LIST;
@@ -1189,26 +1224,17 @@ export function createHandler(deps: Deps) {
       stored.intake = decision.answer;
     }
 
-    // A live change that is not recorded gives its place in the daily caps back.
-    const giveBack = async () => {
-      if (env.RECENT_LIST && decision?.slot) await releaseLive(env.RECENT_LIST, decision.slot).catch(() => undefined);
-    };
     try {
-      await write(stored);
+      await store(stored, decision && env.RECENT_LIST ? decision.writes(env.RECENT_LIST) : []);
     } catch {
-      await giveBack();
+      // A live change that is not stored gives its place in the daily caps back.
+      if (env.RECENT_LIST && decision?.slot) await releaseLive(env.RECENT_LIST, decision.slot).catch(() => undefined);
       return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
     }
-    // The item is in the inbox already, so a failed store write still reaches the apply run.
-    let state: ItemState | undefined;
+    // The item is stored already, so a failed write here still reaches the apply run.
+    const state: ItemState | undefined = decision?.answer;
     if (env.RECENT_LIST) {
-      const db = env.RECENT_LIST;
-      await updateRecent(db, submission as FeedbackSubmission, { id, received, device, target }).catch(() => undefined);
-      if (decision) {
-        const writes = decision.writes(db);
-        const answer = decision.answer;
-        state = writes.length === 0 ? answer : await db.batch(writes).then(() => answer, async () => (await giveBack(), UNAVAILABLE));
-      }
+      await updateRecent(env.RECENT_LIST, submission as FeedbackSubmission, { id, received, device, target }).catch(() => undefined);
     }
     // An illegal-content report withholds the photo before a person sees it. The
     // report is in the inbox already, so a failed write here still reaches a person.

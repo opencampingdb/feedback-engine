@@ -1,6 +1,7 @@
 /**
  * GitHub App authentication with WebCrypto (RS256 JWT, installation tokens
- * cached until near expiry), file creation through the contents API,
+ * cached until near expiry), file creation through the contents API, many
+ * files in one commit through the Git Data API,
  * starting a workflow through the Actions API, and the calls the AI reviewer
  * makes on the data repository's review PR.
  */
@@ -234,6 +235,59 @@ export class GitHubApp {
       }
       return res;
     }
+  }
+
+  /** The commit `branch` points at. */
+  async branchHead(config: GitHubAppConfig, branch: string): Promise<string> {
+    const res = await this.#call(config, CONTENTS_WRITE, "GET", `/repos/${config.repo}/git/ref/heads/${branch}`);
+    if (!res.ok) throw new GitHubError(`reading the head of ${branch} failed with ${res.status}`, res.status);
+    return ((await res.json()) as { object: { sha: string } }).object.sha;
+  }
+
+  /** The tree of commit `sha`. */
+  async commitTree(config: GitHubAppConfig, sha: string): Promise<string> {
+    const res = await this.#call(config, CONTENTS_WRITE, "GET", `/repos/${config.repo}/git/commits/${sha}`);
+    if (!res.ok) throw new GitHubError(`reading commit ${sha} failed with ${res.status}`, res.status);
+    return ((await res.json()) as { tree: { sha: string } }).tree.sha;
+  }
+
+  /**
+   * A tree of `baseTree` with each file added or replaced, its text given
+   * inline so GitHub writes the blobs. The same files on the same base give
+   * the same tree, so a tree equal to `baseTree` means nothing changed.
+   */
+  async createTree(config: GitHubAppConfig, baseTree: string, files: readonly { path: string; content: string }[]): Promise<string> {
+    const tree = files.map((f) => ({ path: f.path, mode: "100644", type: "blob", content: f.content }));
+    const res = await this.#call(config, CONTENTS_WRITE, "POST", `/repos/${config.repo}/git/trees`, { base_tree: baseTree, tree });
+    if (!res.ok) throw new GitHubError(`creating a tree of ${files.length} files failed with ${res.status}`, res.status);
+    return ((await res.json()) as { sha: string }).sha;
+  }
+
+  /** A commit of `tree` on `parents`, by the App. */
+  async createCommit(config: GitHubAppConfig, message: string, tree: string, parents: readonly string[]): Promise<string> {
+    const res = await this.#call(config, CONTENTS_WRITE, "POST", `/repos/${config.repo}/git/commits`, { message, tree, parents });
+    if (!res.ok) throw new GitHubError(`creating a commit failed with ${res.status}`, res.status);
+    return ((await res.json()) as { sha: string }).sha;
+  }
+
+  /**
+   * Moves `branch` to `sha`, never by force. False when the branch has moved
+   * on and `sha` is not a fast forward of it (GitHub answers 422, or 409).
+   */
+  async updateBranch(config: GitHubAppConfig, branch: string, sha: string): Promise<boolean> {
+    const res = await this.#call(config, CONTENTS_WRITE, "PATCH", `/repos/${config.repo}/git/refs/heads/${branch}`, { sha, force: false });
+    if (res.ok) return true;
+    if (res.status === 422 || res.status === 409) return false;
+    throw new GitHubError(`moving ${branch} failed with ${res.status}`, res.status);
+  }
+
+  /** Whether commit `sha` is on `branch`: the branch is that commit or one after it. False for a commit GitHub doesn't have. */
+  async isOnBranch(config: GitHubAppConfig, sha: string, branch: string): Promise<boolean> {
+    const res = await this.#call(config, CONTENTS_WRITE, "GET", `/repos/${config.repo}/compare/${sha}...${branch}?per_page=1`);
+    if (res.status === 404) return false;
+    if (!res.ok) throw new GitHubError(`comparing ${sha} with ${branch} failed with ${res.status}`, res.status);
+    const status = ((await res.json()) as { status?: string }).status;
+    return status === "ahead" || status === "identical";
   }
 
   /** The open PR from `branch` in the configured repository, or null when there is none. */

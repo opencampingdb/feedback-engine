@@ -43,8 +43,9 @@ SAFESEARCH = "off"
 # REVIEW_BOT_LOGINS = "example-bot[bot]"
 # REVIEW_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 
-# Every minute: starts the apply when it is due, and runs the AI reviewer when
-# it is on and due. Does nothing without APPLY_WORKFLOW or AI_REVIEWER.
+# Every minute: writes the queued items to the inbox, starts the apply when it
+# is due, and runs the AI reviewer when it is on and due. Does nothing without
+# RECENT_LIST, APPLY_WORKFLOW or AI_REVIEWER.
 [triggers]
 crons = ["* * * * *"]
 
@@ -62,6 +63,8 @@ id = "REPLACE_ME_ATTEST_KV_NAMESPACE_ID"
 # place index each data release loads through PUT /v1/place-index. Apply
 # the schema with the deploy copy of this file, once it holds the database_id:
 # `npx wrangler d1 migrations apply RECENT_LIST --remote -c wrangler.deploy.toml`.
+# With it bound, feedback and owner submissions are queued here and the job
+# below writes them to the inbox once a minute as one commit (src/inbox-queue.ts).
 [[d1_databases]]
 binding = "RECENT_LIST"
 database_name = "ocdb-recent-list"

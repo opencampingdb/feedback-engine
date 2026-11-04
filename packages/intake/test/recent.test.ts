@@ -36,7 +36,9 @@ function atOnce(d1: D1Like, n: number): D1Like {
         waiting = [];
       }
     });
+  // The statement's own fields are kept, so the fake D1 can still run it in a batch.
   const wrap = (stmt: D1Statement): D1Statement => ({
+    ...stmt,
     bind: (...values: unknown[]) => wrap(stmt.bind(...values)),
     all: () => stmt.all(),
     run: () => stmt.run(),
@@ -62,12 +64,10 @@ const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 /** GitHub and Play Integrity. A token `ok:<hash>` decodes to a sound verdict for the body with that hash. */
 function fakeServices() {
   const writes: Record<string, unknown>[] = [];
-  const state = { failWrites: false };
   const fetch = async (url: string, init?: RequestInit) => {
     if (url.endsWith("/access_tokens")) {
       return new Response(JSON.stringify({ token: "ghs_x", expires_at: new Date(NOW + 100 * HOUR).toISOString() }), { status: 201 });
     }
-    if (url.includes("/contents/") && state.failWrites) return new Response("{}", { status: 502 });
     if (url.includes("/contents/")) {
       const body = JSON.parse(String(init?.body)) as { content: string };
       writes.push(JSON.parse(Buffer.from(body.content, "base64").toString("utf8")) as Record<string, unknown>);
@@ -95,10 +95,16 @@ function fakeServices() {
     }
     return new Response("not found", { status: 404 });
   };
-  return { fetch, writes, state };
+  return { fetch, writes };
 }
 
 let clock = NOW;
+
+/** What the intake stored for the inbox, oldest first: items written at once, then the queued ones (inbox-queue.ts). */
+function inboxItems(services: ReturnType<typeof fakeServices>, store: ReturnType<typeof fakeD1>): Record<string, unknown>[] {
+  const queued = store.db.prepare("SELECT content FROM inbox_queue ORDER BY rowid").all() as { content: string }[];
+  return [...services.writes, ...queued.map((row) => JSON.parse(row.content) as Record<string, unknown>)];
+}
 
 /** Workers AI as Llama Guard: safe, unless the text holds `unsafe:`. `runs` counts its calls. */
 const safeAi = {
@@ -180,6 +186,7 @@ describe("recent places", () => {
   let handle: ReturnType<typeof createHandler>;
   let store: ReturnType<typeof fakeD1>;
   let e: Env;
+  const written = () => inboxItems(services, store);
 
   beforeEach(() => {
     clock = NOW;
@@ -213,7 +220,7 @@ describe("recent places", () => {
       name: "Gravel Pit Rest Area",
       standing: "shown",
       added: "2026-11-03T09:00:00Z",
-      contributor: services.writes[0]!.contributor,
+      contributor: written()[0]!.contributor,
     });
     expect(places[0]!.contributor).toMatch(/^ctr_[0-9a-f]{16}$/);
   });
@@ -397,7 +404,7 @@ describe("recent places", () => {
     expect((await handle(post("block", { contributors: [] }), without)).status).toBe(404);
     // Feedback still reaches the inbox.
     expect((await handle(feedback(newPlace()), without)).status).toBe(202);
-    expect(services.writes).toHaveLength(1);
+    expect(written()).toHaveLength(1);
   });
 
   describe("withdraw", () => {
@@ -410,7 +417,7 @@ describe("recent places", () => {
       const res = await handle(withdraw(id), e);
       expect(res.status).toBe(202);
       expect(await list()).toEqual([]);
-      expect(services.writes.at(-1)).toMatchObject({ type: "withdraw", place: id, device: services.writes[0]!.device });
+      expect(written().at(-1)).toMatchObject({ type: "withdraw", place: id, device: written()[0]!.device });
     });
 
     it("refuses a withdraw after 24 hours", async () => {
@@ -419,7 +426,7 @@ describe("recent places", () => {
       const res = await handle(withdraw(id), e);
       expect(res.status).toBe(409);
       expect(await res.json()).toEqual({ error: "withdraw_window_closed" });
-      expect(services.writes).toHaveLength(1);
+      expect(written()).toHaveLength(1);
       expect(await list()).toHaveLength(1);
     });
 
@@ -428,7 +435,7 @@ describe("recent places", () => {
       const res = await handle(withdraw(id, otherDevice(1)), e);
       expect(res.status).toBe(403);
       expect(await res.json()).toEqual({ error: "not_your_place" });
-      expect(services.writes).toHaveLength(1);
+      expect(written()).toHaveLength(1);
       expect(await list()).toHaveLength(1);
     });
 
@@ -443,7 +450,7 @@ describe("recent places", () => {
     it("passes a withdraw for a place the store doesn't hold to the inbox for the apply run", async () => {
       const id = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
       expect((await handle(withdraw(id), e)).status).toBe(202);
-      expect(services.writes.at(-1)).toMatchObject({ type: "withdraw", place: id });
+      expect(written().at(-1)).toMatchObject({ type: "withdraw", place: id });
     });
   });
 
@@ -452,14 +459,14 @@ describe("recent places", () => {
     await add({ device: otherDevice(1), note: "Nice spot, click here for cheap gear" });
     const unattested = env(store, { requires_attestation: false });
     expect((await handle(feedback(newPlace({ device: otherDevice(2), contributor: "acct_another_00000001" })), unattested)).status).toBe(202);
-    expect(services.writes).toHaveLength(3);
+    expect(written()).toHaveLength(3);
     expect(await list()).toEqual([]);
   });
 
   it("lists a new place whose note had a contact detail, which the inbox strips", async () => {
     const id = await add({ note: "Call 0412 345 678 for the gate" });
     expect((await list()).map((p) => p.id)).toEqual([id]);
-    expect(JSON.stringify(services.writes[0])).not.toContain("0412");
+    expect(JSON.stringify(written()[0])).not.toContain("0412");
   });
 
   it("limits the list to a bounding box", async () => {
@@ -546,7 +553,7 @@ describe("recent places", () => {
         headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
         body: JSON.stringify({ contributors }),
       });
-    const contributorOf = (i: number) => services.writes[i]!.contributor as string;
+    const contributorOf = (i: number) => written()[i]!.contributor as string;
 
     it("takes a blocked contributor's new places off the list, and lists none they add later", async () => {
       await add();
@@ -557,7 +564,7 @@ describe("recent places", () => {
       expect((await list()).map((p) => p.id)).toEqual([kept]);
       const later = await handle(feedback(newPlace({ device: otherDevice(2) })), e);
       expect(later.status).toBe(202);
-      expect(services.writes).toHaveLength(3);
+      expect(written()).toHaveLength(3);
       expect((await list()).map((p) => p.id)).toEqual([kept]);
     });
 
@@ -598,7 +605,7 @@ describe("recent places", () => {
       expect(first!.contributor).toBe(contributorOf(0));
       expect(contributorOf(1)).toBe(contributorOf(0));
       expect(contributorOf(2)).not.toBe(contributorOf(0));
-      expect(JSON.stringify(services.writes)).not.toContain(ADDER);
+      expect(JSON.stringify(written())).not.toContain(ADDER);
       await handle(block([contributorOf(0)]), e);
       expect((await list()).map((p) => p.id)).toEqual([other]);
     });
@@ -620,6 +627,7 @@ describe("send-time decisions", () => {
   let handle: ReturnType<typeof createHandler>;
   let store: ReturnType<typeof fakeD1>;
   let e: Env;
+  const written = () => inboxItems(services, store);
 
   beforeEach(() => {
     clock = NOW;
@@ -672,11 +680,11 @@ describe("send-time decisions", () => {
 
   it("puts an attested fact live at once, as a recent change, and still writes it to the inbox", async () => {
     const answer = await send(fact(PLACE, "toilets", true));
-    expect(answer).toEqual({ id: services.writes[0]!.id, state: "live" });
-    expect(services.writes[0]).toMatchObject({ type: "report", place: PLACE, report: { kind: "fact", fact: "toilets", value: true } });
-    expect(services.writes[0]).not.toHaveProperty("state");
+    expect(answer).toEqual({ id: written()[0]!.id, state: "live" });
+    expect(written()[0]).toMatchObject({ type: "report", place: PLACE, report: { kind: "fact", fact: "toilets", value: true } });
+    expect(written()[0]).not.toHaveProperty("state");
     // The decision goes into the inbox with the item, for the apply.
-    expect(services.writes[0]!.intake).toEqual({ state: "live" });
+    expect(written()[0]!.intake).toEqual({ state: "live" });
     expect((await listing()).changes).toEqual([{ place: PLACE, fact: "toilets", value: true, accepted: "2026-11-03T09:00:00Z", in_data_at: null }]);
     // A fact with no free text never goes to the AI, and counts towards the contributor's track record.
     expect(safeAi.runs).toBe(0);
@@ -703,7 +711,7 @@ describe("send-time decisions", () => {
   it("holds a fact the earlier held report disagrees with", async () => {
     const unattested = env(store, { requires_attestation: false });
     expect(await send(fact(PLACE, "toilets", true, { device: otherDevice(1), contributor: "acct_second_person_01" }), unattested)).toEqual({
-      id: services.writes[0]!.id,
+      id: written()[0]!.id,
       ...held("not_attested"),
     });
     expect(await send(fact(PLACE, "toilets", false), e)).toMatchObject({ state: "live" });
@@ -731,31 +739,31 @@ describe("send-time decisions", () => {
     const { URLHAUS_KEY: _, ...noUrlhaus } = e;
     expect(await send(fact(PLACE, "instagram", "https://www.instagram.com/lakecamp"), noUrlhaus)).toMatchObject(held("check_unavailable"));
     expect((await listing()).changes).toEqual([]);
-    expect(services.writes).toHaveLength(6);
+    expect(written()).toHaveLength(6);
     // Each hold goes into the inbox with the item, so the apply never publishes what a check held.
-    expect(services.writes.map((w) => w.intake)).toEqual(
+    expect(written().map((w) => w.intake)).toEqual(
       ["owner_value", "link_check", "text_check", "ai_check", "unknown_place", "check_unavailable"].map(held),
     );
   });
 
   it("stores no decision on items it doesn't decide, and stores a failed decision as check_unavailable", async () => {
     await send(report(PLACE, { kind: "closed" }));
-    expect(services.writes[0]).not.toHaveProperty("intake");
+    expect(written()[0]).not.toHaveProperty("intake");
+    // The decision's reads fail, but D1 still takes the item.
     const broken: D1Like = {
-      prepare: () => {
-        throw new Error("D1 is down");
+      prepare: (sql) => {
+        if (sql.includes("contributor_records")) throw new Error("D1 read failed");
+        return store.prepare(sql);
       },
-      batch: async () => {
-        throw new Error("D1 is down");
-      },
+      batch: (list) => store.batch(list),
     };
     expect(await send(fact(PLACE, "toilets", true), { ...e, RECENT_LIST: broken })).toMatchObject(held("check_unavailable"));
-    expect(services.writes[1]!.intake).toEqual(held("check_unavailable"));
+    expect(written()[1]!.intake).toEqual(held("check_unavailable"));
   });
 
   it("holds a fact past the contributor's 50 live changes for the day", async () => {
     expect(await send(fact(PLACE, "toilets", true))).toMatchObject({ state: "live" });
-    const contributor = services.writes[0]!.contributor as string;
+    const contributor = written()[0]!.contributor as string;
     store.db.prepare("UPDATE live_counts SET count = 50 WHERE contributor = ?").run(contributor);
     expect(await send(fact(PLACE, "drinking_water", true))).toMatchObject(held("daily_cap"));
     clock += 24 * HOUR;
@@ -778,7 +786,7 @@ describe("send-time decisions", () => {
 
   it("holds everything from a blocked contributor", async () => {
     await send(fact(PLACE, "toilets", true));
-    const contributor = services.writes[0]!.contributor as string;
+    const contributor = written()[0]!.contributor as string;
     const block = new Request("https://intake.example/v1/places/recent/block", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
@@ -792,7 +800,7 @@ describe("send-time decisions", () => {
 
   it("decides against the index, not a blocked contributor's change", async () => {
     await send(fact(PLACE, "toilets", true));
-    const blocked = services.writes[0]!.contributor as string;
+    const blocked = written()[0]!.contributor as string;
     const block = new Request("https://intake.example/v1/places/recent/block", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
@@ -816,7 +824,7 @@ describe("send-time decisions", () => {
       });
     };
     await send(fact(PLACE, "toilets", true));
-    const first = services.writes[0]!.id as string;
+    const first = written()[0]!.id as string;
     clock += HOUR;
     // A release that does not hold the change yet: the change still lies over it.
     expect((await handle(load({ toilets: false }), e)).status).toBe(200);
@@ -841,7 +849,7 @@ describe("send-time decisions", () => {
   it("skips Llama Guard for a contributor with a track record", async () => {
     await send(fact(PLACE, "toilets", true, { note: "Clean, and open all night" }));
     expect(safeAi.runs).toBe(1);
-    const contributor = services.writes[0]!.contributor as string;
+    const contributor = written()[0]!.contributor as string;
     store.db.prepare("UPDATE contributor_records SET accepted = 5 WHERE contributor = ?").run(contributor);
     await send(fact(PLACE, "drinking_water", true, { note: "Tank by the shed" }));
     expect(safeAi.runs).toBe(1);
@@ -868,18 +876,18 @@ describe("send-time decisions", () => {
   it("holds a signed-out install's fact without attestation, under the install standing in for a contributor", async () => {
     const unattested = env(store, { requires_attestation: false });
     expect(await send(fact(PLACE, "toilets", true, { contributor: null }), unattested)).toMatchObject(held("not_attested"));
-    expect(services.writes[0]).not.toHaveProperty("contributor");
+    expect(written()[0]).not.toHaveProperty("contributor");
   });
 
   it("counts a signed-out Android install's live changes under its hashed install", async () => {
     expect(await send(fact(PLACE, "toilets", true, { contributor: null }))).toMatchObject({ state: "live" });
-    expect(services.writes[0]).not.toHaveProperty("contributor");
+    expect(written()[0]).not.toHaveProperty("contributor");
     const [record] = store.db.prepare("SELECT contributor, accepted FROM contributor_records").all() as { contributor: string; accepted: number }[];
     expect(record!.contributor).toMatch(/^ctr_[0-9a-f]{16}$/);
     expect(record!.accepted).toBe(1);
     // The same stand-in its new places are listed under.
     await send(newPlace({ contributor: null }));
-    expect(services.writes[1]!.contributor).toBe(record!.contributor);
+    expect(written()[1]!.contributor).toBe(record!.contributor);
   });
 
   it("lists a new place with its description, fee and the contacts that pass, and answers live", async () => {
@@ -950,7 +958,7 @@ describe("send-time decisions", () => {
 
     it("keeps a change for 7 days from when the apply says the data has it, and keeps the first time it was told", async () => {
       await send(fact(PLACE, "toilets", true));
-      const first = services.writes[0]!.id as string;
+      const first = written()[0]!.id as string;
       await send(fact(ELSEWHERE, "toilets", true));
       clock += HOUR;
       // An id with no recent change is skipped.
@@ -969,17 +977,17 @@ describe("send-time decisions", () => {
 
     it("takes a time later than its own clock as now", async () => {
       await send(fact(PLACE, "toilets", true));
-      const id = services.writes[0]!.id as string;
+      const id = written()[0]!.id as string;
       expect((await answer(call("in-data", { ids: [id], at: "2027-01-01T00:00:00Z" }))).status).toBe(200);
       expect((await listing()).changes[0]).toMatchObject({ in_data_at: "2026-11-03T09:00:00Z" });
     });
 
     it("takes an overruled change off the list at once, counts it against the contributor, and counts it once", async () => {
       await send(fact(PLACE, "toilets", true));
-      const earlier = services.writes[0]!.id as string;
+      const earlier = written()[0]!.id as string;
       clock += HOUR;
       await send(fact(PLACE, "toilets", false));
-      const overruled = services.writes[1]!.id as string;
+      const overruled = written()[1]!.id as string;
       expect((await listing()).changes).toMatchObject([{ place: PLACE, fact: "toilets", value: false }]);
       expect(record()).toEqual([{ accepted: 2, taken_down: 0 }]);
 
@@ -1006,9 +1014,9 @@ describe("send-time decisions", () => {
 
     it("takes a change the apply sent to a person off the list without counting it against the contributor", async () => {
       await send(fact(PLACE, "toilets", true));
-      const forPerson = services.writes[0]!.id as string;
+      const forPerson = written()[0]!.id as string;
       await send(fact(PLACE, "showers", true));
-      const refused = services.writes[1]!.id as string;
+      const refused = written()[1]!.id as string;
       // Only the refused one counts, and only when it is one of the ids.
       expect(await answer(call("overruled", { ids: [forPerson], refused: [refused] }))).toEqual({ status: 200, body: { removed: 1 } });
       expect(record()).toEqual([{ accepted: 2, taken_down: 0 }]);
@@ -1020,16 +1028,16 @@ describe("send-time decisions", () => {
 
     it("counts each refused item once, across calls", async () => {
       await send(fact(PLACE, "toilets", true));
-      const a = services.writes[0]!.id as string;
+      const a = written()[0]!.id as string;
       await send(fact(PLACE, "showers", true));
-      const b = services.writes[1]!.id as string;
+      const b = written()[1]!.id as string;
       expect(await answer(call("overruled", { ids: [a, b], refused: [a, b] }))).toEqual({ status: 200, body: { removed: 2 } });
       expect(record()).toEqual([{ accepted: 2, taken_down: 2 }]);
     });
 
     it("leaves held items and ids it doesn't know as they are", async () => {
       expect(await send(contact(PLACE, "phone"))).toMatchObject(held("unconfirmed"));
-      const heldId = services.writes[0]!.id as string;
+      const heldId = written()[0]!.id as string;
       expect(await answer(call("overruled", { ids: [heldId, "fb_01JC0000000000000000000099"] }))).toEqual({ status: 200, body: { removed: 0 } });
       expect(evidence()).toEqual([{ feedback_id: heldId, state: "held" }]);
       expect(store.db.prepare("SELECT count(*) AS n FROM contributor_records").get()).toEqual({ n: 0 });
@@ -1037,7 +1045,7 @@ describe("send-time decisions", () => {
 
     it("takes 500 ids in one call", async () => {
       await send(fact(PLACE, "toilets", true));
-      const id = services.writes[0]!.id as string;
+      const id = written()[0]!.id as string;
       const many = [id, ...Array.from({ length: 499 }, (_, n) => `fb_01JC${String(n).padStart(22, "0")}`)];
       expect(await answer(call("in-data", { ids: many, at: "2026-11-03T09:00:00Z" }))).toEqual({ status: 200, body: { marked: 1 } });
       expect(await answer(call("overruled", { ids: many, refused: many }))).toEqual({ status: 200, body: { removed: 1 } });
@@ -1070,39 +1078,28 @@ describe("send-time decisions", () => {
     expect(await send(contact(PLACE, "phone", { device: otherDevice(1), contributor: "acct_second_person_01" }))).toMatchObject(held("unconfirmed"));
   });
 
-  it("gives the daily cap's place back when the inbox write or the decision's record fails", async () => {
+  it("answers 503 and gives the daily cap's place back when the item and its decision can't be stored", async () => {
     const count = () => store.db.prepare("SELECT contributor, count FROM live_counts ORDER BY contributor").all();
-    services.state.failWrites = true;
-    const res = await handle(feedback(fact(PLACE, "toilets", true), { "cf-connecting-ip": "203.0.113.7" }), e);
-    expect(res.status).toBe(503);
-    expect(count().every((row) => (row as { count: number }).count === 0)).toBe(true);
-    services.state.failWrites = false;
-
     const failing: D1Like = {
       prepare: (sql) => store.prepare(sql),
       batch: async () => {
         throw new Error("D1 is down");
       },
     };
-    expect(await send(fact(PLACE, "toilets", true), { ...e, RECENT_LIST: failing })).toMatchObject(held("check_unavailable"));
+    const res = await handle(feedback(fact(PLACE, "toilets", true), { "cf-connecting-ip": "203.0.113.7" }), { ...e, RECENT_LIST: failing });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "storage_unavailable" });
     expect(count().every((row) => (row as { count: number }).count === 0)).toBe(true);
-    // A change that is recorded keeps its place.
+    // Neither the item nor its change was stored: the two go in one batch.
+    expect(written()).toEqual([]);
+    expect((await listing()).changes).toEqual([]);
+    // A change that is stored keeps its place.
     await send(fact(PLACE, "toilets", true));
     expect(count()).toEqual([
       { contributor: expect.stringMatching(/^ctr_/), count: 1 },
       { contributor: expect.stringMatching(/^org_/), count: 0 },
     ]);
-  });
-
-  it("answers held when the decision can't be recorded", async () => {
-    const failing: D1Like = {
-      prepare: (sql) => store.prepare(sql),
-      batch: async () => {
-        throw new Error("D1 is down");
-      },
-    };
-    expect(await send(fact(PLACE, "toilets", true), { ...e, RECENT_LIST: failing })).toMatchObject(held("check_unavailable"));
-    expect(services.writes).toHaveLength(1);
+    expect(written()).toHaveLength(1);
   });
 
   it("answers as before, with no state, without a D1 database bound or for items it doesn't decide", async () => {
@@ -1112,6 +1109,6 @@ describe("send-time decisions", () => {
     expect(Object.keys(await send(newPlace(), without))).toEqual(["id"]);
     expect(Object.keys(await send(report(PLACE, { kind: "name", value: "Lake Eppalock Rest Area" })))).toEqual(["id"]);
     expect(Object.keys(await send(report(PLACE, { kind: "closed" })))).toEqual(["id"]);
-    expect(services.writes).toHaveLength(5);
+    expect(written()).toHaveLength(5);
   });
 });
