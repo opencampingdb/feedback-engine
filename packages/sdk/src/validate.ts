@@ -357,6 +357,14 @@ function checkText(value: unknown, field: string, errors: string[], required: bo
   return value;
 }
 
+/**
+ * A latitude or longitude rounded to 6 decimal places (about 11 cm), as the
+ * SDK stores and sends it. Use it to keep the same value the queue holds.
+ */
+export function sdkCoordinate(value: number): number {
+  return Math.round(value * 1e6) / 1e6;
+}
+
 function checkLocation(value: unknown, errors: string[]): LatLon | undefined {
   if (!isObject(value)) {
     errors.push("location must be an object with lat and lon");
@@ -370,7 +378,7 @@ function checkLocation(value: unknown, errors: string[]): LatLon | undefined {
     errors.push("location.lon must be a number from -180 to 180");
   }
   return typeof lat === "number" && typeof lon === "number"
-    ? { lat: Math.round(lat * 1e6) / 1e6, lon: Math.round(lon * 1e6) / 1e6 }
+    ? { lat: sdkCoordinate(lat), lon: sdkCoordinate(lon) }
     : undefined;
 }
 

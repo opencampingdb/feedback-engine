@@ -80,6 +80,14 @@ export interface FeedbackClientOptions {
    * `keyIsUnusable(refusal.reason)` is true.
    */
   onAttestationRejected?: (error: AttestationError, refusal?: AttestationRefusal) => Promise<void> | void;
+  /**
+   * Called once for each queued item when it is settled: sent, or dropped
+   * without being sent. It runs whether the call that queued the item sent it
+   * or a later `flush` did, after the queue is saved. Errors it throws are
+   * caught and never stop the queue. Connect the answer to the app's own
+   * record with `ref`, not by comparing content.
+   */
+  onAnswered?: (answer: Answer) => Promise<void> | void;
 }
 
 /** Why the intake refused an item's attestation. */
@@ -163,6 +171,11 @@ export interface ReportInput {
   /** The signed-in traveller's opaque account id, when there is one. */
   contributor?: string;
   consent: boolean;
+  /**
+   * The caller's own id for this submission, 1 to 100 characters. Kept with
+   * the queued item and passed back to `onAnswered`. Never sent to the intake.
+   */
+  ref?: string;
 }
 
 export interface ReviewInput {
@@ -171,6 +184,11 @@ export interface ReviewInput {
   /** The signed-in traveller's opaque account id (a keyed hash, never a name or email). */
   contributor?: string;
   consent: boolean;
+  /**
+   * The caller's own id for this submission, 1 to 100 characters. Kept with
+   * the queued item and passed back to `onAnswered`. Never sent to the intake.
+   */
+  ref?: string;
 }
 
 export interface FeeInput {
@@ -179,6 +197,11 @@ export interface FeeInput {
   /** The signed-in traveller's opaque account id, as for a review. */
   contributor?: string;
   consent: boolean;
+  /**
+   * The caller's own id for this submission, 1 to 100 characters. Kept with
+   * the queued item and passed back to `onAnswered`. Never sent to the intake.
+   */
+  ref?: string;
 }
 
 export interface CheckInput {
@@ -186,6 +209,11 @@ export interface CheckInput {
   check: CheckBody;
   contributor?: string;
   consent: boolean;
+  /**
+   * The caller's own id for this submission, 1 to 100 characters. Kept with
+   * the queued item and passed back to `onAnswered`. Never sent to the intake.
+   */
+  ref?: string;
 }
 
 export interface WithdrawInput {
@@ -193,6 +221,11 @@ export interface WithdrawInput {
   place: string;
   contributor?: string;
   consent: boolean;
+  /**
+   * The caller's own id for this submission, 1 to 100 characters. Kept with
+   * the queued item and passed back to `onAnswered`. Never sent to the intake.
+   */
+  ref?: string;
 }
 
 export interface ReviewReportInput {
@@ -203,6 +236,11 @@ export interface ReviewReportInput {
   reason: ReviewReportReason;
   contributor?: string;
   consent: boolean;
+  /**
+   * The caller's own id for this submission, 1 to 100 characters. Kept with
+   * the queued item and passed back to `onAnswered`. Never sent to the intake.
+   */
+  ref?: string;
 }
 
 export interface PhotoInput {
@@ -224,12 +262,22 @@ export interface PhotoReportInput {
   reason: PhotoReportReason;
   contributor?: string;
   consent: boolean;
+  /**
+   * The caller's own id for this submission, 1 to 100 characters. Kept with
+   * the queued item and passed back to `onAnswered`. Never sent to the intake.
+   */
+  ref?: string;
 }
 
 export interface PhotoErasureInput {
   /** The account id whose photos are removed. */
   contributor: string;
   consent: boolean;
+  /**
+   * The caller's own id for this submission, 1 to 100 characters. Kept with
+   * the queued item and passed back to `onAnswered`. Never sent to the intake.
+   */
+  ref?: string;
 }
 
 /**
@@ -393,13 +441,35 @@ export class FeedbackValidationError extends Error {
 
 interface QueueItem {
   localId: string;
+  /** The caller's own ref, kept here and never sent. Items queued before 0.8.0 have none. */
+  ref?: string;
   body: FeedbackSubmission;
   queuedAt: number;
   attempts: number;
   nextAttemptAt: number;
 }
 
-type Outcome = { kind: "sent"; id: string } | { kind: "dropped"; httpStatus: number };
+/**
+ * What became of a queued item. `id` is the intake's id for it (for a new
+ * place, the id to pass to `newPlaceId`). `httpStatus` is the intake's refusal,
+ * or 0 when the SDK dropped the item unsent because it grew too old or the
+ * queue was full.
+ */
+export type AnswerOutcome = { kind: "sent"; id: string } | { kind: "dropped"; httpStatus: number };
+
+/** What `onAnswered` is told when a queued item is settled. */
+export interface Answer {
+  /** The `ref` the caller gave the submission. Absent when it had none. */
+  ref?: string;
+  /** The submission's type, such as `report` or `check`. */
+  type: FeedbackSubmission["type"];
+  outcome: AnswerOutcome;
+}
+
+type Outcome = AnswerOutcome;
+
+/** Longest `ref` a caller can give a submission. */
+export const MAX_REF_LENGTH = 100;
 
 const BASE_DELAY_MS = 30_000;
 /** A photo pass is renewed when it has less than this left. */
@@ -530,7 +600,7 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
       } catch {
         // A 2xx without a readable body still means the intake has it.
       }
-      record(item.localId, { kind: "sent", id });
+      record(item, { kind: "sent", id });
       return "sent";
     }
     if (res.status === 429) {
@@ -557,19 +627,34 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
         return "stop";
       }
     }
-    record(item.localId, { kind: "dropped", httpStatus: res.status });
+    record(item, { kind: "dropped", httpStatus: res.status });
     return "drop";
   }
 
   // Outcomes are kept only for items a report(), review(), check() or reportReview() call is waiting on.
   const waiting = new Set<string>();
   const outcomes = new Map<string, Outcome>();
-  function record(localId: string, outcome: Outcome): void {
-    if (waiting.has(localId)) outcomes.set(localId, outcome);
+  // Answers for onAnswered, kept until the queue is saved and then told in order.
+  const answers: Answer[] = [];
+  function record(item: QueueItem, outcome: Outcome): void {
+    if (waiting.has(item.localId)) outcomes.set(item.localId, outcome);
+    if (options.onAnswered) answers.push({ ...(item.ref !== undefined ? { ref: item.ref } : {}), type: item.body.type, outcome });
   }
 
-  function flushNow(): Promise<FlushResult> {
-    return serial(async () => {
+  async function tellAnswers(): Promise<void> {
+    const hook = options.onAnswered;
+    if (!hook) return;
+    for (let answer = answers.shift(); answer; answer = answers.shift()) {
+      try {
+        await hook(answer);
+      } catch {
+        // The app's own record keeping failing must not stop the queue.
+      }
+    }
+  }
+
+  async function flushNow(): Promise<FlushResult> {
+    const result = await serial(async () => {
       const queue = await readQueue();
       const t = now();
       const kept: QueueItem[] = [];
@@ -578,6 +663,7 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
       let stopped = false;
       for (const item of queue) {
         if (t - item.queuedAt > maxQueueAgeMs) {
+          record(item, { kind: "dropped", httpStatus: 0 });
           dropped += 1;
           continue;
         }
@@ -601,10 +687,18 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
       await writeQueue(kept);
       return { sent, dropped, remaining: kept.length };
     });
+    await tellAnswers();
+    return result;
   }
 
-  async function submit(input: { consent: boolean } & Record<string, unknown>, type: FeedbackSubmission["type"]) {
+  async function submit(
+    { ref, ...input }: { consent: boolean; ref?: string | undefined } & Record<string, unknown>,
+    type: FeedbackSubmission["type"],
+  ) {
     if (input.consent !== true) throw new ConsentRequiredError();
+    if (ref !== undefined && (typeof ref !== "string" || ref.length < 1 || ref.length > MAX_REF_LENGTH)) {
+      throw new FeedbackValidationError([`ref must be a string of 1 to ${MAX_REF_LENGTH} characters`]);
+    }
     const localId = await serial(async () => {
       const body = { ...input, type, device: await device(), app_version: appVersion, consent: true };
       const checked = validateSubmission(body, new Date(now()));
@@ -612,13 +706,14 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
       const queue = await readQueue();
       const item: QueueItem = {
         localId: randomUUID(),
+        ...(ref !== undefined ? { ref } : {}),
         body: checked.value as FeedbackSubmission,
         queuedAt: now(),
         attempts: 0,
         nextAttemptAt: 0,
       };
       queue.push(item);
-      while (queue.length > maxQueueLength) queue.shift();
+      while (queue.length > maxQueueLength) record(queue.shift()!, { kind: "dropped", httpStatus: 0 });
       await writeQueue(queue);
       waiting.add(item.localId);
       return item.localId;
@@ -823,21 +918,21 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
     review: (input) => submit({ ...input }, "review"),
     check: (input) => submit({ ...input }, "check"),
     fee: (input) => submit({ ...input }, "fee"),
-    reportReview: ({ place, review, reason, contributor, consent }) =>
+    reportReview: ({ place, review, reason, contributor, consent, ref }) =>
       submit(
-        { place, review_report: { review, reason }, ...(contributor !== undefined ? { contributor } : {}), consent },
+        { place, review_report: { review, reason }, ...(contributor !== undefined ? { contributor } : {}), consent, ref },
         "review_report",
       ),
-    withdraw: ({ place, contributor, consent }) =>
-      submit({ place, ...(contributor !== undefined ? { contributor } : {}), consent }, "withdraw"),
+    withdraw: ({ place, contributor, consent, ref }) =>
+      submit({ place, ...(contributor !== undefined ? { contributor } : {}), consent, ref }, "withdraw"),
     photo: sendPhoto,
     photoPass,
-    reportPhoto: ({ place, photo, reason, contributor, consent }) =>
+    reportPhoto: ({ place, photo, reason, contributor, consent, ref }) =>
       submit(
-        { place, photo_report: { photo, reason }, ...(contributor !== undefined ? { contributor } : {}), consent },
+        { place, photo_report: { photo, reason }, ...(contributor !== undefined ? { contributor } : {}), consent, ref },
         "photo_report",
       ),
-    erasePhotos: ({ contributor, consent }) => submit({ place: null, contributor, consent }, "photo_erasure"),
+    erasePhotos: ({ contributor, consent, ref }) => submit({ place: null, contributor, consent, ref }, "photo_erasure"),
     flush: flushNow,
     pending: () => serial(async () => (await readQueue()).length),
   };

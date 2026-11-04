@@ -171,6 +171,29 @@ describe("photo client", () => {
     expect(JSON.parse(posts[1]!.body)).toMatchObject({ type: "photo_erasure", place: null, contributor: CONTRIBUTOR });
   });
 
+  it("answers a photo report and an erasure by their refs, which it never sends", async () => {
+    const answers: unknown[] = [];
+    const posts: string[] = [];
+    const client = createPhotoClient({
+      endpoint: "https://intake.example",
+      appKey: "key-1",
+      appVersion: "1.2.3",
+      storage: memoryStorage(),
+      fetch: async (_url, init) => {
+        posts.push(init.body);
+        return { status: 202, json: async () => ({ id: "fb_1" }), headers: { get: () => null } };
+      },
+      onAnswered: (a) => void answers.push(a),
+    });
+    await client.reportPhoto({ place: PLACE, photo: PHOTO, reason: "offensive", contributor: CONTRIBUTOR, consent: true, ref: "pr" });
+    await client.erasePhotos({ contributor: CONTRIBUTOR, consent: true, ref: "er" });
+    expect(posts.every((b) => !("ref" in JSON.parse(b)))).toBe(true);
+    expect(answers).toEqual([
+      { ref: "pr", type: "photo_report", outcome: { kind: "sent", id: "fb_1" } },
+      { ref: "er", type: "photo_erasure", outcome: { kind: "sent", id: "fb_1" } },
+    ]);
+  });
+
   it("keeps photos out of the feedback client, and its queue apart from feedback's", async () => {
     const storage = memoryStorage();
     const offline = async (): Promise<never> => {

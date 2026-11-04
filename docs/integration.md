@@ -176,7 +176,7 @@ A `new_place` report may carry `report.address`, checked the same way and held f
 await feedback.report({ place: newPlace, report: { kind: "remove", reason: "private_land" }, consent: true });
 ```
 
-**Withdrawing a new place.** A new place has its id as soon as its report is sent: `newPlaceId(result.id)` when the result is `sent`, which is `ocdb_` and the feedback id without its `fb_`. Keep it. The install that sent the place can take it back:
+**Withdrawing a new place.** A new place has its id as soon as its report is sent: `newPlaceId(result.id)` when the result is `sent`, which is `ocdb_` and the feedback id without its `fb_`. When the report was queued, the id comes to your `onAnswered` hook instead (see section 8). Keep it. The install that sent the place can take it back:
 
 ```ts
 const newPlace = newPlaceId(result.id);
@@ -282,6 +282,24 @@ export function useFlushFeedback(): void {
 ```
 
 Items older than 30 days, or past the 100 newest, are dropped unsent.
+
+**Connecting answers to your own records.** The client normalises a submission before it queues it: a location is rounded to 6 decimal places and names are trimmed. So what was queued can differ from what you passed in, and matching an answer to your record by content fails. Tidy what the traveller typed with `tidyName` and `tidyText`, round a location with `sdkCoordinate`, and store those values if you keep a copy.
+
+A new place's id arrives only to the send that carried it: the `report()` call when it went at once, or a later `flush()` when it was queued. To receive it either way, pass a `ref` of your own (1 to 100 characters) with each submission, and an `onAnswered` hook when you create the client. The client keeps `ref` with the queued item and never sends it. `onAnswered({ ref, type, outcome })` is called once for each queued item when it is settled, after the queue is saved, with `outcome` either `{ kind: "sent", id }` or `{ kind: "dropped", httpStatus }` (0 when the item was dropped unsent for its age or a full queue). Errors in the hook are caught, so they never stop the queue.
+
+```ts
+export const feedback = createFeedbackClient({
+  // ...
+  onAnswered: async ({ ref, outcome }) => {
+    if (!ref) return; // items queued before SDK 0.8.0 carry no ref
+    const draft = await drafts.get(ref);
+    if (draft && outcome.kind === "sent") await drafts.setPlace(ref, newPlaceId(outcome.id));
+    if (draft && outcome.kind === "dropped") await drafts.markRefused(ref, outcome.httpStatus);
+  },
+});
+
+await feedback.report({ place: null, location, report: { kind: "new_place", name: tidyName(name) }, consent: true, ref: draft.id });
+```
 
 ## 9. Show the attribution
 
