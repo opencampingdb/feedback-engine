@@ -10,7 +10,8 @@ const MAX_BOUND = 100;
  * The part of a D1 database the intake uses, on Node's SQLite, with every
  * migration in `packages/intake/migrations` applied in order. Like D1 it
  * refuses `undefined`, stores booleans as 1 and 0, refuses more than 100
- * bound values in one statement, and runs a batch as one transaction.
+ * bound values in one statement, and runs a batch as one transaction. A
+ * statement with RETURNING gives its rows, as on D1.
  * `statements` records the SQL of each statement run.
  */
 export function fakeD1(): D1Like & { db: DatabaseSync; statements: string[] } {
@@ -23,7 +24,7 @@ export function fakeD1(): D1Like & { db: DatabaseSync; statements: string[] } {
   const execute = (sql: string, values: SQLInputValue[]) => {
     statements.push(sql);
     const stmt = db.prepare(sql);
-    if (/^\s*(select|with)\b/i.test(sql)) return { results: stmt.all(...values) as Record<string, unknown>[], changes: 0 };
+    if (/^\s*(select|with)\b/i.test(sql) || /\breturning\b/i.test(sql)) return { results: stmt.all(...values) as Record<string, unknown>[], changes: 0 };
     return { results: [], changes: Number(stmt.run(...values).changes) };
   };
   const result = ({ results, changes }: { results: Record<string, unknown>[]; changes: number }) => ({
