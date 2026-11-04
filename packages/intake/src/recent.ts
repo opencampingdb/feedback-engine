@@ -1,4 +1,13 @@
-import { newPlaceStanding, type LatLon, type NewPlaceCheck, type NewPlaceReport, type NewPlaceStanding } from "@opencampingdb/feedback";
+import {
+  newPlaceStanding,
+  type ContactFactName,
+  type FactValue,
+  type FeeValue,
+  type LatLon,
+  type NewPlaceCheck,
+  type NewPlaceReport,
+  type NewPlaceStanding,
+} from "@opencampingdb/feedback";
 
 /** A prepared D1 statement: the part of the Workers D1 API the recent list uses. */
 export interface D1Statement {
@@ -14,7 +23,11 @@ export interface D1Like {
   batch(statements: D1Statement[]): Promise<unknown[]>;
 }
 
-/** What the recent list serves for a place. Never the note or contacts. */
+/**
+ * What the recent list serves for a place. Never the note. The description,
+ * fee and contacts are there only when the report carried them and they passed
+ * the checks, as the place is published with them.
+ */
 export interface RecentPlace {
   id: string;
   location: LatLon;
@@ -25,6 +38,11 @@ export interface RecentPlace {
   added: string;
   /** The hashed contributor id, so apps can hide what a hidden contributor added. */
   contributor: string;
+  /** The description, tidied. */
+  description?: string;
+  fee?: FeeValue;
+  /** The contact facts and the address. */
+  contacts?: Partial<Record<ContactFactName, FactValue>>;
 }
 
 /** A new place as the recent list keeps it. Written once, when the place is added. */
@@ -71,7 +89,7 @@ export function insertPlace(db: D1Like, place: StoredPlace): Promise<unknown> {
 export function placeStatement(db: D1Like, place: StoredPlace): D1Statement {
   return db
     .prepare(
-      "INSERT OR IGNORE INTO new_places (id, lat, lon, kind, name, added, contributor, device, attest_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO new_places (id, lat, lon, kind, name, added, contributor, device, attest_key, description, fee, contacts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       place.id,
@@ -83,6 +101,9 @@ export function placeStatement(db: D1Like, place: StoredPlace): D1Statement {
       place.contributor,
       place.device,
       place.attest_key ?? null,
+      place.description ?? null,
+      place.fee === undefined ? null : JSON.stringify(place.fee),
+      place.contacts === undefined ? null : JSON.stringify(place.contacts),
     );
 }
 
@@ -126,6 +147,9 @@ interface PlaceRow {
   contributor: string;
   device: string;
   attest_key: string | null;
+  description: string | null;
+  fee: string | null;
+  contacts: string | null;
 }
 
 const fromRow = (row: PlaceRow): StoredPlace => ({
@@ -137,6 +161,9 @@ const fromRow = (row: PlaceRow): StoredPlace => ({
   contributor: row.contributor,
   device: row.device,
   ...(row.attest_key === null ? {} : { attest_key: row.attest_key }),
+  ...(row.description === null ? {} : { description: row.description }),
+  ...(row.fee === null ? {} : { fee: JSON.parse(row.fee) as FeeValue }),
+  ...(row.contacts === null ? {} : { contacts: JSON.parse(row.contacts) as Partial<Record<ContactFactName, FactValue>> }),
 });
 
 export async function getPlace(db: D1Like, id: string): Promise<StoredPlace | undefined> {
@@ -203,8 +230,19 @@ export async function listPlaces(db: D1Like, now: string, bbox?: Bbox): Promise<
       now,
     });
     if (standing !== "shown" && standing !== "confirmed") continue;
-    const { id, location, kind, name, added, contributor } = place;
-    out.push({ id, location, kind, name, standing, added, contributor });
+    const { id, location, kind, name, added, contributor, description, fee, contacts } = place;
+    out.push({
+      id,
+      location,
+      kind,
+      name,
+      standing,
+      added,
+      contributor,
+      ...(description !== undefined ? { description } : {}),
+      ...(fee !== undefined ? { fee } : {}),
+      ...(contacts !== undefined ? { contacts } : {}),
+    });
   }
   return out;
 }
