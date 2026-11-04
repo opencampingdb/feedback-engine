@@ -24,8 +24,8 @@ ALLOWED_ORIGINS = "*"
 # GOOGLE_SERVICE_ACCOUNT secret (its project needs the Cloud Vision API turned on).
 SAFESEARCH = "off"
 # The inbox's apply workflow, by file name or id. With RECENT_LIST, the job
-# below starts it once the inbox has had no new write for 2 minutes, at most
-# once every 10 minutes. The GitHub App needs Actions: Read and write on the
+# below starts it once the inbox has had no new write for 2 minutes, or once
+# the oldest waiting write is 10 minutes old, at most once every 10 minutes. The GitHub App needs Actions: Read and write on the
 # inbox for it. Until it has that, each start fails, is logged, and is tried
 # again the next minute, and the apply's hourly schedule still runs.
 # APPLY_WORKFLOW = "apply-feedback.yml"

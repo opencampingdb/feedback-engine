@@ -109,7 +109,8 @@ export interface Env {
   /**
    * The inbox's apply workflow, by file name (`apply-feedback.yml`) or id.
    * With RECENT_LIST, the scheduled job starts it on INBOX_BRANCH once the
-   * inbox has had no new write for 2 minutes, at most once every 10 minutes.
+   * inbox has had no new write for 2 minutes, or once the oldest waiting write
+   * is 10 minutes old, at most once every 10 minutes.
    * Needs the GitHub App's `actions: write` on the inbox. Off when left out.
    */
   APPLY_WORKFLOW?: string;

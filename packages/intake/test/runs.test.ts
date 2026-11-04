@@ -2,7 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createHandler, createScheduled, type Env } from "../src/index.js";
 import type { KVLike } from "../src/ratelimit.js";
-import { CAP_MS, QUIET_MS, recordInboxWrite, startApplyIfDue } from "../src/runs.js";
+import { CAP_MS, MAX_WAIT_MS, QUIET_MS, recordInboxWrite, startApplyIfDue } from "../src/runs.js";
 import { fakeD1 } from "./fake-d1.js";
 
 const NOW = Date.parse("2026-11-04T09:00:00Z");
@@ -71,6 +71,44 @@ describe("starting the apply", () => {
     clock = first + CAP_MS;
     expect(await tick()).toBe("started");
     expect(starts).toEqual([first, first + CAP_MS]);
+  });
+
+  it("starts one run at the 10 minute mark while writes come every minute for 15 minutes", async () => {
+    const outcomes: string[] = [];
+    for (let minute = 0; minute <= 15; minute++) {
+      clock = NOW + minute * MINUTE;
+      outcomes.push(await tick());
+      if (minute < 15) await recordInboxWrite(db, clock);
+    }
+    expect(starts).toEqual([NOW + MAX_WAIT_MS]);
+    expect(outcomes[10]).toBe("started");
+    expect(outcomes.slice(1, 10).every((o) => o === "waiting_quiet")).toBe(true);
+    expect(outcomes.slice(11)).not.toContain("started");
+  });
+
+  it("starts again at the cap when the stream goes on", async () => {
+    for (let minute = 0; minute <= 25; minute++) {
+      clock = NOW + minute * MINUTE;
+      await tick();
+      await recordInboxWrite(db, clock);
+    }
+    expect(starts).toEqual([NOW + 10 * MINUTE, NOW + 20 * MINUTE]);
+  });
+
+  it("keeps the first waiting write when a start fails", async () => {
+    await recordInboxWrite(db, clock);
+    for (let minute = 1; minute < 10; minute++) {
+      clock = NOW + minute * MINUTE;
+      await recordInboxWrite(db, clock);
+    }
+    clock = NOW + MAX_WAIT_MS;
+    const failing = async () => {
+      throw new Error("403");
+    };
+    expect(await startApplyIfDue(db, clock, failing)).toBe("failed");
+    await recordInboxWrite(db, clock);
+    clock += MINUTE;
+    expect(await tick()).toBe("started");
   });
 
   it("never moves the last write back", async () => {
