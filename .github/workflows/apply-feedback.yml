@@ -330,7 +330,24 @@ jobs:
             if ! git diff --cached --quiet; then
               git commit -m "Feedback for review (run ${RUN_ID})"
             fi
-            git push origin HEAD:refs/heads/feedback/review
+            # The intake's AI reviewer commits to this branch at any time. Rebase
+            # onto its commits and retry, keeping the merge of the base branch
+            # made above.
+            pushed=false
+            for attempt in 1 2 3 4 5; do
+              if git fetch origin "+refs/heads/feedback/review:refs/remotes/origin/feedback/review" &&
+                git rebase --rebase-merges origin/feedback/review &&
+                git push origin HEAD:refs/heads/feedback/review; then
+                pushed=true
+                break
+              fi
+              git rebase --abort 2>/dev/null || true
+              sleep $((attempt * 5))
+            done
+            if [ "$pushed" != "true" ]; then
+              echo "::error::could not push to feedback/review after 5 attempts"
+              exit 1
+            fi
             gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$RUNNER_TEMP/review-pr-body.md"
             if [ "$OWNER_CLAIMS" = "true" ]; then
               gh pr edit "$PR_NUMBER" --repo "$DATA_REPO" --add-label owner-claim
