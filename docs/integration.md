@@ -116,7 +116,23 @@ Facts a report may name:
 - contacts: `website`, `facebook`, `instagram`, `tiktok` and `x` (https only), `phone`, `phone_2` and `email`
 - `address`, an object (`PlaceAddress`) with a `street` or, for a rural address, a named `place`, and any of `unit`, `housenumber`, `suburb`, `state` (one of `ADDRESS_STATES`: `NSW`, `VIC`, `QLD`, `SA`, `WA`, `TAS`, `NT`, `ACT`) and `postcode` (four digits)
 
-A fact from an attested report is applied at once, unless another device reported a different value within 90 days or the owner set it: then a person decides. Without attestation, two devices must agree within 90 days. Contact changes (website, phones, email and social pages) and addresses are checked by a person, even from one report. `booking_url` comes only from the owner.
+A fact from an attested report is applied at once, unless another device reported a different value within 90 days or the owner set it: then a person decides. Without attestation, two devices must agree within 90 days. Contacts (website, phones, email and social pages) and addresses follow the same rule, but an attested one is applied at once only when it passes `contactProblem`; one that fails, and any without attestation, goes to a person. `booking_url` comes only from the owner.
+
+**Link and spam checks.** `contactProblem(fact, value)` returns what is wrong with a contact or an address, or `null` when it passes, so the app can check before sending. A website or social page must be an https address on a public host (no IP addresses or local names, see `isPublicHttpsUrl`) and not a link shortener (`LINK_SHORTENERS`: bit.ly, tinyurl.com, t.co and the rest). `facebook` must be on facebook.com or fb.com, `instagram` on instagram.com, `tiktok` on tiktok.com and `x` on x.com or twitter.com, or a subdomain such as www or m (`SOCIAL_HOSTS`). A phone or email is checked as its fact is, and an address with `addressProblems`. The facts it covers are `CONTACT_FACTS`.
+
+```ts
+import { contactProblem } from "@opencampingdb/feedback";
+
+contactProblem("facebook", "https://www.facebook.com/lakecamp"); // null
+contactProblem("website", "https://bit.ly/camp"); // "must not be a link shortener"
+contactProblem("instagram", "https://park.example.org/insta"); // "must be on instagram.com"
+```
+
+**Reporting a contact.** A `contact` report says a contact on a place is wrong or spam: `fact` is one of `CONTACT_FACTS` and `reason` is `wrong` or `spam` (`CONTACT_REPORT_REASONS`). It needs the place and carries no `value`. One report goes to a person. Reports from two different sources within 90 days, at least one of them attested, take the contact off the place at the next apply run, and a person, a bot or an AI reviewer then decides whether it comes back. A contact the owner set is left to a person, and a report about a contact the place does not have is refused.
+
+```ts
+await feedback.report({ place, report: { kind: "contact", fact: "website", reason: "spam" }, consent: true });
+```
 
 Three more report kinds let a traveller fix what Edit site covers on other apps. Each goes to a person, who accepts or rejects it on the review PR:
 
@@ -144,7 +160,18 @@ const problem = firstProblem(name, note); // "rude", "contact", "spam" or null
 
 `tidyName` brings a shouted or all lower case name to title case and keeps states and road terms such as `NSW` and `4WD` in capitals. `tidyText` turns shouted text into sentences. Both collapse spacing and runs such as `!!!!` or `sooooo`. `textProblem` checks one text and `firstProblem` several, after tidying: `rude` for rude words and slurs, however they are spelt, `contact` for an email address, link or phone number (opening hours such as 0800-1700 are left alone), and `spam` for advertising wording, a word said over and over, or keyboard mashing. Show your own message for each.
 
-**Contacts on a new place.** A `new_place` report may carry `contacts`, with any of `phone`, `website` and `email`, each checked as the fact of that name is. Keep them out of the note. A person checks them before they are published. `contacts` is refused on every other report kind.
+**Contacts on a new place.** A `new_place` report may carry `contacts`, with any of `phone`, `website` and `email`, each checked as the fact of that name is. Keep them out of the note. When the place is published, each contact that passes `contactProblem` is published with it, and a person checks the rest. `contacts` is refused on every other report kind.
+
+**Description and fee on a new place.** A `new_place` report may carry `description`, checked as a `description` report's value is (1 to 500 characters, no email address, phone number or link) and stored trimmed, and `fee` (true, false or `donation`). Both are published with the place. A description that fails `firstProblem` after `tidyText` is left off and a person checks it, so run the text checks before sending. Both are refused on every other report kind.
+
+```ts
+await feedback.report({
+  place: null,
+  location: { lat: -36.851234, lon: 144.551234 },
+  report: { kind: "new_place", name: "Creek Bend Free Camp", description: "Flat sites beside the creek.", fee: false },
+  consent: true,
+});
+```
 
 ```ts
 await feedback.report({
@@ -168,9 +195,9 @@ addressProblems({ suburb: "Lakeside", state: "Victoria" });
 await feedback.report({ place, report: { kind: "fact", fact: "address", value: address }, consent: true });
 ```
 
-A `new_place` report may carry `report.address`, checked the same way and held for a person like its contacts. It still needs its `location`, so an app that lets a traveller add a place by address finds the spot first. `address` is refused on every other report kind.
+A `new_place` report may carry `report.address`, checked the same way and published with the place like its contacts when it passes `contactProblem`. It still needs its `location`, so an app that lets a traveller add a place by address finds the spot first. `address` is refused on every other report kind.
 
-**Reporting a new place.** A `remove` report says a new place should come down, with a `reason` from `NEW_PLACE_REPORT_REASONS`: `not_there`, `fake`, `offensive`, `private_land` or `duplicate`. `reason` is refused on every other report kind.
+**Reporting a new place.** A `remove` report says a new place should come down, with a `reason` from `NEW_PLACE_REPORT_REASONS`: `not_there`, `fake`, `offensive`, `private_land` or `duplicate`. `reason` is refused on every report kind but `remove` and `contact`.
 
 ```ts
 await feedback.report({ place: newPlace, report: { kind: "remove", reason: "private_land" }, consent: true });
