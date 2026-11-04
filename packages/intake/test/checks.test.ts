@@ -101,7 +101,7 @@ afterEach(() => {
 describe("checks: the intake's own rules", () => {
   it("passes a fact with no text or links without calling URLhaus or the AI, and counts it", async () => {
     const t = setup();
-    expect(await t.check(fact("toilets", true), NEWCOMER)).toEqual({ pass: true });
+    expect(await t.check(fact("toilets", true), NEWCOMER)).toMatchObject({ pass: true });
     expect(t.urlhaus.calls).toEqual([]);
     expect(t.ai!.runs).toEqual([]);
     expect(counted(t.db)).toEqual([{ day: "2026-11-04", count: 1 }]);
@@ -122,7 +122,7 @@ describe("checks: the intake's own rules", () => {
   it("holds a description with a phone number in it, but not a note, which is stored without it", async () => {
     const t = setup();
     expect(await t.check(newPlace({ description: "Ring 0412 345 678 to book" }), NEWCOMER)).toEqual({ held: "text_check" });
-    expect(await t.check(newPlace({ note: "Ring 0412 345 678 to book" }), NEWCOMER)).toEqual({ pass: true });
+    expect(await t.check(newPlace({ note: "Ring 0412 345 678 to book" }), NEWCOMER)).toMatchObject({ pass: true });
     expect(t.ai!.runs[0]!.inputs.messages).toEqual([{ role: "user", content: "Lake Eppalock Rest Area\n\nRing [removed] to book" }]);
   });
 
@@ -141,25 +141,52 @@ describe("checks: the intake's own rules", () => {
 
   it("passes a good phone and email without calling URLhaus", async () => {
     const t = setup();
-    expect(await t.check(fact("phone", "+61 3 5432 1234"), NEWCOMER)).toEqual({ pass: true });
-    expect(await t.check(fact("email", "stay@example.org"), NEWCOMER)).toEqual({ pass: true });
+    expect(await t.check(fact("phone", "+61 3 5432 1234"), NEWCOMER)).toMatchObject({ pass: true });
+    expect(await t.check(fact("email", "stay@example.org"), NEWCOMER)).toMatchObject({ pass: true });
     expect(t.urlhaus.calls).toEqual([]);
   });
 
   it("holds a contributor's live changes past the daily cap, counted per UTC day", async () => {
     const t = setup();
-    for (let i = 0; i < LIVE_DAILY_LIMIT; i++) expect(await t.check(fact("toilets", true), NEWCOMER)).toEqual({ pass: true });
+    for (let i = 0; i < LIVE_DAILY_LIMIT; i++) expect(await t.check(fact("toilets", true), NEWCOMER)).toMatchObject({ pass: true });
     expect(await t.check(fact("website", "https://example.org"), NEWCOMER)).toEqual({ held: "daily_cap" });
     expect(t.urlhaus.calls).toEqual([]);
     // Someone else has their own count.
-    expect(await t.check(fact("toilets", true), TRUSTED)).toEqual({ pass: true });
+    expect(await t.check(fact("toilets", true), TRUSTED)).toMatchObject({ pass: true });
     // The next UTC day starts again.
     t.setNow(Date.parse("2026-11-05T00:00:00Z"));
-    expect(await t.check(fact("toilets", true), NEWCOMER)).toEqual({ pass: true });
+    expect(await t.check(fact("toilets", true), NEWCOMER)).toMatchObject({ pass: true });
     expect(counted(t.db)).toEqual([
       { day: "2026-11-04", count: LIVE_DAILY_LIMIT },
       { day: "2026-11-05", count: 1 },
     ]);
+  });
+
+  it("caps live changes per client network and per attest key too, whatever contributor id the app sends", async () => {
+    const t = setup();
+    const from = (n: number, extra: Partial<CheckContributor>): CheckContributor => ({
+      id: `ctr_${String(n).padStart(16, "0")}`,
+      accepted: 0,
+      taken_down: 0,
+      ...extra,
+    });
+    // A new contributor id each time, from one network.
+    for (let i = 0; i < LIVE_DAILY_LIMIT; i++) expect(await t.check(fact("toilets", true), from(i, { origin: "a1b2c3d4e5f60718" }))).toMatchObject({ pass: true });
+    expect(await t.check(fact("toilets", true), from(99, { origin: "a1b2c3d4e5f60718" }))).toEqual({ held: "daily_cap" });
+    // The cap that was full takes nothing from the others: the held item's contributor has no count.
+    expect(counted(t.db, from(99, {}).id)).toEqual([]);
+    expect(await t.check(fact("toilets", true), from(99, { origin: "0f0f0f0f0f0f0f0f" }))).toMatchObject({ pass: true });
+
+    // A new contributor id and network each time, from one App Attest key.
+    for (let i = 0; i < LIVE_DAILY_LIMIT; i++) {
+      expect(await t.check(fact("toilets", true), from(200 + i, { origin: i.toString(16).padStart(16, "e"), attest_key: "ak_00112233445566ff" }))).toMatchObject({ pass: true });
+    }
+    expect(await t.check(fact("toilets", true), from(300, { attest_key: "ak_00112233445566ff" }))).toEqual({ held: "daily_cap" });
+    const count = (key: string) => t.db.db.prepare("SELECT count FROM live_counts WHERE contributor = ?").get(key);
+    expect(count("ak_00112233445566ff")).toEqual({ count: LIVE_DAILY_LIMIT });
+    expect(count("org_a1b2c3d4e5f60718")).toEqual({ count: LIVE_DAILY_LIMIT });
+    expect(count("org_0f0f0f0f0f0f0f0f")).toEqual({ count: 1 });
+    expect(count(`org_${(7).toString(16).padStart(16, "e")}`)).toEqual({ count: 1 });
   });
 
   it("counts only items that pass", async () => {
@@ -176,7 +203,7 @@ describe("checks: the intake's own rules", () => {
         return { response: { safe: true } };
       }),
     });
-    expect(await t.check(fact("toilets", true), NEWCOMER)).toEqual({ pass: true });
+    expect(await t.check(fact("toilets", true), NEWCOMER)).toMatchObject({ pass: true });
     expect(await t.check(newPlace(), NEWCOMER)).toEqual({ held: "daily_cap" });
   });
 
@@ -206,7 +233,7 @@ describe("checks: the intake's own rules", () => {
 describe("checks: URLhaus", () => {
   it("looks up a website's address and host with the auth key, as form posts", async () => {
     const t = setup();
-    expect(await t.check(fact("website", "https://Camp.Example.org/stay"), TRUSTED)).toEqual({ pass: true });
+    expect(await t.check(fact("website", "https://Camp.Example.org/stay"), TRUSTED)).toMatchObject({ pass: true });
     expect(t.urlhaus.calls.map((c) => [c.endpoint, c.key, c.type, Object.fromEntries(c.body)])).toEqual([
       [URLHAUS_URL_ENDPOINT, KEY, "application/x-www-form-urlencoded", { url: "https://Camp.Example.org/stay" }],
       [URLHAUS_HOST_ENDPOINT, KEY, "application/x-www-form-urlencoded", { host: "camp.example.org" }],
@@ -215,7 +242,7 @@ describe("checks: URLhaus", () => {
 
   it("looks up a social page's address only, not its network's host", async () => {
     const t = setup();
-    expect(await t.check(fact("facebook", "https://www.facebook.com/examplecamp"), TRUSTED)).toEqual({ pass: true });
+    expect(await t.check(fact("facebook", "https://www.facebook.com/examplecamp"), TRUSTED)).toMatchObject({ pass: true });
     expect(t.urlhaus.calls.map((c) => c.endpoint)).toEqual([URLHAUS_URL_ENDPOINT]);
   });
 
@@ -247,7 +274,7 @@ describe("checks: URLhaus", () => {
     expect(await t.check(fact("website", "https://surbl.example.org"), TRUSTED)).toEqual({ held: "link_check" });
     expect(await t.check(fact("website", "https://hacked.example.org"), TRUSTED)).toEqual({ held: "link_check" });
     expect(await t.check(fact("website", "https://online.example.org"), TRUSTED)).toEqual({ held: "link_check" });
-    expect(await t.check(fact("website", "https://offline.example.org"), TRUSTED)).toEqual({ pass: true });
+    expect(await t.check(fact("website", "https://offline.example.org"), TRUSTED)).toMatchObject({ pass: true });
   });
 
   it("reads the query_staus spelling in URLhaus's example", async () => {
@@ -305,7 +332,7 @@ describe("checks: Llama Guard", () => {
   it("asks about the free text from a contributor without a track record, and nothing else", async () => {
     const t = setup();
     const item = newPlace({ description: "Grassy sites by the water", note: "Lovely spot", fee: true, contacts: { website: "https://camp.example.org", phone: "03 5432 1234" } });
-    expect(await t.check(item, NEWCOMER)).toEqual({ pass: true });
+    expect(await t.check(item, NEWCOMER)).toMatchObject({ pass: true });
     expect(t.ai!.runs).toEqual([
       {
         model: GUARD_MODEL,
@@ -356,7 +383,7 @@ describe("checks: Llama Guard", () => {
   it("passes what it calls safe, in its JSON or its plain text answer", async () => {
     for (const out of [{ response: { safe: true, categories: [] } }, { response: "safe" }, { response: "safe\n" }]) {
       const t = setup({ ai: fakeAi(out) });
-      expect(await t.check(newPlace(), NEWCOMER)).toEqual({ pass: true });
+      expect(await t.check(newPlace(), NEWCOMER)).toMatchObject({ pass: true });
     }
   });
 
@@ -364,7 +391,7 @@ describe("checks: Llama Guard", () => {
     const none = setup({ ai: undefined });
     expect(await none.check(newPlace(), NEWCOMER)).toEqual({ held: "check_unavailable" });
     // A contributor with a track record doesn't need it.
-    expect(await none.check(newPlace(), TRUSTED)).toEqual({ pass: true });
+    expect(await none.check(newPlace(), TRUSTED)).toMatchObject({ pass: true });
     const outs = [
       async () => Promise.reject(new Error("3040: Capacity temporarily exceeded")),
       async () => ({ response: "I can't help with that" }),

@@ -366,7 +366,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `text_check` | Free text failed the text checks. |
 | `unconfirmed` | A contact report from one source, or with none attested. |
 | `no_contributor` | A new place sent without a contributor. |
-| `daily_cap` | The contributor has had 50 live changes today (UTC). |
+| `daily_cap` | The contributor, their network or their install's App Attest key has had 50 live changes today (UTC). |
 | `ai_check` | The AI check flagged its free text. |
 | `check_unavailable` | A check could not run, so it waits rather than going live unchecked. |
 | `unknown_place` | The intake does not have the place yet, such as a place newer than the last release. |

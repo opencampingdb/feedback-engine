@@ -216,7 +216,7 @@ export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDeci
   // The place already has the value: nothing to show, and nothing for the checks.
   if (decision.changes.length === 0) return live((d) => [evidenceStatement(d, item, "live")]);
 
-  const checked = await checks.check(submission, record);
+  const checked = await checks.check(submission, { ...record, origin: item.origin, attest_key: item.attest_key });
   if ("held" in checked) return held(checked.held, (d) => [evidenceStatement(d, item, "held")]);
   const [cellLon, cellLat] = place.cell;
   return live((d) => [
@@ -261,7 +261,7 @@ async function decideNewPlace({ checks, item, submission }: DecideInput, record:
       ...(fields.description !== undefined ? { description: fields.description } : {}),
     } as ReportBody,
   } as FeedbackSubmission;
-  const checked = await checks.check(published, record);
+  const checked = await checks.check(published, { ...record, origin: item.origin, attest_key: item.attest_key });
   if ("held" in checked) return held(checked.held);
 
   const { place_kind, name } = item.report;

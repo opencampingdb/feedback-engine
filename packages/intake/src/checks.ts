@@ -6,7 +6,9 @@
  * 1. The intake's own rules: the text checks on the name, description and
  *    note, `contactProblem` on each contact and the address (which covers the
  *    phone and email formats), and at most `LIVE_DAILY_LIMIT` live changes per
- *    contributor per UTC day, counted in D1.
+ *    UTC day for each of the contributor, the client network (`origin`) and
+ *    the App Attest key, counted in D1. The app chooses the contributor id,
+ *    so the network and key caps hold when an install changes it.
  * 2. URLhaus (abuse.ch), for the links that passed step 1.
  * 3. Llama Guard 3 on Workers AI, for the name, description and note, and only
  *    from a contributor without a track record. Facts, fees, choices from a
@@ -15,7 +17,8 @@
  * A check service that is down, answers with an error, or takes longer than
  * `CHECK_TIMEOUT_MS` holds the item as `check_unavailable`. So does a check
  * that isn't set up (no URLhaus key, no AI binding) when the item needs it.
- * An item that passes counts as one live change for its contributor.
+ * An item that passes counts as one live change for its contributor, network
+ * and key.
  */
 
 import {
@@ -31,7 +34,7 @@ import {
 import type { Fetch } from "./github.js";
 import type { D1Like } from "./recent.js";
 
-/** Live changes per contributor per UTC day. Past it, items are held as `daily_cap`. */
+/** Live changes per contributor, per client network and per App Attest key, per UTC day. Past it, items are held as `daily_cap`. */
 export const LIVE_DAILY_LIMIT = 50;
 /** How long one check service may take before the item is held as `check_unavailable`. */
 export const CHECK_TIMEOUT_MS = 2000;
@@ -47,7 +50,14 @@ export const GUARD_MODEL = "@cf/meta/llama-guard-3-8b";
 /** Why the checks held an item. */
 export type HeldReason = "text_check" | "link_check" | "daily_cap" | "ai_check" | "check_unavailable";
 
-export type CheckResult = { pass: true } | { held: HeldReason };
+/** The live change an item that passed took from each of its daily caps, to give back if it is not recorded after all. */
+export interface LiveSlot {
+  day: string;
+  /** The `live_counts` keys counted: the contributor, `org_` and the hashed network, and the `ak_` attest key. */
+  keys: string[];
+}
+
+export type CheckResult = { pass: true; slot: LiveSlot } | { held: HeldReason };
 
 /** Who sent the item, and what has become of what they sent before. */
 export interface CheckContributor {
@@ -57,6 +67,10 @@ export interface CheckContributor {
   accepted: number;
   /** Items of theirs that were later taken down. */
   taken_down: number;
+  /** The hashed client network the item came from, as the inbox stores it. */
+  origin?: string | undefined;
+  /** The `ak_` App Attest key the item was sent with. */
+  attest_key?: string | undefined;
 }
 
 /** The part of a Workers AI binding the checks use. */
@@ -198,20 +212,57 @@ async function guardUnsafe(ai: AiLike, text: string): Promise<boolean> {
 
 const hasTrackRecord = (c: CheckContributor) => c.accepted >= TRACK_RECORD_ACCEPTED && c.taken_down === 0;
 
-async function liveCount(db: D1Like, contributor: string, day: string): Promise<number> {
-  const count = await db.prepare("SELECT count FROM live_counts WHERE contributor = ? AND day = ?").bind(contributor, day).first<number>("count");
+/** The `live_counts` keys an item from `contributor` counts against. */
+export function liveKeys(contributor: CheckContributor): string[] {
+  return [contributor.id, ...(contributor.origin ? [`org_${contributor.origin}`] : []), ...(contributor.attest_key ? [contributor.attest_key] : [])];
+}
+
+const marks = (n: number) => Array.from({ length: n }, () => "?").join(", ");
+
+/** The highest count among `keys` on `day`. */
+async function liveCount(db: D1Like, keys: readonly string[], day: string): Promise<number> {
+  const count = await db
+    .prepare(`SELECT max(count) AS count FROM live_counts WHERE day = ? AND contributor IN (${marks(keys.length)})`)
+    .bind(day, ...keys)
+    .first<number | null>("count");
   return count ?? 0;
 }
 
-/** Counts one live change, unless the contributor has reached the cap. False when they have. */
-async function countLive(db: D1Like, contributor: string, day: string): Promise<boolean> {
+/** Counts one live change on `key`, unless it has reached the cap. False when it has. */
+async function countOne(db: D1Like, key: string, day: string): Promise<boolean> {
   const row = await db
     .prepare(
       "INSERT INTO live_counts (contributor, day, count) VALUES (?, ?, 1) ON CONFLICT (contributor, day) DO UPDATE SET count = count + 1 WHERE count < ? RETURNING count",
     )
-    .bind(contributor, day, LIVE_DAILY_LIMIT)
+    .bind(key, day, LIVE_DAILY_LIMIT)
     .first<number>("count");
   return row !== null;
+}
+
+/**
+ * Counts one live change on each key, unless one of them has reached the cap.
+ * Then the keys counted so far are given back and the result is null.
+ */
+async function countLive(db: D1Like, keys: readonly string[], day: string): Promise<LiveSlot | null> {
+  const counted: string[] = [];
+  for (const key of keys) {
+    if (await countOne(db, key, day)) {
+      counted.push(key);
+      continue;
+    }
+    if (counted.length > 0) await releaseLive(db, { day, keys: counted });
+    return null;
+  }
+  return { day, keys: counted };
+}
+
+/** Gives back the live change `slot` took, when the item that took it was not recorded after all. */
+export async function releaseLive(db: D1Like, slot: LiveSlot): Promise<void> {
+  if (slot.keys.length === 0) return;
+  await db
+    .prepare(`UPDATE live_counts SET count = count - 1 WHERE day = ? AND count > 0 AND contributor IN (${marks(slot.keys.length)})`)
+    .bind(slot.day, ...slot.keys)
+    .run();
 }
 
 /** Deletes `live_counts` rows older than `LIVE_COUNT_DAYS`, for the intake's scheduled job. */
@@ -223,8 +274,10 @@ export async function pruneLiveCounts(db: D1Like, now: number): Promise<void> {
 export interface Checks {
   /**
    * Checks one validated item from `contributor`, cheapest first. An item that
-   * passes is counted as one of the contributor's live changes for the day, so
-   * call it last, when nothing else would hold the item.
+   * passes is counted as one of the contributor's, network's and key's live
+   * changes for the day, so call it last, when nothing else would hold the
+   * item, and give the slot back with `releaseLive` if the item is not
+   * recorded after all.
    */
   check(item: FeedbackSubmission, contributor: CheckContributor): Promise<CheckResult>;
 }
@@ -243,8 +296,9 @@ async function check(deps: CheckDeps, item: FeedbackSubmission, contributor: Che
   const contacts = contactsOf(item);
   if (contacts.some(([fact, value]) => contactProblem(fact, value) !== null)) return { held: "link_check" };
   const day = dayOf(deps.now());
+  const keys = liveKeys(contributor);
   try {
-    if ((await liveCount(deps.db, contributor.id, day)) >= LIVE_DAILY_LIMIT) return { held: "daily_cap" };
+    if ((await liveCount(deps.db, keys, day)) >= LIVE_DAILY_LIMIT) return { held: "daily_cap" };
   } catch {
     return unavailable;
   }
@@ -274,7 +328,8 @@ async function check(deps: CheckDeps, item: FeedbackSubmission, contributor: Che
   }
 
   try {
-    return (await countLive(deps.db, contributor.id, day)) ? { pass: true } : { held: "daily_cap" };
+    const slot = await countLive(deps.db, keys, day);
+    return slot ? { pass: true, slot } : { held: "daily_cap" };
   } catch {
     return unavailable;
   }

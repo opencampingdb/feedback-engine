@@ -1,5 +1,6 @@
--- Live changes per contributor per UTC day, for the intake's daily cap. A row
--- counts the items that passed every check that day. Rows from earlier days
+-- Live changes per UTC day, for the intake's daily caps. `contributor` is the
+-- counted key: a contributor id (`ctr_`), a hashed client network (`org_`) or
+-- an App Attest key (`ak_`). A row counts the items that passed every check that day. Rows from earlier days
 -- are only kept until the intake prunes them.
 
 CREATE TABLE live_counts (

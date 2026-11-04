@@ -760,6 +760,20 @@ describe("send-time decisions", () => {
     expect(await send(fact(PLACE, "drinking_water", true))).toMatchObject({ state: "live" });
   });
 
+  it("holds a fact past 50 live changes for the day from one network, however often the install changes its contributor id", async () => {
+    const network = { "cf-connecting-ip": "203.0.113.7" };
+    for (let i = 0; i < 50; i++) {
+      const res = await handle(feedback(fact(PLACE, "toilets", i % 2 === 0, { device: otherDevice(i % 10), contributor: `acct_rotating_${String(i).padStart(6, "0")}` }), network), e);
+      expect(await res.json()).toMatchObject({ state: "live" });
+      clock += 1000;
+    }
+    const res = await handle(feedback(fact(PLACE, "showers", true, { contributor: "acct_rotating_fresh01" }), network), e);
+    expect(await res.json()).toMatchObject(held("daily_cap"));
+    // Another network is not held by it.
+    const other = await handle(feedback(fact(PLACE, "showers", true, { contributor: "acct_rotating_fresh01" }), { "cf-connecting-ip": "198.51.100.7" }), e);
+    expect(await other.json()).toMatchObject({ state: "live" });
+  });
+
   it("holds everything from a blocked contributor", async () => {
     await send(fact(PLACE, "toilets", true));
     const contributor = services.writes[0]!.contributor as string;
