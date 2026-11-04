@@ -279,6 +279,18 @@ describe("intakeRecentList", () => {
     expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).has("authorization")).toBe(false);
   });
 
+  it("leaves out places the intake keeps listing after the apply was done with them", async () => {
+    const fetcher = answer(200, {
+      places: [
+        { id: placeOf(1), standing: "shown" },
+        { id: placeOf(2), standing: "hidden", in_data_at: "2026-11-03T10:00:00Z" },
+        { id: placeOf(3), standing: "shown", in_data_at: "2026-11-03T10:00:00Z" },
+      ],
+    });
+    const ids = await intakeRecentList("https://intake.example.org", fetcher as unknown as typeof fetch).ids();
+    expect([...ids]).toEqual([placeOf(1)]);
+  });
+
   it("throws when the intake answers with an error", async () => {
     const list = intakeRecentList("https://intake.example.org", answer(503, { error: "down" }) as unknown as typeof fetch);
     await expect(list.ids()).rejects.toThrow(/503/);

@@ -503,33 +503,115 @@ describe("recent places", () => {
         body: JSON.stringify({ ids }),
       });
 
-    it("takes places written into the data off the list", async () => {
+    const DAY = 24 * HOUR;
+    const reportRemove = (place: string, i: number) =>
+      feedback({ ...newPlace({ device: otherDevice(i), contributor: `acct_reporter_000000${i}` }), place, location: undefined, report: { kind: "remove", reason: "fake" } });
+    const withdraw = (place: string) => feedback({ type: "withdraw", place, device: ADDER, contributor: "acct_3f9a8b7c6d5e4f30", app_version: "1.0.0", consent: true });
+    const prune = () => createScheduled({ fetch: services.fetch, now: () => clock })(e);
+    const rows = (id: string) => ({
+      places: store.db.prepare("SELECT count(*) AS n FROM new_places WHERE id = ?").get(id),
+      evidence: store.db.prepare("SELECT count(*) AS n FROM evidence WHERE place_id = ?").get(id),
+    });
+
+    it("keeps listing places written into the data, marked with in_data_at from the intake's clock", async () => {
       const id = await add();
-      const kept = await add({ device: otherDevice(1) });
+      const waiting = await add({ device: otherDevice(1) });
+      clock += HOUR;
       const res = await handle(remove([id, "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA"]), e);
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ removed: 2 });
-      expect((await list()).map((p) => p.id)).toEqual([kept]);
+      const places = (await list()) as (Listed & { in_data_at?: string })[];
+      expect(places.map((p) => [p.id, p.standing, p.in_data_at])).toEqual(
+        [
+          [id, "shown", "2026-11-03T10:00:00Z"],
+          [waiting, "shown", undefined],
+        ].sort(),
+      );
+      expect(Object.keys(places.find((p) => p.id === waiting)!)).not.toContain("in_data_at");
     });
 
-    it("removes the removal reports on a place with it", async () => {
-      // Fixed random bytes for each item, so the place can be sent again with the same id after its removal.
+    it("keeps the first in_data_at when the apply sends a place again", async () => {
+      const id = await add();
+      await handle(remove([id]), e);
+      clock += 2 * DAY;
+      expect((await handle(remove([id]), e)).status).toBe(200);
+      expect(((await list()) as (Listed & { in_data_at?: string })[])[0]!.in_data_at).toBe("2026-11-03T09:00:00Z");
+    });
+
+    it("lists a place hidden by removal reports after it reached the data as hidden", async () => {
+      const id = await add();
+      await handle(remove([id]), e);
+      expect((await handle(reportRemove(id, 1), e)).status).toBe(202);
+      expect((await list()).map((p) => p.standing)).toEqual(["shown"]);
+      expect((await handle(reportRemove(id, 2), e)).status).toBe(202);
+      expect((await list()).map((p) => [p.id, p.standing])).toEqual([[id, "hidden"]]);
+    });
+
+    it("lists a place whose contributor is blocked after it reached the data as hidden", async () => {
+      const id = await add();
+      await handle(remove([id]), e);
+      const contributor = written()[0]!.contributor as string;
+      const block = new Request("https://intake.example/v1/places/recent/block", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ contributors: [contributor] }),
+      });
+      expect((await handle(block, e)).status).toBe(200);
+      expect((await list()).map((p) => [p.id, p.standing])).toEqual([[id, "hidden"]]);
+    });
+
+    it("lists a place its adder withdraws after it reached the data as withdrawn", async () => {
+      const id = await add();
+      clock += HOUR;
+      await handle(remove([id]), e);
+      clock += HOUR;
+      expect((await handle(withdraw(id), e)).status).toBe(202);
+      expect((await list()).map((p) => [p.id, p.standing])).toEqual([[id, "withdrawn"]]);
+    });
+
+    it("still leaves out a hidden place the apply run is not done with", async () => {
+      const id = await add();
+      await handle(reportRemove(id, 1), e);
+      await handle(reportRemove(id, 2), e);
+      expect(await list()).toEqual([]);
+    });
+
+    it("stops listing a place 7 days after in_data_at, even before the prune", async () => {
+      const id = await add();
+      await handle(remove([id]), e);
+      clock = NOW + 7 * DAY;
+      expect((await list()).map((p) => p.id)).toEqual([id]);
+      clock = NOW + 7 * DAY + 1000;
+      expect(await list()).toEqual([]);
+    });
+
+    it("deletes a place and its evidence 7 days after in_data_at", async () => {
+      // Fixed random bytes for each item, so the place can be sent again with the same id after it is deleted.
       let seed = 1;
       handle = createHandler({ fetch: services.fetch, now: () => clock, randomBytes: (n) => new Uint8Array(n).fill(seed) });
       const id = await add();
-      const report = (i: number) =>
-        feedback({ ...newPlace({ device: otherDevice(i), contributor: `acct_reporter_000000${i}` }), place: id, location: undefined, report: { kind: "remove", reason: "fake" } });
       seed = 2;
-      expect((await handle(report(1), e)).status).toBe(202);
+      expect((await handle(reportRemove(id, 1), e)).status).toBe(202);
       seed = 3;
-      expect((await handle(report(2), e)).status).toBe(202);
-      expect(await list()).toEqual([]);
-      expect((await handle(remove([id]), e)).status).toBe(200);
+      expect((await handle(reportRemove(id, 2), e)).status).toBe(202);
+      await handle(remove([id]), e);
+      const other = await add({ device: otherDevice(5), contributor: "acct_second_person_01" });
 
+      clock = NOW + 7 * DAY - 1000;
+      await prune();
+      expect(rows(id)).toEqual({ places: { n: 1 }, evidence: { n: 2 } });
+      clock = NOW + 7 * DAY + 1000;
+      await prune();
+      expect(rows(id)).toEqual({ places: { n: 0 }, evidence: { n: 0 } });
+      // A place the apply is not done with stays, however old.
+      expect(rows(other).places).toEqual({ n: 1 });
+
+      // The same item sent again at the same moment, so it makes the same id.
       seed = 1;
+      clock = NOW;
       expect(await add()).toBe(id);
       // Had the two removal reports outlived the place, they would hide it again.
-      expect((await list()).map((p) => p.id)).toEqual([id]);
+      expect((await list()).find((p) => p.id === id)?.standing).toBe("shown");
     });
 
     it("refuses a wrong token and a bad body", async () => {

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { dataVersionTime, withRecentChanges, type RecentChange } from "../src/index.js";
+import { describe, expect, expectTypeOf, it } from "vitest";
+import { dataVersionTime, withRecentChanges, type RecentChange, type RecentPlace } from "../src/index.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const OTHER = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZB";
@@ -113,5 +113,15 @@ describe("withRecentChanges", () => {
       fact_sources: { toilets: "feedback" },
       fact_dates: { toilets: "2026-11-03T10:00:00Z" },
     });
+  });
+});
+
+describe("RecentPlace", () => {
+  it("carries in_data_at only once the data has the place, so older intakes' places still type", () => {
+    expectTypeOf<RecentPlace["in_data_at"]>().toEqualTypeOf<string | undefined>();
+    const waiting: RecentPlace = { id: PLACE, location: { lat: -36.1, lon: 146.9 }, kind: null, name: null, standing: "shown", added: "2026-11-03T09:00:00Z", contributor: "ctr_5d1c0e2a9b7f4436" };
+    const inData: RecentPlace = { ...waiting, standing: "hidden", in_data_at: "2026-11-03T10:00:00Z" };
+    expect(inData.in_data_at).toBe("2026-11-03T10:00:00Z");
+    expect("in_data_at" in waiting).toBe(false);
   });
 });

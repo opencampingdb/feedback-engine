@@ -21,7 +21,7 @@ import {
 } from "@opencampingdb/feedback";
 import type { CheckContributor, Checks, HeldReason as ChecksHeldReason, LiveSlot } from "./checks.js";
 import { getIndexedPlace, type Cell } from "./place-index.js";
-import { chunks, placeStatement, type Bbox, type D1Like, type D1Statement, type StoredPlace } from "./recent.js";
+import { chunks, placeStatement, prunePlaceStatements, type Bbox, type D1Like, type D1Statement, type StoredPlace } from "./recent.js";
 
 /**
  * The intake deciding an item at send time, with the apply's own rules
@@ -406,13 +406,15 @@ export async function overrule(db: D1Like, ids: readonly string[], takenDown: re
 
 /**
  * Deletes recent changes the data has held for more than 7 days, those
- * accepted more than 7 days ago that the data still does not hold, and report
- * evidence older than the rules' 90 days. For the scheduled job.
+ * accepted more than 7 days ago that the data still does not hold, new places
+ * the apply run was done with more than 7 days ago with their evidence, and
+ * report evidence older than the rules' 90 days. For the scheduled job.
  */
 export async function pruneDecisions(db: D1Like, now: number): Promise<void> {
   await db.batch([
     db.prepare("DELETE FROM recent_changes WHERE in_data_at IS NOT NULL AND in_data_at < ?").bind(isoSeconds(now - KEEP_IN_DATA_DAYS * DAY_MS)),
     db.prepare("DELETE FROM recent_changes WHERE in_data_at IS NULL AND accepted < ?").bind(isoSeconds(now - KEEP_NOT_IN_DATA_DAYS * DAY_MS)),
     db.prepare("DELETE FROM report_evidence WHERE received < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
+    ...prunePlaceStatements(db, now),
   ]);
 }
