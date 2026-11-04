@@ -16,7 +16,7 @@ _Avoid_: attestation, signature (for the whole proof)
 The intake saying no to a key registration or an assertion, always with a reason.
 _Avoid_: rejection, failure (for a check that ran and said no)
 
-## New places between releases
+## Between releases
 
 **New place**:
 A place a traveller added that is not in a release yet.
@@ -42,6 +42,18 @@ _Avoid_: delete, retract
 How far a new place is trusted right now, worked out from its evidence and the time, and never stored.
 _Avoid_: status, score
 
+**Recent change**:
+An accepted change to a place that is not in a release yet, such as a fact set or a contact taken down.
+_Avoid_: pending change, live edit
+
 **Recent list**:
-The new places, with their standing, that apps show between releases.
+The new places, with their standing, and the recent changes that apps show between releases.
 _Avoid_: recent places store, instant places feed
+
+**Held**:
+Accepted, but kept from apps until a reviewer decides.
+_Avoid_: pending, queued, quarantined
+
+**Reviewer**:
+A person, bot or AI that the maintainers allow to decide held items, named on every decision it makes.
+_Avoid_: moderator, admin
