@@ -5,6 +5,7 @@ import {
   FLUSH_ATTEMPTS,
   FLUSH_LEASE_MS,
   flushInbox,
+  MAX_ROW_ATTEMPTS,
   MAX_FLUSH_BYTES,
   MAX_FLUSH_ITEMS,
   queueStatement,
@@ -235,6 +236,37 @@ describe("the inbox queue", () => {
     expect(git.log()[0]!.message).toBe(`Add ${id(2)}`);
   });
 
+  it("drains 300 rows queued behind one whose file GitHub keeps refusing, and moves that one to the back", async () => {
+    git.control.refuseContent = "poison";
+    await queue(file(0, "poison"), ...Array.from({ length: 300 }, (_, n) => file(n + 1)));
+    const attempts = () => db.db.prepare("SELECT attempts FROM inbox_queue WHERE id = ?").get(id(0));
+    expect(await flush()).toMatchObject({ outcome: "committed", items: MAX_FLUSH_ITEMS - 1 });
+    expect(attempts()).toEqual({ attempts: 1 });
+    expect(await flush()).toMatchObject({ outcome: "committed", items: 101 });
+    expect(git.pending()).toHaveLength(300);
+    expect(queued()).toEqual([id(0)]);
+    // On its own it fails each flush, makes no commit, and counts each time.
+    for (let n = 2; n < MAX_ROW_ATTEMPTS; n++) expect(await flush()).toEqual({ outcome: "settled", items: 0 });
+    expect(attempts()).toEqual({ attempts: MAX_ROW_ATTEMPTS });
+    // From then on it waits behind items queued after it.
+    await queue(file(400));
+    expect(await flush()).toMatchObject({ outcome: "committed", items: 1 });
+    expect(git.pending().map((p) => p.id)).toContain(id(400));
+    expect(queued()).toEqual([id(0)]);
+  });
+
+  it("leaves out a marked row whose commit GitHub can't place, and after 5 tries writes it again as new", async () => {
+    await queue(file(1), file(2));
+    db.db.prepare("UPDATE inbox_queue SET commit_sha = ? WHERE id = ?").run("0".repeat(40), id(1));
+    git.control.compareStatus = 500;
+    expect(await flush()).toMatchObject({ outcome: "committed", items: 1 });
+    expect(git.pending().map((p) => p.id)).toEqual([id(2)]);
+    for (let n = 1; n < MAX_ROW_ATTEMPTS; n++) await flush();
+    expect(db.db.prepare("SELECT commit_sha, attempts FROM inbox_queue").get()).toEqual({ commit_sha: null, attempts: MAX_ROW_ATTEMPTS });
+    expect(await flush()).toMatchObject({ outcome: "committed", items: 1 });
+    expect(git.pending().map((p) => p.id).sort()).toEqual([id(1), id(2)]);
+  });
+
   it("writes at most MAX_FLUSH_ITEMS a flush, oldest first, and the rest on the next", async () => {
     const files = Array.from({ length: MAX_FLUSH_ITEMS + 50 }, (_, n) => file(n));
     await queue(...files);
@@ -407,12 +439,12 @@ describe("queued writes through the intake", () => {
     expect((await handle(health("wrong"), guarded)).status).toBe(401);
     expect((await handle(health("places-token-for-the-apply-run"), env)).status).toBe(404);
     const read = async () => (await handle(health("places-token-for-the-apply-run"), guarded)).json();
-    expect(await read()).toEqual({ queued: 0, oldest_age_seconds: null, stale: false });
+    expect(await read()).toEqual({ queued: 0, oldest_age_seconds: null, stale: false, stuck: 0 });
     await handle(post(review(1)), guarded);
     clock += 30_000;
     await handle(post(review(2)), guarded);
     clock += 30_000;
-    expect(await read()).toEqual({ queued: 2, oldest_age_seconds: 60, stale: false });
+    expect(await read()).toEqual({ queued: 2, oldest_age_seconds: 60, stale: false, stuck: 0 });
     clock += 15 * MINUTE;
     expect(await read()).toMatchObject({ queued: 2, stale: true });
   });

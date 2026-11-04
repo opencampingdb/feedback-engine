@@ -1,4 +1,4 @@
-import type { Fetch, GitHubApp, GitHubAppConfig } from "./github.js";
+import { GitHubError, type Fetch, type GitHubApp, type GitHubAppConfig } from "./github.js";
 import { chunks, type D1Like, type D1Statement } from "./recent.js";
 
 /**
@@ -23,6 +23,13 @@ import { chunks, type D1Like, type D1Statement } from "./recent.js";
  * and each GitHub call is given FLUSH_TIMEOUT_MS. The marks are read again
  * just before each tree, so a row another flush wrote meanwhile is never
  * written again after the apply has moved it out of `pending/`.
+ *
+ * One bad row never holds up the rest. When GitHub refuses a tree (400 or
+ * 422), the flush splits the files in halves until it finds the ones it
+ * refuses, and writes the others. When GitHub can't say whether a marked
+ * row's commit landed, that row is left out of the flush. Either way the row
+ * counts an attempt, and from MAX_ROW_ATTEMPTS it waits behind every other
+ * row; a marked one is unmarked, so it is written again as new.
  */
 
 /** Most items one flush writes. The rest wait for the next minute. */
@@ -31,6 +38,9 @@ export const MAX_FLUSH_ITEMS = 200;
 export const MAX_FLUSH_BYTES = 2 * 1024 * 1024;
 /** Times a flush starts again from a branch that moved on before it gives up until the next minute. */
 export const FLUSH_ATTEMPTS = 3;
+
+/** Failed attempts after which a row waits behind the others, and a marked row is unmarked. */
+export const MAX_ROW_ATTEMPTS = 5;
 
 /** Queued items older than this mean the flush is failing: the scheduled job logs an error on every tick until they are written. */
 export const STALE_QUEUE_MS = 15 * 60 * 1000;
@@ -127,12 +137,13 @@ async function releaseLease(db: D1Like, claimed: number): Promise<void> {
 
 interface Row extends QueuedFile {
   commit_sha: string | null;
+  attempts: number;
 }
 
 /** The oldest queued rows, within MAX_FLUSH_ITEMS and MAX_FLUSH_BYTES. */
 async function oldest(db: D1Like): Promise<Row[]> {
   const { results } = await db
-    .prepare("SELECT id, path, content, commit_sha FROM inbox_queue ORDER BY queued, rowid LIMIT ?")
+    .prepare(`SELECT id, path, content, commit_sha, attempts FROM inbox_queue ORDER BY attempts >= ${MAX_ROW_ATTEMPTS}, queued, rowid LIMIT ?`)
     .bind(MAX_FLUSH_ITEMS)
     .all<Row>();
   const out: Row[] = [];
@@ -156,6 +167,41 @@ async function mark(db: D1Like, ids: readonly string[], commit: string | null): 
   await db.batch(
     chunks(ids, MAX_BOUND - 1).map((part) => db.prepare(`UPDATE inbox_queue SET commit_sha = ? WHERE id IN (${marks(part.length)})`).bind(commit, ...part)),
   );
+}
+
+/** Counts a failed attempt on each of `ids`, and unmarks those that reach MAX_ROW_ATTEMPTS. */
+async function failed(db: D1Like, ids: readonly string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await db.batch(
+    chunks(ids, MAX_BOUND - 1).map((part) =>
+      db
+        .prepare(
+          `UPDATE inbox_queue SET attempts = attempts + 1, commit_sha = CASE WHEN attempts + 1 >= ? THEN NULL ELSE commit_sha END WHERE id IN (${marks(part.length)})`,
+        )
+        .bind(MAX_ROW_ATTEMPTS, ...part),
+    ),
+  );
+}
+
+/** GitHub refused the request itself, so the same files would be refused again. */
+const refused = (error: unknown) => error instanceof GitHubError && (error.status === 400 || error.status === 422);
+
+/**
+ * A tree of `rows` on `base`. When GitHub refuses the files, they are split
+ * in halves until the ones it refuses are found, and the tree holds the rest.
+ */
+async function buildTree(deps: FlushDeps, base: string, rows: readonly Row[]): Promise<{ tree: string; written: Row[]; bad: Row[] }> {
+  try {
+    const tree = await deps.github.createTree(deps.inbox, base, rows.map((r) => ({ path: r.path, content: r.content })));
+    return { tree, written: [...rows], bad: [] };
+  } catch (error) {
+    if (!refused(error)) throw error;
+    if (rows.length === 1) return { tree: base, written: [], bad: [...rows] };
+    const half = Math.ceil(rows.length / 2);
+    const left = await buildTree(deps, base, rows.slice(0, half));
+    const right = await buildTree(deps, left.tree, rows.slice(half));
+    return { tree: right.tree, written: [...left.written, ...right.written], bad: [...left.bad, ...right.bad] };
+  }
 }
 
 /**
@@ -199,7 +245,16 @@ async function settle(deps: FlushDeps, rows: readonly Row[], own: ReadonlySet<st
   let settled = 0;
   for (const commit of new Set(left.flatMap((r) => (r.commit_sha === null || own.has(r.commit_sha) ? [] : [r.commit_sha])))) {
     const ids = left.filter((r) => r.commit_sha === commit).map((r) => r.id);
-    if (await github.isOnBranch(inbox, commit, branch)) {
+    let landed: boolean;
+    try {
+      landed = await github.isOnBranch(inbox, commit, branch);
+    } catch {
+      // Not known whether these landed: they sit out this flush, and the rest go on.
+      await failed(db, ids);
+      left = left.filter((r) => r.commit_sha !== commit);
+      continue;
+    }
+    if (landed) {
       await remove(db, ids);
       settled += ids.length;
       left = left.filter((r) => r.commit_sha !== commit);
@@ -243,8 +298,14 @@ async function flushHeld(deps: FlushDeps, claimed: number): Promise<FlushResult>
     rows = now.rows;
     settled += now.settled;
     if (rows.length === 0) break;
+    const built = await buildTree(deps, base, rows);
+    if (built.bad.length > 0) {
+      await failed(db, built.bad.map((r) => r.id));
+      rows = built.written;
+      if (rows.length === 0) break;
+    }
     const ids = rows.map((r) => r.id);
-    const tree = await github.createTree(inbox, base, rows.map((r) => ({ path: r.path, content: r.content })));
+    const tree = built.tree;
     if (tree === base) {
       // Every file is in the inbox with this text already.
       await remove(db, ids);
@@ -266,7 +327,7 @@ async function flushHeld(deps: FlushDeps, claimed: number): Promise<FlushResult>
     return { outcome: "committed", commit, items: ids.length };
   }
   if (rows.length === 0) {
-    await deps.onWritten?.();
+    if (settled > 0) await deps.onWritten?.();
     return { outcome: "settled", items: settled };
   }
   return { outcome: "conflict" };
@@ -276,10 +337,14 @@ async function flushHeld(deps: FlushDeps, claimed: number): Promise<FlushResult>
 export interface QueueBacklog {
   queued: number;
   oldest_age_ms: number | null;
+  /** Rows that failed MAX_ROW_ATTEMPTS times or more, which wait behind the others. */
+  stuck: number;
 }
 
 export async function queueBacklog(db: D1Like, nowMs: number): Promise<QueueBacklog> {
-  const row = await db.prepare("SELECT count(*) AS queued, min(queued) AS oldest FROM inbox_queue").first<{ queued: number; oldest: number | null }>();
+  const row = await db
+    .prepare(`SELECT count(*) AS queued, min(queued) AS oldest, count(CASE WHEN attempts >= ${MAX_ROW_ATTEMPTS} THEN 1 END) AS stuck FROM inbox_queue`)
+    .first<{ queued: number; oldest: number | null; stuck: number }>();
   const oldest = row?.oldest ?? null;
-  return { queued: row?.queued ?? 0, oldest_age_ms: oldest === null ? null : Math.max(0, nowMs - oldest) };
+  return { queued: row?.queued ?? 0, oldest_age_ms: oldest === null ? null : Math.max(0, nowMs - oldest), stuck: row?.stuck ?? 0 };
 }

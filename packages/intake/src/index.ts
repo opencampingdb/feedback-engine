@@ -526,7 +526,9 @@ export function createFlush(deps: Pick<Deps, "fetch" | "now">) {
     const backlog = await queueBacklog(db, deps.now()).catch(() => undefined);
     if (backlog && backlog.oldest_age_ms !== null && backlog.oldest_age_ms > STALE_QUEUE_MS) {
       const minutes = Math.floor(backlog.oldest_age_ms / 60_000);
-      console.error(`the inbox queue is behind: ${backlog.queued} item(s) waiting, the oldest for ${minutes} minutes. See GET /v1/health/queue.`);
+      console.error(
+        `the inbox queue is behind: ${backlog.queued} item(s) waiting, the oldest for ${minutes} minutes, ${backlog.stuck} refused 5 times or more. See GET /v1/health/queue.`,
+      );
     }
     return result;
   };
@@ -886,14 +888,14 @@ export function createHandler(deps: Deps) {
   /**
    * `GET /v1/health/queue`, with `authorization: Bearer <PLACES_TOKEN>`: how
    * far behind the inbox queue is, `{ "queued", "oldest_age_seconds" }`
-   * (null when nothing waits), and `stale` once the oldest has waited more
-   * than 15 minutes.
+   * (null when nothing waits), `stale` once the oldest has waited more than
+   * 15 minutes, and `stuck`, the items GitHub has refused 5 times or more.
    */
   async function queueHealth(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
     const db = await placesDb(request, env, cors);
     if (db instanceof Response) return db;
-    const { queued, oldest_age_ms: age } = await queueBacklog(db, deps.now());
-    return json(200, { queued, oldest_age_seconds: age === null ? null : Math.floor(age / 1000), stale: age !== null && age > STALE_QUEUE_MS }, cors);
+    const { queued, oldest_age_ms: age, stuck } = await queueBacklog(db, deps.now());
+    return json(200, { queued, oldest_age_seconds: age === null ? null : Math.floor(age / 1000), stale: age !== null && age > STALE_QUEUE_MS, stuck }, cors);
   }
 
   /**

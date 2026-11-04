@@ -3,11 +3,14 @@
 -- text. queued is when it was accepted, in milliseconds since the epoch. commit_sha is the commit a flush
 -- made with it, set just before the flush moves the branch, so a flush that stopped before deleting the
 -- row can tell whether the item already reached the inbox. Rows are deleted once the commit is on the branch.
+-- attempts counts the flushes that failed on this row alone (GitHub refused its file, or could not say whether
+-- its commit landed). From 5 the row waits behind the others, so one bad row never holds up the queue.
 
 CREATE TABLE inbox_queue (
   id TEXT PRIMARY KEY,
   path TEXT NOT NULL,
   content TEXT NOT NULL,
   queued INTEGER NOT NULL,
-  commit_sha TEXT
+  commit_sha TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0
 );

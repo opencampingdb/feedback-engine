@@ -22,6 +22,10 @@ export function fakeGit(options: { repo?: string; branch?: string; now?: () => n
     beforeRefUpdate: undefined as (() => void) | undefined,
     /** Runs before each tree is created, to act as another writer would meanwhile. */
     beforeTree: undefined as (() => void | Promise<void>) | undefined,
+    /** Trees with a file whose text contains this are refused with 422. */
+    refuseContent: undefined as string | undefined,
+    /** Answers compare calls with this status while set. */
+    compareStatus: undefined as number | undefined,
     /** Calls whose URL contains this never answer, until aborted. */
     hang: undefined as string | undefined,
     /** Answers every Git Data and contents call with this status while set. */
@@ -109,6 +113,7 @@ export function fakeGit(options: { repo?: string; branch?: string; now?: () => n
       const next = new Map(base);
       for (const entry of body!.tree as { path: string; mode: string; type: string; content?: string; sha?: string }[]) {
         if (entry.mode !== "100644" || entry.type !== "blob" || typeof entry.content !== "string" || "sha" in entry) return json(422, {});
+        if (control.refuseContent !== undefined && entry.content.includes(control.refuseContent)) return json(422, { message: "refused" });
         next.set(entry.path, entry.content);
       }
       return json(201, { sha: putTree(next) });
@@ -130,6 +135,7 @@ export function fakeGit(options: { repo?: string; branch?: string; now?: () => n
       return json(200, { object: { sha } });
     }
     if (method === "GET" && (match = /^compare\/([0-9a-f]+)\.\.\.(.+)$/.exec(rest))) {
+      if (control.compareStatus !== undefined) return json(control.compareStatus, {});
       const base = match[1]!;
       const head = branches.get(match[2]!);
       if (!commits.has(base) || !head) return json(404, {});
