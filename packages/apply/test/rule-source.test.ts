@@ -22,7 +22,7 @@ function report(day: number, origin: string, body: Record<string, unknown>, atte
     type: "report",
     report: body,
     ...(attested ? { attested: "app_attest", contributor: "ctr_00000000000000aa" } : {}),
-  } as ReportItem;
+  } as unknown as ReportItem;
 }
 
 // A fact the release set by a rule: source rule, and no date, as the place index holds it.
