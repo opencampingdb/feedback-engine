@@ -8,7 +8,9 @@
  *
  * Cheapest first: `settleByRules` decides first, with no model call, and the
  * model is asked only about what is left, at most MAX_MODEL_CASES a run. On
- * its own the model may approve a held or hidden new place, restore a
+ * its own the model may approve a held or hidden new place, merge a held
+ * duplicate into the place it duplicates (never into a place with a verified
+ * owner, nor a pair on `moderation/distinct_places.json`), restore a
  * withdrawn contact, take down a new place that is clear spam, restore or
  * keep down a fact doubts took down, dismiss doubts about a fact that
  * stays, and confirm `vehicle_access` on a place whose name says only heavy
@@ -30,6 +32,9 @@ import {
   applyDecision,
   dumpPlace,
   heldCaseKey,
+  mergePlaces,
+  mergeProblem,
+  pairKey,
   parseClosedCases,
   parseHeldCases,
   placePath,
@@ -164,6 +169,7 @@ const MEANINGS: Record<ReviewDecision, string> = {
   dismiss: "keep the fact: the doubts do not outweigh it",
   leave: "a person decides",
   confirm: "set the fact: the place's name clearly says only heavy vehicles (trucks) may use it",
+  merge: "merge the new place into the place it may duplicate: the two are clearly one place added twice, with the same or nearly the same name and nothing to tell them apart",
 };
 
 /** What a decision means for this case. */
@@ -257,8 +263,8 @@ export async function askModel(
   c: HeldCase,
   place: Place,
   duplicateOf: Place | undefined,
+  allowed: readonly ReviewDecision[] = allowedDecisions(c),
 ): Promise<{ decision: ReviewDecision; reason: string }> {
-  const allowed = allowedDecisions(c);
   const evidence = {
     case: c.case,
     place: placeView(place),
@@ -338,6 +344,20 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
 
   const reviewer = `ai:${deps.model}`;
   const records: ReviewRecord[] = [];
+  // Pairs a person found separate, read once and only for a duplicate case.
+  let distinct: Set<string> | undefined;
+  const distinctPairs = async () => {
+    if (distinct) return distinct;
+    const file = await github.readFile(data, "moderation/distinct_places.json", branch);
+    let pairs: { a?: unknown; b?: unknown }[] = [];
+    try {
+      pairs = file ? ((JSON.parse(file.text) as { pairs?: { a?: unknown; b?: unknown }[] }).pairs ?? []) : [];
+    } catch {
+      pairs = [];
+    }
+    distinct = new Set(pairs.filter((p) => typeof p.a === "string" && typeof p.b === "string").map((p) => pairKey(p.a as string, p.b as string)));
+    return distinct;
+  };
   let asked = 0;
   try {
     for (const [key, c] of cases) {
@@ -350,26 +370,44 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         : settleByRules(c, place);
       let decision: ReviewDecision;
       let reason: string;
+      let otherFile: { text: string; sha: string } | null = null;
+      let other: Place | undefined;
       if (settled) {
         ({ decision, reason } = settled);
       } else {
         if (asked >= MAX_MODEL_CASES) continue;
         asked++;
-        const other = c.case === "duplicate" && c.duplicate_of ? await github.readFile(data, placePath(c.duplicate_of), branch) : null;
-        ({ decision, reason } = await askModel(deps.ai, deps.model, c, place!, other ? parsePlace(other.text) : undefined));
+        otherFile = c.case === "duplicate" && c.duplicate_of ? await github.readFile(data, placePath(c.duplicate_of), branch) : null;
+        other = otherFile ? parsePlace(otherFile.text) : undefined;
+        // A merge only where the rules allow one: never into an owner's place or a pair a person found separate.
+        const pairs = c.case === "duplicate" ? await distinctPairs() : undefined;
+        const allowed = allowedDecisions(c).filter((d) => d !== "merge" || (other !== undefined && mergeProblem(place!, other, pairs) === null));
+        ({ decision, reason } = await askModel(deps.ai, deps.model, c, place!, other, allowed));
       }
       reason = safeReason(reason);
       const at = new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
-      const next = place && file ? applyDecision(place, c, decision, at) : null;
-      if (next && file) {
+      const message = `${reviewer}: ${decision} held case ${c.case} on ${c.place}\n\n${reason}\n\nReviewer: ${reviewer}`;
+      // A merge writes the kept place first, then the tombstone: a tombstone on its own would lose the facts it carries.
+      const writes: { path: string; record: Place; sha: string }[] = [];
+      if (decision === "merge" && place && file && other && otherFile) {
+        const merged = mergePlaces(other, place, at);
+        writes.push({ path: placePath(other.id), record: merged.kept, sha: otherFile.sha }, { path, record: merged.tombstone, sha: file.sha });
+      } else {
+        const next = place && file ? applyDecision(place, c, decision, at) : null;
+        if (next && file) writes.push({ path, record: next, sha: file.sha });
+      }
+      let lost = false;
+      for (const write of writes) {
         try {
-          await github.updateFile(data, branch, path, dumpPlace(next), file.sha, `${reviewer}: ${decision} held case ${c.case} on ${c.place}\n\n${reason}\n\nReviewer: ${reviewer}`);
+          await github.updateFile(data, branch, write.path, dumpPlace(write.record), write.sha, message);
         } catch (error) {
-          if (conflict(error)) continue;
-          throw error;
+          if (!conflict(error)) throw error;
+          lost = true;
+          break;
         }
       }
-      records.push({ key, case: c.case, place: c.place, decision, reviewer, reason, by_rules: settled !== null, committed: next !== null });
+      if (lost) continue;
+      records.push({ key, case: c.case, place: c.place, decision, reviewer, reason, by_rules: settled !== null, committed: writes.length > 0 });
     }
   } catch (error) {
     (deps.onError ?? (() => undefined))(error);

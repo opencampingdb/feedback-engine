@@ -1,6 +1,7 @@
 import {
   newPlaceStanding,
   safeSearchVerdict,
+  tidyName,
   type ContactFactName,
   type ContactReportReason,
   type FactName,
@@ -30,7 +31,8 @@ import {
   type OpenDoubt,
 } from "./decide.js";
 import { moderateReview } from "./moderation.js";
-import type { ClosedCase, HeldCase } from "./review.js";
+import { mergePlaces, mergeProblem, type ClosedCase, type HeldCase } from "./review.js";
+import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
 import { dropSource, setSource } from "./sources.js";
 import type { Fee, Photo, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
@@ -134,6 +136,14 @@ export interface RulesInput {
   photoLicence?: string;
   /** Every record in the data, for the duplicates check on new places. None when left out. */
   everyPlace?: readonly Place[];
+  /** Pairs on `moderation/distinct_places.json`, as `pairKey` makes them: never merged. None when left out. */
+  distinct?: ReadonlySet<string>;
+  /**
+   * The major roads in the data repository's geometry sidecar, for the rule
+   * that keeps two places on opposite sides of a road apart. Left out, no
+   * road is assumed between two places.
+   */
+  roads?: MajorRoads;
   /**
    * Ids on the intake's recent list, or "unreadable" when the list was asked
    * for and could not be read. Feedback about a place on the list that is not
@@ -282,6 +292,8 @@ const isNewPlaceEvidence = (item: StoredFeedback) =>
 
 /** A new place this close to a place in the same group is a possible duplicate. */
 export const DUPLICATE_DISTANCE_M = 150;
+/** A possible duplicate closer than this, with the same name and no major road between, is merged without anyone asked. */
+export const MERGE_DISTANCE_M = 50;
 
 /** Great-circle distance in metres, as the data repository's duplicates check works it out. */
 function distanceM(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
@@ -312,6 +324,7 @@ export function applyRules(input: RulesInput): RulesOutput {
   const held: HeldCase[] = [];
   const closed: ClosedCase[] = [];
   const removed: string[] = [];
+  let everyPlaceById: Map<string, Place> | undefined;
 
   const decide = (item: StoredFeedback, outcome: Outcome, reason: string) => {
     decisions.set(item.id, { id: item.id, place: item.place, outcome, reason });
@@ -1156,6 +1169,24 @@ export function applyRules(input: RulesInput): RulesOutput {
         feedback: feedback.map((f) => f.id),
       });
 
+      // A duplicate the rules settle: merged into the place it duplicates, with no one asked.
+      const target = isPending && !existing && standing === "held" && unlisted === undefined && duplicate ? mergeTarget(origin, duplicate.place) : undefined;
+      if (target) {
+        const draft: Place = { ...draftOf(origin), standing };
+        for (const fact of contacts) {
+          if (failing.includes(fact)) continue;
+          (draft.facts as Record<string, FactValue>)[fact] = heldFacts[fact]!;
+          setSource(draft, fact, "feedback", nowIso);
+        }
+        const { kept, tombstone } = mergePlaces(working.get(target.place.id) ?? structuredClone(target.place), draft, nowIso);
+        working.set(kept.id, kept);
+        working.set(id, tombstone);
+        const why = `new place merged into ${kept.id}: the same name, ${target.distance} m away, in the same group, with no major road between`;
+        note(id, `${why} (to undo: set status back to open, remove merged_into, and list the pair in moderation/distinct_places.json)`, true, [origin]);
+        decide(origin, "applied", why);
+        continue;
+      }
+
       if (existing || published) {
         if (existing) {
           const place = record(id);
@@ -1455,6 +1486,25 @@ export function applyRules(input: RulesInput): RulesOutput {
       confirmations: [...confirmations],
       feedback: [...doubts, ...confirmations],
     };
+  }
+
+  /**
+   * The place a new place held as a possible duplicate of `placeId` merges
+   * into without anyone asked, or undefined when a reviewer decides: a place
+   * in the data (not one added in this run) with the same name once tidied,
+   * in the same group, less than MERGE_DISTANCE_M away, with no major road
+   * between them in `roads` (when the run has no road data, none is
+   * assumed), and neither an owner's place nor a pair on the distinct list.
+   */
+  function mergeTarget(item: ReportItem, placeId: string): { place: Place; distance: number } | undefined {
+    const other = (everyPlaceById ??= new Map((input.everyPlace ?? []).map((p) => [p.id, p]))).get(placeId);
+    if (!other || item.report.name === undefined || other.name === null) return undefined;
+    const distance = distanceM(item.location!, other.location);
+    if (distance >= MERGE_DISTANCE_M) return undefined;
+    if (tidyName(item.report.name).toLowerCase() !== tidyName(other.name).toLowerCase()) return undefined;
+    if (mergeProblem(draftOf(item), other, input.distinct) !== null) return undefined;
+    if (input.roads?.between(item.location!, other.location)) return undefined;
+    return { place: other, distance: Math.round(distance) };
   }
 
   /**

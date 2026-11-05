@@ -9,6 +9,7 @@ import {
   readOwners,
   readListed,
   readPending,
+  readRoads,
   refuseMalformed,
   settleAwaiting,
   writeOwners,
@@ -52,6 +53,13 @@ export interface RunOptions {
    * isn't a photo, photo report or photo erasure is refused.
    */
   places?: string;
+  /**
+   * The data repository's geometry sidecar (`pipeline.extract --geometry`).
+   * Its major roads keep a new place on the other side of a road from the
+   * place it may duplicate from being merged into it. Left out, the run has
+   * no road data and assumes no road between them.
+   */
+  geometry?: string;
   /** Licence id for new photo lines. Defaults to CC-BY-4.0. */
   photoLicence?: string;
   /**
@@ -189,6 +197,9 @@ export async function run(options: RunOptions): Promise<RunSummary> {
       (p.type === "check" && p.place !== null && places.get(p.place)?.standing === "held"),
   );
   const everyPlace = aboutNewPlaces && !photosOnly ? await auto.allPlaces() : undefined;
+  // What a merge of a duplicate new place checks: pairs a person found separate, and major roads.
+  const distinct = everyPlace ? await auto.distinct() : undefined;
+  const roads = everyPlace && options.geometry ? await readRoads(options.geometry) : undefined;
 
   // The recent list, asked for only when something is about a place not in the data.
   const aboutMissingPlace = crowd.some((p) => typeof p.place === "string" && !places.has(p.place));
@@ -213,6 +224,8 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     photos,
     ...(options.photoLicence ? { photoLicence: options.photoLicence } : {}),
     ...(everyPlace ? { everyPlace } : {}),
+    ...(distinct ? { distinct } : {}),
+    ...(roads ? { roads } : {}),
     ...(recent !== undefined ? { recent } : {}),
   });
 

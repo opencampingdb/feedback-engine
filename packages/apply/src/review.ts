@@ -1,4 +1,4 @@
-import { contactProblem, isContactFact, isDoubtFact, isValidFactValue, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
+import { contactProblem, isContactFact, isDoubtFact, isFactName, isValidFactValue, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
 import type { Settles } from "./decide.js";
 import { dumpPlace, placePath } from "./serialise.js";
 import { setSource } from "./sources.js";
@@ -10,7 +10,9 @@ import type { Place } from "./types.js";
  * APIs, so the intake's AI reviewer runs them in a Worker.
  *
  * A reviewer decides `approve` (keep a held or hidden new place), `restore`
- * (put a withdrawn contact, or a fact doubts took down, back), `take_down`
+ * (put a withdrawn contact, or a fact doubts took down, back), `merge` (a
+ * held new place into the place it duplicates, with `mergePlaces`),
+ * `confirm` (a fact a case suggests), `take_down`
  * (hide a new place that is clear spam), `keep_down` (leave a fact doubts
  * took down off the place), `dismiss` (doubts about a fact that stays) or
  * `leave` (a person decides). `settleByRules` settles what it can before
@@ -183,7 +185,7 @@ export function heldCaseKey(c: HeldCase): string {
   return [c.case, c.place, c.fact ?? "", [...c.feedback].sort().join(",")].join(" ");
 }
 
-export type ReviewDecision = "approve" | "restore" | "take_down" | "keep_down" | "dismiss" | "leave" | "confirm";
+export type ReviewDecision = "approve" | "restore" | "take_down" | "keep_down" | "dismiss" | "leave" | "confirm" | "merge";
 
 /**
  * What a reviewer may decide on a case of each kind. `contacts` and
@@ -194,6 +196,7 @@ export type ReviewDecision = "approve" | "restore" | "take_down" | "keep_down" |
 export function allowedDecisions(c: HeldCase): ReviewDecision[] {
   switch (c.case) {
     case "duplicate":
+      return ["approve", "merge", "take_down", "leave"];
     case "hidden":
     case "first_place":
       return ["approve", "take_down", "leave"];
@@ -259,10 +262,11 @@ export function settleByRules(c: HeldCase, place: Place | undefined): { decision
  * with a `hide` decision, so reports can't bring it back. `restore` sets the
  * withdrawn contact, or a fact doubts took down, back to the value the place
  * published. `confirm` sets the fact a `vehicle_access_candidate` names, as
- * from feedback. `keep_down` and `dismiss` change nothing.
+ * from feedback. `keep_down` and `dismiss` change nothing, and neither does
+ * `merge` here: it writes two records, with `mergePlaces`.
  */
 export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecision, at: string): Place | null {
-  if (!allowedDecisions(c).includes(decision) || decision === "leave" || decision === "keep_down" || decision === "dismiss") return null;
+  if (!allowedDecisions(c).includes(decision) || decision === "leave" || decision === "keep_down" || decision === "dismiss" || decision === "merge") return null;
   const next = structuredClone(place);
   if (decision === "restore" || (decision === "confirm" && c.case === "vehicle_access_candidate")) {
     (next.facts as Record<string, FactValue>)[c.fact!] = c.value as FactValue;
@@ -303,4 +307,53 @@ export function vehicleAccessCases(candidates: readonly string[], places: Readon
     });
   }
   return out;
+}
+
+/** One key for a pair of places, whichever comes first, as `moderation/distinct_places.json` lists them. */
+export const pairKey = (a: string, b: string) => (a < b ? `${a} ${b}` : `${b} ${a}`);
+
+/** Sources whose facts move to the kept record in a merge, as the data repository's `pipeline.merge` moves them. */
+const MOVABLE: readonly string[] = ["feedback", "contributed", "community_report"];
+
+/**
+ * Why a new place may not be merged into `other`, the place it may
+ * duplicate, or null when it may: never into a place with a verified owner,
+ * a tombstone or a place of another group, and never a pair on
+ * `moderation/distinct_places.json` (keys from `pairKey`).
+ */
+export function mergeProblem(place: Place, other: Place | undefined, distinct: ReadonlySet<string> = new Set()): string | null {
+  if (!other) return "the place it duplicates is not on the review branch";
+  if (other.status === "merged") return "the place it duplicates was merged into another";
+  if (other.owner_verified === true) return "the place it duplicates has a verified owner";
+  if (other.group !== place.group) return "the two places are in different groups";
+  if (distinct.has(pairKey(place.id, other.id))) return "moderation/distinct_places.json lists the two as separate places";
+  return null;
+}
+
+/**
+ * `dropped` merged into `kept` at `at`, as the data repository's
+ * `pipeline.merge` does it: the facts `dropped` has from feedback,
+ * contributions or community reports that `kept` lacks move with their
+ * dates, `kept` takes the newer `last_confirmed`, and `dropped` becomes a
+ * tombstone, `status: "merged"` with `merged_into`, otherwise unchanged.
+ * Releases list tombstones in `merged.ndjson.gz`, so an app that stored the
+ * new place's id can follow it. A person reverses a merge by setting the
+ * tombstone's `status` back and removing `merged_into`, and lists the pair in
+ * `moderation/distinct_places.json` so it is not merged again.
+ */
+export function mergePlaces(kept: Place, dropped: Place, at: string): { kept: Place; tombstone: Place } {
+  const next = structuredClone(kept);
+  for (const [key, source] of Object.entries(dropped.fact_sources).sort(([a], [b]) => (a < b ? -1 : 1))) {
+    if (!isFactName(key) || !MOVABLE.includes(source!) || key in next.facts) continue;
+    const value = (dropped.facts as Record<string, FactValue | undefined>)[key];
+    if (value === undefined) continue;
+    (next.facts as Record<string, FactValue>)[key] = value;
+    next.fact_sources[key] = source;
+    const date = dropped.fact_dates?.[key];
+    if (date !== undefined) next.fact_dates = { ...next.fact_dates, [key]: date };
+  }
+  const confirmed = [kept.last_confirmed ?? "", dropped.last_confirmed ?? ""].sort().at(-1)!;
+  if (confirmed) next.last_confirmed = confirmed;
+  next.updated = at;
+  return { kept: next, tombstone: { ...structuredClone(dropped), status: "merged", merged_into: kept.id } };
 }

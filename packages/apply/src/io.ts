@@ -1,7 +1,11 @@
+import { createReadStream } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
 import type { AwaitingClaim, OwnerRecord } from "./owners.js";
+import { pairKey } from "./review.js";
+import { majorRoads, type MajorRoads } from "./roads.js";
 import type { Decision } from "./rules.js";
 import { dumpFeeLine, dumpPhotoLine, dumpPlace, dumpReviewLine, feePath, photoPath, placePath, reviewPath } from "./serialise.js";
 import type { BlockedList, Fee, Photo, Place, RemovedPhotos, Review } from "./types.js";
@@ -204,6 +208,15 @@ function csvFields(line: string): string[] {
   }
   out.push(field);
   return out;
+}
+
+/** The major roads in a geometry sidecar written by the data repository's `pipeline.extract --geometry`, read line by line. */
+export async function readRoads(path: string): Promise<MajorRoads> {
+  const lines: string[] = [];
+  for await (const line of createInterface({ input: createReadStream(path, "utf8"), crlfDelay: Infinity })) {
+    if (line.includes('"road"')) lines.push(line);
+  }
+  return majorRoads(lines);
 }
 
 /** Approved owners: `owners/<place id>.json`. */
@@ -545,6 +558,14 @@ export class DataRepo {
     const column = header ? csvFields(header).map((f) => f.trim()).indexOf("place") : -1;
     if (column < 0) return [];
     return rows.map((row) => csvFields(row)[column]?.trim() ?? "").filter((id) => PLACE_FILE.test(`${id}.json`));
+  }
+
+  /** Pairs in `moderation/distinct_places.json`, as `pairKey` makes them. Empty when the file is missing. */
+  async distinct(): Promise<Set<string>> {
+    const path = join(this.root, "moderation", "distinct_places.json");
+    if (!(await exists(path))) return new Set();
+    const list = JSON.parse(await readFile(path, "utf8")) as { pairs?: { a: string; b: string }[] };
+    return new Set((list.pairs ?? []).map((pair) => pairKey(pair.a, pair.b)));
   }
 
   /** Contributors in `moderation/blocked_contributors.json`. Empty when the file is missing. */

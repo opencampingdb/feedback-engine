@@ -170,7 +170,8 @@ describe("the AI reviewer", () => {
     const told = caseOf(asked[0]!.input);
     expect(told).toMatchObject({ case: "duplicate", place: { id: id(0), name: "Creek Bend 0" }, possible_duplicate_of: { id: id(1), name: "Lakeside Park" }, distance_m: 140 });
     const schema = (asked[0]!.input.response_format as { json_schema: { properties: { decision: { enum: string[] } } } }).json_schema;
-    expect(schema.properties.decision.enum).toEqual(["approve", "take_down", "leave"]);
+    // Different names and kinds, but nothing rules a merge out, so the model may answer it.
+    expect(schema.properties.decision.enum).toEqual(["approve", "merge", "take_down", "leave"]);
 
     expect(gh.read(0)).toMatchObject({ standing: "shown", updated: AT });
     expect(gh.files.get(placePath(id(0)))!.text).toBe(dumpPlace({ ...place(0), standing: "shown", updated: AT }));
@@ -322,6 +323,44 @@ describe("the AI reviewer", () => {
           { place: id(1), decision: "leave", by_rules: true, reason: "the rules closed this case: travellers restored the fact" },
         ],
       });
+    });
+  });
+
+  describe("merging a duplicate", () => {
+    const dup = (n: number, of: number) => heldCase(n, { case: "duplicate", standing: "held", duplicate_of: id(of), distance_m: 70 });
+    const existing = (n: number, overrides: Partial<Place> = {}) =>
+      place(n, { standing: undefined, name: "Creek Bend Camp", facts: { toilets: true }, fact_sources: { name: "osm", toilets: "osm" }, fact_dates: undefined, ...overrides });
+    const enumOf = (input: Record<string, unknown>) =>
+      (input.response_format as { json_schema: { properties: { decision: { enum: string[] } } } }).json_schema.properties.decision.enum;
+
+    it("merges a held new place into the place it duplicates: the kept place first, then the tombstone", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [dup(0, 1)]));
+      gh.put(place(0, { facts: { fee: false }, fact_sources: { name: "feedback", location: "feedback", fee: "feedback" }, fact_dates: { name: AT, location: AT, fee: AT } }));
+      gh.put(existing(1));
+      const { ai } = fakeAi(() => reply("merge", "The same camp, 70 m apart, mapped twice."));
+
+      const result = await run(gh, ai);
+      expect(result).toMatchObject({ decisions: [{ decision: "merge", committed: true }] });
+      expect(gh.commits().map((c) => c.url.split("/contents/")[1])).toEqual([placePath(id(1)), placePath(id(0))]);
+      expect(gh.read(1)).toMatchObject({ facts: { toilets: true, fee: false }, fact_sources: { fee: "feedback" }, fact_dates: { fee: AT }, updated: AT });
+      expect(gh.read(0)).toMatchObject({ status: "merged", merged_into: id(1) });
+      expect(gh.commits()[1]!.body!.message as string).toContain(`${REVIEWER}: merge held case duplicate on ${id(0)}`);
+    });
+
+    it("does not offer a merge into an owner's place or a pair a person found separate", async () => {
+      const [a, b] = [id(3), id(2)].sort();
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [dup(0, 1), dup(3, 2)]));
+      gh.files.set("moderation/distinct_places.json", { text: JSON.stringify({ pairs: [{ a, b, added: "2026-11-01", reason: "other" }] }), sha: "shaD" });
+      gh.put(place(0));
+      gh.put(place(3));
+      gh.put(existing(1, { owner_verified: true }));
+      gh.put(existing(2));
+      const { ai, asked } = fakeAi(() => reply("merge", "should not be allowed"));
+
+      const result = await run(gh, ai);
+      expect(asked.map((a) => enumOf(a.input))).toEqual([["approve", "take_down", "leave"], ["approve", "take_down", "leave"]]);
+      expect(result).toMatchObject({ decisions: [{ decision: "leave" }, { decision: "leave" }] });
+      expect(gh.commits()).toHaveLength(0);
     });
   });
 
