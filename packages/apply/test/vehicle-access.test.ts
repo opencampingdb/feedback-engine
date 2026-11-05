@@ -87,6 +87,17 @@ describe("vehicle_access_candidate cases in a run", async () => {
     await writeFile(path, text);
   };
 
+  it("reads the place column of a candidates file with a quoted location", async () => {
+    const { DataRepo } = await import("../src/io.js");
+    const root = await mkdtemp(join(tmpdir(), "ocdb-vehicle-"));
+    try {
+      await put(join(root, "moderation", "heavy-vehicle-candidates.csv"), `place,name,location\r\n${PLACE},Heavy Vehicle Rest Area,"-31.5,147.2"\r\n${OTHER},"Truck Bay, ""north""","-31.6,147.3"\r\n`);
+      expect(await new DataRepo(root).heavyVehicleCandidates()).toEqual([PLACE, OTHER]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("lists each candidate in the data's candidates file on the review PR once, and remembers it in the inbox", async () => {
     const root = await mkdtemp(join(tmpdir(), "ocdb-vehicle-"));
     try {

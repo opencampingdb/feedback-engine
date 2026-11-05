@@ -94,6 +94,14 @@ describe("place index", () => {
     });
   });
 
+  it("loads a fact the release set by a rule, and ignores the rule's name", async () => {
+    // As the release writes it: source rule, no date, and fact_rules naming the rule.
+    const ruled = { id: ID(4), cell: perth, facts: { vehicle_access: "heavy_vehicles_only", toilets: true }, fact_sources: { vehicle_access: "rule", toilets: "osm" }, fact_dates: {}, fact_rules: { vehicle_access: "hgv_designated" } };
+    const res = await handle(put(body([perth], [ruled as unknown as Line])), e);
+    expect(res.status).toBe(200);
+    expect(await getIndexedPlace(d1, ID(4))).toEqual({ id: ID(4), cell: perth, facts: ruled.facts, fact_sources: ruled.fact_sources, fact_dates: {} });
+  });
+
   it("replaces only the cells a call names, in one batch", async () => {
     await handle(put(body([perth, brookton], first)), e);
     const changed = [place(2, perth, { toilets: false })];

@@ -791,6 +791,15 @@ describe("send-time decisions", () => {
     expect((await listing()).changes).toEqual([]);
   });
 
+  it("lets one attested report replace a fact the release set by a rule, and doubts take one down", async () => {
+    index(UNKNOWN, [146, -37], { vehicle_access: "heavy_vehicles_only", toilets: true }, { vehicle_access: "rule", toilets: "rule" });
+    expect(await send(fact(UNKNOWN, "toilets", false))).toMatchObject({ state: "live" });
+    expect(await send(report(UNKNOWN, { kind: "doubt", fact: "vehicle_access" }))).toMatchObject(held("single_doubt"));
+    clock += HOUR;
+    expect(await send(report(UNKNOWN, { kind: "doubt", fact: "vehicle_access" }, { device: otherDevice(1), contributor: "acct_second_person_01" }))).toMatchObject({ state: "live" });
+    expect((await listing()).changes).toContainEqual(expect.objectContaining({ place: UNKNOWN, fact: "vehicle_access", value: null }));
+  });
+
   it("answers live, with no recent change, for the value the place already has", async () => {
     expect(await send(fact(PLACE, "toilets", false))).toMatchObject({ state: "live" });
     expect((await listing()).changes).toEqual([]);
