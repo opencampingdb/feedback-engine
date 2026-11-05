@@ -36,9 +36,10 @@ import { chunks, placeStatement, prunePlaceStatements, type Bbox, type D1Like, t
  * and `new_place` reports. A fact report, contact takedown or doubt takedown
  * that goes live is a recent change, served with the recent list by map area
  * until 7 days after the apply has put it into the data. A doubt takedown also
- * opens a case in `doubt_cases` with the value the fact had, so a later report
- * of that value is decided as a confirmation, and the restore or replacement
- * that goes live closes it. A live new place goes on the recent list
+ * opens a case in `doubt_cases` with the value the fact had, as does a
+ * takedown by the apply (`openDoubtCases`), so a later report of that value is
+ * decided as a confirmation, and the restore or replacement that goes live
+ * closes it. A live new place goes on the recent list
  * with its description, fee and contacts. Everything else the apply decides,
  * as before, and its answer has no `state`.
  *
@@ -218,6 +219,42 @@ export async function openDoubt(db: D1Like, place: string, fact: string): Promis
     .bind(place, fact)
     .first<{ value: string; taken_down_at: string }>();
   return row === null ? undefined : { value: JSON.parse(row.value) as OpenDoubt["value"], at: row.taken_down_at };
+}
+
+/** A fact the apply took down after doubts, as it sends it to `openDoubtCases`. */
+export interface DoubtCase {
+  place: string;
+  fact: string;
+  /** The value the place had. */
+  value: FactValue;
+  /** When the doubt that took it down was received. */
+  taken_down_at: string;
+  /** That doubt. */
+  feedback_id: string;
+}
+
+/**
+ * Opens a case for each fact the apply took down after doubts, as the intake
+ * does for its own takedowns, so a later report of the value is decided as a
+ * confirmation once the release no longer has the fact. A case replaces the
+ * one held for its place and fact only when its takedown is later, and that
+ * one was not closed after it, so the apply can send the same cases on every
+ * run. Returns the cases opened.
+ */
+export async function openDoubtCases(db: D1Like, cases: readonly DoubtCase[]): Promise<number> {
+  if (cases.length === 0) return 0;
+  const results = await db.batch(
+    cases.map((c) =>
+      db
+        .prepare(
+          `INSERT INTO doubt_cases (place, fact, value, taken_down_at, feedback_id, closed_by, closed_at) VALUES (?, ?, ?, ?, ?, NULL, NULL)
+           ON CONFLICT (place, fact) DO UPDATE SET value = excluded.value, taken_down_at = excluded.taken_down_at, feedback_id = excluded.feedback_id, closed_by = NULL, closed_at = NULL
+           WHERE excluded.taken_down_at > doubt_cases.taken_down_at AND (doubt_cases.closed_at IS NULL OR doubt_cases.closed_at <= excluded.taken_down_at)`,
+        )
+        .bind(c.place, c.fact, JSON.stringify(c.value), c.taken_down_at, c.feedback_id),
+    ),
+  );
+  return results.reduce<number>((sum, result) => sum + changesOf(result), 0);
 }
 
 /**

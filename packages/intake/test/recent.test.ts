@@ -1152,6 +1152,67 @@ describe("send-time decisions", () => {
       expect(await send(fact(PLACE, "toilets", false, third))).toMatchObject({ state: "live" });
       expect((await listing()).changes).toEqual([]);
     });
+
+    const doubtCases = (cases: unknown, token = TOKEN) =>
+      handle(
+        new Request("https://intake.example/v1/places/recent/doubt-cases", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          body: JSON.stringify({ cases }),
+        }),
+        e,
+      );
+    // The release drops the fact from the index once the apply's takedown is in the data.
+    const released = () =>
+      store.db.prepare("UPDATE place_index SET facts = ? WHERE id = ?").run(JSON.stringify({ phone: "03 5555 0100", website: "https://lake.example.org" }), PLACE);
+    const caseRows = () => store.db.prepare("SELECT place, fact, value, taken_down_at, feedback_id, closed_by FROM doubt_cases").all();
+
+    it("opens the case when the apply takes a fact down, so one confirmation does not bring it back", async () => {
+      expect(await send(doubt(PLACE, "toilets"))).toMatchObject(held("single_doubt"));
+      clock += HOUR;
+      expect(await send(doubt(PLACE, "toilets", second), env(store, { requires_attestation: false }))).toMatchObject(held("not_attested"));
+      const takedown = written()[1]!;
+      const res = await doubtCases([{ place: PLACE, fact: "toilets", value: false, taken_down_at: takedown.received, feedback_id: takedown.id }]);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ opened: 1 });
+      released();
+      clock += HOUR;
+      expect(await send(fact(PLACE, "toilets", false, third))).toMatchObject(held("taken_down"));
+      clock += HOUR;
+      expect(await send(fact(PLACE, "toilets", false, fourth))).toMatchObject({ state: "live" });
+      expect(caseRows()).toEqual([expect.objectContaining({ place: PLACE, fact: "toilets", closed_by: written()[3]!.id })]);
+    });
+
+    it("keeps a case the intake closed after the apply's takedown, and its own later takedown", async () => {
+      await takeDown();
+      const own = written()[1]!;
+      // An earlier takedown from the apply does not replace the intake's own.
+      const before = { place: PLACE, fact: "toilets", value: false, taken_down_at: "2026-11-03T08:00:00Z", feedback_id: "fb_01JC0000000000000000000001" };
+      expect(await (await doubtCases([before])).json()).toEqual({ opened: 0 });
+      expect(caseRows()).toEqual([expect.objectContaining({ taken_down_at: own.received, feedback_id: own.id, closed_by: null })]);
+      // Sent again on every run: nothing changes.
+      const same = { ...before, taken_down_at: own.received, feedback_id: own.id };
+      expect(await (await doubtCases([same])).json()).toEqual({ opened: 0 });
+      // Closed by a restore at the intake: an apply takedown from before the restore stays closed, a later one opens it again.
+      expect(await send(fact(PLACE, "toilets", false, third))).toMatchObject(held("taken_down"));
+      clock += HOUR;
+      expect(await send(fact(PLACE, "toilets", false, fourth))).toMatchObject({ state: "live" });
+      const restore = written()[3]!;
+      expect(await (await doubtCases([{ ...same, taken_down_at: "2026-11-03T11:30:00Z" }])).json()).toEqual({ opened: 0 });
+      expect(caseRows()).toEqual([expect.objectContaining({ closed_by: restore.id })]);
+      const later = { ...same, taken_down_at: "2026-11-03T13:00:00Z", feedback_id: "fb_01JC0000000000000000000002" };
+      expect(await (await doubtCases([later])).json()).toEqual({ opened: 1 });
+      expect(caseRows()).toEqual([{ place: PLACE, fact: "toilets", value: "false", taken_down_at: later.taken_down_at, feedback_id: later.feedback_id, closed_by: null }]);
+    });
+
+    it("refuses doubt cases without the token, or that are not cases", async () => {
+      const good = { place: PLACE, fact: "toilets", value: false, taken_down_at: "2026-11-03T08:00:00Z", feedback_id: "fb_01JC0000000000000000000001" };
+      expect((await doubtCases([good], "wrong-token")).status).toBe(401);
+      for (const bad of [[], [{ ...good, fact: "phone" }], [{ ...good, value: "maybe" }], [{ ...good, taken_down_at: "yesterday" }], [{ ...good, feedback_id: "x" }], [{ ...good, place: "x" }], "x"]) {
+        expect((await doubtCases(bad)).status).toBe(400);
+      }
+      expect(caseRows()).toEqual([]);
+    });
   });
 
   describe("what the apply tells it", () => {

@@ -1,7 +1,7 @@
-import type { StoredFeedback } from "@opencampingdb/feedback";
+import type { FactName, FactValue, StoredFeedback } from "@opencampingdb/feedback";
 import { sameValue } from "./decide.js";
 import { DataRepo, readHistory } from "./io.js";
-import { newPlaceIdOf, WINDOW_DAYS, WITHDRAWN } from "./rules.js";
+import { newPlaceIdOf, WINDOW_DAYS, WITHDRAWN, type DoubtedRecord } from "./rules.js";
 import type { Place } from "./types.js";
 
 /**
@@ -30,6 +30,24 @@ export interface RecentChangeStore {
    * count against their contributor; the rest went to a person or wait.
    */
   overruled(ids: readonly string[], refused: readonly string[]): Promise<void>;
+  /**
+   * Facts the apply took down after doubts. The intake opens a case for each,
+   * as for its own takedowns, so that a report of the value waits for two new
+   * travellers there too.
+   */
+  doubtCases(cases: readonly DoubtCase[]): Promise<void>;
+}
+
+/** A fact the apply took down after doubts, as the intake's `POST /v1/places/recent/doubt-cases` takes it. */
+export interface DoubtCase {
+  place: string;
+  fact: FactName;
+  /** The value the place had. */
+  value: FactValue;
+  /** When the doubt that took it down was received. */
+  taken_down_at: string;
+  /** That doubt. */
+  feedback_id: string;
 }
 
 /** The ids of the new places on the intake's recent list that the apply run is not done with yet. */
@@ -95,6 +113,17 @@ export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeo
       const isRefused = new Set(refused);
       // Each call names the refused ids among its own ids.
       return post("/v1/places/recent/overruled", ids, (part) => ({ refused: part.filter((id) => isRefused.has(id)) }), "the overruled recent changes");
+    },
+    async doubtCases(cases) {
+      const target = new URL("/v1/places/recent/doubt-cases", baseUrl).toString();
+      for (let start = 0; start < cases.length; start += REMOVE_BATCH) {
+        const response = await fetcher(target, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ cases: cases.slice(start, start + REMOVE_BATCH) }),
+        });
+        if (!response.ok) throw new Error(`the intake refused the doubt cases: ${response.status} ${await response.text()}`);
+      }
     },
     async block(contributors) {
       const response = await fetcher(blockUrl, {
@@ -219,4 +248,27 @@ export async function sendOverruled(options: { ids: readonly string[]; refused: 
   const refused = [...new Set(options.refused)].filter((id) => sent.has(id)).sort();
   if (ids.length > 0) await options.store.overruled(ids, refused);
   return ids;
+}
+
+/**
+ * Sends the intake every fact a doubt applied in the last 90 days took down,
+ * as the inbox keeps it on that doubt, so the intake decides a later report of
+ * the value as a confirmation. The intake counts a case only while the place
+ * lacks the fact, so a takedown whose PR is not merged yet changes nothing
+ * there. All of them go on every run. Returns the cases sent, oldest first.
+ */
+export async function sendDoubtCases(options: { inbox: string; store: RecentChangeStore; now?: Date }): Promise<DoubtCase[]> {
+  const now = options.now ?? new Date();
+  const since = now.getTime() - WINDOW_DAYS * DAY_MS;
+  const sinceDay = new Date(now.getTime() - (WINDOW_DAYS + 1) * DAY_MS).toISOString().slice(0, 10);
+  const cases: DoubtCase[] = [];
+  for (const item of await readHistory(options.inbox, sinceDay)) {
+    const outcome = (item as { outcome?: { result?: string; doubted?: DoubtedRecord } }).outcome;
+    const down = outcome?.doubted;
+    if (outcome?.result !== "applied" || down === undefined || typeof item.place !== "string" || Date.parse(down.at) < since) continue;
+    cases.push({ place: item.place, fact: down.fact, value: down.value, taken_down_at: down.at, feedback_id: item.id });
+  }
+  cases.sort((a, b) => (a.taken_down_at < b.taken_down_at ? -1 : a.taken_down_at > b.taken_down_at ? 1 : a.feedback_id < b.feedback_id ? -1 : 1));
+  if (cases.length > 0) await options.store.doubtCases(cases);
+  return cases;
 }
