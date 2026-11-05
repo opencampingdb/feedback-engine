@@ -265,6 +265,66 @@ describe("the AI reviewer", () => {
     expect(gh.commits()).toHaveLength(2);
   });
 
+  describe("fact_doubted cases", () => {
+    const doubted = (n: number, takenDown: boolean, extra: Partial<HeldCase> = {}) =>
+      heldCase(n, {
+        case: "fact_doubted",
+        fact: "toilets",
+        value: true,
+        taken_down: takenDown,
+        sources: takenDown ? 2 : 1,
+        doubts: [`fb_01JC00000000000000000000${String(n).padStart(2, "0")}`],
+        confirmations: [],
+        ...extra,
+      });
+    const down = (n: number, overrides: Partial<Place> = {}) =>
+      place(n, { standing: undefined, facts: {}, fact_sources: { name: "contributed", toilets: "feedback" }, ...overrides });
+
+    it("restores a fact doubts took down, keeps one down, and dismisses a single doubt, telling the model what was weighed", async () => {
+      const cases = [doubted(0, true), doubted(1, true), doubted(2, false)];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(down(0));
+      gh.put(down(1));
+      gh.put(place(2, { standing: undefined }));
+      const answers: Record<string, ReturnType<typeof reply>> = {
+        [id(0)]: reply("restore", "Toilets are common at this kind of place."),
+        [id(1)]: reply("keep_down", "Two travellers found none."),
+        [id(2)]: reply("dismiss", "One doubt against a long-standing fact."),
+      };
+      const { ai, asked } = fakeAi((input) => answers[(caseOf(input).place as { id: string }).id]!);
+
+      const result = await run(gh, ai);
+      expect(caseOf(asked[0]!.input)).toMatchObject({ case: "fact_doubted", fact: "toilets", last_value: true, taken_down: true, doubting_sources: 2, doubts: 1, confirmations: 0 });
+      const system = (asked[2]!.input.messages as { content: string }[])[0]!.content;
+      expect(system).toContain("dismiss, leave");
+      expect(system).not.toContain("- restore:");
+      expect(gh.read(0).facts).toEqual({ toilets: true });
+      expect(gh.read(0).fact_dates?.toilets).toBe(AT);
+      expect(gh.read(1).facts).toEqual({});
+      expect(gh.commits()).toHaveLength(1);
+      expect(result).toMatchObject({ decisions: [{ decision: "restore", committed: true }, { decision: "keep_down", committed: false }, { decision: "dismiss", committed: false }] });
+    });
+
+    it("never acts on a fact the owner set, and settles a case the rules closed, without asking the model", async () => {
+      const cases = [doubted(0, true), doubted(1, true)];
+      const closed = [{ case: "fact_doubted" as const, place: id(1), fact: "toilets" as const, settles: "restored" as const, feedback: ["fb_01JC0000000000000000000099"] }];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases, new Map(), closed));
+      gh.put(down(0, { fact_sources: { name: "contributed", toilets: "owner" } }));
+      gh.put(down(1));
+      const { ai, asked } = fakeAi(() => reply("restore", "should not be asked"));
+
+      const result = await run(gh, ai);
+      expect(asked).toHaveLength(0);
+      expect(gh.commits()).toHaveLength(0);
+      expect(result).toMatchObject({
+        decisions: [
+          { place: id(0), decision: "leave", by_rules: true, reason: "the owner set this fact" },
+          { place: id(1), decision: "leave", by_rules: true, reason: "the rules closed this case: travellers restored the fact" },
+        ],
+      });
+    });
+  });
+
   it("leaves a case when the model is unsure, answers a decision the case doesn't allow, or can't be read", async () => {
     const cases = [
       heldCase(0, { case: "duplicate", standing: "held", duplicate_of: id(9), distance_m: 30 }),
