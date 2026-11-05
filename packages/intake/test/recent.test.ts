@@ -1036,6 +1036,124 @@ describe("send-time decisions", () => {
     expect(store.db.prepare("SELECT count(*) AS n FROM recent_changes").get()).toEqual({ n: 0 });
   });
 
+  describe("doubts", () => {
+    const doubt = (place: string, name: string, who: Parameters<typeof report>[2] & { note?: string } = {}) =>
+      report(place, { kind: "doubt", fact: name, ...(who.note ? { note: who.note } : {}) }, who);
+    const second = { device: otherDevice(1), contributor: "acct_second_person_01" };
+    const third = { device: otherDevice(2), contributor: "acct_third_person_01" };
+    const fourth = { device: otherDevice(3), contributor: "acct_fourth_person_01" };
+
+    it("holds one doubt for a reviewer, and the fact stays", async () => {
+      expect(await send(doubt(PLACE, "toilets"))).toEqual({ id: written()[0]!.id, ...held("single_doubt") });
+      expect(written()[0]!.intake).toEqual(held("single_doubt"));
+      expect((await listing()).changes).toEqual([]);
+    });
+
+    it("takes the fact down on a second source's doubt, as a recent change with no value", async () => {
+      await send(doubt(PLACE, "toilets"));
+      clock += HOUR;
+      expect(await send(doubt(PLACE, "toilets", second))).toMatchObject({ state: "live" });
+      expect(written()[1]!.intake).toEqual({ state: "live" });
+      expect((await listing()).changes).toEqual([{ place: PLACE, fact: "toilets", value: null, accepted: "2026-11-03T10:00:00Z", in_data_at: null }]);
+      // Once it is down, a doubt about it is about a fact the place no longer has.
+      expect(await send(doubt(PLACE, "toilets", third))).toMatchObject(held("no_value"));
+      // One traveller confirming the old value is not enough to bring it back.
+      clock += HOUR;
+      expect(await send(fact(PLACE, "toilets", false, third))).toMatchObject(held("taken_down"));
+      expect((await listing()).changes).toMatchObject([{ fact: "toilets", value: null }]);
+    });
+
+    async function takeDown(name = "toilets") {
+      await send(doubt(PLACE, name));
+      clock += HOUR;
+      expect(await send(doubt(PLACE, name, second))).toMatchObject({ state: "live" });
+      clock += HOUR;
+    }
+
+    it("restores the fact when two new travellers confirm it, and closes the case", async () => {
+      await takeDown();
+      expect(await send(fact(PLACE, "toilets", false, third))).toMatchObject(held("taken_down"));
+      clock += HOUR;
+      expect(await send(fact(PLACE, "toilets", false, fourth))).toMatchObject({ state: "live" });
+      expect((await listing()).changes).toEqual([{ place: PLACE, fact: "toilets", value: false, accepted: "2026-11-03T12:00:00Z", in_data_at: null }]);
+      // The case is closed: a report of another value is decided as usual, against the confirmations.
+      clock += HOUR;
+      expect(await send(fact(PLACE, "toilets", true, { device: otherDevice(5), contributor: "acct_fifth_person_01" }))).toMatchObject(held("disagreement"));
+    });
+
+    it("replaces the fact with a new value, and closes the case", async () => {
+      await takeDown();
+      expect(await send(fact(PLACE, "toilets", true, third))).toMatchObject({ state: "live" });
+      expect((await listing()).changes).toMatchObject([{ fact: "toilets", value: true }]);
+      // A doubt now is about the new value: one source is held, and the fact stays.
+      clock += HOUR;
+      expect(await send(doubt(PLACE, "toilets", fourth))).toMatchObject(held("single_doubt"));
+      expect((await listing()).changes).toMatchObject([{ fact: "toilets", value: true }]);
+    });
+
+    it("holds a doubt about a fact from OSM or the owner, and one about a fact the place doesn't have", async () => {
+      const OWNED = "ocdb_01JB0000000000000000000003";
+      index(OWNED, [150, -34], { pets: "yes", showers: true }, { pets: "owner", showers: "osm" });
+      for (const name of ["pets", "showers"]) {
+        await send(doubt(OWNED, name));
+        expect(await send(doubt(OWNED, name, second))).toMatchObject(held("protected_source"));
+      }
+      expect(await send(doubt(PLACE, "drinking_water"))).toMatchObject(held("no_value"));
+      expect((await listing()).changes).toEqual([]);
+    });
+
+    it("holds a second doubt sent without attestation, which the apply decides", async () => {
+      await send(doubt(PLACE, "toilets"));
+      const unattested = env(store, { requires_attestation: false });
+      expect(await send(doubt(PLACE, "toilets", second), unattested)).toMatchObject(held("not_attested"));
+      expect((await listing()).changes).toEqual([]);
+    });
+
+    it("holds a takedown whose note fails the checks, and the fact stays", async () => {
+      await send(doubt(PLACE, "toilets"));
+      expect(await send(doubt(PLACE, "toilets", { ...second, note: "Bloody shit dunny" }))).toMatchObject(held("text_check"));
+      expect((await listing()).changes).toEqual([]);
+    });
+
+    it("counts a takedown as one live change for the day, and a held doubt as none", async () => {
+      await send(fact(PLACE, "showers", true, second));
+      const contributor = written()[0]!.contributor as string;
+      store.db.prepare("UPDATE live_counts SET count = 49 WHERE contributor = ?").run(contributor);
+      clock += HOUR;
+      await send(doubt(PLACE, "toilets"));
+      expect(await send(doubt(PLACE, "toilets", second))).toMatchObject({ state: "live" });
+      expect(await send(doubt(PLACE, "showers", second))).toMatchObject(held("single_doubt"));
+      expect(await send(fact(PLACE, "drinking_water", true, second))).toMatchObject(held("daily_cap"));
+    });
+
+    it("forgets a case 90 days after the takedown", async () => {
+      await takeDown();
+      clock += 91 * 24 * HOUR;
+      await createScheduled({ fetch: services.fetch, now: () => clock })(e);
+      expect(store.db.prepare("SELECT count(*) AS n FROM doubt_cases").get()).toEqual({ n: 0 });
+    });
+
+    const overruled = (ids: string[]) =>
+      handle(
+        new Request("https://intake.example/v1/places/recent/overruled", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+          body: JSON.stringify({ ids }),
+        }),
+        e,
+      );
+
+    it("puts the fact back when the apply overrules the takedown", async () => {
+      await takeDown();
+      const takedown = written()[1]!.id as string;
+      expect((await overruled([takedown])).status).toBe(200);
+      expect((await listing()).changes).toEqual([]);
+      // The place has its value again, and one report of it is a value it already has.
+      expect(await send(fact(PLACE, "toilets", false, third))).toMatchObject({ state: "live" });
+      expect((await listing()).changes).toEqual([]);
+    });
+  });
+
   describe("what the apply tells it", () => {
     const call = (route: "in-data" | "overruled", body: unknown, token = TOKEN) =>
       new Request(`https://intake.example/v1/places/recent/${route}`, {
