@@ -50,6 +50,10 @@ _Avoid_: pending change, live edit
 The new places, with their standing, and the recent changes that apps show between releases.
 _Avoid_: recent places store, instant places feed
 
+**Doubt**:
+A traveller saying one fact about a place is wrong, without giving the right value.
+_Avoid_: dispute, flag, removal report (for a fact)
+
 **Held**:
 Accepted, but kept from apps until a reviewer decides.
 _Avoid_: pending, queued, quarantined
