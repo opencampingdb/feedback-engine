@@ -487,7 +487,7 @@ describe("itemDecision", () => {
     expect(itemDecision("fb_1")).toEqual({});
   });
 
-  it("lists the fourteen codes the intake sends", () => {
+  it("lists the seventeen codes the intake sends", () => {
     expect(HELD_REASONS).toEqual([
       "not_attested",
       "owner_value",
@@ -503,6 +503,9 @@ describe("itemDecision", () => {
       "blocked",
       "no_value",
       "invalid_value",
+      "single_doubt",
+      "protected_source",
+      "taken_down",
     ]);
   });
 });

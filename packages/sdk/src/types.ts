@@ -37,7 +37,16 @@ export type ReportKind =
    * `reason` says which. One report goes to a person. Reports from two
    * different sources within 90 days, at least one attested, take it down.
    */
-  | "contact";
+  | "contact"
+  /**
+   * One fact on a place is wrong, and the traveller does not know the right
+   * value. `fact` names it (a `DoubtFactName`) and there is no value; the
+   * note is kept for reviewers and never published. One doubt goes to a
+   * person. Doubts from two different sources within 90 days, at least one
+   * attested, take the fact down until two new sources confirm it or someone
+   * reports a new value. Facts from OSM or the owner stay up.
+   */
+  | "doubt";
 
 /** Why a contact on a place is reported: `wrong` (it reaches someone else, or nobody) or `spam`. */
 export type ContactReportReason = "wrong" | "spam";
@@ -193,6 +202,8 @@ export type FactName = keyof PlaceFacts;
 export type ReportFactName = Exclude<FactName, "booking_url">;
 /** The contact facts and the address: checked with `contactProblem`, and what a `contact` report may name. */
 export type ContactFactName = Extract<FactName, "website" | "phone" | "phone_2" | "email" | "facebook" | "instagram" | "tiktok" | "x" | "address">;
+/** Facts a `doubt` report may name: any reportable fact except the contact facts and the address, which use the `contact` kind. */
+export type DoubtFactName = Exclude<ReportFactName, ContactFactName>;
 export type FactValue = boolean | string | PlaceAddress;
 
 export interface LatLon {
@@ -202,7 +213,11 @@ export interface LatLon {
 
 export interface ReportBody {
   kind: ReportKind;
-  /** Required when `kind` is `fact`. Required on `contact` too, where it is one of the contact facts (`ContactFactName`). */
+  /**
+   * Required when `kind` is `fact`. Required on `contact` too, where it is one
+   * of the contact facts (`ContactFactName`), and on `doubt`, where it is any
+   * other fact (`DoubtFactName`).
+   */
   fact?: ReportFactName;
   /** Required when `kind` is `fact`, `name` (the name) or `description` (the text). */
   value?: FactValue;

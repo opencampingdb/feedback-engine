@@ -6,6 +6,7 @@ import type {
   CheckBody,
   ContactFactName,
   ContactReportReason,
+  DoubtFactName,
   FactName,
   FeeValue,
   FeeBody,
@@ -58,6 +59,7 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   "kind",
   "remove",
   "contact",
+  "doubt",
 ];
 /** The contact facts and the address, as a `contact` report may name them. */
 export const CONTACT_FACTS: readonly ContactFactName[] = ["website", "phone", "phone_2", "email", "facebook", "instagram", "tiktok", "x", "address"];
@@ -442,10 +444,14 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
     if (!isContactFact(value.fact)) errors.push(`report.fact must be one of ${CONTACT_FACTS.join(", ")}`);
     else out.fact = value.fact;
     if (value.value !== undefined) errors.push("report.value is not allowed when report.kind is contact");
+  } else if (kind === "doubt") {
+    if (!isDoubtFact(value.fact)) errors.push("report.fact must be a fact other than a contact or the address (use the contact kind for those)");
+    else out.fact = value.fact;
+    if (value.value !== undefined) errors.push("report.value is not allowed when report.kind is doubt");
   } else if (kind === "name" || kind === "description") {
     const max = kind === "name" ? MAX_NAME_LENGTH : MAX_DESCRIPTION_LENGTH;
     const text = value.value;
-    if (value.fact !== undefined) errors.push("report.fact is only allowed when report.kind is fact or contact");
+    if (value.fact !== undefined) errors.push("report.fact is only allowed when report.kind is fact, contact or doubt");
     if (typeof text !== "string" || text.trim().length === 0 || text.length > max) {
       errors.push(`report.value must be the ${kind}, 1 to ${max} characters`);
     } else if (findContactDetails(text).length > 0) {
@@ -454,7 +460,7 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
       out.value = text.trim();
     }
   } else if (value.fact !== undefined || value.value !== undefined) {
-    errors.push("report.fact and report.value are only allowed when report.kind is fact, name or description, and report.fact on contact");
+    errors.push("report.fact and report.value are only allowed when report.kind is fact, name or description, and report.fact on contact or doubt");
   }
   const note = checkText(value.note, "report.note", errors, false);
   if (note !== undefined) out.note = note;
@@ -841,6 +847,11 @@ export function contactProblem(fact: ContactFactName, value: unknown): string | 
   if (fact === "website") return null;
   const hosts = SOCIAL_HOSTS[fact];
   return hosts.some((h) => onHost(host, h)) ? null : `must be on ${hosts.join(" or ")}`;
+}
+
+/** Whether a fact is one a `doubt` report may name: a reportable fact that is not a contact or the address. */
+export function isDoubtFact(value: unknown): value is DoubtFactName {
+  return isFactName(value) && !isContactFact(value);
 }
 
 /** Whether a fact is one of the contact facts or the address. */

@@ -467,9 +467,12 @@ export type AnswerOutcome = ({ kind: "sent"; id: string } & ItemDecision) | { ki
  * additive; renaming or removing one is a breaking change.
  *
  * - `not_attested`: the report was not from an attested install, so a person
- *   reads it (a contact) or a second device has to agree (any other fact).
+ *   reads it (a contact) or a second device has to agree (any other fact). On a
+ *   doubt or a confirmation of a value doubts took down, none of the reports
+ *   counted was attested.
  * - `owner_value`: the place's owner set the value.
- * - `disagreement`: another source sent a different value within 90 days.
+ * - `disagreement`: another source sent a different value within 90 days, or as
+ *   many sources confirm a doubted fact as doubt it.
  * - `link_check`: a link failed the link rules or the malware check.
  * - `text_check`: free text failed the text checks.
  * - `unconfirmed`: a contact report from one source, or with none attested.
@@ -479,8 +482,11 @@ export type AnswerOutcome = ({ kind: "sent"; id: string } & ItemDecision) | { ki
  * - `check_unavailable`: a check could not run, so the item waits.
  * - `unknown_place`: the intake does not have the place yet.
  * - `blocked`: the contributor is blocked.
- * - `no_value`: a contact report about a contact the place does not have.
+ * - `no_value`: a contact report or doubt about a fact the place does not have.
  * - `invalid_value`: not a valid value for the fact.
+ * - `single_doubt`: one traveller doubts the fact, so a reviewer reads it. The fact stays.
+ * - `protected_source`: a doubt about a fact from OSM or the owner, which doubts never take down.
+ * - `taken_down`: a report of a value doubts took down, which returns when two new travellers confirm it.
  */
 export const HELD_REASONS = [
   "not_attested",
@@ -497,6 +503,9 @@ export const HELD_REASONS = [
   "blocked",
   "no_value",
   "invalid_value",
+  "single_doubt",
+  "protected_source",
+  "taken_down",
 ] as const;
 
 /** Why the intake held an item at send time. */
