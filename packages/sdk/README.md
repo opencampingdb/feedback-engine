@@ -15,6 +15,7 @@ await feedback.review({ place, review: { stars: 5, text: "Quiet and shady", visi
 - Nothing is sent unless `consent: true` is passed. Show `CONSENT_TEXT` first.
 - Show `ATTRIBUTION` wherever the data appears.
 - Reviews, fees and `reportReview()` carry the signed-in traveller's opaque `contributor` id. Pass an `attest` function when the app key requires App Attest or Play Integrity; it gets the exact body and its SHA-256 at send time. A refused assertion keeps the item queued and calls `onAttestationRejected` (see below).
+- Facts include `pets_months` (an OSM month range such as `May-Sep`, read with `monthsInRange`) and `vehicle_access` (`heavy_vehicles_only`). A `commons_mismatch` report says a Wikimedia Commons photo shown for a place is not of it.
 - `tidyName`, `tidyText` and `textProblem` tidy what a traveller types and find rude words, contact details and spam before it is sent. `withdraw()` takes back a new place the same install sent.
 
 ## Refused assertion
@@ -73,7 +74,7 @@ const feedback = createFeedbackClient({
 await feedback.report({ place: null, location, report: { kind: "new_place", name }, consent: true, ref: draft.id });
 ```
 
-`outcome` is `{ kind: "sent", id, state?, heldReason? }` or `{ kind: "dropped", httpStatus }`. On a fact report, contact report, doubt or new place, `state` is `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`, one of `HELD_REASONS` (absent for a code this version does not know). Other items, and items sent to an intake from before 0.10.0, have neither. `httpStatus` is the intake's refusal, or 0 when the client dropped the item unsent because it was older than `maxQueueAgeMs` or pushed out past `maxQueueLength`. An item still waiting to be retried has no answer yet. Errors thrown by the hook are caught and never stop the queue. `ref` works on every call that queues: `report`, `review`, `check`, `fee`, `reportReview`, `withdraw`, and on the photo client `reportPhoto` and `erasePhotos`. Owner requests and photo uploads are sent at once and answer directly, so they take no `ref`.
+`outcome` is `{ kind: "sent", id, state?, heldReason? }` or `{ kind: "dropped", httpStatus }`. On a fact report, contact report, doubt or new place, `state` is `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`, one of `HELD_REASONS` (absent for a code this version does not know). A `commons_mismatch` report is always `held` (`commons_report`): hide the photo for that traveller at once. Other items, and items sent to an intake from before 0.10.0, have neither. `httpStatus` is the intake's refusal, or 0 when the client dropped the item unsent because it was older than `maxQueueAgeMs` or pushed out past `maxQueueLength`. An item still waiting to be retried has no answer yet. Errors thrown by the hook are caught and never stop the queue. `ref` works on every call that queues: `report`, `review`, `check`, `fee`, `reportReview`, `withdraw`, and on the photo client `reportPhoto` and `erasePhotos`. Owner requests and photo uploads are sent at once and answer directly, so they take no `ref`.
 
 ## Recent changes
 
