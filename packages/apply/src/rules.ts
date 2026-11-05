@@ -1328,18 +1328,26 @@ export function applyRules(input: RulesInput): RulesOutput {
 
   /**
    * Doubts that a fact on a place is right, from travellers who don't know the
-   * right value. One source sends it to a reviewer as a `fact_doubted` case and
-   * the fact stays. Doubts from two sources within 90 days, at least one
-   * attested and more than the sources confirming the value, take the fact off
-   * the place at once, with the doubt's source and date on it, and list a
-   * `fact_doubted` case. A fact from OSM or the owner is left to a person, and
-   * a doubt about a fact the place does not have is refused. A doubt's note is
+   * right value. Doubts from two sources within 90 days, at least one attested
+   * and more than the sources confirming the value, take the fact off the place
+   * at once, with the doubt's source and date on it, and list a `fact_doubted`
+   * case. Doubts that leave the fact on the place (one source, none attested,
+   * as many confirmations or more, or a fact from OSM or the owner) go to a
+   * reviewer as one `fact_doubted` case for the place and fact. A doubt about
+   * a fact the place does not have is refused. A doubt's note is
    * for reviewers in the inbox and never reaches the PR.
    */
   function applyDoubts(items: ReportItem[]): void {
     const takenDown = new Map<string, HeldCase>();
     // What a doubt sent to a person, to take back if a later doubt in this run takes the fact down.
-    const sentToPerson = new Map<string, { edit: ReviewEdit; change: Change; held?: HeldCase }>();
+    const sentToPerson = new Map<string, { edit: ReviewEdit; change: Change }>();
+    // The case for a fact that stays, one for each place and fact, with every doubt weighed so far.
+    const stays = new Map<string, HeldCase>();
+    const dropStays = (key: string) => {
+      const listed = stays.get(key);
+      if (listed !== undefined && held.includes(listed)) held.splice(held.indexOf(listed), 1);
+      stays.delete(key);
+    };
     const evidence = (item: ReportItem) =>
       [...input.history, ...known].filter(
         (r) => r === item || (r.type === "report" && (r.report.kind === "doubt" || r.report.kind === "fact") && decisions.get(r.id)?.outcome !== "refused"),
@@ -1376,10 +1384,10 @@ export function applyRules(input: RulesInput): RulesOutput {
           if (sent) {
             edits.splice(edits.indexOf(sent.edit), 1);
             changes.splice(changes.indexOf(sent.change), 1);
-            if (sent.held) held.splice(held.indexOf(sent.held), 1);
           }
           decide(r, "applied", decision.why);
         }
+        dropStays(key);
         const doubted: DoubtedRecord = { fact, value, at: item.received };
         const taken = decisions.get(item.id);
         if (taken) taken.doubted = doubted;
@@ -1406,15 +1414,16 @@ export function applyRules(input: RulesInput): RulesOutput {
         false,
         [item],
       );
-      let heldCase: HeldCase | undefined;
-      if (reason === "single_doubt" && check === null) {
-        // One traveller doubts a fact that stays: a reviewer may dismiss it.
+      if (check === null) {
+        // Doubts that leave the fact on the place, for whatever reason: a reviewer may dismiss them.
         const value = (place.facts as Record<string, FactValue>)[fact]!;
         const weight = weighFact({ place: placeId, fact, value, at: item.received, reports: earlier, ...(place.fact_dates?.[fact] ? { doubtsSince: place.fact_dates[fact] } : {}) });
-        heldCase = doubtCase(placeId, place, fact, value, false, weight.doubts.sources, weight.doubts.feedback, weight.confirmations.feedback);
+        dropStays(key);
+        const heldCase = doubtCase(placeId, place, fact, value, false, weight.doubts.sources, weight.doubts.feedback, weight.confirmations.feedback);
         held.push(heldCase);
+        stays.set(key, heldCase);
       }
-      sentToPerson.set(item.id, { edit, change: changes[changes.length - 1]!, ...(heldCase ? { held: heldCase } : {}) });
+      sentToPerson.set(item.id, { edit, change: changes[changes.length - 1]! });
       decide(item, "needs_review", check === null ? decision.why : `the intake held it for ${check}, so a person checks it`);
     }
   }

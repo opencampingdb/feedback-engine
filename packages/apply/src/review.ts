@@ -11,10 +11,11 @@ import type { Place } from "./types.js";
  * A reviewer decides `approve` (keep a held or hidden new place), `restore`
  * (put a withdrawn contact, or a fact doubts took down, back), `take_down`
  * (hide a new place that is clear spam), `keep_down` (leave a fact doubts
- * took down off the place), `dismiss` (one traveller's doubt about a fact
- * that stays) or `leave` (a person decides). `settleByRules` settles what it
- * can before anyone is asked: owner-set values, blocked contributors, values
- * that wait in the inbox and contacts taken down as spam always go to a person.
+ * took down off the place), `dismiss` (doubts about a fact that stays) or
+ * `leave` (a person decides). `settleByRules` settles what it can before
+ * anyone is asked: owner-set values, doubted facts from OSM, blocked
+ * contributors, values that wait in the inbox and contacts taken down as spam
+ * always go to a person.
  */
 
 export { dumpPlace, placePath };
@@ -168,7 +169,7 @@ export type ReviewDecision = "approve" | "restore" | "take_down" | "keep_down" |
  * What a reviewer may decide on a case of each kind. `contacts` and
  * `description` name values that wait in the inbox, so only a person can
  * decide them. A `fact_doubted` case the doubts took down may be restored or
- * kept down, and one doubt about a fact that stays may be dismissed.
+ * kept down, and doubts about a fact that stays may be dismissed.
  */
 export function allowedDecisions(c: HeldCase): ReviewDecision[] {
   switch (c.case) {
@@ -196,6 +197,8 @@ export function settleByRules(c: HeldCase, place: Place | undefined): { decision
     const current = (place.facts as Record<string, unknown>)[fact];
     // Doubts never move an owner's fact, so neither does a reviewer.
     if (place.fact_sources[fact] === "owner") return leave("the owner set this fact");
+    // Nor an OSM fact: it is fixed in OSM, which the data follows.
+    if (place.fact_sources[fact] === "osm") return leave("this fact came from OSM, so a person decides");
     if (c.taken_down && current !== undefined) return leave("the place has this fact again");
     if (!c.taken_down && (current === undefined || JSON.stringify(current) !== JSON.stringify(c.value))) return leave("the fact has changed since the doubt");
     return null;

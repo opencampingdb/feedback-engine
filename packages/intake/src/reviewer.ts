@@ -10,8 +10,8 @@
  * model is asked only about what is left, at most MAX_MODEL_CASES a run. On
  * its own the model may approve a held or hidden new place, restore a
  * withdrawn contact, take down a new place that is clear spam, restore or
- * keep down a fact doubts took down, and dismiss one traveller's doubt about
- * a fact that stays. A case the apply's rules closed (a doubted fact that
+ * keep down a fact doubts took down, and dismiss doubts about a fact that
+ * stays. A case the apply's rules closed (a doubted fact that
  * travellers restored or replaced) is left without asking. Owner-set
  * values, blocked contributors and values that wait in the inbox go to a
  * person, and an answer the model isn't sure of, or one that can't be read,
@@ -160,7 +160,7 @@ const MEANINGS: Record<ReviewDecision, string> = {
   restore: "put the withdrawn contact back on the place: it is the place's own contact and not spam",
   take_down: "hide the place: only for clear spam, such as advertising, scams, abuse or nonsense, never because it is unusual or sparse",
   keep_down: "leave the fact off the place: the doubts are believable",
-  dismiss: "keep the fact: one traveller's doubt does not outweigh it",
+  dismiss: "keep the fact: the doubts do not outweigh it",
   leave: "a person decides",
 };
 

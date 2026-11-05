@@ -467,22 +467,38 @@ describe("doubts", () => {
     expect(out.outcome(r)).toBe("applied");
     expect(out.after()?.facts.toilets).toBeUndefined();
     expect(out.held).toEqual([expect.objectContaining({ case: "fact_doubted", taken_down: true, doubts: [earlier.id, r.id] })]);
-    const unattested = run([doubt(0, "dev-a"), doubt(1, "dev-b")], { now: 2, places: [withToilets()] });
+    const two = [doubt(0, "dev-a"), doubt(1, "dev-b")];
+    const unattested = run(two, { now: 2, places: [withToilets()] });
     expect(unattested.after()).toBeUndefined();
     expect(unattested.decisions.map((d) => d.outcome)).toEqual(["needs_review", "needs_review"]);
     expect(unattested.decisions[1]?.reason).toContain("without attestation");
+    // One case for the fact, with every doubt the run weighed.
+    expect(unattested.held).toEqual([expect.objectContaining({ case: "fact_doubted", taken_down: false, sources: 2, doubts: two.map((d) => d.id) })]);
+  });
+
+  it("lists a case for doubts that do not outnumber the confirmations, and the fact stays", () => {
+    const confirms = [applied(fact(-5, "dev-c", "toilets", true)), applied(fact(-4, "dev-d", "toilets", true))];
+    const doubts = [attested(doubt(0, "dev-a")), doubt(1, "dev-b")];
+    const out = run(doubts, { now: 2, history: confirms, places: [withToilets()] });
+    expect(out.after()).toBeUndefined();
+    expect(out.decisions.at(-1)?.reason).toContain("as many confirmations as doubts");
+    expect(out.held).toEqual([
+      expect.objectContaining({ case: "fact_doubted", taken_down: false, sources: 2, doubts: doubts.map((d) => d.id), confirmations: confirms.map((c) => c.id) }),
+    ]);
   });
 
   it("never takes down a fact from OSM or the owner, and refuses a doubt about a fact the place doesn't have", () => {
     const owned = withToilets({ fact_sources: { power: "osm", fee: "osm", toilets: "owner" } });
-    const out = run([attested(doubt(0, "dev-a")), attested(doubt(1, "dev-b"))], { now: 2, places: [owned] });
+    const pair = [attested(doubt(0, "dev-a")), attested(doubt(1, "dev-b"))];
+    const out = run(pair, { now: 2, places: [owned] });
     expect(out.decisions.map((d) => d.outcome)).toEqual(["needs_review", "needs_review"]);
     expect(out.after()).toBeUndefined();
-    expect(out.held).toEqual([]);
+    expect(out.held).toEqual([expect.objectContaining({ case: "fact_doubted", fact: "toilets", taken_down: false, sources: 2, doubts: pair.map((d) => d.id) })]);
     expect(out.changes[0]?.summary).toBe("toilets doubted, but it came from the owner (decide: keep it or remove it)");
     const osm = run([attested(doubt(0, "dev-a", "power")), attested(doubt(1, "dev-b", "power"))], { now: 2, places: [withToilets()] });
     expect(osm.after()).toBeUndefined();
     expect(osm.changes[0]?.summary).toContain("came from OSM");
+    expect(osm.held).toEqual([expect.objectContaining({ case: "fact_doubted", fact: "power", value: false, taken_down: false })]);
     const none = attested(doubt(0, "dev-a", "pets"));
     const refused = run([none], { places: [withToilets()] });
     expect(refused.outcome(none)).toBe("refused");

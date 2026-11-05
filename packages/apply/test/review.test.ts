@@ -71,9 +71,10 @@ describe("fact_doubted cases", () => {
     expect(settleByRules(doubtedLive, place({ standing: undefined }))).toBeNull();
   });
 
-  it("leaves an owner's fact to a person, and settles a case whose fact has moved on", () => {
+  it("leaves an owner's or OSM's fact to a person, and settles a case whose fact has moved on", () => {
     expect(settleByRules(doubtedDown, place({ standing: undefined, fact_sources: { toilets: "owner" } }))?.reason).toContain("owner");
     expect(settleByRules(doubtedLive, place({ standing: undefined, fact_sources: { toilets: "owner" } }))?.reason).toContain("owner");
+    expect(settleByRules(doubtedLive, place({ standing: undefined, fact_sources: { toilets: "osm" } }))?.reason).toBe("this fact came from OSM, so a person decides");
     expect(settleByRules(doubtedDown, place({ standing: undefined }))?.reason).toBe("the place has this fact again");
     expect(settleByRules(doubtedLive, takenDown())?.reason).toBe("the fact has changed since the doubt");
     expect(settleByRules(doubtedLive, place({ standing: undefined, facts: { toilets: false } }))?.reason).toBe("the fact has changed since the doubt");
