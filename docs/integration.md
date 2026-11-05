@@ -134,6 +134,13 @@ contactProblem("instagram", "https://park.example.org/insta"); // "must be on in
 await feedback.report({ place, report: { kind: "contact", fact: "website", reason: "spam" }, consent: true });
 ```
 
+**Confirming or doubting a fact.** A traveller who sees a fact is still right confirms it with a `fact` report of the same value, so a "Still right? Yes" button needs no new kind. A `doubt` report says one fact on a place is wrong when the traveller doesn't know the right value: `fact` is any reportable fact except the contacts and the address (`isDoubtFact`), which use the `contact` kind. It needs the place, carries no `value`, and may carry a `note`, which is kept for reviewers and never published. Each source counts once, however many times it sends. One doubt goes to a reviewer and the fact stays. Doubts from two different sources within 90 days, at least one attested and more than the sources confirming the value, take the fact off the place at once: it comes through the recent list as a change with `value: null`, and a reviewer gets the case. The fact comes back by itself when two new travellers confirm it (one of them attested, and more than any newer doubts), and is replaced when someone reports a new value. A fact from OSM or the owner is never taken down, and a doubt about a fact the place doesn't have is refused. Doubts sent before a fact was last set are about an older value and don't count.
+
+```ts
+await feedback.report({ place, report: { kind: "fact", fact: "toilets", value: true }, consent: true }); // still right
+await feedback.report({ place, report: { kind: "doubt", fact: "toilets", note: "None I could find" }, consent: true }); // wrong, right value unknown
+```
+
 Three more report kinds let a traveller fix what Edit site covers on other apps. Each goes to a person, who accepts or rejects it on the review PR:
 
 ```ts
@@ -248,7 +255,7 @@ const visible = places.filter((place) => {
 });
 ```
 
-**Recent changes.** `changes` holds the changes to released places that went live: for each place and fact, the latest one, by map area like the places. `value` is the fact's new value, or `null` when the change takes the fact down (a contact taken down after reports). `accepted` is when the intake accepted it, and `in_data_at` when the apply run put it into the data, or `null` until it has. A change stays on the list for 7 days after it reaches the data, so an app with an older release still shows it. Changes from a blocked contributor leave the list. Intakes from before SDK 0.10.0 have no `changes`.
+**Recent changes.** `changes` holds the changes to released places that went live: for each place and fact, the latest one, by map area like the places. `value` is the fact's new value, or `null` when the change takes the fact down (a contact taken down after reports, or a fact after doubts). `accepted` is when the intake accepted it, and `in_data_at` when the apply run put it into the data, or `null` until it has. A change stays on the list for 7 days after it reaches the data, so an app with an older release still shows it. Changes from a blocked contributor leave the list. Intakes from before SDK 0.10.0 have no `changes`.
 
 Lay the changes over each place of your release with `withRecentChanges(place, changes, dataVersion)`, where `dataVersion` is the `data_version` of the release you have. It sets each fact (with `fact_sources` `feedback` and the `fact_dates` entry the time it was accepted), takes off a fact whose value is `null`, and skips changes your release already has: those whose `in_data_at` is earlier than the commit time at the front of `dataVersion` (`20261030T160000Z-abc1234` is 16:00 UTC on 30 October 2026; `dataVersionTime` reads it). When the version is not in that form, every change is laid over. It returns a new record, or the same one when no change applies, and leaves the release record as it was.
 
@@ -360,7 +367,7 @@ export const feedback = createFeedbackClient({
 await feedback.report({ place: null, location, report: { kind: "new_place", name: tidyName(name) }, consent: true, ref: draft.id });
 ```
 
-**Live or held.** The intake decides fact reports, contact reports and new places when they arrive, with the apply run's own rules and then its checks, and says what it decided. A `sent` outcome, and the `sent` result of a call that sent at once, then carries `state`: `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`. Every other kind of item, and every item sent to an intake from before SDK 0.10.0, comes back with neither, and the apply run decides it as before. The apply still writes every item into the data, and may yet decide a live item differently, for example when two reports collide in one run; the change then leaves the recent list.
+**Live or held.** The intake decides fact reports, contact reports, doubts and new places when they arrive, with the apply run's own rules and then its checks, and says what it decided. A `sent` outcome, and the `sent` result of a call that sent at once, then carries `state`: `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`. Every other kind of item, and every item sent to an intake from before SDK 0.10.0, comes back with neither, and the apply run decides it as before. The apply still writes every item into the data, and may yet decide a live item differently, for example when two reports collide in one run; the change then leaves the recent list.
 
 ```ts
 onAnswered: async ({ ref, outcome }) => {
@@ -375,9 +382,9 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 
 | `heldReason` | Why |
 | --- | --- |
-| `not_attested` | The report was not from an attested install: a person reads a contact, and a second device has to agree on any other fact. |
+| `not_attested` | The report was not from an attested install: a person reads a contact, and a second device has to agree on any other fact. On a doubt, or a confirmation of a fact doubts took down, none of the reports counted was attested. |
 | `owner_value` | The place's owner set the value. |
-| `disagreement` | Another source reported a different value within 90 days. |
+| `disagreement` | Another source reported a different value within 90 days. On a doubt, as many sources confirm the value as doubt it, or more. |
 | `link_check` | A link failed `contactProblem` or the malware check. |
 | `text_check` | Free text failed the text checks. |
 | `unconfirmed` | A contact report from one source, or with none attested. |
@@ -387,8 +394,11 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `check_unavailable` | A check could not run, so it waits rather than going live unchecked. |
 | `unknown_place` | The intake does not have the place yet, such as a place newer than the last release. |
 | `blocked` | The contributor is blocked. |
-| `no_value` | A contact report about a contact the place does not have. |
+| `no_value` | A contact report or doubt about a fact the place does not have. |
 | `invalid_value` | Not a valid value for the fact. |
+| `single_doubt` | One traveller doubts the fact, so a reviewer reads it. The fact stays. |
+| `protected_source` | A doubt about a fact from OSM or the owner, which doubts never take down. |
+| `taken_down` | A report of a value doubts took down: it comes back when two new travellers confirm it. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. Adding a code later is additive. A code this version does not know is left out of `heldReason`, and `state` is still `held`. `itemDecision(answer)` reads `state` and `heldReason` from an intake answer you fetched yourself.
 

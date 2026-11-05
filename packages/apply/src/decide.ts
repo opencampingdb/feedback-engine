@@ -2,6 +2,7 @@ import {
   contactProblem,
   firstProblem,
   isContactFact,
+  isDoubtFact,
   isFactName,
   isValidFactValue,
   tidyText,
@@ -62,9 +63,24 @@ export type PlaceState = Pick<Place, "facts" | "fact_sources" | "fact_dates">;
  * another source sent a different value within 90 days. `link_check`: a contact
  * fails `contactProblem`. `text_check`: free text fails the text checks.
  * `unconfirmed`: a contact report from one source, or with none attested.
- * `no_contributor`: a new place sent without a contributor.
+ * `no_contributor`: a new place sent without a contributor. `single_doubt`:
+ * one source doubts a fact, which stays. `protected_source`: a doubt about a
+ * fact from OSM or the owner, which doubts never take down. `taken_down`: a
+ * report of a value doubts took down, waiting for a second new source.
+ * On a doubt, `not_attested` means no doubt counted was attested, and
+ * `disagreement` that as many sources confirm the value as doubt it, or more.
  */
-export type HeldReason = "not_attested" | "owner_value" | "disagreement" | "link_check" | "text_check" | "unconfirmed" | "no_contributor";
+export type HeldReason =
+  | "not_attested"
+  | "owner_value"
+  | "disagreement"
+  | "link_check"
+  | "text_check"
+  | "unconfirmed"
+  | "no_contributor"
+  | "single_doubt"
+  | "protected_source"
+  | "taken_down";
 
 /** The reasons the intake holds an item for one of its checks rather than for these rules. */
 export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "check_unavailable"];
@@ -83,7 +99,10 @@ export function heldForCheck(item: StoredFeedback): string | null {
   return state === "held" && typeof reason === "string" && CHECK_HOLDS.includes(reason) ? reason : null;
 }
 
-/** Why an item is refused. `invalid_value`: not a valid fact value. `no_value`: a contact report about a contact the place does not have. */
+/** How a `fact_doubted` case was settled: its value restored, or replaced with another. */
+export type Settles = "restored" | "replaced";
+
+/** Why an item is refused. `invalid_value`: not a valid fact value, or a fact a doubt cannot name. `no_value`: a contact report or doubt about a fact the place does not have. */
 export type RefusedReason = "invalid_value" | "no_value";
 
 /** A change the rules accept: `value` null takes the fact off the place. */
@@ -105,8 +124,12 @@ export interface Takedown {
 }
 
 export type ItemDecision =
-  /** `changes` is empty when the place already has the value. */
-  | { verdict: "live"; changes: FactChange[]; why: string; takedown?: Takedown }
+  /**
+   * `changes` is empty when the place already has the value. `settles`: the
+   * change closes an open `fact_doubted` case, by restoring the value or
+   * replacing it with another.
+   */
+  | { verdict: "live"; changes: FactChange[]; why: string; takedown?: Takedown; doubtTakedown?: DoubtTakedown; settles?: Settles }
   /** `problem`: on `link_check`, the check the value failed. */
   | { verdict: "held"; reason: HeldReason; why: string; problem?: string }
   | { verdict: "refused"; reason: RefusedReason; why: string };
@@ -121,6 +144,14 @@ export interface ItemInput {
    * more than 90 days before it. The item itself may be among them.
    */
   earlier: readonly StoredFeedback[];
+  /** On `decideFact`: the open `fact_doubted` case for this place and fact, when doubts took the fact down. */
+  openCase?: OpenDoubt;
+}
+
+/** An open `fact_doubted` case as `decideFact` reads it: the value the fact had, and when doubts took it down. */
+export interface OpenDoubt {
+  value: FactValue;
+  at: string;
 }
 
 const time = (item: StoredFeedback) => Date.parse(item.received);
@@ -144,6 +175,9 @@ export const sameValue = (a: unknown, b: unknown) => a === b || JSON.stringify(a
 
 const show = (value: unknown) => JSON.stringify(value);
 
+/** `earlier` with `item` among them. */
+const withItem = (earlier: readonly StoredFeedback[], item: StoredFeedback) => (earlier.some((r) => r.id === item.id) ? earlier : [...earlier, item]);
+
 /** The refusal for a `fact` report whose fact or value is not valid, or null when both are. It needs no place. */
 export function factRefusal(item: ReportItem): Extract<ItemDecision, { verdict: "refused" }> | null {
   const { fact, value } = item.report;
@@ -159,11 +193,14 @@ export function factRefusal(item: ReportItem): Extract<ItemDecision, { verdict: 
  * fact waits for a second device to agree (which `applyRules` settles across
  * runs).
  */
-export function decideFact({ item, place, earlier }: ItemInput): ItemDecision {
+export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemDecision {
   const refusal = factRefusal(item);
   if (refusal !== null) return refusal;
   const fact = item.report.fact as FactName;
   const value = item.report.value as FactValue;
+  // The case counts only while the place lacks the fact.
+  const down = openCase !== undefined && (place.facts as Record<string, unknown>)[fact] === undefined ? openCase : undefined;
+  if (down !== undefined && sameValue(value, down.value)) return decideRestore(item, earlier, down);
   const reviewed = REVIEWED_FACTS.has(fact);
   if (reviewed && (!isContactFact(fact) || item.attested === undefined)) {
     return { verdict: "held", reason: "not_attested", why: `${fact} changes are checked by a person` };
@@ -193,13 +230,48 @@ export function decideFact({ item, place, earlier }: ItemInput): ItemDecision {
       r.report.fact === fact &&
       sourceOf(r) !== source &&
       !sameValue(r.report.value, value) &&
-      inWindow(r, at),
+      inWindow(r, at) &&
+      !(down !== undefined && sameValue(r.report.value, down.value) && time(r) < Date.parse(down.at)),
   );
   if (disagrees) {
     return { verdict: "held", reason: "disagreement", why: `another device reported a different ${fact}, so a person decides` };
   }
-  return { verdict: "live", changes: [{ place: item.place as string, fact, value }], why: `${fact} set to ${show(value)}` };
+  return {
+    verdict: "live",
+    changes: [{ place: item.place as string, fact, value }],
+    why: `${fact} set to ${show(value)}`,
+    ...(down !== undefined ? { settles: "replaced" as const } : {}),
+  };
 }
+
+/**
+ * A report of the value a fact had before doubts took it down. Confirmations
+ * from two new sources since the takedown, at least one attested and more
+ * than the sources doubting it since, put the value back and settle the case
+ * (see `restoreWeight`).
+ */
+function decideRestore(item: ReportItem, earlier: readonly StoredFeedback[], down: OpenDoubt): ItemDecision {
+  const fact = item.report.fact as FactName;
+  const { confirmations, doubts } = restoreWeight({
+    place: item.place as string,
+    fact,
+    value: down.value,
+    at: item.received,
+    reports: withItem(earlier, item),
+    takenDownAt: down.at,
+  });
+  if (confirmations.sources < 2 || confirmations.sources <= doubts.sources) return { verdict: "held", reason: "taken_down", why: takenDownWhy(fact) };
+  if (!confirmations.attested) return { verdict: "held", reason: "not_attested", why: `confirmations of ${fact} without attestation are read by a reviewer` };
+  return {
+    verdict: "live",
+    changes: [{ place: item.place as string, fact, value: down.value }],
+    why: `${fact} restored after ${confirmations.sources === 2 ? "two" : confirmations.sources} travellers confirmed it`,
+    settles: "restored",
+  };
+}
+
+/** Why a report of a value doubts took down waits. */
+export const takenDownWhy = (fact: string) => `${fact} was taken down after doubts, and returns when two new travellers confirm it`;
 
 /**
  * A `contact` report that a contact on a place is wrong or spam. Reports from
@@ -221,7 +293,7 @@ export function decideContactReport({ item, place, earlier }: ItemInput): ItemDe
   const at = time(item);
   const setAt = place.fact_dates?.[fact];
   const since = setAt === undefined ? -Infinity : Date.parse(setAt);
-  const all = earlier.some((r) => r.id === item.id) ? earlier : [...earlier, item];
+  const all = withItem(earlier, item);
   const reports = all.filter(
     (r): r is ReportItem =>
       r.type === "report" && r.report.kind === "contact" && r.place === item.place && r.report.fact === fact && inWindow(r, at) && time(r) >= since,
@@ -271,5 +343,153 @@ export function newPlaceFields(item: ReportItem): NewPlaceFields {
     ...(tidied !== undefined && tidied.length > 0 && descriptionProblem === null ? { description: tidied } : {}),
     descriptionProblem,
     ...(fee !== undefined ? { fee } : {}),
+  };
+}
+
+/** One side of the weight of reports about a fact: the sources on it, whether any of their reports was attested, and the reports counted. */
+export interface WeightSide {
+  sources: number;
+  attested: boolean;
+  /** The ids of the reports counted, in the order they were passed in. */
+  feedback: string[];
+}
+
+/** Confirmations (fact reports of the value) and doubts about one fact on one place. */
+export interface FactWeight {
+  confirmations: WeightSide;
+  doubts: WeightSide;
+}
+
+export interface WeighInput {
+  place: string;
+  fact: FactName;
+  /** The value confirmations must carry. */
+  value: FactValue;
+  /** When to weigh from: reports count when they arrived at or before it, and no more than 90 days before it. */
+  at: string;
+  reports: readonly StoredFeedback[];
+  /** Doubts that arrived before this were about an older value and do not count. */
+  doubtsSince?: string;
+}
+
+/**
+ * Weighs confirmations against doubts for one fact on one place. A
+ * confirmation is a `fact` report of the same value, a doubt is a `doubt`
+ * report. Each source (origin, else device) counts once, on the side of its
+ * latest report, so a traveller who doubted and later confirmed counts as a
+ * confirmation. The intake, the apply and the MapRoulette builder weigh alike.
+ */
+export function weighFact({ place, fact, value, at, reports, doubtsSince }: WeighInput): FactWeight {
+  const now = Date.parse(at);
+  const doubtsFrom = doubtsSince === undefined ? -Infinity : Date.parse(doubtsSince);
+  const counted = reports.filter((r): r is ReportItem => {
+    if (r.type !== "report" || r.place !== place || r.report.fact !== fact || !inWindow(r, now)) return false;
+    if (r.report.kind === "doubt") return time(r) >= doubtsFrom;
+    return r.report.kind === "fact" && sameValue(r.report.value, value);
+  });
+  const latest = new Map<string, ReportItem>();
+  for (const r of counted) {
+    const seen = latest.get(sourceOf(r));
+    if (seen === undefined || time(r) >= time(seen)) latest.set(sourceOf(r), r);
+  }
+  const side = (kind: "fact" | "doubt"): WeightSide => {
+    const items = counted.filter((r) => r.report.kind === kind && latest.get(sourceOf(r))?.report.kind === kind);
+    return { sources: distinctSources(items), attested: items.some((r) => r.attested !== undefined), feedback: items.map((r) => r.id) };
+  };
+  return { confirmations: side("fact"), doubts: side("doubt") };
+}
+
+export interface RestoreInput extends Omit<WeighInput, "doubtsSince"> {
+  /** When doubts took the fact down. */
+  takenDownAt: string;
+}
+
+/**
+ * Weighs a fact doubts took down for a restore, so the intake and the apply
+ * restore alike. Only reports that arrived after the takedown count: the
+ * doubts that took the fact down are not counted again, and a confirmation
+ * sent with them was already weighed against them. A source that reported
+ * the value at or before the takedown, within the 90 days, is not a new
+ * traveller, so its confirmations since do not count either.
+ */
+export function restoreWeight({ takenDownAt, ...input }: RestoreInput): FactWeight {
+  const down = Date.parse(takenDownAt);
+  const now = Date.parse(input.at);
+  const setters = new Set(
+    input.reports
+      .filter(
+        (r) =>
+          r.type === "report" && r.report.kind === "fact" && r.place === input.place && r.report.fact === input.fact &&
+          sameValue(r.report.value, input.value) && time(r) <= down && inWindow(r, now),
+      )
+      .map(sourceOf),
+  );
+  const { confirmations, doubts } = weighFact({ ...input, reports: input.reports.filter((r) => time(r) > down) });
+  const byId = new Map(input.reports.map((r) => [r.id, r]));
+  const fresh = confirmations.feedback.map((id) => byId.get(id)!).filter((r) => !setters.has(sourceOf(r)));
+  return {
+    confirmations: { sources: distinctSources(fresh), attested: fresh.some((r) => r.attested !== undefined), feedback: fresh.map((r) => r.id) },
+    doubts,
+  };
+}
+
+/** A fact taken down after doubts, for a reviewer: the held case `fact_doubted`. */
+export interface DoubtTakedown {
+  fact: FactName;
+  /** The value the place published before it was taken down. */
+  value: FactValue;
+  /** Independent sources among the doubts. */
+  sources: number;
+  /** The doubts counted, in the order they were passed in. */
+  doubts: string[];
+  /** The confirmations of the value counted against them. */
+  confirmations: string[];
+}
+
+/** Where a fact doubts never take down came from, in words, or undefined when doubts can take it down. */
+export const protectedSource = (place: PlaceState, fact: string): string | undefined =>
+  ({ osm: "OSM", owner: "the owner" } as Partial<Record<string, string>>)[place.fact_sources[fact as FactName] ?? ""];
+
+/**
+ * A `doubt` report: a traveller says one fact on a place is wrong without
+ * giving the right value. Doubts from two sources within 90 days, at least
+ * one attested and more than the sources confirming the value, take the fact
+ * off the place at once (`live`, with `doubtTakedown` for a reviewer). Fewer are
+ * held for a reviewer and the fact stays. A fact from OSM or the owner is
+ * never taken down, and a doubt about a fact the place does not have is
+ * refused. Doubts sent before the fact was last set are about an older value
+ * and do not count, the item itself included.
+ *
+ * The caller records the takedown as it does a contact takedown, with the
+ * item's source and date on the fact, and keeps the value with that date as
+ * the open case `decideFact` restores it from.
+ */
+export function decideDoubt({ item, place, earlier }: ItemInput): ItemDecision {
+  const fact = item.report.fact;
+  if (!isDoubtFact(fact)) return { verdict: "refused", reason: "invalid_value", why: `${String(fact)} cannot be doubted` };
+  const value = (place.facts as Record<string, FactValue | undefined>)[fact];
+  if (value === undefined) return { verdict: "refused", reason: "no_value", why: `place has no ${fact}` };
+  const from = protectedSource(place, fact);
+  if (from !== undefined) return { verdict: "held", reason: "protected_source", why: `${fact} came from ${from}, so a reviewer decides` };
+  const reports = withItem(earlier, item);
+  const setAt = place.fact_dates?.[fact];
+  const { confirmations, doubts } = weighFact({
+    place: item.place as string,
+    fact,
+    value,
+    at: item.received,
+    reports,
+    ...(setAt === undefined ? {} : { doubtsSince: setAt }),
+  });
+  if (doubts.sources < 2) return { verdict: "held", reason: "single_doubt", why: `one traveller doubts ${fact}, so a reviewer reads it` };
+  if (!doubts.attested) return { verdict: "held", reason: "not_attested", why: `doubts about ${fact} without attestation are read by a reviewer` };
+  if (doubts.sources <= confirmations.sources) {
+    return { verdict: "held", reason: "disagreement", why: `${fact} has as many confirmations as doubts or more, so a reviewer decides` };
+  }
+  return {
+    verdict: "live",
+    changes: [{ place: item.place as string, fact, value: null }],
+    why: `${fact} taken down after doubts from ${doubts.sources === 2 ? "two" : doubts.sources} sources`,
+    doubtTakedown: { fact, value, sources: doubts.sources, doubts: doubts.feedback, confirmations: confirmations.feedback },
   };
 }

@@ -13,6 +13,8 @@ import {
   type StoredFeedback,
   type StoredOwnerSubmission,
   isPlaceId,
+  isDoubtFact,
+  isValidFactValue,
 } from "@opencampingdb/feedback";
 import { AttestError, verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
 import { refuse, type RefusalBody } from "./refusal.js";
@@ -56,9 +58,11 @@ import {
   isFeedbackId,
   listChanges,
   markInData,
+  openDoubtCases,
   overrule,
   pruneDecisions,
   UNAVAILABLE,
+  type DoubtCase,
   type ItemState,
   type SendTimeDecision,
 } from "./decide.js";
@@ -200,6 +204,10 @@ interface AppEntry {
 const isLimit = (v: unknown): v is number => typeof v === "number" && v > 0;
 
 export const MAX_BODY_BYTES = 16 * 1024;
+
+/** A UTC time to the second, as the intake stamps `received`, so it compares with them as text. */
+const isIsoSeconds = (value: unknown): value is string =>
+  typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value) && !Number.isNaN(Date.parse(value));
 /** Largest photo upload body: both files. The meta travels in the `x-photo-meta` header. */
 export const MAX_PHOTO_BODY_BYTES = MAX_PHOTO_BYTES + MAX_THUMB_BYTES;
 /** Longest `x-photo-meta` header, base64url. */
@@ -1077,6 +1085,32 @@ export function createHandler(deps: Deps) {
     return json(200, { removed: await overrule(call.db, ids, refused as string[]) }, cors);
   }
 
+  /**
+   * `POST /v1/places/recent/doubt-cases`, for the apply run: `{ "cases": [{
+   * "place", "fact", "value", "taken_down_at", "feedback_id" }] }`, the facts
+   * it took down after doubts in the last 90 days, with `authorization: Bearer
+   * <PLACES_TOKEN>`. Each opens the case a takedown at send time opens (see
+   * `openDoubtCases`), and sending them again changes nothing.
+   */
+  async function doubtCasesRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 16);
+    if (call instanceof Response) return call;
+    const cases = call.body.cases;
+    const isCase = (c: unknown): c is DoubtCase => {
+      if (typeof c !== "object" || c === null) return false;
+      const { place, fact, value, taken_down_at: at, feedback_id: id } = c as Record<string, unknown>;
+      return isPlaceId(place) && isDoubtFact(fact) && isValidFactValue(fact, value) && isIsoSeconds(at) && isFeedbackId(id);
+    };
+    if (!Array.isArray(cases) || cases.length === 0 || cases.length > MAX_REMOVE_IDS || !cases.every(isCase)) {
+      return json(400, { error: "invalid", details: [`cases must be 1 to ${MAX_REMOVE_IDS} facts taken down after doubts`] }, cors);
+    }
+    const opened = await openDoubtCases(
+      call.db,
+      cases.map(({ place, fact, value, taken_down_at, feedback_id }) => ({ place, fact, value, taken_down_at, feedback_id })),
+    );
+    return json(200, { opened }, cors);
+  }
+
   return async function handle(request: Request, env: Env): Promise<Response> {
     const cors = corsHeaders(request, env);
     const url = new URL(request.url);
@@ -1108,6 +1142,10 @@ export function createHandler(deps: Deps) {
     if (route === "/v1/places/recent/overruled") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return overruledRecent(request, env, cors);
+    }
+    if (route === "/v1/places/recent/doubt-cases") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return doubtCasesRecent(request, env, cors);
     }
     if (route === "/v1/places/recent/block") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });

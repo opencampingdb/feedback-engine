@@ -13,6 +13,6 @@
     "wrangler": "4.156.2"
   },
   "dependencies": {
-    "@opencampingdb/feedback": "0.10.1"
+    "@opencampingdb/feedback": "0.11.0"
   }
 }

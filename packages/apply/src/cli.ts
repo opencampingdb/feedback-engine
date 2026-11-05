@@ -2,7 +2,7 @@
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import type { ReviewPr } from "./owners.js";
-import { intakeRecentList, intakeRecentStore, sendBlockList, sendOverruled, settleRecentChanges, settleRecentPlaces } from "./recent.js";
+import { intakeRecentList, intakeRecentStore, sendBlockList, sendDoubtCases, sendOverruled, settleRecentChanges, settleRecentPlaces } from "./recent.js";
 import { run } from "./run.js";
 
 const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>]
@@ -125,6 +125,8 @@ async function main(): Promise<number> {
     console.log(`${overruled.length} item(s) decided other than applied sent to the intake`);
     const inData = await settleRecentChanges({ inbox: values.inbox, main: values.main, store, ...(now ? { now } : {}) });
     console.log(`${inData.length} applied report(s) in the data on main sent to the intake`);
+    const cases = await sendDoubtCases({ inbox: values.inbox, store, ...(now ? { now } : {}) });
+    console.log(`${cases.length} fact(s) taken down after doubts sent to the intake`);
   }
   const c = summary.counts;
   console.log(

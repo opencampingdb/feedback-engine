@@ -28,7 +28,7 @@ _Avoid_: votes, feedback (for these three on their own)
 
 **Check**:
 Evidence that a new place is there as described.
-_Avoid_: confirmation, verification
+_Avoid_: verification
 
 **Removal report**:
 Evidence that a new place is not there or should not be listed.
@@ -49,6 +49,14 @@ _Avoid_: pending change, live edit
 **Recent list**:
 The new places, with their standing, and the recent changes that apps show between releases.
 _Avoid_: recent places store, instant places feed
+
+**Doubt**:
+A traveller saying one fact about a place is wrong, without giving the right value.
+_Avoid_: dispute, flag, removal report (for a fact)
+
+**Confirmation**:
+A fact report of the value a place has, or had before doubts took it down, weighed against the doubts about it.
+_Avoid_: check (for a fact), vote
 
 **Held**:
 Accepted, but kept from apps until a reviewer decides.

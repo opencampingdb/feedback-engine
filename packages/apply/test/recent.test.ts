@@ -2,7 +2,7 @@ import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { intakeRecentList, intakeRecentStore, sendBlockList, sendOverruled, settleRecentChanges, settleRecentPlaces } from "../src/recent.js";
+import { intakeRecentList, intakeRecentStore, sendBlockList, sendDoubtCases, sendOverruled, settleRecentChanges, settleRecentPlaces } from "../src/recent.js";
 import { run } from "../src/run.js";
 import { dumpPlace } from "../src/serialise.js";
 import type { Place } from "../src/types.js";
@@ -89,7 +89,11 @@ describe("settleRecentChanges", () => {
   const onMain = (place: Place) => put(join(main, "places", "za", `${PLACE}.json`), place);
   const fact = (name: string, value: unknown) => ({ type: "report", place: PLACE, attested: "apple", report: { kind: "fact", fact: name, value } });
   const contact = (name: string) => ({ type: "report", place: PLACE, report: { kind: "contact", fact: name, reason: "wrong" } });
-  const store = () => ({ inData: vi.fn(async (_ids: readonly string[], _at: string) => {}), overruled: vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {}) });
+  const store = () => ({
+    inData: vi.fn(async (_ids: readonly string[], _at: string) => {}),
+    overruled: vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {}),
+    doubtCases: async () => {},
+  });
 
   it("sends a fact report once main has the fact from that run or later, with the time of this run", async () => {
     await decided("applied", 1, "2026-10-28T00:00:00Z", fact("power", true));
@@ -108,6 +112,17 @@ describe("settleRecentChanges", () => {
     expect(sent.inData).not.toHaveBeenCalled();
     const { phone: _, ...facts } = record.facts;
     await onMain({ ...record, facts });
+    expect(await settleRecentChanges({ inbox, main, store: sent, now: NOW })).toEqual([id(1)]);
+  });
+
+  it("sends a doubt takedown once main no longer has the fact", async () => {
+    const doubt = { type: "report", place: PLACE, attested: "apple", report: { kind: "doubt", fact: "power" } };
+    await decided("applied", 1, "2026-10-28T00:00:00Z", doubt);
+    await onMain(record);
+    const sent = store();
+    expect(await settleRecentChanges({ inbox, main, store: sent, now: NOW })).toEqual([]);
+    const { power: _, ...facts } = record.facts;
+    await onMain({ ...record, facts, fact_sources: { phone: "osm", power: "feedback" }, fact_dates: { power: "2026-10-28T00:00:00Z" } });
     expect(await settleRecentChanges({ inbox, main, store: sent, now: NOW })).toEqual([id(1)]);
   });
 
@@ -161,7 +176,7 @@ describe("settleRecentChanges", () => {
 describe("sendOverruled", () => {
   it("sends the items the run decided other than applying them, and which of them it refused", async () => {
     const overruled = vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {});
-    expect(await sendOverruled({ ids: [id(2), id(1), id(2), id(3)], refused: [id(3), id(9)], store: { inData: async () => {}, overruled } })).toEqual([
+    expect(await sendOverruled({ ids: [id(2), id(1), id(2), id(3)], refused: [id(3), id(9)], store: { inData: async () => {}, overruled, doubtCases: async () => {} } })).toEqual([
       id(1),
       id(2),
       id(3),
@@ -172,8 +187,49 @@ describe("sendOverruled", () => {
 
   it("calls nothing when every item was applied", async () => {
     const overruled = vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {});
-    expect(await sendOverruled({ ids: [], refused: [], store: { inData: async () => {}, overruled } })).toEqual([]);
+    expect(await sendOverruled({ ids: [], refused: [], store: { inData: async () => {}, overruled, doubtCases: async () => {} } })).toEqual([]);
     expect(overruled).not.toHaveBeenCalled();
+  });
+});
+
+describe("sendDoubtCases", () => {
+  const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
+  /** A doubt in applied/, with the takedown the run kept on it when it took the fact down. */
+  async function doubt(n: number, received: string, result: string, doubted?: Record<string, unknown>) {
+    await put(join(inbox, "applied", received.slice(0, 10), `${id(n)}.json`), {
+      id: id(n),
+      received,
+      app: "example-app",
+      device: "aaaa",
+      app_version: "1.0.0",
+      consent: true,
+      type: "report",
+      place: PLACE,
+      report: { kind: "doubt", fact: "toilets" },
+      outcome: { result, reason: "", run: received, ...(doubted ? { doubted } : {}) },
+    });
+  }
+
+  it("sends every fact doubts took down in the last 90 days, on every run", async () => {
+    await doubt(1, "2026-10-28T00:00:00Z", "applied", { fact: "toilets", value: true, at: "2026-10-28T00:00:00Z" });
+    await doubt(2, "2026-10-27T00:00:00Z", "applied");
+    await doubt(3, "2026-10-26T00:00:00Z", "needs_review", { fact: "toilets", value: false, at: "2026-10-26T00:00:00Z" });
+    await doubt(4, "2026-07-31T00:00:00Z", "applied", { fact: "toilets", value: false, at: "2026-07-31T00:00:00Z" });
+    await doubt(5, "2026-09-01T00:00:00Z", "applied", { fact: "toilets", value: false, at: "2026-09-01T00:00:00Z" });
+    const doubtCases = vi.fn(async (_cases: readonly unknown[]) => {});
+    const store = { inData: async () => {}, overruled: async () => {}, doubtCases };
+    const expected = [
+      { place: PLACE, fact: "toilets", value: false, taken_down_at: "2026-09-01T00:00:00Z", feedback_id: id(5) },
+      { place: PLACE, fact: "toilets", value: true, taken_down_at: "2026-10-28T00:00:00Z", feedback_id: id(1) },
+    ];
+    expect(await sendDoubtCases({ inbox, store, now: NOW })).toEqual(expected);
+    expect(doubtCases).toHaveBeenCalledWith(expected);
+  });
+
+  it("calls nothing when no doubt took a fact down", async () => {
+    const doubtCases = vi.fn(async (_cases: readonly unknown[]) => {});
+    expect(await sendDoubtCases({ inbox, store: { inData: async () => {}, overruled: async () => {}, doubtCases }, now: NOW })).toEqual([]);
+    expect(doubtCases).not.toHaveBeenCalled();
   });
 });
 
@@ -253,6 +309,17 @@ describe("intakeRecentStore", () => {
     // Each call names the refused ids among its own.
     expect((bodies[3] as { refused?: string[] }).refused).toEqual([id(3)]);
     expect(bodies[4]).toEqual({ ids: [id(500)], refused: [id(500)] });
+  });
+
+  it("posts the doubt cases with the token, at most 500 at a time", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ opened: 1 }), { status: 200 }));
+    const cases = Array.from({ length: 501 }, (_, n) => ({ place: placeOf(n), fact: "toilets" as const, value: true, taken_down_at: "2026-10-28T00:00:00Z", feedback_id: id(n) }));
+    await intakeRecentStore("https://intake.example.org/", "secret", fetch).doubtCases(cases);
+    const calls = fetch.mock.calls as unknown as [string, RequestInit][];
+    expect(calls.map(([url]) => url)).toEqual(["https://intake.example.org/v1/places/recent/doubt-cases", "https://intake.example.org/v1/places/recent/doubt-cases"]);
+    expect(new Headers(calls[0]![1].headers).get("authorization")).toBe("Bearer secret");
+    expect(JSON.parse(calls[0]![1].body as string).cases).toHaveLength(500);
+    expect(JSON.parse(calls[1]![1].body as string)).toEqual({ cases: [cases[500]] });
   });
 
   it("throws when the intake refuses the recent changes", async () => {

@@ -76,6 +76,7 @@ export {
   contactProblem,
   isAddress,
   isContactFact,
+  isDoubtFact,
   isContributor,
   isFactName,
   isOwnerSubmission,

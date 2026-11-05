@@ -1,10 +1,13 @@
 import {
   decideContactReport,
+  decideDoubt,
   decideFact,
   newPlaceFields,
   newPlaceListing,
   WINDOW_DAYS,
   type HeldReason as RulesHeldReason,
+  type ItemDecision,
+  type OpenDoubt,
   type PlaceState,
   type RefusedReason,
   type ReportItem,
@@ -29,16 +32,20 @@ import { chunks, placeStatement, prunePlaceStatements, type Bbox, type D1Like, t
  * learns at once whether its change is live or held. The inbox write is the
  * same either way, and the apply still writes the data.
  *
- * Decided here: `fact` and `contact` reports about a released place, and
- * `new_place` reports. A fact report or contact takedown that goes live is a
- * recent change, served with the recent list by map area until 7 days after
- * the apply has put it into the data. A live new place goes on the recent list
+ * Decided here: `fact`, `contact` and `doubt` reports about a released place,
+ * and `new_place` reports. A fact report, contact takedown or doubt takedown
+ * that goes live is a recent change, served with the recent list by map area
+ * until 7 days after the apply has put it into the data. A doubt takedown also
+ * opens a case in `doubt_cases` with the value the fact had, as does a
+ * takedown by the apply (`openDoubtCases`), so a later report of that value is
+ * decided as a confirmation, and the restore or replacement that goes live
+ * closes it. A live new place goes on the recent list
  * with its description, fee and contacts. Everything else the apply decides,
  * as before, and its answer has no `state`.
  *
  * Each item is decided against the place in the place index with the recent
- * changes on it laid over, and against the fact and contact reports the intake
- * decided for the same place and fact in the last 90 days, live or held. The
+ * changes on it laid over, and against the fact, contact and doubt reports the
+ * intake decided for the same place and fact in the last 90 days, live or held. The
  * checks run last, only for an item the rules would put live, because an item
  * that passes them takes one of its contributor's daily live changes.
  */
@@ -58,8 +65,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * `unknown_place`, the place is not in the place index (a place the release
  * doesn't have yet, or a new place); `blocked`, the contributor is on the
  * block list; `no_value` and `invalid_value`, the rules would refuse it (a
- * contact report about a contact the place does not have, as the index has
- * it). The apply decides each of these again when it runs.
+ * contact report or doubt about a fact the place does not have, as the index
+ * has it). The apply decides each of these again when it runs.
  */
 export type HeldReason = RulesHeldReason | ChecksHeldReason | RefusedReason | "unknown_place" | "blocked";
 
@@ -85,7 +92,7 @@ export function decidedHere(item: StoredFeedback): item is ReportItem {
   if (item.type !== "report") return false;
   const kind = item.report.kind;
   if (kind === "new_place") return true;
-  return (kind === "fact" || kind === "contact") && typeof item.place === "string" && typeof item.report.fact === "string";
+  return (kind === "fact" || kind === "contact" || kind === "doubt") && typeof item.place === "string" && typeof item.report.fact === "string";
 }
 
 const isoSeconds = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -149,7 +156,7 @@ interface EvidenceRow {
   feedback_id: string;
   place: string;
   fact: string;
-  kind: "fact" | "contact";
+  kind: "fact" | "contact" | "doubt";
   value: string | null;
   reason: string | null;
   received: string;
@@ -158,7 +165,7 @@ interface EvidenceRow {
   attested: string | null;
 }
 
-/** The fact and contact reports the intake decided about a place and fact in the 90 days up to `at`, as the rules read them. */
+/** The fact, contact and doubt reports the intake decided about a place and fact in the 90 days up to `at`, as the rules read them. */
 export async function earlierReports(db: D1Like, place: string, fact: string, at: number): Promise<StoredFeedback[]> {
   const { results } = await db
     .prepare("SELECT * FROM report_evidence WHERE place = ? AND fact = ? AND received >= ? ORDER BY received, feedback_id")
@@ -177,7 +184,9 @@ export async function earlierReports(db: D1Like, place: string, fact: string, at
         report:
           row.kind === "fact"
             ? { kind: "fact", fact: row.fact, value: row.value === null ? undefined : (JSON.parse(row.value) as unknown) }
-            : { kind: "contact", fact: row.fact, reason: row.reason },
+            : row.kind === "contact"
+              ? { kind: "contact", fact: row.fact, reason: row.reason }
+              : { kind: "doubt", fact: row.fact },
       }) as unknown as StoredFeedback,
   );
 }
@@ -201,6 +210,77 @@ function evidenceStatement(db: D1Like, item: ReportItem, state: "live" | "held")
       item.attested ?? null,
       state,
     );
+}
+
+/** The open case for a fact doubts took down on a place, as `decideFact` reads it, or undefined when there is none. */
+export async function openDoubt(db: D1Like, place: string, fact: string): Promise<OpenDoubt | undefined> {
+  const row = await db
+    .prepare("SELECT value, taken_down_at FROM doubt_cases WHERE place = ? AND fact = ? AND closed_by IS NULL")
+    .bind(place, fact)
+    .first<{ value: string; taken_down_at: string }>();
+  return row === null ? undefined : { value: JSON.parse(row.value) as OpenDoubt["value"], at: row.taken_down_at };
+}
+
+/** A fact the apply took down after doubts, as it sends it to `openDoubtCases`. */
+export interface DoubtCase {
+  place: string;
+  fact: string;
+  /** The value the place had. */
+  value: FactValue;
+  /** When the doubt that took it down was received. */
+  taken_down_at: string;
+  /** That doubt. */
+  feedback_id: string;
+}
+
+/**
+ * Opens a case for each fact the apply took down after doubts, as the intake
+ * does for its own takedowns, so a later report of the value is decided as a
+ * confirmation once the release no longer has the fact. A case replaces the
+ * one held for its place and fact only when its takedown is later, and that
+ * one was not closed after it, so the apply can send the same cases on every
+ * run. Returns the cases opened.
+ */
+export async function openDoubtCases(db: D1Like, cases: readonly DoubtCase[]): Promise<number> {
+  if (cases.length === 0) return 0;
+  const results = await db.batch(
+    cases.map((c) =>
+      db
+        .prepare(
+          `INSERT INTO doubt_cases (place, fact, value, taken_down_at, feedback_id, closed_by, closed_at) VALUES (?, ?, ?, ?, ?, NULL, NULL)
+           ON CONFLICT (place, fact) DO UPDATE SET value = excluded.value, taken_down_at = excluded.taken_down_at, feedback_id = excluded.feedback_id, closed_by = NULL, closed_at = NULL
+           WHERE excluded.taken_down_at > doubt_cases.taken_down_at AND (doubt_cases.closed_at IS NULL OR doubt_cases.closed_at <= excluded.taken_down_at)`,
+        )
+        .bind(c.place, c.fact, JSON.stringify(c.value), c.taken_down_at, c.feedback_id),
+    ),
+  );
+  return results.reduce<number>((sum, result) => sum + changesOf(result), 0);
+}
+
+/**
+ * The writes for a live decision's case: a takedown opens the case for the
+ * place and fact (replacing a closed one), with the value the place had and
+ * the takedown's time, and a restore or replacement closes it.
+ */
+function caseStatements(db: D1Like, item: ReportItem, decision: Extract<ItemDecision, { verdict: "live" }>): D1Statement[] {
+  if (decision.doubtTakedown !== undefined) {
+    return [
+      db
+        .prepare(
+          `INSERT INTO doubt_cases (place, fact, value, taken_down_at, feedback_id, closed_by, closed_at) VALUES (?, ?, ?, ?, ?, NULL, NULL)
+           ON CONFLICT (place, fact) DO UPDATE SET value = excluded.value, taken_down_at = excluded.taken_down_at, feedback_id = excluded.feedback_id, closed_by = NULL, closed_at = NULL`,
+        )
+        .bind(item.place, decision.doubtTakedown.fact, JSON.stringify(decision.doubtTakedown.value), item.received, item.id),
+    ];
+  }
+  if (decision.settles !== undefined) {
+    return [
+      db
+        .prepare("UPDATE doubt_cases SET closed_by = ?, closed_at = ? WHERE place = ? AND fact = ? AND closed_by IS NULL")
+        .bind(item.id, item.received, item.place, item.report.fact),
+    ];
+  }
+  return [];
 }
 
 export interface DecideInput {
@@ -231,7 +311,12 @@ export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDeci
   const place = await placeNow(db, placeId);
   if (place === undefined) return held("unknown_place");
   const earlier = await earlierReports(db, placeId, item.report.fact as string, Date.parse(item.received));
-  const decision = item.report.kind === "fact" ? decideFact({ item, place, earlier }) : decideContactReport({ item, place, earlier });
+  const kind = item.report.kind;
+  const openCase = kind === "fact" ? await openDoubt(db, placeId, item.report.fact as string) : undefined;
+  const decision =
+    kind === "fact"
+      ? decideFact({ item, place, earlier, ...(openCase === undefined ? {} : { openCase }) })
+      : kind === "doubt" ? decideDoubt({ item, place, earlier }) : decideContactReport({ item, place, earlier });
   if (decision.verdict === "refused") return held(decision.reason);
   if (decision.verdict === "held") return held(decision.reason, (d) => [evidenceStatement(d, item, "held")]);
   // An item without attestation is never live from the intake. The apply's two-device rule still runs.
@@ -244,6 +329,7 @@ export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDeci
   const [cellLon, cellLat] = place.cell;
   return live((d) => [
     evidenceStatement(d, item, "live"),
+    ...caseStatements(d, item, decision),
     ...decision.changes.map((change) =>
       d
         .prepare(
@@ -408,13 +494,15 @@ export async function overrule(db: D1Like, ids: readonly string[], takenDown: re
  * Deletes recent changes the data has held for more than 7 days, those
  * accepted more than 7 days ago that the data still does not hold, new places
  * the apply run was done with more than 7 days ago with their evidence, and
- * report evidence older than the rules' 90 days. For the scheduled job.
+ * report evidence and doubt cases older than the rules' 90 days. For the
+ * scheduled job.
  */
 export async function pruneDecisions(db: D1Like, now: number): Promise<void> {
   await db.batch([
     db.prepare("DELETE FROM recent_changes WHERE in_data_at IS NOT NULL AND in_data_at < ?").bind(isoSeconds(now - KEEP_IN_DATA_DAYS * DAY_MS)),
     db.prepare("DELETE FROM recent_changes WHERE in_data_at IS NULL AND accepted < ?").bind(isoSeconds(now - KEEP_NOT_IN_DATA_DAYS * DAY_MS)),
     db.prepare("DELETE FROM report_evidence WHERE received < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
+    db.prepare("DELETE FROM doubt_cases WHERE taken_down_at < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
     ...prunePlaceStatements(db, now),
   ]);
 }
