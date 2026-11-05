@@ -1,7 +1,11 @@
+import { createReadStream } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
 import type { AwaitingClaim, OwnerRecord } from "./owners.js";
+import { pairKey, withDoNotMatch, type DoNotMatchEntry } from "./review.js";
+import { majorRoads, type MajorRoads } from "./roads.js";
 import type { Decision } from "./rules.js";
 import { dumpFeeLine, dumpPhotoLine, dumpPlace, dumpReviewLine, feePath, photoPath, placePath, reviewPath } from "./serialise.js";
 import type { BlockedList, Fee, Photo, Place, RemovedPhotos, Review } from "./types.js";
@@ -160,6 +164,59 @@ async function readJsonFolder<T>(folder: string, name: RegExp): Promise<T[]> {
     if (name.test(file)) out.push(JSON.parse(await readFile(join(folder, file), "utf8")) as T);
   }
   return out;
+}
+
+/** Place ids the apply listed before as held cases of kind `name`: `listed/<name>.json`, `{"places": [...]}`. Empty when the file is missing. */
+export async function readListed(inbox: string, name: string): Promise<Set<string>> {
+  const path = join(inbox, "listed", `${name}.json`);
+  if (!(await exists(path))) return new Set();
+  return new Set((JSON.parse(await readFile(path, "utf8")) as { places?: string[] }).places ?? []);
+}
+
+/** Adds place ids to `listed/<name>.json`, sorted. Returns how many were added. */
+export async function addListed(inbox: string, name: string, ids: readonly string[]): Promise<number> {
+  const current = await readListed(inbox, name);
+  const added = ids.filter((id) => !current.has(id) && (current.add(id), true));
+  if (added.length === 0) return 0;
+  await mkdir(join(inbox, "listed"), { recursive: true });
+  await writeFile(join(inbox, "listed", `${name}.json`), `${JSON.stringify({ places: [...current].sort() }, null, 2)}\n`, "utf8");
+  return added.length;
+}
+
+/**
+ * The fields of one CSV line, as Python's csv module writes them: fields
+ * separated by commas, quoted with double quotes when they hold a comma, a
+ * quote (doubled) or a line break.
+ */
+function csvFields(line: string): string[] {
+  const out: string[] = [];
+  let field = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+    if (quoted) {
+      if (ch === '"' && line[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else if (ch === '"') quoted = false;
+      else field += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ",") {
+      out.push(field);
+      field = "";
+    } else field += ch;
+  }
+  out.push(field);
+  return out;
+}
+
+/** The major roads in a geometry sidecar written by the data repository's `pipeline.extract --geometry`, read line by line. */
+export async function readRoads(path: string): Promise<MajorRoads> {
+  const lines: string[] = [];
+  for await (const line of createInterface({ input: createReadStream(path, "utf8"), crlfDelay: Infinity })) {
+    if (line.includes('"road"')) lines.push(line);
+  }
+  return majorRoads(lines);
 }
 
 /** Approved owners: `owners/<place id>.json`. */
@@ -487,6 +544,47 @@ export class DataRepo {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, `${JSON.stringify({ photos }, null, 2)}\n`, "utf8");
     return "moderation/removed_photos.json";
+  }
+
+  /**
+   * Place ids in `moderation/heavy-vehicle-candidates.csv`: the `place`
+   * column of a CSV with a header line, in file order. Rows without a place
+   * id are skipped. Empty when the file is missing or has no `place` column.
+   */
+  async heavyVehicleCandidates(): Promise<string[]> {
+    const path = join(this.root, "moderation", "heavy-vehicle-candidates.csv");
+    if (!(await exists(path))) return [];
+    const [header, ...rows] = (await readFile(path, "utf8")).split(/\r?\n/).filter((line) => line.trim());
+    const column = header ? csvFields(header).map((f) => f.trim()).indexOf("place") : -1;
+    if (column < 0) return [];
+    return rows.map((row) => csvFields(row)[column]?.trim() ?? "").filter((id) => PLACE_FILE.test(`${id}.json`));
+  }
+
+  /** Pairs in `moderation/commons-do-not-match.json`. Empty when the file is missing. */
+  async doNotMatch(): Promise<DoNotMatchEntry[]> {
+    const path = join(this.root, "moderation", "commons-do-not-match.json");
+    if (!(await exists(path))) return [];
+    return (JSON.parse(await readFile(path, "utf8")) as { pairs?: DoNotMatchEntry[] }).pairs ?? [];
+  }
+
+  /** Adds pairs to `moderation/commons-do-not-match.json` with `withDoNotMatch`. Returns the path, or undefined when nothing changed. */
+  async addDoNotMatch(entries: readonly DoNotMatchEntry[]): Promise<string | undefined> {
+    if (entries.length === 0) return undefined;
+    const path = join(this.root, "moderation", "commons-do-not-match.json");
+    const before = (await exists(path)) ? await readFile(path, "utf8") : undefined;
+    const text = withDoNotMatch(before, entries);
+    if (text === before) return undefined;
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, text, "utf8");
+    return "moderation/commons-do-not-match.json";
+  }
+
+  /** Pairs in `moderation/distinct_places.json`, as `pairKey` makes them. Empty when the file is missing. */
+  async distinct(): Promise<Set<string>> {
+    const path = join(this.root, "moderation", "distinct_places.json");
+    if (!(await exists(path))) return new Set();
+    const list = JSON.parse(await readFile(path, "utf8")) as { pairs?: { a: string; b: string }[] };
+    return new Set((list.pairs ?? []).map((pair) => pairKey(pair.a, pair.b)));
   }
 
   /** Contributors in `moderation/blocked_contributors.json`. Empty when the file is missing. */

@@ -1,12 +1,15 @@
 import { resolve } from "node:path";
 import { isOwnerSubmission, type StoredFeedback, type StoredOwnerSubmission } from "@opencampingdb/feedback";
 import {
+  addListed,
   DataRepo,
   moveDecided,
   readAwaiting,
   readHistory,
   readOwners,
+  readListed,
   readPending,
+  readRoads,
   refuseMalformed,
   settleAwaiting,
   writeOwners,
@@ -15,6 +18,7 @@ import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
 import { autoPrBody, reviewPrBody } from "./prbody.js";
 import { previewUrl, PREVIEW_TTL_SECONDS } from "./preview.js";
 import { checkProof as realCheckProof, type ProofResult } from "./proof.js";
+import { vehicleAccessCases } from "./review.js";
 import { applyEdit, applyHeldReview, applyRules, newPlaceIdOf, resolvePlace, WINDOW_DAYS, type Change, type Decision } from "./rules.js";
 import type { RecentList } from "./recent.js";
 import type { Fee, Place, Review } from "./types.js";
@@ -49,6 +53,13 @@ export interface RunOptions {
    * isn't a photo, photo report or photo erasure is refused.
    */
   places?: string;
+  /**
+   * The data repository's geometry sidecar (`pipeline.extract --geometry`).
+   * Its major roads keep a new place on the other side of a road from the
+   * place it may duplicate from being merged into it. Left out, the run has
+   * no road data and merges no duplicate on its own: a reviewer decides.
+   */
+  geometry?: string;
   /** Licence id for new photo lines. Defaults to CC-BY-4.0. */
   photoLicence?: string;
   /**
@@ -186,6 +197,9 @@ export async function run(options: RunOptions): Promise<RunSummary> {
       (p.type === "check" && p.place !== null && places.get(p.place)?.standing === "held"),
   );
   const everyPlace = aboutNewPlaces && !photosOnly ? await auto.allPlaces() : undefined;
+  // What a merge of a duplicate new place checks: pairs a person found separate, and major roads.
+  const distinct = everyPlace ? await auto.distinct() : undefined;
+  const roads = everyPlace && options.geometry ? await readRoads(options.geometry) : undefined;
 
   // The recent list, asked for only when something is about a place not in the data.
   const aboutMissingPlace = crowd.some((p) => typeof p.place === "string" && !places.has(p.place));
@@ -196,6 +210,9 @@ export async function run(options: RunOptions): Promise<RunSummary> {
           return "unreadable" as const;
         })
       : undefined;
+
+  // The do-not-match list, when anything in this run says a Commons photo is not of a place.
+  const doNotMatch = crowd.some((p) => p.type === "report" && p.report.kind === "commons_mismatch") && !photosOnly ? await auto.doNotMatch() : undefined;
 
   const crowdResult = applyRules({
     now: runAt,
@@ -210,6 +227,9 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     photos,
     ...(options.photoLicence ? { photoLicence: options.photoLicence } : {}),
     ...(everyPlace ? { everyPlace } : {}),
+    ...(distinct ? { distinct } : {}),
+    ...(roads ? { roads } : {}),
+    ...(doNotMatch ? { doNotMatch } : {}),
     ...(recent !== undefined ? { recent } : {}),
   });
 
@@ -268,6 +288,8 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   }
   const removedWritten = await auto.addRemovedPhotos(crowdResult.removedPhotos);
   if (removedWritten) autoFiles.push(removedWritten);
+  const doNotMatchWritten = await auto.addDoNotMatch(crowdResult.doNotMatch);
+  if (doNotMatchWritten) autoFiles.push(doNotMatchWritten);
   // Withdrawn new places leave both checkouts.
   const reviewFiles: string[] = [];
   for (const placeId of crowdResult.removed) {
@@ -342,7 +364,16 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const autoChanged = autoFiles.length > 0;
   const ownerClaims = ownerResult.forReview.length > 0;
   // A held case is listed when this run wrote its place or its edit for a person.
+  let listedNow = 0;
   const held = crowdResult.held.filter((h) => crowdResult.places.has(h.place) || h.feedback.some((f) => effective.has(f)));
+  // Places whose name says only heavy vehicles may use them, listed once each for a reviewer.
+  const candidates = photosOnly ? [] : await auto.heavyVehicleCandidates();
+  if (candidates.length > 0) {
+    const records = new Map([...(await auto.places(candidates)), ...autoPlaces]);
+    const cases = vehicleAccessCases(candidates, records, await readListed(options.inbox, "vehicle_access_candidate"));
+    held.push(...cases);
+    listedNow = await addListed(options.inbox, "vehicle_access_candidate", cases.map((c) => c.place));
+  }
   const closed = crowdResult.closed;
   const reviewChanged = reviewFiles.length > 0 || reviewChanges.length > 0 || ownerClaims || held.length > 0 || closed.length > 0;
 
@@ -351,7 +382,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     auto_changed: autoChanged,
     review_changed: reviewChanged,
     owner_claims: ownerClaims,
-    inbox_changed: refusedMalformed + moved + ownersWritten + settled > 0,
+    inbox_changed: refusedMalformed + moved + ownersWritten + settled + listedNow > 0,
     counts,
     auto_files: autoFiles,
     review_files: reviewFiles,

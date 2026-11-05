@@ -31,6 +31,6 @@
     "apply": "node dist/cli.js"
   },
   "dependencies": {
-    "@opencampingdb/feedback": "0.11.0"
+    "@opencampingdb/feedback": "0.12.0"
   }
 }

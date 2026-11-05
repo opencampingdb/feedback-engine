@@ -46,7 +46,17 @@ export type ReportKind =
    * attested, take the fact down until two new sources confirm it or someone
    * reports a new value. Facts from OSM or the owner stay up.
    */
-  | "doubt";
+  | "doubt"
+  /**
+   * A Wikimedia Commons photo shown for a place is not of it. `file` names
+   * the photo as the place's line in `commons.ndjson.gz` does. The app hides
+   * the photo for the traveller who sent it at once, and the intake answers
+   * `held` (`commons_report`): a reviewer gets the case. Reports from two
+   * different sources within 90 days, at least one attested, add the place
+   * and file to the data's do-not-match list, so the photo is never matched
+   * to the place again.
+   */
+  | "commons_mismatch";
 
 /** Why a contact on a place is reported: `wrong` (it reaches someone else, or nobody) or `spam`. */
 export type ContactReportReason = "wrong" | "spam";
@@ -84,6 +94,12 @@ export type BrandValue =
   | "yha"
   | "acc";
 export type AccessValue = "2wd" | "awd" | "4wd" | "unknown";
+/**
+ * Who may use a place by the vehicle they drive. `heavy_vehicles_only`: only
+ * heavy vehicles (trucks), and others may be fined for stopping there. More
+ * values may be added later, such as cars only.
+ */
+export type VehicleAccessValue = "heavy_vehicles_only";
 export type EntryValue = "public" | "customers" | "permit" | "private";
 export type WaterType = "tank_fill" | "fountain";
 /** An Australian state or territory, as its abbreviation. */
@@ -111,6 +127,12 @@ export interface PlaceFacts {
   fee?: FeeValue;
   power?: boolean;
   pets?: PetsValue;
+  /**
+   * The months dogs are allowed, when `pets` is `seasonal`: one OSM month
+   * range such as `May-Sep`, which may wrap the year end (`Dec-Feb`). It is
+   * OSM's `dog:conditional=yes @ (May-Sep)`. `monthsInRange` reads it.
+   */
+  pets_months?: string;
   tents?: boolean;
   caravans?: CaravansValue;
   toilets?: boolean;
@@ -125,6 +147,8 @@ export interface PlaceFacts {
   access?: AccessValue;
   /** Who may stay (OSM access=*). */
   entry?: EntryValue;
+  /** Who may use the place by vehicle, from OSM's hgv and access tags or a traveller. */
+  vehicle_access?: VehicleAccessValue;
   /** drinking_water_point only. */
   water_type?: WaterType;
   /** Where to book. https only. */
@@ -257,6 +281,8 @@ export interface ReportBody {
   description?: string;
   /** On `new_place` only: whether there is a charge, checked as a `fee` fact report's value is. Published with the place. */
   fee?: FeeValue;
+  /** Required on `commons_mismatch`, and allowed only there: the Commons file name, as `file` in `commons.ndjson.gz`, 1 to 255 characters on one line. */
+  file?: string;
 }
 
 /** The contact facts a new place may carry. */

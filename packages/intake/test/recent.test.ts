@@ -773,6 +773,33 @@ describe("send-time decisions", () => {
     expect(store.db.prepare("SELECT accepted, taken_down FROM contributor_records").all()).toEqual([{ accepted: 1, taken_down: 0 }]);
   });
 
+  it("takes pets_months off with pets that is no longer seasonal, and holds months for a place that is not seasonal", async () => {
+    index(UNKNOWN, [146, -37], { pets: "seasonal", pets_months: "May-Sep" });
+    expect(await send(fact(UNKNOWN, "pets", "leashed"))).toMatchObject({ state: "live" });
+    expect((await listing()).changes).toEqual([
+      { place: UNKNOWN, fact: "pets", value: "leashed", accepted: "2026-11-03T09:00:00Z", in_data_at: null },
+      { place: UNKNOWN, fact: "pets_months", value: null, accepted: "2026-11-03T09:00:00Z", in_data_at: null },
+    ]);
+    clock += HOUR;
+    expect(await send(fact(UNKNOWN, "pets_months", "Dec-Feb", { device: otherDevice(1), contributor: "acct_second_person_01" }))).toMatchObject(held("not_seasonal"));
+  });
+
+  it("answers held for a Commons photo that is not of the place, and keeps the decision with the item for the apply", async () => {
+    const answer = await send(report(PLACE, { kind: "commons_mismatch", file: "Lake Pool 6.jpg" }));
+    expect(answer).toEqual({ id: written()[0]!.id, ...held("commons_report") });
+    expect(written()[0]).toMatchObject({ report: { kind: "commons_mismatch", file: "Lake Pool 6.jpg" }, intake: held("commons_report") });
+    expect((await listing()).changes).toEqual([]);
+  });
+
+  it("lets one attested report replace a fact the release set by a rule, and doubts take one down", async () => {
+    index(UNKNOWN, [146, -37], { vehicle_access: "heavy_vehicles_only", toilets: true }, { vehicle_access: "rule", toilets: "rule" });
+    expect(await send(fact(UNKNOWN, "toilets", false))).toMatchObject({ state: "live" });
+    expect(await send(report(UNKNOWN, { kind: "doubt", fact: "vehicle_access" }))).toMatchObject(held("single_doubt"));
+    clock += HOUR;
+    expect(await send(report(UNKNOWN, { kind: "doubt", fact: "vehicle_access" }, { device: otherDevice(1), contributor: "acct_second_person_01" }))).toMatchObject({ state: "live" });
+    expect((await listing()).changes).toContainEqual(expect.objectContaining({ place: UNKNOWN, fact: "vehicle_access", value: null }));
+  });
+
   it("answers live, with no recent change, for the value the place already has", async () => {
     expect(await send(fact(PLACE, "toilets", false))).toMatchObject({ state: "live" });
     expect((await listing()).changes).toEqual([]);

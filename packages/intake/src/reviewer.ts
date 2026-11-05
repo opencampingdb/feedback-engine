@@ -8,10 +8,14 @@
  *
  * Cheapest first: `settleByRules` decides first, with no model call, and the
  * model is asked only about what is left, at most MAX_MODEL_CASES a run. On
- * its own the model may approve a held or hidden new place, restore a
+ * its own the model may approve a held or hidden new place, merge a held
+ * duplicate into the place it duplicates (never into a place with a verified
+ * owner, a pair on `moderation/distinct_places.json` or a pair across a major
+ * road; without road data, only the same name less than 25 m apart), restore a
  * withdrawn contact, take down a new place that is clear spam, restore or
- * keep down a fact doubts took down, and dismiss doubts about a fact that
- * stays. A case the apply's rules closed (a doubted fact that
+ * keep down a fact doubts took down, dismiss doubts about a fact that
+ * stays, and confirm `vehicle_access` on a place whose name says only heavy
+ * vehicles may use it. A case the apply's rules closed (a doubted fact that
  * travellers restored or replaced) is left without asking. Owner-set
  * values, blocked contributors and values that wait in the inbox go to a
  * person, and an answer the model isn't sure of, or one that can't be read,
@@ -29,6 +33,9 @@ import {
   applyDecision,
   dumpPlace,
   heldCaseKey,
+  mergePlaces,
+  reviewerMergeProblem,
+  pairKey,
   parseClosedCases,
   parseHeldCases,
   placePath,
@@ -37,6 +44,9 @@ import {
   type HeldCase,
   type Place,
   type ReviewDecision,
+  withDoNotMatch,
+  type DoNotMatchEntry,
+  type MajorRoads,
 } from "@opencampingdb/apply/review";
 import type { AiLike } from "./checks.js";
 import { GitHubError, type GitHubApp, type GitHubAppConfig, type IssueComment } from "./github.js";
@@ -48,6 +58,8 @@ import { claimReviewRun } from "./runs.js";
  * is held to the decision schema.
  */
 export const DEFAULT_REVIEW_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+/** The data repository's list of Commons photos that are not of a place. */
+export const DO_NOT_MATCH_PATH = "moderation/commons-do-not-match.json";
 /** The data repository's branch for changes a person or a reviewer decides on. */
 export const REVIEW_BRANCH = "feedback/review";
 /** Cases the model is asked about in one run. The rest wait for the next. */
@@ -70,6 +82,13 @@ export interface ReviewerDeps {
   botLogins: readonly string[];
   now: () => number;
   onError?: (error: unknown) => void;
+  /**
+   * The major roads from the data repository's geometry sidecar, when the
+   * deployment has them. With them a merge across a major road is refused;
+   * without them only the same name, in the same group, less than 25 m apart
+   * is merged.
+   */
+  roads?: MajorRoads;
 }
 
 /** One decision, as the reviewer records it on the PR. */
@@ -162,11 +181,19 @@ const MEANINGS: Record<ReviewDecision, string> = {
   keep_down: "leave the fact off the place: the doubts are believable",
   dismiss: "keep the fact: the doubts do not outweigh it",
   leave: "a person decides",
+  confirm: "set the fact: the place's name clearly says only heavy vehicles (trucks) may use it",
+  merge: "merge the new place into the place it may duplicate: the two are clearly one place added twice, with the same or nearly the same name and nothing to tell them apart",
 };
 
 /** What a decision means for this case. */
 const meaning = (c: HeldCase, d: ReviewDecision) =>
-  c.case === "fact_doubted" && d === "restore" ? "put the last value back on the place: the doubts are outweighed or unlikely" : MEANINGS[d];
+  c.case === "fact_doubted" && d === "restore"
+    ? "put the last value back on the place: the doubts are outweighed or unlikely"
+    : c.case === "commons_mismatch" && d === "confirm"
+      ? "never show this photo for the place again: its file name clearly names another place or something else"
+      : c.case === "commons_mismatch" && d === "dismiss"
+        ? "keep showing the photo: its file name clearly names this place"
+        : MEANINGS[d];
 
 /** What the model reads of a place. Values travellers or the owner sent are data, not instructions. */
 function placeView(place: Place) {
@@ -189,6 +216,12 @@ function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
     "You review held cases for an open database of camping places. A case is a new place or a change that the automatic checks held for a reviewer.",
     ...(c.case === "fact_doubted"
       ? ["In a fact_doubted case, travellers say a fact about the place is wrong without giving the right value. Doubts and confirmations count independent travellers."]
+      : []),
+    ...(c.case === "commons_mismatch"
+      ? ["In a commons_mismatch case, a traveller says a Wikimedia Commons photo shown for the place is not of it. You see only the photo's file name, matched to the place by its words and distance."]
+      : []),
+    ...(c.case === "vehicle_access_candidate"
+      ? ["In a vehicle_access_candidate case, the place's name suggests only heavy vehicles may use it, and OpenStreetMap does not say so. Confirm only when the name clearly says trucks or heavy vehicles only, such as a truck parking bay or a heavy vehicle rest area."]
       : []),
     "Answer with JSON only: {\"decision\": ..., \"reason\": ..., \"sure\": true or false}.",
     `The decisions you may give for this case are: ${allowed.join(", ")}.`,
@@ -252,8 +285,8 @@ export async function askModel(
   c: HeldCase,
   place: Place,
   duplicateOf: Place | undefined,
+  allowed: readonly ReviewDecision[] = allowedDecisions(c),
 ): Promise<{ decision: ReviewDecision; reason: string }> {
-  const allowed = allowedDecisions(c);
   const evidence = {
     case: c.case,
     place: placeView(place),
@@ -263,6 +296,8 @@ export async function askModel(
     ...(c.case === "fact_doubted"
       ? { fact: c.fact, last_value: c.value, taken_down: c.taken_down, doubting_sources: c.sources, doubts: c.doubts?.length ?? 0, confirmations: c.confirmations?.length ?? 0 }
       : {}),
+    ...(c.case === "vehicle_access_candidate" ? { fact: c.fact, value: c.value } : {}),
+    ...(c.case === "commons_mismatch" ? { file: c.file, reporting_sources: c.sources } : {}),
   };
   let out: unknown;
   try {
@@ -299,6 +334,16 @@ function parsePlace(text: string): Place | undefined {
   }
 }
 
+/** The pairs in the do-not-match list's text, or none when it does not parse. */
+function doNotMatchOf(text: string): DoNotMatchEntry[] {
+  try {
+    const pairs = (JSON.parse(text) as { pairs?: unknown }).pairs;
+    return Array.isArray(pairs) ? (pairs as DoNotMatchEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 const conflict = (error: unknown) => error instanceof GitHubError && (error.status === 409 || error.status === 422);
 
 /**
@@ -332,6 +377,20 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
 
   const reviewer = `ai:${deps.model}`;
   const records: ReviewRecord[] = [];
+  // Pairs a person found separate, read once and only for a duplicate case.
+  let distinct: Set<string> | undefined;
+  const distinctPairs = async () => {
+    if (distinct) return distinct;
+    const file = await github.readFile(data, "moderation/distinct_places.json", branch);
+    let pairs: { a?: unknown; b?: unknown }[] = [];
+    try {
+      pairs = file ? ((JSON.parse(file.text) as { pairs?: { a?: unknown; b?: unknown }[] }).pairs ?? []) : [];
+    } catch {
+      pairs = [];
+    }
+    distinct = new Set(pairs.filter((p) => typeof p.a === "string" && typeof p.b === "string").map((p) => pairKey(p.a as string, p.b as string)));
+    return distinct;
+  };
   let asked = 0;
   try {
     for (const [key, c] of cases) {
@@ -339,31 +398,53 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       const file = await github.readFile(data, path, branch);
       const place = file ? parsePlace(file.text) : undefined;
       const closed = closedBy.get(key);
+      const list = c.case === "commons_mismatch" ? await github.readFile(data, DO_NOT_MATCH_PATH, branch) : null;
       const settled = closed
         ? { decision: "leave" as const, reason: `the rules closed this case: travellers ${closed.settles} the fact` }
-        : settleByRules(c, place);
+        : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [] });
       let decision: ReviewDecision;
       let reason: string;
+      let otherFile: { text: string; sha: string } | null = null;
+      let other: Place | undefined;
       if (settled) {
         ({ decision, reason } = settled);
       } else {
         if (asked >= MAX_MODEL_CASES) continue;
         asked++;
-        const other = c.case === "duplicate" && c.duplicate_of ? await github.readFile(data, placePath(c.duplicate_of), branch) : null;
-        ({ decision, reason } = await askModel(deps.ai, deps.model, c, place!, other ? parsePlace(other.text) : undefined));
+        otherFile = c.case === "duplicate" && c.duplicate_of ? await github.readFile(data, placePath(c.duplicate_of), branch) : null;
+        other = otherFile ? parsePlace(otherFile.text) : undefined;
+        // A merge only where the rules allow one: never into an owner's place or a pair a person found separate.
+        const pairs = c.case === "duplicate" ? await distinctPairs() : undefined;
+        const allowed = allowedDecisions(c).filter((d) => d !== "merge" || reviewerMergeProblem(place!, other, pairs, deps.roads) === null);
+        ({ decision, reason } = await askModel(deps.ai, deps.model, c, place!, other, allowed));
       }
       reason = safeReason(reason);
       const at = new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
-      const next = place && file ? applyDecision(place, c, decision, at) : null;
-      if (next && file) {
+      const message = `${reviewer}: ${decision} held case ${c.case} on ${c.place}\n\n${reason}\n\nReviewer: ${reviewer}`;
+      // A merge writes the kept place first, then the tombstone: a tombstone on its own would lose the facts it carries.
+      const writes: { path: string; text: string; sha: string | undefined }[] = [];
+      if (decision === "merge" && place && file && other && otherFile) {
+        const merged = mergePlaces(other, place, at);
+        writes.push({ path: placePath(other.id), text: dumpPlace(merged.kept), sha: otherFile.sha }, { path, text: dumpPlace(merged.tombstone), sha: file.sha });
+      } else if (decision === "confirm" && c.case === "commons_mismatch") {
+        const entry: DoNotMatchEntry = { place: c.place, file: c.file!, added: at.slice(0, 10), source: "reviewer" };
+        writes.push({ path: DO_NOT_MATCH_PATH, text: withDoNotMatch(list?.text, [entry]), sha: list?.sha });
+      } else {
+        const next = place && file ? applyDecision(place, c, decision, at) : null;
+        if (next && file) writes.push({ path, text: dumpPlace(next), sha: file.sha });
+      }
+      let lost = false;
+      for (const write of writes) {
         try {
-          await github.updateFile(data, branch, path, dumpPlace(next), file.sha, `${reviewer}: ${decision} held case ${c.case} on ${c.place}\n\n${reason}\n\nReviewer: ${reviewer}`);
+          await github.updateFile(data, branch, write.path, write.text, write.sha, message);
         } catch (error) {
-          if (conflict(error)) continue;
-          throw error;
+          if (!conflict(error)) throw error;
+          lost = true;
+          break;
         }
       }
-      records.push({ key, case: c.case, place: c.place, decision, reviewer, reason, by_rules: settled !== null, committed: next !== null });
+      if (lost) continue;
+      records.push({ key, case: c.case, place: c.place, decision, reviewer, reason, by_rules: settled !== null, committed: writes.length > 0 });
     }
   } catch (error) {
     (deps.onError ?? (() => undefined))(error);

@@ -3,8 +3,8 @@ import type { FactName, PlaceFacts, PlaceGroup, PlaceKind } from "@opencampingdb
 /** `merged` marks a tombstone: the record was merged into `merged_into` by a person. */
 export type PlaceStatus = "open" | "reported_closed" | "closed" | "temporarily_closed" | "merged";
 
-/** Where a value in a place record came from. */
-export type Source = "osm" | "feedback" | "contributed" | "owner" | "community_report";
+/** Where a value in a place record came from. `rule`: set by a rule in the data release (named in its `fact_rules`), so it is in the release and the place index but never in `places/`. */
+export type Source = "osm" | "feedback" | "contributed" | "owner" | "community_report" | "rule";
 
 /** Keys of `fact_sources` and `fact_dates`: every fact, plus the name, location, kind, status and description. */
 export type SourceKey = FactName | "name" | "location" | "kind" | "status" | "description";

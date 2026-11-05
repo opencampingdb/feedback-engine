@@ -11,6 +11,7 @@ const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>
                   [--summary <file>] [--now <ISO time>] [--places <dir>]
                   [--photo-licence <id>] [--main <dir> --intake <url>]
                   [--recent-places <url>] [--review-preview <url>]
+                  [--geometry <file>]
 
 Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
@@ -37,6 +38,12 @@ cannot be read, all feedback about places not in the data stays there.
 --review-preview puts a link to each held photo in the review PR body, served
 by the intake at that URL and signed with REVIEW_PREVIEW_SECRET. Use it only
 with a private data repository: anyone who can read the PR can open the links.
+--geometry reads the major roads in the data repository's geometry sidecar
+(pipeline.extract --geometry). A new place held as a possible duplicate is
+merged into the place it duplicates only when the two have the same name once
+tidied, are in the same group and less than 50 m apart, and no major road runs
+between them. Without it the run has no road data and merges no duplicate on
+its own: each goes to a reviewer as a duplicate case.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
 
@@ -58,6 +65,7 @@ async function main(): Promise<number> {
       intake: { type: "string" },
       "recent-places": { type: "string" },
       "review-preview": { type: "string" },
+      geometry: { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -98,6 +106,7 @@ async function main(): Promise<number> {
     ...(now ? { now } : {}),
     ...(values.places ? { places: values.places } : {}),
     ...(values["photo-licence"] ? { photoLicence: values["photo-licence"] } : {}),
+    ...(values.geometry ? { geometry: values.geometry } : {}),
     ...(values["recent-places"] ? { recentList: intakeRecentList(values["recent-places"]) } : {}),
     ...(values["review-preview"] && previewSecret ? { reviewPreview: { url: values["review-preview"], secret: previewSecret } } : {}),
   });

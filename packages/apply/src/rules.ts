@@ -1,6 +1,7 @@
 import {
   newPlaceStanding,
   safeSearchVerdict,
+  tidyName,
   type ContactFactName,
   type ContactReportReason,
   type FactName,
@@ -14,6 +15,7 @@ import {
   decideFact,
   distinctSources as distinctDevices,
   factRefusal,
+  factsClearedBy,
   heldForCheck,
   inWindow,
   newPlaceFields,
@@ -29,9 +31,10 @@ import {
   type OpenDoubt,
 } from "./decide.js";
 import { moderateReview } from "./moderation.js";
-import type { ClosedCase, HeldCase } from "./review.js";
+import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase } from "./review.js";
+import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
-import { setSource } from "./sources.js";
+import { dropSource, setSource } from "./sources.js";
 import type { Fee, Photo, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
 
 export type { ClosedCase, HeldCase };
@@ -133,6 +136,16 @@ export interface RulesInput {
   photoLicence?: string;
   /** Every record in the data, for the duplicates check on new places. None when left out. */
   everyPlace?: readonly Place[];
+  /** Pairs on `moderation/commons-do-not-match.json`: a Commons photo that is not of the place. None when left out. */
+  doNotMatch?: readonly Pick<DoNotMatchEntry, "place" | "file">[];
+  /** Pairs on `moderation/distinct_places.json`, as `pairKey` makes them: never merged. None when left out. */
+  distinct?: ReadonlySet<string>;
+  /**
+   * The major roads in the data repository's geometry sidecar, for the rule
+   * that keeps two places on opposite sides of a road apart. Left out, no
+   * duplicate is merged without a reviewer.
+   */
+  roads?: MajorRoads;
   /**
    * Ids on the intake's recent list, or "unreadable" when the list was asked
    * for and could not be read. Feedback about a place on the list that is not
@@ -199,6 +212,8 @@ export interface RulesOutput {
   closed: ClosedCase[];
   /** New places withdrawn by their adder whose records are to be deleted from the data. */
   removed: string[];
+  /** Place and Commons file pairs to add to `moderation/commons-do-not-match.json`. */
+  doNotMatch: DoNotMatchEntry[];
   needsReview: boolean;
 }
 
@@ -281,6 +296,8 @@ const isNewPlaceEvidence = (item: StoredFeedback) =>
 
 /** A new place this close to a place in the same group is a possible duplicate. */
 export const DUPLICATE_DISTANCE_M = 150;
+/** A possible duplicate closer than this, with the same name and no major road between, is merged without anyone asked. */
+export const MERGE_DISTANCE_M = 50;
 
 /** Great-circle distance in metres, as the data repository's duplicates check works it out. */
 function distanceM(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
@@ -311,6 +328,8 @@ export function applyRules(input: RulesInput): RulesOutput {
   const held: HeldCase[] = [];
   const closed: ClosedCase[] = [];
   const removed: string[] = [];
+  let everyPlaceById: Map<string, Place> | undefined;
+  const doNotMatch: DoNotMatchEntry[] = [];
 
   const decide = (item: StoredFeedback, outcome: Outcome, reason: string) => {
     decisions.set(item.id, { id: item.id, place: item.place, outcome, reason });
@@ -423,6 +442,7 @@ export function applyRules(input: RulesInput): RulesOutput {
   applyFacts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
   applyNewPlaces(known.filter((i): i is ReportItem => isNewPlaceReport(i)), newPlaceEvidence);
   applyContactReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "contact"));
+  applyCommonsReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "commons_mismatch"));
   routeToPerson(known.filter((i): i is ReportItem => i.type === "report"));
 
   // Anything still waiting past the window can no longer be confirmed.
@@ -464,6 +484,7 @@ export function applyRules(input: RulesInput): RulesOutput {
     fees: newFees,
     photos: newPhotos,
     removedPhotos,
+    doNotMatch,
     edits,
     changes,
     held,
@@ -916,12 +937,18 @@ export function applyRules(input: RulesInput): RulesOutput {
       groups.set(key, [...(groups.get(key) ?? []), item]);
     }
 
-    for (const reports of groups.values()) {
+    // pets_months last, so it is decided against the pets this run leaves.
+    const ordered = [...groups.values()].sort((a, b) => Number(a[0]!.report.fact === "pets_months") - Number(b[0]!.report.fact === "pets_months"));
+    for (const reports of ordered) {
       const placeId = reports[0]!.place as string;
       const fact = reports[0]!.report.fact as FactName;
       const place = record(placeId);
       const current = () => (place.facts as Record<string, unknown>)[fact];
       const setFact = (value: FactValue) => {
+        for (const cleared of factsClearedBy(place.facts, fact, value)) {
+          delete (place.facts as Record<string, FactValue | undefined>)[cleared];
+          dropSource(place, cleared);
+        }
         (place.facts as Record<string, FactValue>)[fact] = value;
         setSource(place, fact, "feedback", nowIso);
       };
@@ -1148,6 +1175,24 @@ export function applyRules(input: RulesInput): RulesOutput {
         ...(kind === "first_place" && origin.contributor ? { contributor: origin.contributor } : {}),
         feedback: feedback.map((f) => f.id),
       });
+
+      // A duplicate the rules settle: merged into the place it duplicates, with no one asked.
+      const target = isPending && !existing && standing === "held" && unlisted === undefined && duplicate ? mergeTarget(origin, duplicate.place) : undefined;
+      if (target) {
+        const draft: Place = { ...draftOf(origin), standing };
+        for (const fact of contacts) {
+          if (failing.includes(fact)) continue;
+          (draft.facts as Record<string, FactValue>)[fact] = heldFacts[fact]!;
+          setSource(draft, fact, "feedback", nowIso);
+        }
+        const { kept, tombstone } = mergePlaces(working.get(target.place.id) ?? structuredClone(target.place), draft, nowIso);
+        working.set(kept.id, kept);
+        working.set(id, tombstone);
+        const why = `new place merged into ${kept.id}: the same name, ${target.distance} m away, in the same group, with no major road between`;
+        note(id, `${why} (to undo: set status back to open, remove merged_into, and list the pair in moderation/distinct_places.json)`, true, [origin]);
+        decide(origin, "applied", why);
+        continue;
+      }
 
       if (existing || published) {
         if (existing) {
@@ -1451,6 +1496,26 @@ export function applyRules(input: RulesInput): RulesOutput {
   }
 
   /**
+   * The place a new place held as a possible duplicate of `placeId` merges
+   * into without anyone asked, or undefined when a reviewer decides: a place
+   * in the data (not one added in this run) with the same name once tidied,
+   * in the same group, less than MERGE_DISTANCE_M away, with no major road
+   * between them in `roads`, and neither an owner's place nor a pair on the
+   * distinct list. A run without road data merges nothing on its own.
+   */
+  function mergeTarget(item: ReportItem, placeId: string): { place: Place; distance: number } | undefined {
+    const other = (everyPlaceById ??= new Map((input.everyPlace ?? []).map((p) => [p.id, p]))).get(placeId);
+    if (!other || item.report.name === undefined || other.name === null) return undefined;
+    const distance = distanceM(item.location!, other.location);
+    if (distance >= MERGE_DISTANCE_M) return undefined;
+    if (tidyName(item.report.name).toLowerCase() !== tidyName(other.name).toLowerCase()) return undefined;
+    if (mergeProblem(draftOf(item), other, input.distinct) !== null) return undefined;
+    // Without road data, two places on opposite sides of a road look the same, so a reviewer decides.
+    if (!input.roads || input.roads.between(item.location!, other.location)) return undefined;
+    return { place: other, distance: Math.round(distance) };
+  }
+
+  /**
    * The nearest place in the same group within 150 m of a new place: every
    * record in the data and the new places published earlier in this run.
    * Merged and hidden records do not count.
@@ -1465,6 +1530,56 @@ export function applyRules(input: RulesInput): RulesOutput {
       if (distance <= DUPLICATE_DISTANCE_M && (!best || distance < best.distance)) best = { place: other.id, distance };
     }
     return best;
+  }
+
+  /**
+   * Reports that a Commons photo is not of a place, by place and file. Each
+   * source counts once. Reports from two sources within 90 days, at least one
+   * attested, put the pair on the do-not-match list; until then each report
+   * is a `commons_mismatch` case for a reviewer. A pair already on the list
+   * changes nothing.
+   */
+  function applyCommonsReports(items: ReportItem[]): void {
+    const groups = new Map<string, ReportItem[]>();
+    for (const item of items) {
+      const key = factKey(item.place as string, item.report.file as string);
+      groups.set(key, [...(groups.get(key) ?? []), item]);
+    }
+    for (const reports of groups.values()) {
+      const placeId = reports[0]!.place as string;
+      const file = reports[0]!.report.file as string;
+      if ([...(input.doNotMatch ?? []), ...doNotMatch].some((p) => p.place === placeId && p.file === file)) {
+        for (const r of reports) decide(r, "applied", "the Commons photo is on the do-not-match list already");
+        continue;
+      }
+      const latest = time(reports[reports.length - 1]!);
+      const earlier = input.history.filter(
+        (h): h is ReportItem => h.type === "report" && h.report.kind === "commons_mismatch" && h.place === placeId && h.report.file === file,
+      );
+      const counted = [...earlier, ...reports].filter((r) => inWindow(r, latest) && heldForCheck(r) === null);
+      const sources = distinctDevices(counted);
+      if (sources >= 2 && counted.some((r) => r.attested !== undefined)) {
+        doNotMatch.push({ place: placeId, file, added: nowIso.slice(0, 10), source: "reports" });
+        note(placeId, `Commons photo ${JSON.stringify(file)} goes on the do-not-match list after reports from ${sources} sources within ${WINDOW_DAYS} days`, true, counted);
+        for (const r of reports) decide(r, "applied", `the Commons photo goes on the do-not-match list after reports from ${sources} sources`);
+        continue;
+      }
+      const target = input.places.get(placeId)!;
+      for (const r of reports) {
+        edits.push({ kind: "note", place: placeId, feedback: r.id });
+        note(placeId, `Commons photo ${JSON.stringify(file)} reported as not of this place${quote(r.report.note)}`, false, [r]);
+        decide(r, "needs_review", "one source reports the Commons photo, so a reviewer looks");
+      }
+      held.push({
+        case: "commons_mismatch",
+        place: placeId,
+        location: { lat: roundCoord(target.location.lat), lon: roundCoord(target.location.lon) },
+        kind: target.kind,
+        file,
+        sources: Math.max(sources, 1),
+        feedback: reports.map((r) => r.id),
+      });
+    }
   }
 
   function routeToPerson(items: ReportItem[]): void {

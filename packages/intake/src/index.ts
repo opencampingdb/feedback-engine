@@ -20,6 +20,7 @@ import { AttestError, verifyAssertion, verifyAttestation, type AttestedKey, type
 import { refuse, type RefusalBody } from "./refusal.js";
 import { fromBase64, hex, sha256, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
+import type { MajorRoads } from "@opencampingdb/apply/review";
 import { recordInboxWrite, startApplyIfDue, type RunOutcome } from "./runs.js";
 import { DEFAULT_REVIEW_MODEL, parseBotLogins, REVIEW_BRANCH, reviewHeldCases, type ReviewResult } from "./reviewer.js";
 import { IntegrityError, IntegrityUnavailable, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
@@ -482,7 +483,7 @@ async function noteInboxWrite(env: Env, nowMs: number): Promise<void> {
  * The AI reviewer, when it is on (see AI_REVIEWER), or "off". A failure is
  * logged and the reviewer tries again on its next run.
  */
-export function createReviewer(deps: Pick<Deps, "fetch" | "now">) {
+export function createReviewer(deps: Pick<Deps, "fetch" | "now"> & { roads?: MajorRoads }) {
   const github = new GitHubApp(deps.fetch, deps.now);
   return async function review(env: Env): Promise<ReviewResult | "off" | "failed"> {
     if (env.AI_REVIEWER !== "on" || !env.AI || !env.RECENT_LIST || !env.DATA_REPO) return "off";
@@ -505,6 +506,7 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now">) {
         botLogins,
         now: deps.now,
         onError: warn,
+        ...(deps.roads ? { roads: deps.roads } : {}),
       });
     } catch (error) {
       warn(error);

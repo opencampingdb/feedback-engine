@@ -65,3 +65,11 @@ _Avoid_: pending, queued, quarantined
 **Reviewer**:
 A person, bot or AI that the maintainers allow to decide held items, named on every decision it makes.
 _Avoid_: moderator, admin
+
+**Merge**:
+Folding a new place added twice into the place it duplicates, leaving the new place as a tombstone that points at it.
+_Avoid_: dedupe, delete (for a merge)
+
+**Do-not-match list**:
+The place and Commons file pairs travellers or a reviewer found are not of the place, which are never matched again.
+_Avoid_: blocklist, hidden photos

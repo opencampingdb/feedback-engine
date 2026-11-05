@@ -89,6 +89,7 @@ function run(
     blocked?: string[];
     reviewers?: string[];
     recent?: RulesInput["recent"];
+    extra?: Partial<RulesInput>;
   } = {},
 ) {
   const places = new Map((opts.places ?? [place()]).map((p) => [p.id, p]));
@@ -108,6 +109,7 @@ function run(
     blocked: new Set(opts.blocked ?? []),
     reviewers: new Set(opts.reviewers ?? []),
     ...(opts.recent !== undefined ? { recent: opts.recent } : {}),
+    ...opts.extra,
   };
   const out = applyRules(input);
   const outcome = (item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.outcome;
@@ -1608,6 +1610,53 @@ describe("new places", () => {
       expect.objectContaining({ case: "duplicate", place: idOf(item), standing: "held", duplicate_of: PLACE, distance_m: 120, feedback: [item.id] }),
       expect.objectContaining({ case: "first_place" }),
     ]);
+  });
+
+  describe("a duplicate the rules merge", () => {
+    // About 30 m south of PLACE, "Lake Eppalock Camp".
+    const near = { lat: -36.85027, lon: 144.55 };
+    const same = (extra: Record<string, unknown> = {}, location = near) =>
+      added(0, "dev-a", { name: "LAKE EPPALOCK CAMP", contacts: { phone: "03 5555 0100" }, ...extra }, location);
+
+    const noRoad = { roads: { between: () => null } };
+
+    it("merges a new place with the same name, in the same group, under 50 m away, into the place it duplicates", () => {
+      const item = same();
+      const out = run([item], { extra: noRoad });
+      expect(out.outcome(item)).toBe("applied");
+      expect(out.decisions[0]!.reason).toBe(`new place merged into ${PLACE}: the same name, 30 m away, in the same group, with no major road between`);
+      expect(out.after(idOf(item))).toMatchObject({ id: idOf(item), status: "merged", merged_into: PLACE, name: "LAKE EPPALOCK CAMP", osm: null });
+      expect(out.after(PLACE)).toMatchObject({ facts: { power: false, fee: true, phone: "03 5555 0100" }, fact_sources: { phone: "feedback" }, fact_dates: { phone: at(1) }, updated: at(1) });
+      expect(out.edits).toEqual([]);
+      expect(out.held).toEqual([]);
+      expect(out.changes).toEqual([expect.objectContaining({ place: idOf(item), automatic: true, summary: expect.stringContaining(`merged into ${PLACE}`) })]);
+    });
+
+    it("holds it for a reviewer when the name differs, it is 50 m or more away, a major road runs between, or the run has no road data", () => {
+      const roads = { between: () => ({ highway: "trunk", name: "Example Highway" }) };
+      const cases: [StoredFeedback, Partial<RulesInput>][] = [
+        [same({ name: "Lake Eppalock North" }), noRoad],
+        [same({}, { lat: -36.8505, lon: 144.55 }), noRoad],
+        [same(), { roads }],
+        // Without road data the run cannot tell opposite sides of a road apart, so a reviewer decides.
+        [same(), {}],
+      ];
+      for (const [item, extra] of cases) {
+        const out = run([item], { extra });
+        expect(out.outcome(item)).toBe("needs_review");
+        expect(out.held).toContainEqual(expect.objectContaining({ case: "duplicate", place: idOf(item), duplicate_of: PLACE }));
+      }
+    });
+
+    it("never merges into a place with a verified owner, a pair a person found separate, or a place the intake would not list", () => {
+      const owned = run([same()], { places: [place({ owner_verified: true })], extra: noRoad });
+      expect(owned.decisions[0]!.outcome).toBe("needs_review");
+      const item = same();
+      const distinct = run([item], { extra: { ...noRoad, distinct: new Set([[PLACE, idOf(item)].sort().join(" ")]) } });
+      expect(distinct.outcome(item)).toBe("needs_review");
+      const { attested: _attested, ...unattested } = same() as StoredFeedback & { attested?: string };
+      expect(run([unattested], { extra: noRoad }).outcome(unattested)).toBe("needs_review");
+    });
   });
 
   it("does not hold a new place near a place in another group, or further than 150 m away", () => {

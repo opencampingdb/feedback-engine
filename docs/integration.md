@@ -109,14 +109,27 @@ A check that finds an open place still there sets the record's `last_confirmed` 
 Facts a report may name:
 
 - `fee` (true, false or `donation`), `caravans` (true, false or `offroad`), `pets` (`yes`, `no`, `leashed`, `seasonal`)
+- `pets_months`, the months dogs are allowed at a place whose `pets` is `seasonal`: one OSM month range such as `May-Sep`, which may wrap the year end (`Dec-Feb`), as in OSM's `dog:conditional=yes @ (May-Sep)` (`isMonthRange`)
 - `power`, `tents`, `toilets`, `showers`, `drinking_water`, `dump_station` and `booking_required` (true or false)
 - the site features in `SITE_FEATURES`, each true or false: who can get in (`wheelchair`, `generators`, `motorhomes`, `camper_trailers`, `motorbikes`, `big_rigs`), what is there (`non_drinking_water`, `laundry`, `kitchen`, `bbq`, `drive_through`, `ensuite_sites`, `bins`, `picnic_tables`, `campfires`, `cabins`, `pub`), what to do (`swimming`, `fishing`, `walking_tracks`, `scenery`, `wildlife`, `playground`, `games_room`, `shade`, `cycling_tracks`, `offroad_tracks`, `boat_ramp_nearby`, `near_road`), services (`telstra_signal`, `mobile_signal`, `wifi`, `tv_reception`, `pet_sitting`, `fuel`, `lpg`, `car_wash`, `vehicle_storage`) and warnings (`self_contained_only`, `crocodiles`, `seasonal_closure`, `dangerous_when_wet`, `over_50s`, `nudist`)
 - `brand`, one of `BRANDS` (`big4`, `discovery`, `nrma` and the other chains and clubs)
-- `access` (`2wd`, `awd`, `4wd`, `unknown`), `entry` (`public`, `customers`, `permit`, `private`), `max_stay` (such as `48h`, `2d`, `1w`), `opening_hours` (with no email address, phone number or link)
+- `access` (`2wd`, `awd`, `4wd`, `unknown`), `entry` (`public`, `customers`, `permit`, `private`), `vehicle_access` (`heavy_vehicles_only`, from `VEHICLE_ACCESS_VALUES`, which may gain values such as cars only: show nothing for a value your app does not know), `max_stay` (such as `48h`, `2d`, `1w`), `opening_hours` (with no email address, phone number or link)
 - contacts: `website`, `facebook`, `instagram`, `tiktok` and `x` (https only), `phone`, `phone_2` and `email`
 - `address`, an object (`PlaceAddress`) with a `street` or, for a rural address, a named `place`, and any of `unit`, `housenumber`, `suburb`, `state` (one of `ADDRESS_STATES`: `NSW`, `VIC`, `QLD`, `SA`, `WA`, `TAS`, `NT`, `ACT`) and `postcode` (four digits)
 
 A fact from an attested report is applied at once, unless another device reported a different value within 90 days or the owner set it: then a person decides. Without attestation, two devices must agree within 90 days. Contacts (website, phones, email and social pages) and addresses follow the same rule, but an attested one is applied at once only when it passes `contactProblem`; one that fails, and any without attestation, goes to a person. `booking_url` comes only from the owner.
+
+**Dog months.** `pets_months` only means something while `pets` is `seasonal`. A report of it for a place whose `pets` is anything else is held for a person (`not_seasonal`). When `pets` is set to a value other than `seasonal`, the place's `pets_months` comes off with it: the intake lists both changes, the second with `value: null`. To clear the months alone, send a `doubt` about `pets_months`. `monthsInRange(range)` gives the months a range covers, 1 to 12 from its first month, so the app can tell whether dogs are allowed on the day a traveller is going:
+
+```ts
+import { monthsInRange } from "@opencampingdb/feedback";
+
+await feedback.report({ place, report: { kind: "fact", fact: "pets_months", value: "May-Sep" }, consent: true });
+monthsInRange("Dec-Feb"); // [12, 1, 2]
+const dogsOk = place.facts.pets !== "seasonal" || monthsInRange(place.facts.pets_months ?? "").includes(month);
+```
+
+**Heavy vehicles only.** `vehicle_access: "heavy_vehicles_only"` says only heavy vehicles may use a place, such as a rest area or truck bay where others may be fined for stopping. The data sets it from OSM's `hgv` and `access` tags. A place that says so only in its name is a case for a reviewer, who may confirm it. A traveller sets it with a `fact` report and clears it with a `doubt`, decided as other facts are.
 
 **Link and spam checks.** `contactProblem(fact, value)` returns what is wrong with a contact or an address, or `null` when it passes, so the app can check before sending. A website or social page must be an https address on a public host (no IP addresses or local names, see `isPublicHttpsUrl`) and not a link shortener (`LINK_SHORTENERS`: bit.ly, tinyurl.com, t.co and the rest). `facebook` must be on facebook.com or fb.com, `instagram` on instagram.com, `tiktok` on tiktok.com and `x` on x.com or twitter.com, or a subdomain such as www or m (`SOCIAL_HOSTS`). A phone or email is checked as its fact is, and an address with `addressProblems`. The facts it covers are `CONTACT_FACTS`.
 
@@ -139,6 +152,13 @@ await feedback.report({ place, report: { kind: "contact", fact: "website", reaso
 ```ts
 await feedback.report({ place, report: { kind: "fact", fact: "toilets", value: true }, consent: true }); // still right
 await feedback.report({ place, report: { kind: "doubt", fact: "toilets", note: "None I could find" }, consent: true }); // wrong, right value unknown
+```
+
+**A Commons photo that is not of the place.** Apps show Wikimedia Commons photos from `commons.ndjson.gz`. A `commons_mismatch` report says one of them is not of the place: it needs the place and `file`, the photo's `file` from that line (1 to 255 characters on one line, `MAX_COMMONS_FILE_LENGTH`), and may carry a `note` for reviewers. Hide the photo for the traveller who sent it at once, and keep it hidden on that phone: the intake answers `held` (`commons_report`) and a reviewer gets the case. Reports from two different sources within 90 days, at least one attested, add the place and file to the data's `moderation/commons-do-not-match.json` at the next apply run, and later releases leave the photo out for everyone. A reviewer may add it on one report too. A person can undo either, and the app should offer the traveller a way to show the photo again.
+
+```ts
+await feedback.report({ place, report: { kind: "commons_mismatch", file: "Brunswick River and Pool Precinct 6.jpg" }, consent: true });
+hiddenCommons.add(`${place}/${file}`); // the app's own list, for this traveller
 ```
 
 Three more report kinds let a traveller fix what Edit site covers on other apps. Each goes to a person, who accepts or rejects it on the review PR:
@@ -239,12 +259,15 @@ The SDK types the answer as `RecentList`, with `RecentPlace` and `RecentChange`.
 
 A place is listed when its report came from an attested install (an app key with `requires_attestation`) and its note, with contact details stripped as the inbox keeps it, passes `textProblem`. A report without a `contributor` is listed under the attested key's contributor id on iOS, and on Android under one the intake makes from the hashed install, so a moderator can still block that install. Other new places reach a person through the apply run as before. `kind` is the code the traveller picked, or `null`; look its group up in `data/schema/kinds.json`. `name` is the report's `name` after `tidyName`, or `null` when it had none. `standing` is `shown` or `confirmed` until the place reaches the data, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive, so a place two other devices report leaves the list on the next refresh. Only `still_there` checks with `nearby: true` count towards `confirmed`. `description`, `fee` and `contacts` (the contact facts and the `address`) are there when the report carried them and they passed the checks, as the place will be published with them. The list never carries the note or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. The intake also keeps the block list the apply run sends: a blocked contributor's new places leave the list, and later ones are accepted to the inbox but not listed.
 
+**A new place added twice.** A new place within 150 m of a place in the same group is held as a possible duplicate. When the two have the same name once tidied, are less than 50 m apart and the road data shows no major road between them, the apply run merges the new place into the other place without anyone asked. Otherwise, and whenever the run has no road data, a reviewer approves, merges or takes it down. A merged new place reaches the data as a tombstone with `merged_into`, and a release lists it in `merged.ndjson.gz`. A person can reverse any merge.
+
 **After a place reaches the data.** Once the apply run has written a place into the data (or settled its adder's withdraw), the entry gains `in_data_at`, when that happened, and stays on the list for 7 more days with its current standing, which can then also be `hidden` or `withdrawn`. Checks, `remove` reports, a withdraw within 24 hours and the block list still count for it, so a place hidden after it reached the data is listed as `hidden`. Intakes from before SDK 0.10.1 have no `in_data_at` and drop the place as soon as it reaches the data.
 
 A phone that showed the place from the recent list keeps showing it until its next release, so for 7 days:
 
 - When your release has the place, show the release record, as it may have changed since, but apply the recent list's standing: hide the place when the entry is `hidden` or `withdrawn`.
 - When your release does not have it yet, keep showing the recent list's entry as before, and hide it when its standing says so.
+- When your release lists the place's id in `merged.ndjson.gz`, it was merged into another place (a new place added twice): show the place it was merged into, and move anything your app keeps under the old id to the new one.
 - When the place has left the list, show what your release says.
 
 ```ts
@@ -367,7 +390,7 @@ export const feedback = createFeedbackClient({
 await feedback.report({ place: null, location, report: { kind: "new_place", name: tidyName(name) }, consent: true, ref: draft.id });
 ```
 
-**Live or held.** The intake decides fact reports, contact reports, doubts and new places when they arrive, with the apply run's own rules and then its checks, and says what it decided. A `sent` outcome, and the `sent` result of a call that sent at once, then carries `state`: `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`. Every other kind of item, and every item sent to an intake from before SDK 0.10.0, comes back with neither, and the apply run decides it as before. The apply still writes every item into the data, and may yet decide a live item differently, for example when two reports collide in one run; the change then leaves the recent list.
+**Live or held.** The intake decides fact reports, contact reports, doubts and new places when they arrive, and answers every `commons_mismatch` report `held`, with the apply run's own rules and then its checks, and says what it decided. A `sent` outcome, and the `sent` result of a call that sent at once, then carries `state`: `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`. Every other kind of item, and every item sent to an intake from before SDK 0.10.0, comes back with neither, and the apply run decides it as before. The apply still writes every item into the data, and may yet decide a live item differently, for example when two reports collide in one run; the change then leaves the recent list.
 
 ```ts
 onAnswered: async ({ ref, outcome }) => {
@@ -399,6 +422,8 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `single_doubt` | One traveller doubts the fact, so a reviewer reads it. The fact stays. |
 | `protected_source` | A doubt about a fact from OSM or the owner, which doubts never take down. |
 | `taken_down` | A report of a value doubts took down: it comes back when two new travellers confirm it. |
+| `not_seasonal` | `pets_months` for a place whose `pets` is not `seasonal`, so a person checks it. |
+| `commons_report` | A report that a Commons photo is not of the place. Hide it for the traveller who sent it; a reviewer decides, and two sources hide it for everyone. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. Adding a code later is additive. A code this version does not know is left out of `heldReason`, and `state` is still `held`. `itemDecision(answer)` reads `state` and `heldReason` from an intake answer you fetched yourself.
 

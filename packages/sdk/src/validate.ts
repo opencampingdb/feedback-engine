@@ -32,6 +32,7 @@ import type {
   ReviewReportBody,
   ReviewReportReason,
   Submission,
+  VehicleAccessValue,
 } from "./types.js";
 
 export const FEEDBACK_TYPES = [
@@ -60,6 +61,7 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   "remove",
   "contact",
   "doubt",
+  "commons_mismatch",
 ];
 /** The contact facts and the address, as a `contact` report may name them. */
 export const CONTACT_FACTS: readonly ContactFactName[] = ["website", "phone", "phone_2", "email", "facebook", "instagram", "tiktok", "x", "address"];
@@ -109,6 +111,8 @@ export const BRANDS: readonly BrandValue[] = [
   "yha",
   "acc",
 ];
+/** Values of `vehicle_access`. More may come; an app should show nothing for a value it does not know. */
+export const VEHICLE_ACCESS_VALUES: readonly VehicleAccessValue[] = ["heavy_vehicles_only"];
 /** Site features: facts that are true or false. */
 export const SITE_FEATURES = [
   "wheelchair",
@@ -185,6 +189,8 @@ export const MAX_FEE_AGE_MONTHS = 24;
 const KIND_CODE = /^[a-z][a-z_]{1,39}$/;
 
 export const MAX_TEXT_LENGTH = 2000;
+/** Longest Commons file name a `commons_mismatch` report may name, as `commons.ndjson.gz` allows. */
+export const MAX_COMMONS_FILE_LENGTH = 255;
 export const MAX_DESCRIPTION_LENGTH = 500;
 export const MAX_APP_VERSION_LENGTH = 32;
 
@@ -243,6 +249,27 @@ function trimmedAddress(value: PlaceAddress): PlaceAddress {
   return out;
 }
 
+/** Month names as OSM opening_hours and conditional tags write them. */
+export const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+const MONTH_RANGE = new RegExp(`^(${MONTHS.join("|")})-(${MONTHS.join("|")})$`);
+
+/** One OSM month range of two different months, such as `May-Sep` or `Dec-Feb`, as `pets_months` holds it. */
+export function isMonthRange(value: unknown): value is string {
+  const m = typeof value === "string" ? MONTH_RANGE.exec(value) : null;
+  return m !== null && m[1] !== m[2];
+}
+
+/** The months (1 to 12) a month range covers, in order from its first month, wrapping the year end. Empty when it is not a month range. */
+export function monthsInRange(range: string): number[] {
+  if (!isMonthRange(range)) return [];
+  const [from, to] = range.split("-").map((name) => (MONTHS as readonly string[]).indexOf(name) + 1) as [number, number];
+  const out: number[] = [];
+  for (let month = from; ; month = (month % 12) + 1) {
+    out.push(month);
+    if (month === to) return out;
+  }
+}
+
 const isBoolean = (v: unknown): boolean => typeof v === "boolean";
 /** An https link to a page, as for the website and social pages. */
 const isHttpsPage = (max: number) => (v: unknown): boolean =>
@@ -261,8 +288,10 @@ export const FACTS: Readonly<Record<ReportFactName, (value: unknown) => boolean>
   drinking_water: isBoolean,
   dump_station: isBoolean,
   pets: (v) => v === "yes" || v === "no" || v === "leashed" || v === "seasonal",
+  pets_months: isMonthRange,
   access: (v) => v === "2wd" || v === "awd" || v === "4wd" || v === "unknown",
   entry: (v) => v === "public" || v === "customers" || v === "permit" || v === "private",
+  vehicle_access: (v) => typeof v === "string" && (VEHICLE_ACCESS_VALUES as readonly string[]).includes(v),
   max_stay: (v) => typeof v === "string" && /^[1-9]\d{0,2}[hdw]$/.test(v),
   // Free text, so it must hold no email address, phone number or link.
   opening_hours: (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 100 && findContactDetailsInHours(v).length === 0,
@@ -461,6 +490,14 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
     }
   } else if (value.fact !== undefined || value.value !== undefined) {
     errors.push("report.fact and report.value are only allowed when report.kind is fact, name or description, and report.fact on contact or doubt");
+  }
+  if (kind === "commons_mismatch") {
+    const file = value.file;
+    if (typeof file !== "string" || file.trim().length === 0 || file.length > MAX_COMMONS_FILE_LENGTH || /[\u0000-\u001f\u007f]/.test(file)) {
+      errors.push(`report.file must be the Commons file name, 1 to ${MAX_COMMONS_FILE_LENGTH} characters on one line`);
+    } else out.file = file.trim();
+  } else if (value.file !== undefined) {
+    errors.push("report.file is only allowed when report.kind is commons_mismatch");
   }
   const note = checkText(value.note, "report.note", errors, false);
   if (note !== undefined) out.note = note;

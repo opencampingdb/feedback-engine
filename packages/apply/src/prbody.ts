@@ -149,14 +149,17 @@ export function reviewPrBody(
       "## Held cases",
       "",
       "Cases a person, a bot or an AI reviewer should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
-        "`contacts`, `description`, `first_place`, `contact_withdrawn` or `fact_doubted`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
+        "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate` or `commons_mismatch`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
         "set its `standing` to `shown` in this PR. `contacts` and `description` name what was left off a published new place: " +
         "contact details, addresses and descriptions travellers sent are in the inbox items, never here. " +
         "`contact_withdrawn` is a contact taken off a place after reports from two sources: its `value` is the place's own published contact, " +
         "not something a traveller sent, so it is shown here. To restore it, set `facts.<fact>` back to `value` on the place in this PR. " +
         "`fact_doubted` is a fact travellers say is wrong without giving the right value: with `taken_down` doubts from two sources took it off the place, " +
         "otherwise one traveller doubts it and it stays. `value` is what the place published, and `doubts` and `confirmations` name the reports weighed. " +
-        "To restore it, set `facts.<fact>` back to `value`. Doubt notes are in the inbox, never here.",
+        "To restore it, set `facts.<fact>` back to `value`. Doubt notes are in the inbox, never here. " +
+        "`vehicle_access_candidate` is a place whose name says only heavy vehicles may use it while OSM does not: to confirm it, set `facts.vehicle_access` to `value`. " +
+        "It comes from the data, so its `feedback` is empty, and each place is listed once. " +
+        "`commons_mismatch` is a Commons photo `file` travellers say is not of the place: to confirm it, add the place and file to `moderation/commons-do-not-match.json`.",
       "",
       ...held.map(heldLine),
       "",
