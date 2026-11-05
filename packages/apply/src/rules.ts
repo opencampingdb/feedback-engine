@@ -18,7 +18,9 @@ import {
   inWindow,
   newPlaceFields,
   newPlaceListing,
+  restoreWeight,
   REVIEWED_FACTS,
+  takenDownWhy,
   sameValue,
   weighFact,
   WINDOW_DAYS,
@@ -292,6 +294,9 @@ function distanceM(a: { lat: number; lon: number }, b: { lat: number; lon: numbe
 const FROM: Partial<Record<string, string>> = { osm: "OSM", owner: "the owner" };
 
 const quote = (text: string | undefined) => (text ? `: "${text}"` : "");
+
+/** What a change that settles a `fact_doubted` case adds to its summary. */
+const CLOSES_CASE = " (closes the fact_doubted case)";
 
 export function applyRules(input: RulesInput): RulesOutput {
   const now = Date.parse(input.now);
@@ -964,11 +969,14 @@ export function applyRules(input: RulesInput): RulesOutput {
 
       // A fact doubts took down: confirmations of its value restore it, and another value replaces it.
       let down = openDoubt(placeId, fact, place);
-      // Doubts sent after the takedown count against a restore; the ones that took it down do not.
-      const downAt = down === undefined ? Infinity : Date.parse(down.at);
-      const doubtEvidence = [...input.history, ...known].filter(
+      // Every fact report and doubt not refused, which `restoreWeight` weighs as the intake does.
+      const restoreEvidence = [...input.history, ...known].filter(
         (r) =>
-          r.type === "report" && r.report.kind === "doubt" && r.place === placeId && r.report.fact === fact && time(r) > downAt && decisions.get(r.id)?.outcome !== "refused",
+          r.type === "report" &&
+          (r.report.kind === "doubt" || r.report.kind === "fact") &&
+          r.place === placeId &&
+          r.report.fact === fact &&
+          decisions.get(r.id)?.outcome !== "refused",
       );
       const closeCase = (settles: ClosedCase["settles"], by: readonly StoredFeedback[]) => {
         closed.push({ case: "fact_doubted", place: placeId, fact, settles, feedback: by.map((r) => r.id) });
@@ -982,17 +990,18 @@ export function applyRules(input: RulesInput): RulesOutput {
         const value = item.report.value as FactValue;
         if (down !== undefined && sameValue(value, down.value)) {
           open.delete(item);
-          if (time(item) < Date.parse(down.at)) {
+          if (time(item) <= Date.parse(down.at)) {
             // Weighed against the doubts when they took the fact down in this run.
             decide(item, "applied", `counted as a confirmation of ${fact} before doubts took it down`);
             continue;
           }
-          const decision = decideFact({ item, place, earlier: [...evidence, ...doubtEvidence], doubted: down });
+          const decision = decideFact({ item, place, earlier: restoreEvidence, doubted: down });
           if (decision.verdict === "live" && decision.settles === "restored" && heldForCheck(item) === null) {
-            const since = Date.parse(down.at);
-            const confirming = reports.filter((r) => r === item || (open.has(r) && sameValue(r.report.value, value) && time(r) >= since && time(r) <= time(item)));
+            const weight = restoreWeight({ place: placeId, fact, value, at: item.received, reports: restoreEvidence, takenDownAt: down.at });
+            const counted = new Set(weight.confirmations.feedback);
+            const confirming = reports.filter((r) => counted.has(r.id));
             setFact(value);
-            note(placeId, `${decision.why} (closes the fact_doubted case)`, true, confirming);
+            note(placeId, `${decision.why}${CLOSES_CASE}`, true, confirming);
             for (const r of confirming) {
               open.delete(r);
               decide(r, "applied", decision.why);
@@ -1012,7 +1021,7 @@ export function applyRules(input: RulesInput): RulesOutput {
           open.delete(item);
           settle(item, decision);
           if (decision.verdict === "live" && decision.settles === "replaced" && decisions.get(item.id)?.outcome === "applied") {
-            changes[changes.length - 1]!.summary += " (closes the fact_doubted case)";
+            changes[changes.length - 1]!.summary += CLOSES_CASE;
             closeCase("replaced", [item]);
           }
           continue;
@@ -1033,7 +1042,7 @@ export function applyRules(input: RulesInput): RulesOutput {
         setFact(value);
         note(
           placeId,
-          `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days)${down !== undefined ? " (closes the fact_doubted case)" : ""}`,
+          `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days)${down !== undefined ? CLOSES_CASE : ""}`,
           true,
           agreeing,
         );
@@ -1050,9 +1059,7 @@ export function applyRules(input: RulesInput): RulesOutput {
         }
       }
       for (const item of open) {
-        decide(item, "waiting", down !== undefined && sameValue(item.report.value, down.value)
-          ? `${fact} was taken down after doubts, and returns when two new travellers confirm it`
-          : `waiting for a second device to agree on ${fact}`);
+        decide(item, "waiting", down !== undefined && sameValue(item.report.value, down.value) ? takenDownWhy(fact) : `waiting for a second device to agree on ${fact}`);
       }
     }
   }

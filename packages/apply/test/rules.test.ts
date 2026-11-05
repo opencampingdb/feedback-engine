@@ -546,6 +546,15 @@ describe("doubts", () => {
       expect(out.after()).toBeUndefined();
     });
 
+    it("does not count a confirmation from a traveller who reported the value before the takedown", () => {
+      const c1 = fact(3, "dev-c", "toilets", true);
+      const c2 = attested(fact(4, "dev-d", "toilets", true));
+      const out = run([c1, c2], { now: 5, history: [...history(), applied(fact(-10, "dev-d", "toilets", true))], places: [down()] });
+      expect(out.decisions.map((d) => d.outcome)).toEqual(["waiting", "waiting"]);
+      expect(out.after()).toBeUndefined();
+      expect(out.closed).toEqual([]);
+    });
+
     it("replaces the value with an attested report of another, and closes the case", () => {
       const r = attested(fact(3, "dev-c", "toilets", false));
       const out = run([r], { now: 5, history: [...history(), applied(fact(-10, "dev-e", "toilets", true))], places: [down()] });
@@ -585,6 +594,18 @@ describe("doubts", () => {
       expect(out.outcome(before)).toBe("applied");
       expect(out.decisions.find((d) => d.id === before.id)?.reason).toBe("counted as a confirmation of toilets before doubts took it down");
       expect(out.held).toEqual([expect.objectContaining({ case: "fact_doubted", taken_down: true })]);
+      expect(out.after()?.facts.toilets).toBe(true);
+      expect(out.closed).toEqual([{ case: "fact_doubted", place: PLACE, fact: "toilets", settles: "restored", feedback: [c1.id, c2.id] }]);
+    });
+
+    it("counts a confirmation sent at the takedown as one sent before it", () => {
+      const a = doubt(0, "dev-a");
+      const b = attested(doubt(1, "dev-b"));
+      const same = fact(1, "dev-e", "toilets", true);
+      const c1 = fact(2, "dev-c", "toilets", true);
+      const c2 = attested(fact(3, "dev-d", "toilets", true));
+      const out = run([a, b, same, c1, c2], { now: 4, places: [withToilets()] });
+      expect(out.decisions.find((d) => d.id === same.id)?.reason).toBe("counted as a confirmation of toilets before doubts took it down");
       expect(out.after()?.facts.toilets).toBe(true);
       expect(out.closed).toEqual([{ case: "fact_doubted", place: PLACE, fact: "toilets", settles: "restored", feedback: [c1.id, c2.id] }]);
     });

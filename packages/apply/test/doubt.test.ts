@@ -165,6 +165,20 @@ describe("decideFact on a fact taken down after doubts", () => {
     expect(decideFact({ item, place: down(), earlier: [...earlier, fact(2, "dev-g")], doubted })).toMatchObject({ verdict: "live", settles: "restored" });
   });
 
+  it("does not count the doubts that took the fact down against a restore", () => {
+    // dev-a's doubt arrived at the takedown itself, dev-b's before it: only dev-e's, since, counts.
+    const earlier = [doubt(-1, "dev-b"), doubt(0, "dev-a"), doubt(1, "dev-e"), fact(1, "dev-c")];
+    expect(decideFact({ item: attested(fact(2, "dev-d")), place: down(), earlier, doubted })).toMatchObject({ verdict: "live", settles: "restored" });
+  });
+
+  it("counts only confirmations sent after the takedown, from travellers who had not reported the value before it", () => {
+    const item = attested(fact(2, "dev-d"));
+    // dev-c reported the value at the takedown itself.
+    expect(decideFact({ item, place: down(), earlier: [fact(0, "dev-c")], doubted })).toMatchObject({ verdict: "held", reason: "taken_down" });
+    // dev-d reported it before the takedown: its confirmation since is not a new traveller's.
+    expect(decideFact({ item, place: down(), earlier: [fact(-10, "dev-d"), fact(1, "dev-c")], doubted })).toMatchObject({ verdict: "held", reason: "taken_down" });
+  });
+
   it("replaces the value with an attested report of another, and settles the case", () => {
     const item = attested(fact(1, "dev-c", false));
     // The doubted value's own reports were outweighed and do not hold the new one.
