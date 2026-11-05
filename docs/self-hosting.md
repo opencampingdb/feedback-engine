@@ -1,6 +1,6 @@
 # Self-hosting the intake and the apply workflow
 
-This sets up the whole feedback path: the intake Worker on Cloudflare, the private `inbox` repository and the hourly workflow that opens PRs to `data`. Everything fits the Cloudflare Workers free plan and GitHub Actions.
+This sets up the whole feedback path: the intake Worker on Cloudflare, the private `inbox` repository and the workflow that applies it to `data`, which the intake starts a few minutes after new feedback and which also runs hourly. Everything fits the Cloudflare Workers free plan and GitHub Actions.
 
 You need Node 22.12 or later, a GitHub organisation that holds `inbox` and `data` (the workflow expects both in the same organisation), and this repository cloned.
 
