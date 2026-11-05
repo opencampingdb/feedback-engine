@@ -14,6 +14,7 @@ import {
   decideFact,
   distinctSources as distinctDevices,
   factRefusal,
+  factsClearedBy,
   heldForCheck,
   inWindow,
   newPlaceFields,
@@ -31,7 +32,7 @@ import {
 import { moderateReview } from "./moderation.js";
 import type { ClosedCase, HeldCase } from "./review.js";
 import { roundCoord } from "./serialise.js";
-import { setSource } from "./sources.js";
+import { dropSource, setSource } from "./sources.js";
 import type { Fee, Photo, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
 
 export type { ClosedCase, HeldCase };
@@ -916,12 +917,18 @@ export function applyRules(input: RulesInput): RulesOutput {
       groups.set(key, [...(groups.get(key) ?? []), item]);
     }
 
-    for (const reports of groups.values()) {
+    // pets_months last, so it is decided against the pets this run leaves.
+    const ordered = [...groups.values()].sort((a, b) => Number(a[0]!.report.fact === "pets_months") - Number(b[0]!.report.fact === "pets_months"));
+    for (const reports of ordered) {
       const placeId = reports[0]!.place as string;
       const fact = reports[0]!.report.fact as FactName;
       const place = record(placeId);
       const current = () => (place.facts as Record<string, unknown>)[fact];
       const setFact = (value: FactValue) => {
+        for (const cleared of factsClearedBy(place.facts, fact, value)) {
+          delete (place.facts as Record<string, FactValue | undefined>)[cleared];
+          dropSource(place, cleared);
+        }
         (place.facts as Record<string, FactValue>)[fact] = value;
         setSource(place, fact, "feedback", nowIso);
       };

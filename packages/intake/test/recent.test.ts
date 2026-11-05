@@ -773,6 +773,17 @@ describe("send-time decisions", () => {
     expect(store.db.prepare("SELECT accepted, taken_down FROM contributor_records").all()).toEqual([{ accepted: 1, taken_down: 0 }]);
   });
 
+  it("takes pets_months off with pets that is no longer seasonal, and holds months for a place that is not seasonal", async () => {
+    index(UNKNOWN, [146, -37], { pets: "seasonal", pets_months: "May-Sep" });
+    expect(await send(fact(UNKNOWN, "pets", "leashed"))).toMatchObject({ state: "live" });
+    expect((await listing()).changes).toEqual([
+      { place: UNKNOWN, fact: "pets", value: "leashed", accepted: "2026-11-03T09:00:00Z", in_data_at: null },
+      { place: UNKNOWN, fact: "pets_months", value: null, accepted: "2026-11-03T09:00:00Z", in_data_at: null },
+    ]);
+    clock += HOUR;
+    expect(await send(fact(UNKNOWN, "pets_months", "Dec-Feb", { device: otherDevice(1), contributor: "acct_second_person_01" }))).toMatchObject(held("not_seasonal"));
+  });
+
   it("answers live, with no recent change, for the value the place already has", async () => {
     expect(await send(fact(PLACE, "toilets", false))).toMatchObject({ state: "live" });
     expect((await listing()).changes).toEqual([]);

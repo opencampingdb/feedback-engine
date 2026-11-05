@@ -69,6 +69,7 @@ export type PlaceState = Pick<Place, "facts" | "fact_sources" | "fact_dates">;
  * report of a value doubts took down, waiting for a second new source.
  * On a doubt, `not_attested` means no doubt counted was attested, and
  * `disagreement` that as many sources confirm the value as doubt it, or more.
+ * `not_seasonal`: `pets_months` for a place whose `pets` is not `seasonal`.
  */
 export type HeldReason =
   | "not_attested"
@@ -80,7 +81,8 @@ export type HeldReason =
   | "no_contributor"
   | "single_doubt"
   | "protected_source"
-  | "taken_down";
+  | "taken_down"
+  | "not_seasonal";
 
 /** The reasons the intake holds an item for one of its checks rather than for these rules. */
 export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "check_unavailable"];
@@ -186,6 +188,15 @@ export function factRefusal(item: ReportItem): Extract<ItemDecision, { verdict: 
 }
 
 /**
+ * Facts that mean nothing once `fact` is set to `value`, so they come off the
+ * place with it: `pets_months` when `pets` is no longer `seasonal`. Only those
+ * the place has are named.
+ */
+export function factsClearedBy(facts: PlaceState["facts"], fact: FactName, value: FactValue): FactName[] {
+  return fact === "pets" && value !== "seasonal" && facts.pets_months !== undefined ? ["pets_months"] : [];
+}
+
+/**
  * A `fact` report. An attested report changes the fact at once, unless the
  * owner set it, another source disagrees within 90 days, or (for a contact
  * fact or the address) it fails `contactProblem`; then it is held. A report
@@ -198,6 +209,9 @@ export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemD
   if (refusal !== null) return refusal;
   const fact = item.report.fact as FactName;
   const value = item.report.value as FactValue;
+  if (fact === "pets_months" && place.facts.pets !== "seasonal") {
+    return { verdict: "held", reason: "not_seasonal", why: "pets_months applies only when pets is seasonal, so a person checks it" };
+  }
   // The case counts only while the place lacks the fact.
   const down = openCase !== undefined && (place.facts as Record<string, unknown>)[fact] === undefined ? openCase : undefined;
   if (down !== undefined && sameValue(value, down.value)) return decideRestore(item, earlier, down);
@@ -238,7 +252,7 @@ export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemD
   }
   return {
     verdict: "live",
-    changes: [{ place: item.place as string, fact, value }],
+    changes: [{ place: item.place as string, fact, value }, ...factsClearedBy(place.facts, fact, value).map((cleared) => ({ place: item.place as string, fact: cleared, value: null }))],
     why: `${fact} set to ${show(value)}`,
     ...(down !== undefined ? { settles: "replaced" as const } : {}),
   };

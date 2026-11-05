@@ -243,6 +243,27 @@ function trimmedAddress(value: PlaceAddress): PlaceAddress {
   return out;
 }
 
+/** Month names as OSM opening_hours and conditional tags write them. */
+export const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+const MONTH_RANGE = new RegExp(`^(${MONTHS.join("|")})-(${MONTHS.join("|")})$`);
+
+/** One OSM month range of two different months, such as `May-Sep` or `Dec-Feb`, as `pets_months` holds it. */
+export function isMonthRange(value: unknown): value is string {
+  const m = typeof value === "string" ? MONTH_RANGE.exec(value) : null;
+  return m !== null && m[1] !== m[2];
+}
+
+/** The months (1 to 12) a month range covers, in order from its first month, wrapping the year end. Empty when it is not a month range. */
+export function monthsInRange(range: string): number[] {
+  if (!isMonthRange(range)) return [];
+  const [from, to] = range.split("-").map((name) => (MONTHS as readonly string[]).indexOf(name) + 1) as [number, number];
+  const out: number[] = [];
+  for (let month = from; ; month = (month % 12) + 1) {
+    out.push(month);
+    if (month === to) return out;
+  }
+}
+
 const isBoolean = (v: unknown): boolean => typeof v === "boolean";
 /** An https link to a page, as for the website and social pages. */
 const isHttpsPage = (max: number) => (v: unknown): boolean =>
@@ -261,6 +282,7 @@ export const FACTS: Readonly<Record<ReportFactName, (value: unknown) => boolean>
   drinking_water: isBoolean,
   dump_station: isBoolean,
   pets: (v) => v === "yes" || v === "no" || v === "leashed" || v === "seasonal",
+  pets_months: isMonthRange,
   access: (v) => v === "2wd" || v === "awd" || v === "4wd" || v === "unknown",
   entry: (v) => v === "public" || v === "customers" || v === "permit" || v === "private",
   max_stay: (v) => typeof v === "string" && /^[1-9]\d{0,2}[hdw]$/.test(v),

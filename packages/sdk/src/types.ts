@@ -111,6 +111,12 @@ export interface PlaceFacts {
   fee?: FeeValue;
   power?: boolean;
   pets?: PetsValue;
+  /**
+   * The months dogs are allowed, when `pets` is `seasonal`: one OSM month
+   * range such as `May-Sep`, which may wrap the year end (`Dec-Feb`). It is
+   * OSM's `dog:conditional=yes @ (May-Sep)`. `monthsInRange` reads it.
+   */
+  pets_months?: string;
   tents?: boolean;
   caravans?: CaravansValue;
   toilets?: boolean;

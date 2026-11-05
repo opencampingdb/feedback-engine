@@ -487,6 +487,7 @@ export type AnswerOutcome = ({ kind: "sent"; id: string } & ItemDecision) | { ki
  * - `single_doubt`: one traveller doubts the fact, so a reviewer reads it. The fact stays.
  * - `protected_source`: a doubt about a fact from OSM or the owner, which doubts never take down.
  * - `taken_down`: a report of a value doubts took down, which returns when two new travellers confirm it.
+ * - `not_seasonal`: `pets_months` for a place whose `pets` is not `seasonal`, so a person checks it.
  */
 export const HELD_REASONS = [
   "not_attested",
@@ -506,6 +507,7 @@ export const HELD_REASONS = [
   "single_doubt",
   "protected_source",
   "taken_down",
+  "not_seasonal",
 ] as const;
 
 /** Why the intake held an item at send time. */
