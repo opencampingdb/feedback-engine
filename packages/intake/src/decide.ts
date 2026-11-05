@@ -33,7 +33,7 @@ import { chunks, placeStatement, prunePlaceStatements, type Bbox, type D1Like, t
  * same either way, and the apply still writes the data.
  *
  * Decided here: `fact`, `contact` and `doubt` reports about a released place,
- * and `new_place` reports. A fact report, contact takedown or doubt takedown
+ * and `new_place` reports. A `commons_mismatch` report is always held. A fact report, contact takedown or doubt takedown
  * that goes live is a recent change, served with the recent list by map area
  * until 7 days after the apply has put it into the data. A doubt takedown also
  * opens a case in `doubt_cases` with the value the fact had, as does a
@@ -66,9 +66,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * doesn't have yet, or a new place); `blocked`, the contributor is on the
  * block list; `no_value` and `invalid_value`, the rules would refuse it (a
  * contact report or doubt about a fact the place does not have, as the index
- * has it). The apply decides each of these again when it runs.
+ * has it). `commons_report`: a report that a Commons photo is not of the
+ * place, which the apply decides. The apply decides each of these again when
+ * it runs.
  */
-export type HeldReason = RulesHeldReason | ChecksHeldReason | RefusedReason | "unknown_place" | "blocked";
+export type HeldReason = RulesHeldReason | ChecksHeldReason | RefusedReason | "unknown_place" | "blocked" | "commons_report";
 
 /** What the answer to an accepted item adds. */
 export type ItemState = { state: "live" } | { state: "held"; held_reason: HeldReason };
@@ -92,6 +94,7 @@ export function decidedHere(item: StoredFeedback): item is ReportItem {
   if (item.type !== "report") return false;
   const kind = item.report.kind;
   if (kind === "new_place") return true;
+  if (kind === "commons_mismatch") return typeof item.place === "string";
   return (kind === "fact" || kind === "contact" || kind === "doubt") && typeof item.place === "string" && typeof item.report.fact === "string";
 }
 
@@ -306,6 +309,8 @@ export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDeci
   const record = await contributorRecord(db, contributor);
   if (record.blocked) return held("blocked");
   if (item.report.kind === "new_place") return decideNewPlace(input, record);
+  // The app hides the photo for this traveller. Everyone else waits for the apply: two sources, or a reviewer.
+  if (item.report.kind === "commons_mismatch") return held("commons_report");
 
   const placeId = item.place as string;
   const place = await placeNow(db, placeId);

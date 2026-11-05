@@ -31,7 +31,7 @@ import {
   type OpenDoubt,
 } from "./decide.js";
 import { moderateReview } from "./moderation.js";
-import { mergePlaces, mergeProblem, type ClosedCase, type HeldCase } from "./review.js";
+import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase } from "./review.js";
 import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
 import { dropSource, setSource } from "./sources.js";
@@ -136,6 +136,8 @@ export interface RulesInput {
   photoLicence?: string;
   /** Every record in the data, for the duplicates check on new places. None when left out. */
   everyPlace?: readonly Place[];
+  /** Pairs on `moderation/commons-do-not-match.json`: a Commons photo that is not of the place. None when left out. */
+  doNotMatch?: readonly Pick<DoNotMatchEntry, "place" | "file">[];
   /** Pairs on `moderation/distinct_places.json`, as `pairKey` makes them: never merged. None when left out. */
   distinct?: ReadonlySet<string>;
   /**
@@ -210,6 +212,8 @@ export interface RulesOutput {
   closed: ClosedCase[];
   /** New places withdrawn by their adder whose records are to be deleted from the data. */
   removed: string[];
+  /** Place and Commons file pairs to add to `moderation/commons-do-not-match.json`. */
+  doNotMatch: DoNotMatchEntry[];
   needsReview: boolean;
 }
 
@@ -325,6 +329,7 @@ export function applyRules(input: RulesInput): RulesOutput {
   const closed: ClosedCase[] = [];
   const removed: string[] = [];
   let everyPlaceById: Map<string, Place> | undefined;
+  const doNotMatch: DoNotMatchEntry[] = [];
 
   const decide = (item: StoredFeedback, outcome: Outcome, reason: string) => {
     decisions.set(item.id, { id: item.id, place: item.place, outcome, reason });
@@ -437,6 +442,7 @@ export function applyRules(input: RulesInput): RulesOutput {
   applyFacts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
   applyNewPlaces(known.filter((i): i is ReportItem => isNewPlaceReport(i)), newPlaceEvidence);
   applyContactReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "contact"));
+  applyCommonsReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "commons_mismatch"));
   routeToPerson(known.filter((i): i is ReportItem => i.type === "report"));
 
   // Anything still waiting past the window can no longer be confirmed.
@@ -478,6 +484,7 @@ export function applyRules(input: RulesInput): RulesOutput {
     fees: newFees,
     photos: newPhotos,
     removedPhotos,
+    doNotMatch,
     edits,
     changes,
     held,
@@ -1522,6 +1529,56 @@ export function applyRules(input: RulesInput): RulesOutput {
       if (distance <= DUPLICATE_DISTANCE_M && (!best || distance < best.distance)) best = { place: other.id, distance };
     }
     return best;
+  }
+
+  /**
+   * Reports that a Commons photo is not of a place, by place and file. Each
+   * source counts once. Reports from two sources within 90 days, at least one
+   * attested, put the pair on the do-not-match list; until then each report
+   * is a `commons_mismatch` case for a reviewer. A pair already on the list
+   * changes nothing.
+   */
+  function applyCommonsReports(items: ReportItem[]): void {
+    const groups = new Map<string, ReportItem[]>();
+    for (const item of items) {
+      const key = factKey(item.place as string, item.report.file as string);
+      groups.set(key, [...(groups.get(key) ?? []), item]);
+    }
+    for (const reports of groups.values()) {
+      const placeId = reports[0]!.place as string;
+      const file = reports[0]!.report.file as string;
+      if ([...(input.doNotMatch ?? []), ...doNotMatch].some((p) => p.place === placeId && p.file === file)) {
+        for (const r of reports) decide(r, "applied", "the Commons photo is on the do-not-match list already");
+        continue;
+      }
+      const latest = time(reports[reports.length - 1]!);
+      const earlier = input.history.filter(
+        (h): h is ReportItem => h.type === "report" && h.report.kind === "commons_mismatch" && h.place === placeId && h.report.file === file,
+      );
+      const counted = [...earlier, ...reports].filter((r) => inWindow(r, latest) && heldForCheck(r) === null);
+      const sources = distinctDevices(counted);
+      if (sources >= 2 && counted.some((r) => r.attested !== undefined)) {
+        doNotMatch.push({ place: placeId, file, added: nowIso.slice(0, 10), source: "reports" });
+        note(placeId, `Commons photo ${JSON.stringify(file)} goes on the do-not-match list after reports from ${sources} sources within ${WINDOW_DAYS} days`, true, counted);
+        for (const r of reports) decide(r, "applied", `the Commons photo goes on the do-not-match list after reports from ${sources} sources`);
+        continue;
+      }
+      const target = input.places.get(placeId)!;
+      for (const r of reports) {
+        edits.push({ kind: "note", place: placeId, feedback: r.id });
+        note(placeId, `Commons photo ${JSON.stringify(file)} reported as not of this place${quote(r.report.note)}`, false, [r]);
+        decide(r, "needs_review", "one source reports the Commons photo, so a reviewer looks");
+      }
+      held.push({
+        case: "commons_mismatch",
+        place: placeId,
+        location: { lat: roundCoord(target.location.lat), lon: roundCoord(target.location.lon) },
+        kind: target.kind,
+        file,
+        sources: Math.max(sources, 1),
+        feedback: reports.map((r) => r.id),
+      });
+    }
   }
 
   function routeToPerson(items: ReportItem[]): void {

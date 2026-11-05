@@ -154,6 +154,13 @@ await feedback.report({ place, report: { kind: "fact", fact: "toilets", value: t
 await feedback.report({ place, report: { kind: "doubt", fact: "toilets", note: "None I could find" }, consent: true }); // wrong, right value unknown
 ```
 
+**A Commons photo that is not of the place.** Apps show Wikimedia Commons photos from `commons.ndjson.gz`. A `commons_mismatch` report says one of them is not of the place: it needs the place and `file`, the photo's `file` from that line (1 to 255 characters on one line, `MAX_COMMONS_FILE_LENGTH`), and may carry a `note` for reviewers. Hide the photo for the traveller who sent it at once, and keep it hidden on that phone: the intake answers `held` (`commons_report`) and a reviewer gets the case. Reports from two different sources within 90 days, at least one attested, add the place and file to the data's `moderation/commons-do-not-match.json` at the next apply run, and later releases leave the photo out for everyone. A reviewer may add it on one report too. A person can undo either, and the app should offer the traveller a way to show the photo again.
+
+```ts
+await feedback.report({ place, report: { kind: "commons_mismatch", file: "Brunswick River and Pool Precinct 6.jpg" }, consent: true });
+hiddenCommons.add(`${place}/${file}`); // the app's own list, for this traveller
+```
+
 Three more report kinds let a traveller fix what Edit site covers on other apps. Each goes to a person, who accepts or rejects it on the review PR:
 
 ```ts
@@ -383,7 +390,7 @@ export const feedback = createFeedbackClient({
 await feedback.report({ place: null, location, report: { kind: "new_place", name: tidyName(name) }, consent: true, ref: draft.id });
 ```
 
-**Live or held.** The intake decides fact reports, contact reports, doubts and new places when they arrive, with the apply run's own rules and then its checks, and says what it decided. A `sent` outcome, and the `sent` result of a call that sent at once, then carries `state`: `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`. Every other kind of item, and every item sent to an intake from before SDK 0.10.0, comes back with neither, and the apply run decides it as before. The apply still writes every item into the data, and may yet decide a live item differently, for example when two reports collide in one run; the change then leaves the recent list.
+**Live or held.** The intake decides fact reports, contact reports, doubts and new places when they arrive, and answers every `commons_mismatch` report `held`, with the apply run's own rules and then its checks, and says what it decided. A `sent` outcome, and the `sent` result of a call that sent at once, then carries `state`: `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`. Every other kind of item, and every item sent to an intake from before SDK 0.10.0, comes back with neither, and the apply run decides it as before. The apply still writes every item into the data, and may yet decide a live item differently, for example when two reports collide in one run; the change then leaves the recent list.
 
 ```ts
 onAnswered: async ({ ref, outcome }) => {
@@ -416,6 +423,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `protected_source` | A doubt about a fact from OSM or the owner, which doubts never take down. |
 | `taken_down` | A report of a value doubts took down: it comes back when two new travellers confirm it. |
 | `not_seasonal` | `pets_months` for a place whose `pets` is not `seasonal`, so a person checks it. |
+| `commons_report` | A report that a Commons photo is not of the place. Hide it for the traveller who sent it; a reviewer decides, and two sources hide it for everyone. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. Adding a code later is additive. A code this version does not know is left out of `heldReason`, and `state` is still `held`. `itemDecision(answer)` reads `state` and `heldReason` from an intake answer you fetched yourself.
 

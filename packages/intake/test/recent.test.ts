@@ -784,6 +784,13 @@ describe("send-time decisions", () => {
     expect(await send(fact(UNKNOWN, "pets_months", "Dec-Feb", { device: otherDevice(1), contributor: "acct_second_person_01" }))).toMatchObject(held("not_seasonal"));
   });
 
+  it("answers held for a Commons photo that is not of the place, and keeps the decision with the item for the apply", async () => {
+    const answer = await send(report(PLACE, { kind: "commons_mismatch", file: "Lake Pool 6.jpg" }));
+    expect(answer).toEqual({ id: written()[0]!.id, ...held("commons_report") });
+    expect(written()[0]).toMatchObject({ report: { kind: "commons_mismatch", file: "Lake Pool 6.jpg" }, intake: held("commons_report") });
+    expect((await listing()).changes).toEqual([]);
+  });
+
   it("answers live, with no recent change, for the value the place already has", async () => {
     expect(await send(fact(PLACE, "toilets", false))).toMatchObject({ state: "live" });
     expect((await listing()).changes).toEqual([]);

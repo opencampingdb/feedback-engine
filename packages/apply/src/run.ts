@@ -211,6 +211,9 @@ export async function run(options: RunOptions): Promise<RunSummary> {
         })
       : undefined;
 
+  // The do-not-match list, when anything in this run says a Commons photo is not of a place.
+  const doNotMatch = crowd.some((p) => p.type === "report" && p.report.kind === "commons_mismatch") && !photosOnly ? await auto.doNotMatch() : undefined;
+
   const crowdResult = applyRules({
     now: runAt,
     pending: crowd,
@@ -226,6 +229,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     ...(everyPlace ? { everyPlace } : {}),
     ...(distinct ? { distinct } : {}),
     ...(roads ? { roads } : {}),
+    ...(doNotMatch ? { doNotMatch } : {}),
     ...(recent !== undefined ? { recent } : {}),
   });
 
@@ -284,6 +288,8 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   }
   const removedWritten = await auto.addRemovedPhotos(crowdResult.removedPhotos);
   if (removedWritten) autoFiles.push(removedWritten);
+  const doNotMatchWritten = await auto.addDoNotMatch(crowdResult.doNotMatch);
+  if (doNotMatchWritten) autoFiles.push(doNotMatchWritten);
   // Withdrawn new places leave both checkouts.
   const reviewFiles: string[] = [];
   for (const placeId of crowdResult.removed) {

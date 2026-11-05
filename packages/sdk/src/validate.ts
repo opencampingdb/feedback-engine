@@ -61,6 +61,7 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   "remove",
   "contact",
   "doubt",
+  "commons_mismatch",
 ];
 /** The contact facts and the address, as a `contact` report may name them. */
 export const CONTACT_FACTS: readonly ContactFactName[] = ["website", "phone", "phone_2", "email", "facebook", "instagram", "tiktok", "x", "address"];
@@ -188,6 +189,8 @@ export const MAX_FEE_AGE_MONTHS = 24;
 const KIND_CODE = /^[a-z][a-z_]{1,39}$/;
 
 export const MAX_TEXT_LENGTH = 2000;
+/** Longest Commons file name a `commons_mismatch` report may name, as `commons.ndjson.gz` allows. */
+export const MAX_COMMONS_FILE_LENGTH = 255;
 export const MAX_DESCRIPTION_LENGTH = 500;
 export const MAX_APP_VERSION_LENGTH = 32;
 
@@ -487,6 +490,14 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
     }
   } else if (value.fact !== undefined || value.value !== undefined) {
     errors.push("report.fact and report.value are only allowed when report.kind is fact, name or description, and report.fact on contact or doubt");
+  }
+  if (kind === "commons_mismatch") {
+    const file = value.file;
+    if (typeof file !== "string" || file.trim().length === 0 || file.length > MAX_COMMONS_FILE_LENGTH || /[\u0000-\u001f\u007f]/.test(file)) {
+      errors.push(`report.file must be the Commons file name, 1 to ${MAX_COMMONS_FILE_LENGTH} characters on one line`);
+    } else out.file = file.trim();
+  } else if (value.file !== undefined) {
+    errors.push("report.file is only allowed when report.kind is commons_mismatch");
   }
   const note = checkText(value.note, "report.note", errors, false);
   if (note !== undefined) out.note = note;

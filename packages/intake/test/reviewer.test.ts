@@ -364,6 +364,41 @@ describe("the AI reviewer", () => {
     });
   });
 
+  describe("commons_mismatch cases", () => {
+    const FILE = "Brunswick River and Pool Precinct 6.jpg";
+    const LIST = "moderation/commons-do-not-match.json";
+    const mismatch = (n: number, file = FILE) => heldCase(n, { case: "commons_mismatch", file, sources: 1 });
+    const park = (n: number) => place(n, { standing: undefined, name: "Brunswick Heads Caravan Park", kind: "caravan_park" });
+
+    it("puts a photo the model confirms is not of the place on the do-not-match list, and dismisses one it finds is", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [mismatch(0), mismatch(1, "Brunswick Heads Caravan Park entrance.jpg")]));
+      gh.put(park(0));
+      gh.put(park(1));
+      const answers: Record<string, ReturnType<typeof reply>> = {
+        [id(0)]: reply("confirm", "The file names a river pool, not the park."),
+        [id(1)]: reply("dismiss", "The file names this park."),
+      };
+      const { ai, asked } = fakeAi((input) => answers[(caseOf(input).place as { id: string }).id]!);
+
+      const result = await run(gh, ai);
+      expect(caseOf(asked[0]!.input)).toMatchObject({ case: "commons_mismatch", place: { name: "Brunswick Heads Caravan Park" }, file: FILE, reporting_sources: 1 });
+      expect((asked[0]!.input.messages as { content: string }[])[0]!.content).toContain("confirm, dismiss, leave");
+      expect(JSON.parse(gh.files.get(LIST)!.text)).toEqual({ pairs: [{ added: "2026-11-04", file: FILE, place: id(0), source: "reviewer" }] });
+      expect(gh.commits()).toHaveLength(1);
+      expect(gh.commits()[0]!.body!.message as string).toContain(`${REVIEWER}: confirm held case commons_mismatch on ${id(0)}`);
+      expect(result).toMatchObject({ decisions: [{ decision: "confirm", committed: true }, { decision: "dismiss", committed: false }] });
+    });
+
+    it("leaves a pair already on the list without asking the model", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [mismatch(0)]));
+      gh.put(park(0));
+      gh.files.set(LIST, { text: JSON.stringify({ pairs: [{ added: "2026-11-01", file: FILE, place: id(0), source: "reports" }] }), sha: "shaL" });
+      const { ai, asked } = fakeAi(() => reply("confirm", "should not be asked"));
+      expect(await run(gh, ai)).toMatchObject({ decisions: [{ decision: "leave", by_rules: true, reason: "the Commons photo is on the do-not-match list already" }] });
+      expect(asked).toHaveLength(0);
+    });
+  });
+
   describe("vehicle_access_candidate cases", () => {
     const candidate = (n: number): HeldCase => ({ ...heldCase(n, { case: "vehicle_access_candidate", fact: "vehicle_access", value: "heavy_vehicles_only" }), kind: "rest_area", feedback: [] });
     const restArea = (n: number, overrides: Partial<Place> = {}) =>

@@ -4,7 +4,7 @@ import { createInterface } from "node:readline";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
 import type { AwaitingClaim, OwnerRecord } from "./owners.js";
-import { pairKey } from "./review.js";
+import { pairKey, withDoNotMatch, type DoNotMatchEntry } from "./review.js";
 import { majorRoads, type MajorRoads } from "./roads.js";
 import type { Decision } from "./rules.js";
 import { dumpFeeLine, dumpPhotoLine, dumpPlace, dumpReviewLine, feePath, photoPath, placePath, reviewPath } from "./serialise.js";
@@ -558,6 +558,25 @@ export class DataRepo {
     const column = header ? csvFields(header).map((f) => f.trim()).indexOf("place") : -1;
     if (column < 0) return [];
     return rows.map((row) => csvFields(row)[column]?.trim() ?? "").filter((id) => PLACE_FILE.test(`${id}.json`));
+  }
+
+  /** Pairs in `moderation/commons-do-not-match.json`. Empty when the file is missing. */
+  async doNotMatch(): Promise<DoNotMatchEntry[]> {
+    const path = join(this.root, "moderation", "commons-do-not-match.json");
+    if (!(await exists(path))) return [];
+    return (JSON.parse(await readFile(path, "utf8")) as { pairs?: DoNotMatchEntry[] }).pairs ?? [];
+  }
+
+  /** Adds pairs to `moderation/commons-do-not-match.json` with `withDoNotMatch`. Returns the path, or undefined when nothing changed. */
+  async addDoNotMatch(entries: readonly DoNotMatchEntry[]): Promise<string | undefined> {
+    if (entries.length === 0) return undefined;
+    const path = join(this.root, "moderation", "commons-do-not-match.json");
+    const before = (await exists(path)) ? await readFile(path, "utf8") : undefined;
+    const text = withDoNotMatch(before, entries);
+    if (text === before) return undefined;
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, text, "utf8");
+    return "moderation/commons-do-not-match.json";
   }
 
   /** Pairs in `moderation/distinct_places.json`, as `pairKey` makes them. Empty when the file is missing. */

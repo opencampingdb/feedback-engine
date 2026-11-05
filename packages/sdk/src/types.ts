@@ -46,7 +46,17 @@ export type ReportKind =
    * attested, take the fact down until two new sources confirm it or someone
    * reports a new value. Facts from OSM or the owner stay up.
    */
-  | "doubt";
+  | "doubt"
+  /**
+   * A Wikimedia Commons photo shown for a place is not of it. `file` names
+   * the photo as the place's line in `commons.ndjson.gz` does. The app hides
+   * the photo for the traveller who sent it at once, and the intake answers
+   * `held` (`commons_report`): a reviewer gets the case. Reports from two
+   * different sources within 90 days, at least one attested, add the place
+   * and file to the data's do-not-match list, so the photo is never matched
+   * to the place again.
+   */
+  | "commons_mismatch";
 
 /** Why a contact on a place is reported: `wrong` (it reaches someone else, or nobody) or `spam`. */
 export type ContactReportReason = "wrong" | "spam";
@@ -271,6 +281,8 @@ export interface ReportBody {
   description?: string;
   /** On `new_place` only: whether there is a charge, checked as a `fee` fact report's value is. Published with the place. */
   fee?: FeeValue;
+  /** Required on `commons_mismatch`, and allowed only there: the Commons file name, as `file` in `commons.ndjson.gz`, 1 to 255 characters on one line. */
+  file?: string;
 }
 
 /** The contact facts a new place may carry. */

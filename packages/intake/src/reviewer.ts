@@ -43,6 +43,8 @@ import {
   type HeldCase,
   type Place,
   type ReviewDecision,
+  withDoNotMatch,
+  type DoNotMatchEntry,
 } from "@opencampingdb/apply/review";
 import type { AiLike } from "./checks.js";
 import { GitHubError, type GitHubApp, type GitHubAppConfig, type IssueComment } from "./github.js";
@@ -54,6 +56,8 @@ import { claimReviewRun } from "./runs.js";
  * is held to the decision schema.
  */
 export const DEFAULT_REVIEW_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+/** The data repository's list of Commons photos that are not of a place. */
+export const DO_NOT_MATCH_PATH = "moderation/commons-do-not-match.json";
 /** The data repository's branch for changes a person or a reviewer decides on. */
 export const REVIEW_BRANCH = "feedback/review";
 /** Cases the model is asked about in one run. The rest wait for the next. */
@@ -174,7 +178,13 @@ const MEANINGS: Record<ReviewDecision, string> = {
 
 /** What a decision means for this case. */
 const meaning = (c: HeldCase, d: ReviewDecision) =>
-  c.case === "fact_doubted" && d === "restore" ? "put the last value back on the place: the doubts are outweighed or unlikely" : MEANINGS[d];
+  c.case === "fact_doubted" && d === "restore"
+    ? "put the last value back on the place: the doubts are outweighed or unlikely"
+    : c.case === "commons_mismatch" && d === "confirm"
+      ? "never show this photo for the place again: its file name clearly names another place or something else"
+      : c.case === "commons_mismatch" && d === "dismiss"
+        ? "keep showing the photo: its file name clearly names this place"
+        : MEANINGS[d];
 
 /** What the model reads of a place. Values travellers or the owner sent are data, not instructions. */
 function placeView(place: Place) {
@@ -197,6 +207,9 @@ function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
     "You review held cases for an open database of camping places. A case is a new place or a change that the automatic checks held for a reviewer.",
     ...(c.case === "fact_doubted"
       ? ["In a fact_doubted case, travellers say a fact about the place is wrong without giving the right value. Doubts and confirmations count independent travellers."]
+      : []),
+    ...(c.case === "commons_mismatch"
+      ? ["In a commons_mismatch case, a traveller says a Wikimedia Commons photo shown for the place is not of it. You see only the photo's file name, matched to the place by its words and distance."]
       : []),
     ...(c.case === "vehicle_access_candidate"
       ? ["In a vehicle_access_candidate case, the place's name suggests only heavy vehicles may use it, and OpenStreetMap does not say so. Confirm only when the name clearly says trucks or heavy vehicles only, such as a truck parking bay or a heavy vehicle rest area."]
@@ -275,6 +288,7 @@ export async function askModel(
       ? { fact: c.fact, last_value: c.value, taken_down: c.taken_down, doubting_sources: c.sources, doubts: c.doubts?.length ?? 0, confirmations: c.confirmations?.length ?? 0 }
       : {}),
     ...(c.case === "vehicle_access_candidate" ? { fact: c.fact, value: c.value } : {}),
+    ...(c.case === "commons_mismatch" ? { file: c.file, reporting_sources: c.sources } : {}),
   };
   let out: unknown;
   try {
@@ -308,6 +322,16 @@ function parsePlace(text: string): Place | undefined {
     return typeof value === "object" && value !== null && typeof (value as Place).id === "string" ? (value as Place) : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/** The pairs in the do-not-match list's text, or none when it does not parse. */
+function doNotMatchOf(text: string): DoNotMatchEntry[] {
+  try {
+    const pairs = (JSON.parse(text) as { pairs?: unknown }).pairs;
+    return Array.isArray(pairs) ? (pairs as DoNotMatchEntry[]) : [];
+  } catch {
+    return [];
   }
 }
 
@@ -365,9 +389,10 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       const file = await github.readFile(data, path, branch);
       const place = file ? parsePlace(file.text) : undefined;
       const closed = closedBy.get(key);
+      const list = c.case === "commons_mismatch" ? await github.readFile(data, DO_NOT_MATCH_PATH, branch) : null;
       const settled = closed
         ? { decision: "leave" as const, reason: `the rules closed this case: travellers ${closed.settles} the fact` }
-        : settleByRules(c, place);
+        : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [] });
       let decision: ReviewDecision;
       let reason: string;
       let otherFile: { text: string; sha: string } | null = null;
@@ -388,18 +413,21 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       const at = new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
       const message = `${reviewer}: ${decision} held case ${c.case} on ${c.place}\n\n${reason}\n\nReviewer: ${reviewer}`;
       // A merge writes the kept place first, then the tombstone: a tombstone on its own would lose the facts it carries.
-      const writes: { path: string; record: Place; sha: string }[] = [];
+      const writes: { path: string; text: string; sha: string | undefined }[] = [];
       if (decision === "merge" && place && file && other && otherFile) {
         const merged = mergePlaces(other, place, at);
-        writes.push({ path: placePath(other.id), record: merged.kept, sha: otherFile.sha }, { path, record: merged.tombstone, sha: file.sha });
+        writes.push({ path: placePath(other.id), text: dumpPlace(merged.kept), sha: otherFile.sha }, { path, text: dumpPlace(merged.tombstone), sha: file.sha });
+      } else if (decision === "confirm" && c.case === "commons_mismatch") {
+        const entry: DoNotMatchEntry = { place: c.place, file: c.file!, added: at.slice(0, 10), source: "reviewer" };
+        writes.push({ path: DO_NOT_MATCH_PATH, text: withDoNotMatch(list?.text, [entry]), sha: list?.sha });
       } else {
         const next = place && file ? applyDecision(place, c, decision, at) : null;
-        if (next && file) writes.push({ path, record: next, sha: file.sha });
+        if (next && file) writes.push({ path, text: dumpPlace(next), sha: file.sha });
       }
       let lost = false;
       for (const write of writes) {
         try {
-          await github.updateFile(data, branch, write.path, dumpPlace(write.record), write.sha, message);
+          await github.updateFile(data, branch, write.path, write.text, write.sha, message);
         } catch (error) {
           if (!conflict(error)) throw error;
           lost = true;

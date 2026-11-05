@@ -44,11 +44,13 @@ export type { Place };
  * says who may use it (such as "Truck Parking Bay") but whose OSM tags do
  * not, from `moderation/heavy-vehicle-candidates.csv` in the data
  * repository; `fact` is `vehicle_access`, `value` the value the name
- * suggests, and `feedback` is empty. Contact values a traveller sent, notes
- * and device ids are never in it.
+ * suggests, and `feedback` is empty. `commons_mismatch`: travellers say the
+ * Commons photo `file` shown for the place is not of it, from `sources`
+ * independent sources, not yet enough to put it on the do-not-match list.
+ * Contact values a traveller sent, notes and device ids are never in it.
  */
 export interface HeldCase {
-  case: "duplicate" | "hidden" | "contacts" | "description" | "first_place" | "contact_withdrawn" | "fact_doubted" | "vehicle_access_candidate";
+  case: "duplicate" | "hidden" | "contacts" | "description" | "first_place" | "contact_withdrawn" | "fact_doubted" | "vehicle_access_candidate" | "commons_mismatch";
   place: string;
   /** The place's standing. Left out for a place travellers did not add. */
   standing?: "shown" | "confirmed" | "held" | "hidden";
@@ -68,7 +70,9 @@ export interface HeldCase {
   value?: FactValue;
   /** On `fact_doubted`: the doubts took the fact off the place. */
   taken_down?: boolean;
-  /** On `fact_doubted`: independent sources among the doubts. */
+  /** On `commons_mismatch`: the Commons file name, as `file` in `commons.ndjson.gz`. */
+  file?: string;
+  /** On `fact_doubted`: independent sources among the doubts. On `commons_mismatch`: among the reports. */
   sources?: number;
   /** On `fact_doubted`: the doubts counted. */
   doubts?: string[];
@@ -104,6 +108,7 @@ export const HELD_CASES: readonly HeldCase["case"][] = [
   "contact_withdrawn",
   "fact_doubted",
   "vehicle_access_candidate",
+  "commons_mismatch",
 ];
 
 /** Cases that come from the data rather than from feedback, so they name no feedback ids. */
@@ -125,7 +130,9 @@ export function isHeldCase(v: unknown): v is HeldCase {
   if (typeof v.kind !== "string" || !isStrings(v.feedback)) return false;
   if (v.feedback.length === 0 && !FROM_DATA.includes(v.case as HeldCase["case"])) return false;
   if (v.duplicate_of !== undefined && (typeof v.duplicate_of !== "string" || !PLACE_ID.test(v.duplicate_of))) return false;
-  if (v.case === "vehicle_access_candidate") {
+  if (v.case === "commons_mismatch") {
+    if (typeof v.file !== "string" || v.file.length === 0 || typeof v.sources !== "number" || v.fact !== undefined) return false;
+  } else if (v.case === "vehicle_access_candidate") {
     if (v.fact !== "vehicle_access" || !isValidFactValue("vehicle_access", v.value)) return false;
   } else if (v.case === "fact_doubted") {
     if (!isDoubtFact(v.fact) || v.value === undefined || typeof v.taken_down !== "boolean") return false;
@@ -182,7 +189,7 @@ export function parseClosedCases(text: string): ClosedCase[] {
 
 /** One key per held case, the same however often the case is listed: its kind, place, fact and feedback ids. */
 export function heldCaseKey(c: HeldCase): string {
-  return [c.case, c.place, c.fact ?? "", [...c.feedback].sort().join(",")].join(" ");
+  return [c.case, c.place, c.fact ?? c.file ?? "", [...c.feedback].sort().join(",")].join(" ");
 }
 
 export type ReviewDecision = "approve" | "restore" | "take_down" | "keep_down" | "dismiss" | "leave" | "confirm" | "merge";
@@ -206,17 +213,31 @@ export function allowedDecisions(c: HeldCase): ReviewDecision[] {
       return c.taken_down ? ["restore", "keep_down", "leave"] : ["dismiss", "leave"];
     case "vehicle_access_candidate":
       return ["confirm", "leave"];
+    case "commons_mismatch":
+      return ["confirm", "dismiss", "leave"];
     default:
       return ["leave"];
   }
 }
 
-/** `leave`, and why, when the rules settle a case; null when a reviewer has to look at it. */
-export function settleByRules(c: HeldCase, place: Place | undefined): { decision: "leave"; reason: string } | null {
+/**
+ * `leave`, and why, when the rules settle a case; null when a reviewer has to
+ * look at it. `context.doNotMatch` is the do-not-match list, for a
+ * `commons_mismatch` case.
+ */
+export function settleByRules(
+  c: HeldCase,
+  place: Place | undefined,
+  context: { doNotMatch?: readonly Pick<DoNotMatchEntry, "place" | "file">[] } = {},
+): { decision: "leave"; reason: string } | null {
   const leave = (reason: string) => ({ decision: "leave" as const, reason });
   if (!place) return leave("the place record is not on the review branch");
   if (place.status === "merged") return leave("the place was merged into another");
   if (c.case === "contacts" || c.case === "description") return leave("what was left off the place is in the inbox, so a person decides");
+  if (c.case === "commons_mismatch") {
+    if (context.doNotMatch?.some((p) => p.place === c.place && p.file === c.file)) return leave("the Commons photo is on the do-not-match list already");
+    return null;
+  }
   if (c.case === "vehicle_access_candidate") {
     if (place.status !== "open") return leave("the place is not open");
     if (place.facts.vehicle_access !== undefined) return leave("the place has vehicle_access already");
@@ -267,6 +288,8 @@ export function settleByRules(c: HeldCase, place: Place | undefined): { decision
  */
 export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecision, at: string): Place | null {
   if (!allowedDecisions(c).includes(decision) || decision === "leave" || decision === "keep_down" || decision === "dismiss" || decision === "merge") return null;
+  // A Commons photo goes on the do-not-match list (`withDoNotMatch`), not into the place record.
+  if (c.case === "commons_mismatch") return null;
   const next = structuredClone(place);
   if (decision === "restore" || (decision === "confirm" && c.case === "vehicle_access_candidate")) {
     (next.facts as Record<string, FactValue>)[c.fact!] = c.value as FactValue;
@@ -356,4 +379,37 @@ export function mergePlaces(kept: Place, dropped: Place, at: string): { kept: Pl
   if (confirmed) next.last_confirmed = confirmed;
   next.updated = at;
   return { kept: next, tombstone: { ...structuredClone(dropped), status: "merged", merged_into: kept.id } };
+}
+
+/**
+ * One entry of `moderation/commons-do-not-match.json` in the data
+ * repository: a Commons file that is not of a place, so `pipeline.commons`
+ * never matches it to the place again and releases leave it out. `added` is
+ * the day, `YYYY-MM-DD`. `source` is `reports` when two travellers' reports
+ * put it there, or `reviewer` when a reviewer confirmed one report. A person
+ * undoes it by deleting the entry.
+ */
+export interface DoNotMatchEntry {
+  place: string;
+  file: string;
+  added: string;
+  source: "reports" | "reviewer";
+}
+
+/**
+ * `moderation/commons-do-not-match.json` as it should be with `entries`
+ * added: `{"pairs": [...]}`, sorted by place and file, keys in sorted order
+ * as Python's json.dumps(sort_keys=True) writes them, two spaces, a trailing
+ * newline. A pair already there keeps its entry. `text` is the file as it
+ * is, or undefined when there is none.
+ */
+export function withDoNotMatch(text: string | undefined, entries: readonly DoNotMatchEntry[]): string {
+  const current = text === undefined ? [] : ((JSON.parse(text) as { pairs?: DoNotMatchEntry[] }).pairs ?? []);
+  const key = (e: Pick<DoNotMatchEntry, "place" | "file">) => `${e.place}\u0000${e.file}`;
+  const byKey = new Map(current.map((e) => [key(e), e]));
+  for (const e of entries) if (!byKey.has(key(e))) byKey.set(key(e), e);
+  const pairs = [...byKey.values()]
+    .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0))
+    .map((e) => ({ added: e.added, file: e.file, place: e.place, source: e.source }));
+  return `${JSON.stringify({ pairs }, null, 2)}\n`;
 }
