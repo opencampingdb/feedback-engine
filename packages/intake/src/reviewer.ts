@@ -10,8 +10,9 @@
  * model is asked only about what is left, at most MAX_MODEL_CASES a run. On
  * its own the model may approve a held or hidden new place, restore a
  * withdrawn contact, take down a new place that is clear spam, restore or
- * keep down a fact doubts took down, and dismiss doubts about a fact that
- * stays. A case the apply's rules closed (a doubted fact that
+ * keep down a fact doubts took down, dismiss doubts about a fact that
+ * stays, and confirm `vehicle_access` on a place whose name says only heavy
+ * vehicles may use it. A case the apply's rules closed (a doubted fact that
  * travellers restored or replaced) is left without asking. Owner-set
  * values, blocked contributors and values that wait in the inbox go to a
  * person, and an answer the model isn't sure of, or one that can't be read,
@@ -162,6 +163,7 @@ const MEANINGS: Record<ReviewDecision, string> = {
   keep_down: "leave the fact off the place: the doubts are believable",
   dismiss: "keep the fact: the doubts do not outweigh it",
   leave: "a person decides",
+  confirm: "set the fact: the place's name clearly says only heavy vehicles (trucks) may use it",
 };
 
 /** What a decision means for this case. */
@@ -189,6 +191,9 @@ function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
     "You review held cases for an open database of camping places. A case is a new place or a change that the automatic checks held for a reviewer.",
     ...(c.case === "fact_doubted"
       ? ["In a fact_doubted case, travellers say a fact about the place is wrong without giving the right value. Doubts and confirmations count independent travellers."]
+      : []),
+    ...(c.case === "vehicle_access_candidate"
+      ? ["In a vehicle_access_candidate case, the place's name suggests only heavy vehicles may use it, and OpenStreetMap does not say so. Confirm only when the name clearly says trucks or heavy vehicles only, such as a truck parking bay or a heavy vehicle rest area."]
       : []),
     "Answer with JSON only: {\"decision\": ..., \"reason\": ..., \"sure\": true or false}.",
     `The decisions you may give for this case are: ${allowed.join(", ")}.`,
@@ -263,6 +268,7 @@ export async function askModel(
     ...(c.case === "fact_doubted"
       ? { fact: c.fact, last_value: c.value, taken_down: c.taken_down, doubting_sources: c.sources, doubts: c.doubts?.length ?? 0, confirmations: c.confirmations?.length ?? 0 }
       : {}),
+    ...(c.case === "vehicle_access_candidate" ? { fact: c.fact, value: c.value } : {}),
   };
   let out: unknown;
   try {

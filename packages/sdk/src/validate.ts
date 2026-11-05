@@ -32,6 +32,7 @@ import type {
   ReviewReportBody,
   ReviewReportReason,
   Submission,
+  VehicleAccessValue,
 } from "./types.js";
 
 export const FEEDBACK_TYPES = [
@@ -109,6 +110,8 @@ export const BRANDS: readonly BrandValue[] = [
   "yha",
   "acc",
 ];
+/** Values of `vehicle_access`. More may come; an app should show nothing for a value it does not know. */
+export const VEHICLE_ACCESS_VALUES: readonly VehicleAccessValue[] = ["heavy_vehicles_only"];
 /** Site features: facts that are true or false. */
 export const SITE_FEATURES = [
   "wheelchair",
@@ -285,6 +288,7 @@ export const FACTS: Readonly<Record<ReportFactName, (value: unknown) => boolean>
   pets_months: isMonthRange,
   access: (v) => v === "2wd" || v === "awd" || v === "4wd" || v === "unknown",
   entry: (v) => v === "public" || v === "customers" || v === "permit" || v === "private",
+  vehicle_access: (v) => typeof v === "string" && (VEHICLE_ACCESS_VALUES as readonly string[]).includes(v),
   max_stay: (v) => typeof v === "string" && /^[1-9]\d{0,2}[hdw]$/.test(v),
   // Free text, so it must hold no email address, phone number or link.
   opening_hours: (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 100 && findContactDetailsInHours(v).length === 0,

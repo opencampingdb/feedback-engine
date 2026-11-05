@@ -84,6 +84,12 @@ export type BrandValue =
   | "yha"
   | "acc";
 export type AccessValue = "2wd" | "awd" | "4wd" | "unknown";
+/**
+ * Who may use a place by the vehicle they drive. `heavy_vehicles_only`: only
+ * heavy vehicles (trucks), and others may be fined for stopping there. More
+ * values may be added later, such as cars only.
+ */
+export type VehicleAccessValue = "heavy_vehicles_only";
 export type EntryValue = "public" | "customers" | "permit" | "private";
 export type WaterType = "tank_fill" | "fountain";
 /** An Australian state or territory, as its abbreviation. */
@@ -131,6 +137,8 @@ export interface PlaceFacts {
   access?: AccessValue;
   /** Who may stay (OSM access=*). */
   entry?: EntryValue;
+  /** Who may use the place by vehicle, from OSM's hgv and access tags or a traveller. */
+  vehicle_access?: VehicleAccessValue;
   /** drinking_water_point only. */
   water_type?: WaterType;
   /** Where to book. https only. */

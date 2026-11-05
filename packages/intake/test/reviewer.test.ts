@@ -325,6 +325,40 @@ describe("the AI reviewer", () => {
     });
   });
 
+  describe("vehicle_access_candidate cases", () => {
+    const candidate = (n: number): HeldCase => ({ ...heldCase(n, { case: "vehicle_access_candidate", fact: "vehicle_access", value: "heavy_vehicles_only" }), kind: "rest_area", feedback: [] });
+    const restArea = (n: number, overrides: Partial<Place> = {}) =>
+      place(n, { standing: undefined, name: "Truck Parking Bay", kind: "rest_area", group: "stopover", fact_sources: { name: "osm", toilets: "osm" }, fact_dates: undefined, ...overrides });
+
+    it("confirms heavy vehicles only from the name, as from feedback, telling the model the name and the value", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [candidate(0), candidate(1)]));
+      gh.put(restArea(0));
+      gh.put(restArea(1, { name: "Truckies Cafe Rest Stop" }));
+      const answers: Record<string, ReturnType<typeof reply>> = {
+        [id(0)]: reply("confirm", "The name says it is a truck parking bay."),
+        [id(1)]: reply("leave", "A cafe stop may take cars too.", false),
+      };
+      const { ai, asked } = fakeAi((input) => answers[(caseOf(input).place as { id: string }).id]!);
+
+      const result = await run(gh, ai);
+      expect(caseOf(asked[0]!.input)).toMatchObject({ case: "vehicle_access_candidate", place: { name: "Truck Parking Bay", kind: "rest_area" }, fact: "vehicle_access", value: "heavy_vehicles_only" });
+      const system = (asked[0]!.input.messages as { content: string }[])[0]!.content;
+      expect(system).toContain("confirm, leave");
+      expect(gh.read(0).facts).toEqual({ toilets: true, vehicle_access: "heavy_vehicles_only" });
+      expect(gh.read(0).fact_sources.vehicle_access).toBe("feedback");
+      expect(gh.read(1).facts).toEqual({ toilets: true });
+      expect(result).toMatchObject({ decisions: [{ decision: "confirm", committed: true }, { decision: "leave", committed: false }] });
+    });
+
+    it("leaves a place that has the fact already without asking the model", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [candidate(0)]));
+      gh.put(restArea(0, { facts: { vehicle_access: "heavy_vehicles_only" } }));
+      const { ai, asked } = fakeAi(() => reply("confirm", "should not be asked"));
+      expect(await run(gh, ai)).toMatchObject({ decisions: [{ decision: "leave", by_rules: true, reason: "the place has vehicle_access already" }] });
+      expect(asked).toHaveLength(0);
+    });
+  });
+
   it("leaves a case when the model is unsure, answers a decision the case doesn't allow, or can't be read", async () => {
     const cases = [
       heldCase(0, { case: "duplicate", standing: "held", duplicate_of: id(9), distance_m: 30 }),

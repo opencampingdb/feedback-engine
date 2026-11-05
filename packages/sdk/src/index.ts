@@ -73,6 +73,7 @@ export {
   REVIEW_REPORT_REASONS,
   SITE_FEATURES,
   SOCIAL_HOSTS,
+  VEHICLE_ACCESS_VALUES,
   addressProblems,
   contactProblem,
   isAddress,

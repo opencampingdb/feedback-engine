@@ -1,4 +1,4 @@
-import { contactProblem, isContactFact, isDoubtFact, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
+import { contactProblem, isContactFact, isDoubtFact, isValidFactValue, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
 import type { Settles } from "./decide.js";
 import { dumpPlace, placePath } from "./serialise.js";
 import { setSource } from "./sources.js";
@@ -38,11 +38,15 @@ export type { Place };
  * fact `fact` doubted by travellers, with `value` the place published, the
  * `sources` doubting it, and the `doubts` and `confirmations` weighed; with
  * `taken_down` the doubts took it off the place, otherwise one traveller
- * doubts it and it stays. Contact values a traveller sent, notes and device
- * ids are never in it.
+ * doubts it and it stays. `vehicle_access_candidate`: a place whose name
+ * says who may use it (such as "Truck Parking Bay") but whose OSM tags do
+ * not, from `moderation/heavy-vehicle-candidates.csv` in the data
+ * repository; `fact` is `vehicle_access`, `value` the value the name
+ * suggests, and `feedback` is empty. Contact values a traveller sent, notes
+ * and device ids are never in it.
  */
 export interface HeldCase {
-  case: "duplicate" | "hidden" | "contacts" | "description" | "first_place" | "contact_withdrawn" | "fact_doubted";
+  case: "duplicate" | "hidden" | "contacts" | "description" | "first_place" | "contact_withdrawn" | "fact_doubted" | "vehicle_access_candidate";
   place: string;
   /** The place's standing. Left out for a place travellers did not add. */
   standing?: "shown" | "confirmed" | "held" | "hidden";
@@ -56,9 +60,9 @@ export interface HeldCase {
   contacts?: string[];
   /** On `description`: the text check it failed. */
   problem?: string;
-  /** On `contact_withdrawn`: the contact taken off the place. On `fact_doubted`: the fact doubted. */
+  /** On `contact_withdrawn`: the contact taken off the place. On `fact_doubted`: the fact doubted. On `vehicle_access_candidate`: `vehicle_access`. */
   fact?: FactName;
-  /** On `contact_withdrawn` and `fact_doubted`: the value the place published. */
+  /** On `contact_withdrawn` and `fact_doubted`: the value the place published. On `vehicle_access_candidate`: the value its name suggests. */
   value?: FactValue;
   /** On `fact_doubted`: the doubts took the fact off the place. */
   taken_down?: boolean;
@@ -69,7 +73,7 @@ export interface HeldCase {
   /** On `fact_doubted`: the confirmations of the value counted against them. */
   confirmations?: string[];
   contributor?: string;
-  /** The feedback ids the case comes from, to read in the inbox. */
+  /** The feedback ids the case comes from, to read in the inbox. Empty on `vehicle_access_candidate`, which comes from the data. */
   feedback: string[];
 }
 
@@ -89,7 +93,19 @@ export interface ClosedCase {
 }
 
 /** Every `case` a held-case line can have. */
-export const HELD_CASES: readonly HeldCase["case"][] = ["duplicate", "hidden", "contacts", "description", "first_place", "contact_withdrawn", "fact_doubted"];
+export const HELD_CASES: readonly HeldCase["case"][] = [
+  "duplicate",
+  "hidden",
+  "contacts",
+  "description",
+  "first_place",
+  "contact_withdrawn",
+  "fact_doubted",
+  "vehicle_access_candidate",
+];
+
+/** Cases that come from the data rather than from feedback, so they name no feedback ids. */
+const FROM_DATA: readonly HeldCase["case"][] = ["vehicle_access_candidate"];
 
 const PLACE_ID = /^ocdb_[0-9A-HJKMNP-TV-Z]{26}$/;
 const HELD_LINE = /^- held-case (\{.*\})\s*$/;
@@ -104,9 +120,12 @@ export function isHeldCase(v: unknown): v is HeldCase {
   if (!HELD_CASES.includes(v.case as HeldCase["case"])) return false;
   if (typeof v.place !== "string" || !PLACE_ID.test(v.place)) return false;
   if (!isObject(v.location) || typeof v.location.lat !== "number" || typeof v.location.lon !== "number") return false;
-  if (typeof v.kind !== "string" || !isStrings(v.feedback) || v.feedback.length === 0) return false;
+  if (typeof v.kind !== "string" || !isStrings(v.feedback)) return false;
+  if (v.feedback.length === 0 && !FROM_DATA.includes(v.case as HeldCase["case"])) return false;
   if (v.duplicate_of !== undefined && (typeof v.duplicate_of !== "string" || !PLACE_ID.test(v.duplicate_of))) return false;
-  if (v.case === "fact_doubted") {
+  if (v.case === "vehicle_access_candidate") {
+    if (v.fact !== "vehicle_access" || !isValidFactValue("vehicle_access", v.value)) return false;
+  } else if (v.case === "fact_doubted") {
     if (!isDoubtFact(v.fact) || v.value === undefined || typeof v.taken_down !== "boolean") return false;
     if (typeof v.sources !== "number" || !isStrings(v.doubts) || !isStrings(v.confirmations)) return false;
   } else if (v.fact !== undefined && (typeof v.fact !== "string" || !isContactFact(v.fact))) return false;
@@ -164,7 +183,7 @@ export function heldCaseKey(c: HeldCase): string {
   return [c.case, c.place, c.fact ?? "", [...c.feedback].sort().join(",")].join(" ");
 }
 
-export type ReviewDecision = "approve" | "restore" | "take_down" | "keep_down" | "dismiss" | "leave";
+export type ReviewDecision = "approve" | "restore" | "take_down" | "keep_down" | "dismiss" | "leave" | "confirm";
 
 /**
  * What a reviewer may decide on a case of each kind. `contacts` and
@@ -182,6 +201,8 @@ export function allowedDecisions(c: HeldCase): ReviewDecision[] {
       return ["restore", "leave"];
     case "fact_doubted":
       return c.taken_down ? ["restore", "keep_down", "leave"] : ["dismiss", "leave"];
+    case "vehicle_access_candidate":
+      return ["confirm", "leave"];
     default:
       return ["leave"];
   }
@@ -193,6 +214,12 @@ export function settleByRules(c: HeldCase, place: Place | undefined): { decision
   if (!place) return leave("the place record is not on the review branch");
   if (place.status === "merged") return leave("the place was merged into another");
   if (c.case === "contacts" || c.case === "description") return leave("what was left off the place is in the inbox, so a person decides");
+  if (c.case === "vehicle_access_candidate") {
+    if (place.status !== "open") return leave("the place is not open");
+    if (place.facts.vehicle_access !== undefined) return leave("the place has vehicle_access already");
+    if (place.owner_verified === true) return leave("the place has a verified owner");
+    return null;
+  }
   if (c.case === "fact_doubted") {
     const fact = c.fact!;
     const current = (place.facts as Record<string, unknown>)[fact];
@@ -231,12 +258,13 @@ export function settleByRules(c: HeldCase, place: Place | undefined): { decision
  * on a published first place it changes nothing. `take_down` hides the place
  * with a `hide` decision, so reports can't bring it back. `restore` sets the
  * withdrawn contact, or a fact doubts took down, back to the value the place
- * published. `keep_down` and `dismiss` change nothing.
+ * published. `confirm` sets the fact a `vehicle_access_candidate` names, as
+ * from feedback. `keep_down` and `dismiss` change nothing.
  */
 export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecision, at: string): Place | null {
   if (!allowedDecisions(c).includes(decision) || decision === "leave" || decision === "keep_down" || decision === "dismiss") return null;
   const next = structuredClone(place);
-  if (decision === "restore") {
+  if (decision === "restore" || (decision === "confirm" && c.case === "vehicle_access_candidate")) {
     (next.facts as Record<string, FactValue>)[c.fact!] = c.value as FactValue;
     setSource(next, c.fact!, "feedback", at);
   } else if (decision === "take_down") {
@@ -250,4 +278,29 @@ export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecisio
   }
   next.updated = at;
   return next;
+}
+
+/**
+ * The `vehicle_access_candidate` cases for the places in `candidates` (ids
+ * from `moderation/heavy-vehicle-candidates.csv`), in that order: each open
+ * place without `vehicle_access` that is not in `listed`, the places a run
+ * listed before. The value is `heavy_vehicles_only`, the only one the
+ * candidates file is for.
+ */
+export function vehicleAccessCases(candidates: readonly string[], places: ReadonlyMap<string, Place>, listed: ReadonlySet<string>): HeldCase[] {
+  const out: HeldCase[] = [];
+  for (const id of new Set(candidates)) {
+    const place = places.get(id);
+    if (!place || listed.has(id) || place.status !== "open" || place.facts.vehicle_access !== undefined) continue;
+    out.push({
+      case: "vehicle_access_candidate",
+      place: id,
+      location: { lat: place.location.lat, lon: place.location.lon },
+      kind: place.kind,
+      fact: "vehicle_access",
+      value: "heavy_vehicles_only",
+      feedback: [],
+    });
+  }
+  return out;
 }
