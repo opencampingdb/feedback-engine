@@ -263,14 +263,14 @@ export async function openDoubtCases(db: D1Like, cases: readonly DoubtCase[]): P
  * the takedown's time, and a restore or replacement closes it.
  */
 function caseStatements(db: D1Like, item: ReportItem, decision: Extract<ItemDecision, { verdict: "live" }>): D1Statement[] {
-  if (decision.doubted !== undefined) {
+  if (decision.doubtTakedown !== undefined) {
     return [
       db
         .prepare(
           `INSERT INTO doubt_cases (place, fact, value, taken_down_at, feedback_id, closed_by, closed_at) VALUES (?, ?, ?, ?, ?, NULL, NULL)
            ON CONFLICT (place, fact) DO UPDATE SET value = excluded.value, taken_down_at = excluded.taken_down_at, feedback_id = excluded.feedback_id, closed_by = NULL, closed_at = NULL`,
         )
-        .bind(item.place, decision.doubted.fact, JSON.stringify(decision.doubted.value), item.received, item.id),
+        .bind(item.place, decision.doubtTakedown.fact, JSON.stringify(decision.doubtTakedown.value), item.received, item.id),
     ];
   }
   if (decision.settles !== undefined) {
@@ -312,10 +312,10 @@ export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDeci
   if (place === undefined) return held("unknown_place");
   const earlier = await earlierReports(db, placeId, item.report.fact as string, Date.parse(item.received));
   const kind = item.report.kind;
-  const doubted = kind === "fact" ? await openDoubt(db, placeId, item.report.fact as string) : undefined;
+  const openCase = kind === "fact" ? await openDoubt(db, placeId, item.report.fact as string) : undefined;
   const decision =
     kind === "fact"
-      ? decideFact({ item, place, earlier, ...(doubted === undefined ? {} : { doubted }) })
+      ? decideFact({ item, place, earlier, ...(openCase === undefined ? {} : { openCase }) })
       : kind === "doubt" ? decideDoubt({ item, place, earlier }) : decideContactReport({ item, place, earlier });
   if (decision.verdict === "refused") return held(decision.reason);
   if (decision.verdict === "held") return held(decision.reason, (d) => [evidenceStatement(d, item, "held")]);

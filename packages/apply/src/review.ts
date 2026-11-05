@@ -1,4 +1,5 @@
 import { contactProblem, isContactFact, isDoubtFact, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
+import type { Settles } from "./decide.js";
 import { dumpPlace, placePath } from "./serialise.js";
 import { setSource } from "./sources.js";
 import type { Place } from "./types.js";
@@ -83,7 +84,7 @@ export interface ClosedCase {
   case: "fact_doubted";
   place: string;
   fact: FactName;
-  settles: "restored" | "replaced";
+  settles: Settles;
   feedback: string[];
 }
 

@@ -18,6 +18,7 @@ import {
   inWindow,
   newPlaceFields,
   newPlaceListing,
+  protectedSource,
   restoreWeight,
   REVIEWED_FACTS,
   takenDownWhy,
@@ -290,8 +291,8 @@ function distanceM(a: { lat: number; lon: number }, b: { lat: number; lon: numbe
   return 2 * 6_371_008.8 * Math.asin(Math.sqrt(h));
 }
 
-/** Where a fact doubts never take down came from, in words. */
-const FROM: Partial<Record<string, string>> = { osm: "OSM", owner: "the owner" };
+/** One key for a fact on a place. */
+const factKey = (place: string, fact: string) => `${place}\u0000${fact}`;
 
 const quote = (text: string | undefined) => (text ? `: "${text}"` : "");
 
@@ -884,7 +885,7 @@ export function applyRules(input: RulesInput): RulesOutput {
    */
   function openDoubt(placeId: string, fact: FactName, place: Place): OpenDoubt | undefined {
     if ((place.facts as Record<string, unknown>)[fact] !== undefined) return undefined;
-    let found = downInRun.get(`${placeId}\u0000${fact}`);
+    let found = downInRun.get(factKey(placeId, fact));
     if (found === undefined) {
       for (const h of input.history) {
         const kept = (h as { outcome?: { doubted?: DoubtedRecord } }).outcome?.doubted;
@@ -911,7 +912,7 @@ export function applyRules(input: RulesInput): RulesOutput {
         decide(item, "refused", refusal.why);
         continue;
       }
-      const key = `${item.place}\u0000${item.report.fact}`;
+      const key = factKey(item.place as string, item.report.fact as string);
       groups.set(key, [...(groups.get(key) ?? []), item]);
     }
 
@@ -968,7 +969,7 @@ export function applyRules(input: RulesInput): RulesOutput {
       }
 
       // A fact doubts took down: confirmations of its value restore it, and another value replaces it.
-      let down = openDoubt(placeId, fact, place);
+      let openCase = openDoubt(placeId, fact, place);
       // Every fact report and doubt not refused, which `restoreWeight` weighs as the intake does.
       const restoreEvidence = [...input.history, ...known].filter(
         (r) =>
@@ -980,7 +981,7 @@ export function applyRules(input: RulesInput): RulesOutput {
       );
       const closeCase = (settles: ClosedCase["settles"], by: readonly StoredFeedback[]) => {
         closed.push({ case: "fact_doubted", place: placeId, fact, settles, feedback: by.map((r) => r.id) });
-        down = undefined;
+        openCase = undefined;
       };
 
       // A report without attestation of any other fact waits for a second device to agree.
@@ -988,16 +989,16 @@ export function applyRules(input: RulesInput): RulesOutput {
       for (const item of reports) {
         if (!open.has(item)) continue;
         const value = item.report.value as FactValue;
-        if (down !== undefined && sameValue(value, down.value)) {
+        if (openCase !== undefined && sameValue(value, openCase.value)) {
           open.delete(item);
-          if (time(item) <= Date.parse(down.at)) {
+          if (time(item) <= Date.parse(openCase.at)) {
             // Weighed against the doubts when they took the fact down in this run.
             decide(item, "applied", `counted as a confirmation of ${fact} before doubts took it down`);
             continue;
           }
-          const decision = decideFact({ item, place, earlier: restoreEvidence, doubted: down });
+          const decision = decideFact({ item, place, earlier: restoreEvidence, openCase });
           if (decision.verdict === "live" && decision.settles === "restored" && heldForCheck(item) === null) {
-            const weight = restoreWeight({ place: placeId, fact, value, at: item.received, reports: restoreEvidence, takenDownAt: down.at });
+            const weight = restoreWeight({ place: placeId, fact, value, at: item.received, reports: restoreEvidence, takenDownAt: openCase.at });
             const counted = new Set(weight.confirmations.feedback);
             const confirming = reports.filter((r) => counted.has(r.id));
             setFact(value);
@@ -1016,7 +1017,7 @@ export function applyRules(input: RulesInput): RulesOutput {
           settle(item, decision);
           continue;
         }
-        const decision = decideFact({ item, place, earlier: evidence, ...(down !== undefined ? { doubted: down } : {}) });
+        const decision = decideFact({ item, place, earlier: evidence, ...(openCase !== undefined ? { openCase } : {}) });
         if (decision.verdict !== "held" || decision.reason !== "not_attested") {
           open.delete(item);
           settle(item, decision);
@@ -1042,11 +1043,11 @@ export function applyRules(input: RulesInput): RulesOutput {
         setFact(value);
         note(
           placeId,
-          `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days)${down !== undefined ? CLOSES_CASE : ""}`,
+          `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days)${openCase !== undefined ? CLOSES_CASE : ""}`,
           true,
           agreeing,
         );
-        if (down !== undefined) closeCase("replaced", agreeing);
+        if (openCase !== undefined) closeCase("replaced", agreeing);
         for (const r of agreeing) {
           open.delete(r);
           decide(r, "applied", `${fact} set to ${JSON.stringify(value)}`);
@@ -1059,7 +1060,7 @@ export function applyRules(input: RulesInput): RulesOutput {
         }
       }
       for (const item of open) {
-        decide(item, "waiting", down !== undefined && sameValue(item.report.value, down.value) ? takenDownWhy(fact) : `waiting for a second device to agree on ${fact}`);
+        decide(item, "waiting", openCase !== undefined && sameValue(item.report.value, openCase.value) ? takenDownWhy(fact) : `waiting for a second device to agree on ${fact}`);
       }
     }
   }
@@ -1262,7 +1263,7 @@ export function applyRules(input: RulesInput): RulesOutput {
       const placeId = item.place as string;
       const fact = item.report.fact as ContactFactName;
       const reason = item.report.reason as ContactReportReason;
-      const key = `${placeId}\u0000${fact}`;
+      const key = factKey(placeId, fact);
       const done = takenDown.get(key);
       if (done) {
         done.feedback.push(item.id);
@@ -1355,11 +1356,11 @@ export function applyRules(input: RulesInput): RulesOutput {
     for (const item of items) {
       const placeId = item.place as string;
       const fact = item.report.fact as FactName;
-      const key = `${placeId}\u0000${fact}`;
-      const done = takenDown.get(key);
-      if (done) {
-        done.doubts!.push(item.id);
-        done.feedback.push(item.id);
+      const key = factKey(placeId, fact);
+      const downCase = takenDown.get(key);
+      if (downCase) {
+        downCase.doubts!.push(item.id);
+        downCase.feedback.push(item.id);
         decide(item, "applied", `${fact} was taken down after doubts from two sources`);
         continue;
       }
@@ -1372,8 +1373,8 @@ export function applyRules(input: RulesInput): RulesOutput {
       }
       // A doubt the intake held for a check takes nothing down on its own, though it still counts as a source.
       const check = heldForCheck(item);
-      if (decision.verdict === "live" && decision.doubted && check === null) {
-        const { value, sources, doubts, confirmations } = decision.doubted;
+      if (decision.verdict === "live" && decision.doubtTakedown && check === null) {
+        const { value, sources, doubts, confirmations } = decision.doubtTakedown;
         delete (place.facts as Record<string, FactValue | undefined>)[fact];
         setSource(place, fact, "feedback", item.received);
         const counted = earlier.filter((r) => doubts.includes(r.id));
@@ -1388,10 +1389,10 @@ export function applyRules(input: RulesInput): RulesOutput {
           decide(r, "applied", decision.why);
         }
         dropStays(key);
-        const doubted: DoubtedRecord = { fact, value, at: item.received };
+        const kept: DoubtedRecord = { fact, value, at: item.received };
         const taken = decisions.get(item.id);
-        if (taken) taken.doubted = doubted;
-        downInRun.set(key, doubted);
+        if (taken) taken.doubted = kept;
+        downInRun.set(key, kept);
         const heldCase = doubtCase(placeId, place, fact, value, true, sources, doubts, confirmations);
         held.push(heldCase);
         takenDown.set(key, heldCase);
@@ -1399,21 +1400,7 @@ export function applyRules(input: RulesInput): RulesOutput {
       }
       const edit: ReviewEdit = { kind: "note", place: placeId, feedback: item.id };
       edits.push(edit);
-      const heldBy = check === null ? "" : `, held by the intake for ${check}`;
-      const from = FROM[place.fact_sources[fact] ?? ""];
-      const reason = decision.verdict === "held" ? decision.reason : undefined;
-      note(
-        placeId,
-        check !== null
-          ? `${fact} doubted${heldBy} (decide: keep it or remove it)`
-          : reason === "single_doubt"
-            ? `${fact} doubted by one traveller (decide: keep it or remove it)`
-            : reason === "protected_source" && from !== undefined
-              ? `${fact} doubted, but it came from ${from} (decide: keep it or remove it)`
-              : `${fact} doubted: ${decision.why} (decide: keep it or remove it)`,
-        false,
-        [item],
-      );
+      note(placeId, `${fact} doubted${whyDoubtStays(decision, check, protectedSource(place, fact))} (decide: keep it or remove it)`, false, [item]);
       if (check === null) {
         // Doubts that leave the fact on the place, for whatever reason: a reviewer may dismiss them.
         const value = (place.facts as Record<string, FactValue>)[fact]!;
@@ -1426,6 +1413,15 @@ export function applyRules(input: RulesInput): RulesOutput {
       sentToPerson.set(item.id, { edit, change: changes[changes.length - 1]! });
       decide(item, "needs_review", check === null ? decision.why : `the intake held it for ${check}, so a person checks it`);
     }
+  }
+
+  /** What the PR says after "<fact> doubted" about doubts that leave the fact on the place. */
+  function whyDoubtStays(decision: ItemDecision, check: string | null, from: string | undefined): string {
+    if (check !== null) return `, held by the intake for ${check}`;
+    const reason = decision.verdict === "held" ? decision.reason : undefined;
+    if (reason === "single_doubt") return " by one traveller";
+    if (reason === "protected_source" && from !== undefined) return `, but it came from ${from}`;
+    return `: ${decision.why}`;
   }
 
   function doubtCase(

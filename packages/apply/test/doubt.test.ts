@@ -42,7 +42,7 @@ describe("decideDoubt", () => {
       verdict: "live",
       changes: [{ place: PLACE, fact: "toilets", value: null }],
       why: "toilets taken down after doubts from two sources",
-      doubted: { fact: "toilets", value: true, sources: 2, doubts: [first.id, item.id], confirmations: [] },
+      doubtTakedown: { fact: "toilets", value: true, sources: 2, doubts: [first.id, item.id], confirmations: [] },
     });
   });
 
@@ -113,7 +113,7 @@ describe("decideDoubt", () => {
     const c = confirm(-5, "dev-d");
     expect(decideDoubt({ item, place: state(), earlier: [...doubts, confirm(-95, "dev-c"), c, confirm(-4, "dev-e", false)] })).toMatchObject({
       verdict: "live",
-      doubted: { sources: 2, confirmations: [c.id] },
+      doubtTakedown: { sources: 2, confirmations: [c.id] },
     });
   });
 
@@ -123,7 +123,7 @@ describe("decideDoubt", () => {
     // dev-a doubted, then confirmed: one doubt against one confirmation.
     expect(decideDoubt({ item, place: state(), earlier: [doubt(-5, "dev-a"), confirm(-2, "dev-a")] })).toMatchObject({ verdict: "held", reason: "single_doubt" });
     // dev-c confirmed, then doubted: two doubts, no confirmations.
-    expect(decideDoubt({ item, place: state(), earlier: [confirm(-5, "dev-c"), doubt(-2, "dev-c")] })).toMatchObject({ verdict: "live", doubted: { confirmations: [] } });
+    expect(decideDoubt({ item, place: state(), earlier: [confirm(-5, "dev-c"), doubt(-2, "dev-c")] })).toMatchObject({ verdict: "live", doubtTakedown: { confirmations: [] } });
   });
 });
 
@@ -132,11 +132,11 @@ describe("decideFact on a fact taken down after doubts", () => {
     ({ ...base(day, device), type: "report", report: { kind: "fact", fact: name, value } }) as ReportItem;
   // Taken down at day 0: the fact is gone, with the doubters' source and the date.
   const down = (): PlaceState => ({ facts: { power: false }, fact_sources: { power: "osm", toilets: "feedback" }, fact_dates: { toilets: at(0) } });
-  const doubted = { value: true, at: at(0) };
+  const openCase = { value: true, at: at(0) };
 
   it("waits for a second new traveller to confirm the value", () => {
     const item = attested(fact(1, "dev-c"));
-    expect(decideFact({ item, place: down(), earlier: [fact(-10, "dev-d")], doubted })).toEqual({
+    expect(decideFact({ item, place: down(), earlier: [fact(-10, "dev-d")], openCase })).toEqual({
       verdict: "held",
       reason: "taken_down",
       why: "toilets was taken down after doubts, and returns when two new travellers confirm it",
@@ -146,7 +146,7 @@ describe("decideFact on a fact taken down after doubts", () => {
   it("restores the value when two new travellers confirm it, and settles the case", () => {
     const first = fact(1, "dev-c");
     const item = attested(fact(2, "dev-d"));
-    expect(decideFact({ item, place: down(), earlier: [first], doubted })).toEqual({
+    expect(decideFact({ item, place: down(), earlier: [first], openCase })).toEqual({
       verdict: "live",
       changes: [{ place: PLACE, fact: "toilets", value: true }],
       why: "toilets restored after two travellers confirmed it",
@@ -155,34 +155,34 @@ describe("decideFact on a fact taken down after doubts", () => {
   });
 
   it("needs one of the confirmations to be attested", () => {
-    expect(decideFact({ item: fact(2, "dev-d"), place: down(), earlier: [fact(1, "dev-c")], doubted })).toMatchObject({ verdict: "held", reason: "not_attested" });
+    expect(decideFact({ item: fact(2, "dev-d"), place: down(), earlier: [fact(1, "dev-c")], openCase })).toMatchObject({ verdict: "held", reason: "not_attested" });
   });
 
   it("needs the confirmations to outnumber doubts sent since the takedown", () => {
     const item = attested(fact(3, "dev-d"));
     const earlier = [fact(1, "dev-c"), doubt(1, "dev-e"), doubt(2, "dev-f")];
-    expect(decideFact({ item, place: down(), earlier, doubted })).toMatchObject({ verdict: "held", reason: "taken_down" });
-    expect(decideFact({ item, place: down(), earlier: [...earlier, fact(2, "dev-g")], doubted })).toMatchObject({ verdict: "live", settles: "restored" });
+    expect(decideFact({ item, place: down(), earlier, openCase })).toMatchObject({ verdict: "held", reason: "taken_down" });
+    expect(decideFact({ item, place: down(), earlier: [...earlier, fact(2, "dev-g")], openCase })).toMatchObject({ verdict: "live", settles: "restored" });
   });
 
   it("does not count the doubts that took the fact down against a restore", () => {
     // dev-a's doubt arrived at the takedown itself, dev-b's before it: only dev-e's, since, counts.
     const earlier = [doubt(-1, "dev-b"), doubt(0, "dev-a"), doubt(1, "dev-e"), fact(1, "dev-c")];
-    expect(decideFact({ item: attested(fact(2, "dev-d")), place: down(), earlier, doubted })).toMatchObject({ verdict: "live", settles: "restored" });
+    expect(decideFact({ item: attested(fact(2, "dev-d")), place: down(), earlier, openCase })).toMatchObject({ verdict: "live", settles: "restored" });
   });
 
   it("counts only confirmations sent after the takedown, from travellers who had not reported the value before it", () => {
     const item = attested(fact(2, "dev-d"));
     // dev-c reported the value at the takedown itself.
-    expect(decideFact({ item, place: down(), earlier: [fact(0, "dev-c")], doubted })).toMatchObject({ verdict: "held", reason: "taken_down" });
+    expect(decideFact({ item, place: down(), earlier: [fact(0, "dev-c")], openCase })).toMatchObject({ verdict: "held", reason: "taken_down" });
     // dev-d reported it before the takedown: its confirmation since is not a new traveller's.
-    expect(decideFact({ item, place: down(), earlier: [fact(-10, "dev-d"), fact(1, "dev-c")], doubted })).toMatchObject({ verdict: "held", reason: "taken_down" });
+    expect(decideFact({ item, place: down(), earlier: [fact(-10, "dev-d"), fact(1, "dev-c")], openCase })).toMatchObject({ verdict: "held", reason: "taken_down" });
   });
 
   it("replaces the value with an attested report of another, and settles the case", () => {
     const item = attested(fact(1, "dev-c", false));
     // The doubted value's own reports were outweighed and do not hold the new one.
-    expect(decideFact({ item, place: down(), earlier: [fact(-10, "dev-d")], doubted })).toEqual({
+    expect(decideFact({ item, place: down(), earlier: [fact(-10, "dev-d")], openCase })).toEqual({
       verdict: "live",
       changes: [{ place: PLACE, fact: "toilets", value: false }],
       why: "toilets set to false",
@@ -190,13 +190,13 @@ describe("decideFact on a fact taken down after doubts", () => {
     });
     // A traveller confirming the doubted value since the takedown still disagrees, as everywhere.
     const later = attested(fact(2, "dev-c", false));
-    expect(decideFact({ item: later, place: down(), earlier: [fact(1, "dev-d")], doubted })).toMatchObject({ verdict: "held", reason: "disagreement" });
-    expect(decideFact({ item: fact(1, "dev-c", false), place: down(), earlier: [], doubted })).toMatchObject({ verdict: "held", reason: "not_attested" });
+    expect(decideFact({ item: later, place: down(), earlier: [fact(1, "dev-d")], openCase })).toMatchObject({ verdict: "held", reason: "disagreement" });
+    expect(decideFact({ item: fact(1, "dev-c", false), place: down(), earlier: [], openCase })).toMatchObject({ verdict: "held", reason: "not_attested" });
   });
 
   it("is decided as usual when the place has the fact again", () => {
     const place: PlaceState = { facts: { toilets: true }, fact_sources: { toilets: "feedback" }, fact_dates: { toilets: at(3) } };
-    expect(decideFact({ item: attested(fact(4, "dev-c")), place, earlier: [], doubted })).toEqual({ verdict: "live", changes: [], why: "toilets is already true" });
+    expect(decideFact({ item: attested(fact(4, "dev-c")), place, earlier: [], openCase })).toEqual({ verdict: "live", changes: [], why: "toilets is already true" });
   });
 });
 
