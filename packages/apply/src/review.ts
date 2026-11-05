@@ -1,4 +1,4 @@
-import { contactProblem, isContactFact, type ContactFactName, type FactValue } from "@opencampingdb/feedback";
+import { contactProblem, isContactFact, isDoubtFact, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
 import { dumpPlace, placePath } from "./serialise.js";
 import { setSource } from "./sources.js";
 import type { Place } from "./types.js";
@@ -9,9 +9,11 @@ import type { Place } from "./types.js";
  * APIs, so the intake's AI reviewer runs them in a Worker.
  *
  * A reviewer decides `approve` (keep a held or hidden new place), `restore`
- * (put a withdrawn contact back), `take_down` (hide a new place that is clear
- * spam) or `leave` (a person decides). `settleByRules` settles what it can
- * before anyone is asked: owner-set values, blocked contributors, values
+ * (put a withdrawn contact, or a fact doubts took down, back), `take_down`
+ * (hide a new place that is clear spam), `keep_down` (leave a fact doubts
+ * took down off the place), `dismiss` (one traveller's doubt about a fact
+ * that stays) or `leave` (a person decides). `settleByRules` settles what it
+ * can before anyone is asked: owner-set values, blocked contributors, values
  * that wait in the inbox and contacts taken down as spam always go to a person.
  */
 
@@ -30,11 +32,15 @@ export type { Place };
  * first place from its contributor, published. `contact_withdrawn`: the
  * contact `fact` taken off a place after reports from two sources for
  * `reasons`; `value` is what the place published, and a reviewer restores it
- * by setting the fact back on the place in the review PR. Contact values a
- * traveller sent, notes and device ids are never in it.
+ * by setting the fact back on the place in the review PR. `fact_doubted`: the
+ * fact `fact` doubted by travellers, with `value` the place published, the
+ * `sources` doubting it, and the `doubts` and `confirmations` weighed; with
+ * `taken_down` the doubts took it off the place, otherwise one traveller
+ * doubts it and it stays. Contact values a traveller sent, notes and device
+ * ids are never in it.
  */
 export interface HeldCase {
-  case: "duplicate" | "hidden" | "contacts" | "description" | "first_place" | "contact_withdrawn";
+  case: "duplicate" | "hidden" | "contacts" | "description" | "first_place" | "contact_withdrawn" | "fact_doubted";
   place: string;
   /** The place's standing. Left out for a place travellers did not add. */
   standing?: "shown" | "confirmed" | "held" | "hidden";
@@ -48,20 +54,44 @@ export interface HeldCase {
   contacts?: string[];
   /** On `description`: the text check it failed. */
   problem?: string;
-  /** On `contact_withdrawn`: the contact taken off the place. */
-  fact?: ContactFactName;
-  /** On `contact_withdrawn`: the value the place published. */
+  /** On `contact_withdrawn`: the contact taken off the place. On `fact_doubted`: the fact doubted. */
+  fact?: FactName;
+  /** On `contact_withdrawn` and `fact_doubted`: the value the place published. */
   value?: FactValue;
+  /** On `fact_doubted`: the doubts took the fact off the place. */
+  taken_down?: boolean;
+  /** On `fact_doubted`: independent sources among the doubts. */
+  sources?: number;
+  /** On `fact_doubted`: the doubts counted. */
+  doubts?: string[];
+  /** On `fact_doubted`: the confirmations of the value counted against them. */
+  confirmations?: string[];
   contributor?: string;
   /** The feedback ids the case comes from, to read in the inbox. */
   feedback: string[];
 }
 
+/**
+ * A held case the rules closed, listed in the review PR body as a
+ * `closed-case` line: the `fact_doubted` case for `fact` on `place`, settled
+ * by travellers `restored` (confirming the value again) or `replaced` (with
+ * another value), from the inbox items in `feedback`. It closes every
+ * `fact_doubted` case for that place and fact listed before it.
+ */
+export interface ClosedCase {
+  case: "fact_doubted";
+  place: string;
+  fact: FactName;
+  settles: "restored" | "replaced";
+  feedback: string[];
+}
+
 /** Every `case` a held-case line can have. */
-export const HELD_CASES: readonly HeldCase["case"][] = ["duplicate", "hidden", "contacts", "description", "first_place", "contact_withdrawn"];
+export const HELD_CASES: readonly HeldCase["case"][] = ["duplicate", "hidden", "contacts", "description", "first_place", "contact_withdrawn", "fact_doubted"];
 
 const PLACE_ID = /^ocdb_[0-9A-HJKMNP-TV-Z]{26}$/;
 const HELD_LINE = /^- held-case (\{.*\})\s*$/;
+const CLOSED_LINE = /^- closed-case (\{.*\})\s*$/;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === "string");
@@ -74,7 +104,10 @@ export function isHeldCase(v: unknown): v is HeldCase {
   if (!isObject(v.location) || typeof v.location.lat !== "number" || typeof v.location.lon !== "number") return false;
   if (typeof v.kind !== "string" || !isStrings(v.feedback) || v.feedback.length === 0) return false;
   if (v.duplicate_of !== undefined && (typeof v.duplicate_of !== "string" || !PLACE_ID.test(v.duplicate_of))) return false;
-  if (v.fact !== undefined && (typeof v.fact !== "string" || !isContactFact(v.fact))) return false;
+  if (v.case === "fact_doubted") {
+    if (!isDoubtFact(v.fact) || v.value === undefined || typeof v.taken_down !== "boolean") return false;
+    if (typeof v.sources !== "number" || !isStrings(v.doubts) || !isStrings(v.confirmations)) return false;
+  } else if (v.fact !== undefined && (typeof v.fact !== "string" || !isContactFact(v.fact))) return false;
   if (v.case === "contact_withdrawn" && (v.fact === undefined || v.value === undefined)) return false;
   if (v.reasons !== undefined && !isStrings(v.reasons)) return false;
   if (v.contacts !== undefined && !isStrings(v.contacts)) return false;
@@ -101,17 +134,41 @@ export function parseHeldCases(text: string): HeldCase[] {
   return out;
 }
 
+/** Whether `v` has the shape the apply writes for a closed case. */
+export function isClosedCase(v: unknown): v is ClosedCase {
+  if (!isObject(v) || v.case !== "fact_doubted") return false;
+  if (typeof v.place !== "string" || !PLACE_ID.test(v.place) || !isDoubtFact(v.fact)) return false;
+  return (v.settles === "restored" || v.settles === "replaced") && isStrings(v.feedback) && v.feedback.length > 0;
+}
+
+/** The closed cases in a review PR body or comment: each `- closed-case` line whose JSON parses to one. */
+export function parseClosedCases(text: string): ClosedCase[] {
+  const out: ClosedCase[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const match = CLOSED_LINE.exec(line);
+    if (!match) continue;
+    try {
+      const value: unknown = JSON.parse(match[1]!);
+      if (isClosedCase(value)) out.push(value);
+    } catch {
+      // Not a line the apply wrote.
+    }
+  }
+  return out;
+}
+
 /** One key per held case, the same however often the case is listed: its kind, place, fact and feedback ids. */
 export function heldCaseKey(c: HeldCase): string {
   return [c.case, c.place, c.fact ?? "", [...c.feedback].sort().join(",")].join(" ");
 }
 
-export type ReviewDecision = "approve" | "restore" | "take_down" | "leave";
+export type ReviewDecision = "approve" | "restore" | "take_down" | "keep_down" | "dismiss" | "leave";
 
 /**
  * What a reviewer may decide on a case of each kind. `contacts` and
  * `description` name values that wait in the inbox, so only a person can
- * decide them.
+ * decide them. A `fact_doubted` case the doubts took down may be restored or
+ * kept down, and one doubt about a fact that stays may be dismissed.
  */
 export function allowedDecisions(c: HeldCase): ReviewDecision[] {
   switch (c.case) {
@@ -121,6 +178,8 @@ export function allowedDecisions(c: HeldCase): ReviewDecision[] {
       return ["approve", "take_down", "leave"];
     case "contact_withdrawn":
       return ["restore", "leave"];
+    case "fact_doubted":
+      return c.taken_down ? ["restore", "keep_down", "leave"] : ["dismiss", "leave"];
     default:
       return ["leave"];
   }
@@ -132,8 +191,17 @@ export function settleByRules(c: HeldCase, place: Place | undefined): { decision
   if (!place) return leave("the place record is not on the review branch");
   if (place.status === "merged") return leave("the place was merged into another");
   if (c.case === "contacts" || c.case === "description") return leave("what was left off the place is in the inbox, so a person decides");
-  if (c.case === "contact_withdrawn") {
+  if (c.case === "fact_doubted") {
     const fact = c.fact!;
+    const current = (place.facts as Record<string, unknown>)[fact];
+    // Doubts never move an owner's fact, so neither does a reviewer.
+    if (place.fact_sources[fact] === "owner") return leave("the owner set this fact");
+    if (c.taken_down && current !== undefined) return leave("the place has this fact again");
+    if (!c.taken_down && (current === undefined || JSON.stringify(current) !== JSON.stringify(c.value))) return leave("the fact has changed since the doubt");
+    return null;
+  }
+  if (c.case === "contact_withdrawn") {
+    const fact = c.fact as ContactFactName;
     if (place.fact_sources[fact] === "owner") return leave("the owner set this contact");
     if ((place.facts as Record<string, unknown>)[fact] !== undefined) return leave("the place has this contact again");
     const problem = contactProblem(fact, c.value);
@@ -158,14 +226,15 @@ export function settleByRules(c: HeldCase, place: Place | undefined): { decision
  * standing to `shown`, and restores a hidden one with a `restore` decision;
  * on a published first place it changes nothing. `take_down` hides the place
  * with a `hide` decision, so reports can't bring it back. `restore` sets the
- * withdrawn contact back to the value the place published.
+ * withdrawn contact, or a fact doubts took down, back to the value the place
+ * published. `keep_down` and `dismiss` change nothing.
  */
 export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecision, at: string): Place | null {
-  if (!allowedDecisions(c).includes(decision) || decision === "leave") return null;
+  if (!allowedDecisions(c).includes(decision) || decision === "leave" || decision === "keep_down" || decision === "dismiss") return null;
   const next = structuredClone(place);
   if (decision === "restore") {
-    (next.facts as Record<string, FactValue>)[c.fact as ContactFactName] = c.value as FactValue;
-    setSource(next, c.fact as ContactFactName, "feedback", at);
+    (next.facts as Record<string, FactValue>)[c.fact!] = c.value as FactValue;
+    setSource(next, c.fact!, "feedback", at);
   } else if (decision === "take_down") {
     next.standing = "hidden";
     next.moderator = { action: "hide", at };

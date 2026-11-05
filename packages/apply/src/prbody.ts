@@ -1,6 +1,6 @@
 import { moderateReview } from "./moderation.js";
 import { approvalLine, type ClaimForReview } from "./owners.js";
-import type { Change, Decision, HeldCase } from "./rules.js";
+import type { Change, ClosedCase, Decision, HeldCase } from "./rules.js";
 import type { Place } from "./types.js";
 
 /**
@@ -112,6 +112,7 @@ export function reviewPrBody(
   claims: readonly ClaimForReview[] = [],
   held: readonly HeldCase[] = [],
   previews: ReadonlyMap<string, string> = new Map(),
+  closed: readonly ClosedCase[] = [],
 ): string {
   const lines = [`Feedback from ${runAt}.`, ""];
   if (changes.length > 0) {
@@ -148,13 +149,27 @@ export function reviewPrBody(
       "## Held cases",
       "",
       "Cases a person, a bot or an AI reviewer should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
-        "`contacts`, `description`, `first_place` or `contact_withdrawn`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
+        "`contacts`, `description`, `first_place`, `contact_withdrawn` or `fact_doubted`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
         "set its `standing` to `shown` in this PR. `contacts` and `description` name what was left off a published new place: " +
         "contact details, addresses and descriptions travellers sent are in the inbox items, never here. " +
         "`contact_withdrawn` is a contact taken off a place after reports from two sources: its `value` is the place's own published contact, " +
-        "not something a traveller sent, so it is shown here. To restore it, set `facts.<fact>` back to `value` on the place in this PR.",
+        "not something a traveller sent, so it is shown here. To restore it, set `facts.<fact>` back to `value` on the place in this PR. " +
+        "`fact_doubted` is a fact travellers say is wrong without giving the right value: with `taken_down` doubts from two sources took it off the place, " +
+        "otherwise one traveller doubts it and it stays. `value` is what the place published, and `doubts` and `confirmations` name the reports weighed. " +
+        "To restore it, set `facts.<fact>` back to `value`. Doubt notes are in the inbox, never here.",
       "",
       ...held.map(heldLine),
+      "",
+    );
+  }
+  if (closed.length > 0) {
+    lines.push(
+      "## Closed cases",
+      "",
+      "Held cases the rules settled, one per line: `closed-case` and a JSON object. Each closes the `fact_doubted` cases for its place and fact listed before it: " +
+        "travellers `restored` the value by confirming it again, or `replaced` it with another value, in the reports `feedback` names.",
+      "",
+      ...closed.map((c) => `- closed-case ${lineJson(c)}`),
       "",
     );
   }
@@ -168,6 +183,7 @@ export function reviewPrBody(
  * line still parses to the same values.
  */
 function heldLine(c: HeldCase): string {
-  const json = JSON.stringify(c).replace(/[<>`@&]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
-  return `- held-case ${json}`;
+  return `- held-case ${lineJson(c)}`;
 }
+
+const lineJson = (value: unknown) => JSON.stringify(value).replace(/[<>`@&]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);

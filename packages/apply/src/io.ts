@@ -226,7 +226,7 @@ export async function settleAwaiting(
   return moved;
 }
 
-/** Moves each decided pending file to `applied/` or `refused/`, adding the outcome. Waiting files stay. */
+/** Moves each decided pending file to `applied/` or `refused/`, adding the outcome (with `doubted` on a doubt that took a fact down). Waiting files stay. */
 export async function moveDecided(
   inbox: string,
   files: readonly PendingFile[],
@@ -253,7 +253,9 @@ export async function moveDecided(
     const folder = decision.outcome === "refused" ? "refused" : "applied";
     const target = join(inbox, folder, file.day, basename(file.path));
     await mkdir(dirname(target), { recursive: true });
-    const withOutcome = { ...file.item, outcome: { result: decision.outcome, reason: decision.reason, run: runAt } };
+    // A doubt that took a fact down keeps the value, so later runs find the open case.
+    const outcome = { result: decision.outcome, reason: decision.reason, run: runAt, ...(decision.doubted ? { doubted: decision.doubted } : {}) };
+    const withOutcome = { ...file.item, outcome };
     await writeFile(target, `${JSON.stringify(withOutcome, null, 2)}\n`, "utf8");
     await rm(file.path);
     moved += 1;

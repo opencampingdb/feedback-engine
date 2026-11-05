@@ -343,7 +343,8 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const ownerClaims = ownerResult.forReview.length > 0;
   // A held case is listed when this run wrote its place or its edit for a person.
   const held = crowdResult.held.filter((h) => crowdResult.places.has(h.place) || h.feedback.some((f) => effective.has(f)));
-  const reviewChanged = reviewFiles.length > 0 || reviewChanges.length > 0 || ownerClaims || held.length > 0;
+  const closed = crowdResult.closed;
+  const reviewChanged = reviewFiles.length > 0 || reviewChanges.length > 0 || ownerClaims || held.length > 0 || closed.length > 0;
 
   return {
     run_at: runAt,
@@ -356,7 +357,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     review_files: reviewFiles,
     auto_pr_body: autoChanged ? autoPrBody(runAt, autoChanges, decisions, allPlaces) : "",
     review_pr_body: reviewChanged
-      ? reviewPrBody(runAt, reviewChanges, allPlaces, ownerResult.forReview, held, await previewLinks(reviewChanges, options.reviewPreview, now))
+      ? reviewPrBody(runAt, reviewChanges, allPlaces, ownerResult.forReview, held, await previewLinks(reviewChanges, options.reviewPreview, now), closed)
       : "",
     new_places: newPlaces,
     not_applied: [...new Set(decisions.filter((d) => d.outcome !== "applied" && d.outcome !== "waiting").map((d) => d.id))].sort(),

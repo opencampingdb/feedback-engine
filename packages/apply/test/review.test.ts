@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { reviewPrBody } from "../src/prbody.js";
-import { allowedDecisions, applyDecision, heldCaseKey, parseHeldCases, settleByRules, type HeldCase } from "../src/review.js";
+import { allowedDecisions, applyDecision, heldCaseKey, parseClosedCases, parseHeldCases, settleByRules, type ClosedCase, type HeldCase } from "../src/review.js";
 import type { Place } from "../src/types.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
@@ -38,6 +38,59 @@ const withdrawn: HeldCase = {
   reasons: ["spam"],
   feedback: ["fb_01JC0000000000000000000002", "fb_01JC0000000000000000000001"],
 };
+
+const doubtedDown: HeldCase = {
+  ...base,
+  case: "fact_doubted",
+  fact: "toilets",
+  value: true,
+  taken_down: true,
+  sources: 2,
+  doubts: ["fb_01JC0000000000000000000002", "fb_01JC0000000000000000000003"],
+  confirmations: ["fb_01JC0000000000000000000001"],
+  feedback: ["fb_01JC0000000000000000000002", "fb_01JC0000000000000000000003", "fb_01JC0000000000000000000001"],
+};
+const doubtedLive: HeldCase = { ...doubtedDown, taken_down: false, sources: 1, doubts: ["fb_01JC0000000000000000000002"], confirmations: [], feedback: ["fb_01JC0000000000000000000002"] };
+const restored: ClosedCase = { case: "fact_doubted", place: PLACE, fact: "toilets", settles: "restored", feedback: ["fb_01JC0000000000000000000009"] };
+/** The place as doubts left it: toilets taken off, with the doubters' source and date. */
+const takenDown = () => place({ standing: undefined, facts: {}, fact_sources: { name: "contributed", toilets: "feedback" }, fact_dates: { name: "2026-11-01T00:00:00Z", toilets: "2026-11-03T00:00:00Z" } });
+
+describe("fact_doubted cases", () => {
+  it("reads the doubted fact cases and the cases the rules closed from the review PR body", () => {
+    const body = reviewPrBody(AT, [], new Map(), [], [doubtedDown, doubtedLive], new Map(), [restored]);
+    expect(parseHeldCases(body)).toEqual([doubtedDown, doubtedLive]);
+    expect(parseClosedCases(body)).toEqual([restored]);
+    expect(parseHeldCases(`- held-case ${JSON.stringify({ ...doubtedDown, fact: "email" })}`)).toEqual([]);
+    expect(parseClosedCases(`- closed-case ${JSON.stringify({ ...restored, settles: "anything" })}`)).toEqual([]);
+  });
+
+  it("lets a reviewer restore or keep down a fact doubts took down, and dismiss a single doubt on a fact still live", () => {
+    expect(allowedDecisions(doubtedDown)).toEqual(["restore", "keep_down", "leave"]);
+    expect(allowedDecisions(doubtedLive)).toEqual(["dismiss", "leave"]);
+    expect(settleByRules(doubtedDown, takenDown())).toBeNull();
+    expect(settleByRules(doubtedLive, place({ standing: undefined }))).toBeNull();
+  });
+
+  it("leaves an owner's fact to a person, and settles a case whose fact has moved on", () => {
+    expect(settleByRules(doubtedDown, place({ standing: undefined, fact_sources: { toilets: "owner" } }))?.reason).toContain("owner");
+    expect(settleByRules(doubtedLive, place({ standing: undefined, fact_sources: { toilets: "owner" } }))?.reason).toContain("owner");
+    expect(settleByRules(doubtedDown, place({ standing: undefined }))?.reason).toBe("the place has this fact again");
+    expect(settleByRules(doubtedLive, takenDown())?.reason).toBe("the fact has changed since the doubt");
+    expect(settleByRules(doubtedLive, place({ standing: undefined, facts: { toilets: false } }))?.reason).toBe("the fact has changed since the doubt");
+  });
+
+  it("restores the last value with its source and date, and changes nothing to keep it down or dismiss", () => {
+    const out = applyDecision(takenDown(), doubtedDown, "restore", AT)!;
+    expect(out.facts).toEqual({ toilets: true });
+    expect(out.fact_sources.toilets).toBe("feedback");
+    expect(out.fact_dates?.toilets).toBe(AT);
+    expect(out.updated).toBe(AT);
+    expect(applyDecision(takenDown(), doubtedDown, "keep_down", AT)).toBeNull();
+    expect(applyDecision(place({ standing: undefined }), doubtedLive, "dismiss", AT)).toBeNull();
+    expect(applyDecision(place({ standing: undefined }), doubtedLive, "restore", AT)).toBeNull();
+    expect(applyDecision(takenDown(), doubtedDown, "approve", AT)).toBeNull();
+  });
+});
 
 describe("reading held cases", () => {
   it("reads every case the apply writes in the review PR body, and nothing else", () => {

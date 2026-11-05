@@ -10,6 +10,7 @@ import {
 } from "@opencampingdb/feedback";
 import {
   decideContactReport,
+  decideDoubt,
   decideFact,
   distinctSources as distinctDevices,
   factRefusal,
@@ -18,16 +19,19 @@ import {
   newPlaceFields,
   newPlaceListing,
   REVIEWED_FACTS,
+  sameValue,
+  weighFact,
   WINDOW_DAYS,
   type ItemDecision,
+  type OpenDoubt,
 } from "./decide.js";
 import { moderateReview } from "./moderation.js";
-import type { HeldCase } from "./review.js";
+import type { ClosedCase, HeldCase } from "./review.js";
 import { roundCoord } from "./serialise.js";
 import { setSource } from "./sources.js";
 import type { Fee, Photo, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
 
-export type { HeldCase };
+export type { ClosedCase, HeldCase };
 
 /**
  * The apply-feedback rules from SPEC "Apply feedback", as pure functions.
@@ -81,6 +85,17 @@ export interface Decision {
   place: string | null;
   outcome: Outcome;
   reason: string;
+  /**
+   * On the doubt that took a fact down: the fact, the value it had and the
+   * date set on it. The inbox keeps it with the outcome, and later runs read
+   * it back as the open `fact_doubted` case (see `openDoubt`).
+   */
+  doubted?: DoubtedRecord;
+}
+
+/** A fact doubts took down, as the inbox keeps it on the doubt that did it. */
+export interface DoubtedRecord extends OpenDoubt {
+  fact: FactName;
 }
 
 export interface Change {
@@ -177,6 +192,8 @@ export interface RulesOutput {
   changes: Change[];
   /** New places a person, or a triage agent, should look at, in the order they were decided. */
   held: HeldCase[];
+  /** Held cases the rules closed: a doubted fact restored or replaced. */
+  closed: ClosedCase[];
   /** New places withdrawn by their adder whose records are to be deleted from the data. */
   removed: string[];
   needsReview: boolean;
@@ -271,6 +288,9 @@ function distanceM(a: { lat: number; lon: number }, b: { lat: number; lon: numbe
   return 2 * 6_371_008.8 * Math.asin(Math.sqrt(h));
 }
 
+/** Where a fact doubts never take down came from, in words. */
+const FROM: Partial<Record<string, string>> = { osm: "OSM", owner: "the owner" };
+
 const quote = (text: string | undefined) => (text ? `: "${text}"` : "");
 
 export function applyRules(input: RulesInput): RulesOutput {
@@ -283,6 +303,7 @@ export function applyRules(input: RulesInput): RulesOutput {
   const changes: Change[] = [];
   const edits: ReviewEdit[] = [];
   const held: HeldCase[] = [];
+  const closed: ClosedCase[] = [];
   const removed: string[] = [];
 
   const decide = (item: StoredFeedback, outcome: Outcome, reason: string) => {
@@ -390,6 +411,9 @@ export function applyRules(input: RulesInput): RulesOutput {
         i.type === "check" || (i.type === "report" && (i.report.kind === "closed" || i.report.kind === "reopened")),
     ),
   );
+  // Doubts before facts, so a confirmation sent after a takedown in this run can restore it.
+  const downInRun = new Map<string, DoubtedRecord>();
+  applyDoubts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "doubt"));
   applyFacts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
   applyNewPlaces(known.filter((i): i is ReportItem => isNewPlaceReport(i)), newPlaceEvidence);
   applyContactReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "contact"));
@@ -437,6 +461,7 @@ export function applyRules(input: RulesInput): RulesOutput {
     edits,
     changes,
     held,
+    closed,
     removed,
     needsReview: ordered.some((d) => d.outcome === "needs_review"),
   };
@@ -844,6 +869,28 @@ export function applyRules(input: RulesInput): RulesOutput {
     }
   }
 
+  /**
+   * The open `fact_doubted` case for a fact, when doubts took it down and
+   * nothing has set or removed it since: the takedown in this run, or the
+   * latest one the inbox keeps on a doubt applied in the last 90 days, whose
+   * date is still the fact's date. The inbox is the apply's own record, read
+   * every run over the same 90 days the doubts count for; the review PR can
+   * be edited, merged or closed, and lists a case only until it is.
+   */
+  function openDoubt(placeId: string, fact: FactName, place: Place): OpenDoubt | undefined {
+    if ((place.facts as Record<string, unknown>)[fact] !== undefined) return undefined;
+    let found = downInRun.get(`${placeId}\u0000${fact}`);
+    if (found === undefined) {
+      for (const h of input.history) {
+        const kept = (h as { outcome?: { doubted?: DoubtedRecord } }).outcome?.doubted;
+        if (h.place !== placeId || kept?.fact !== fact || !wasApplied(h)) continue;
+        if (found === undefined || kept.at > found.at) found = kept;
+      }
+    }
+    if (found === undefined || place.fact_dates?.[fact] !== found.at) return undefined;
+    return { value: found.value, at: found.at };
+  }
+
   /** Fact reports about a place applied in earlier runs. */
   function factHistory(placeId: string, fact: string): ReportItem[] {
     return input.history.filter(
@@ -915,15 +962,59 @@ export function applyRules(input: RulesInput): RulesOutput {
         continue;
       }
 
+      // A fact doubts took down: confirmations of its value restore it, and another value replaces it.
+      let down = openDoubt(placeId, fact, place);
+      // Doubts sent after the takedown count against a restore; the ones that took it down do not.
+      const downAt = down === undefined ? Infinity : Date.parse(down.at);
+      const doubtEvidence = [...input.history, ...known].filter(
+        (r) =>
+          r.type === "report" && r.report.kind === "doubt" && r.place === placeId && r.report.fact === fact && time(r) > downAt && decisions.get(r.id)?.outcome !== "refused",
+      );
+      const closeCase = (settles: ClosedCase["settles"], by: readonly StoredFeedback[]) => {
+        closed.push({ case: "fact_doubted", place: placeId, fact, settles, feedback: by.map((r) => r.id) });
+        down = undefined;
+      };
+
       // A report without attestation of any other fact waits for a second device to agree.
       const open = new Set(reports);
       for (const item of reports) {
         if (!open.has(item)) continue;
         const value = item.report.value as FactValue;
-        const decision = decideFact({ item, place, earlier: evidence });
+        if (down !== undefined && sameValue(value, down.value)) {
+          open.delete(item);
+          if (time(item) < Date.parse(down.at)) {
+            // Weighed against the doubts when they took the fact down in this run.
+            decide(item, "applied", `counted as a confirmation of ${fact} before doubts took it down`);
+            continue;
+          }
+          const decision = decideFact({ item, place, earlier: [...evidence, ...doubtEvidence], doubted: down });
+          if (decision.verdict === "live" && decision.settles === "restored" && heldForCheck(item) === null) {
+            const since = Date.parse(down.at);
+            const confirming = reports.filter((r) => r === item || (open.has(r) && sameValue(r.report.value, value) && time(r) >= since && time(r) <= time(item)));
+            setFact(value);
+            note(placeId, `${decision.why} (closes the fact_doubted case)`, true, confirming);
+            for (const r of confirming) {
+              open.delete(r);
+              decide(r, "applied", decision.why);
+            }
+            closeCase("restored", confirming);
+            continue;
+          }
+          if (decision.verdict === "held" && decision.reason === "taken_down") {
+            open.add(item);
+            continue;
+          }
+          settle(item, decision);
+          continue;
+        }
+        const decision = decideFact({ item, place, earlier: evidence, ...(down !== undefined ? { doubted: down } : {}) });
         if (decision.verdict !== "held" || decision.reason !== "not_attested") {
           open.delete(item);
           settle(item, decision);
+          if (decision.verdict === "live" && decision.settles === "replaced" && decisions.get(item.id)?.outcome === "applied") {
+            changes[changes.length - 1]!.summary += " (closes the fact_doubted case)";
+            closeCase("replaced", [item]);
+          }
           continue;
         }
         const at = time(item);
@@ -942,10 +1033,11 @@ export function applyRules(input: RulesInput): RulesOutput {
         setFact(value);
         note(
           placeId,
-          `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days)`,
+          `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days)${down !== undefined ? " (closes the fact_doubted case)" : ""}`,
           true,
           agreeing,
         );
+        if (down !== undefined) closeCase("replaced", agreeing);
         for (const r of agreeing) {
           open.delete(r);
           decide(r, "applied", `${fact} set to ${JSON.stringify(value)}`);
@@ -957,7 +1049,11 @@ export function applyRules(input: RulesInput): RulesOutput {
           }
         }
       }
-      for (const item of open) decide(item, "waiting", `waiting for a second device to agree on ${fact}`);
+      for (const item of open) {
+        decide(item, "waiting", down !== undefined && sameValue(item.report.value, down.value)
+          ? `${fact} was taken down after doubts, and returns when two new travellers confirm it`
+          : `waiting for a second device to agree on ${fact}`);
+      }
     }
   }
 
@@ -1221,6 +1317,125 @@ export function applyRules(input: RulesInput): RulesOutput {
       sentToPerson.set(item.id, { edit, change: changes[changes.length - 1]! });
       decide(item, "needs_review", check === null ? decision.why : `the intake held it for ${check}, so a person checks it`);
     }
+  }
+
+  /**
+   * Doubts that a fact on a place is right, from travellers who don't know the
+   * right value. One source sends it to a reviewer as a `fact_doubted` case and
+   * the fact stays. Doubts from two sources within 90 days, at least one
+   * attested and more than the sources confirming the value, take the fact off
+   * the place at once, with the doubt's source and date on it, and list a
+   * `fact_doubted` case. A fact from OSM or the owner is left to a person, and
+   * a doubt about a fact the place does not have is refused. A doubt's note is
+   * for reviewers in the inbox and never reaches the PR.
+   */
+  function applyDoubts(items: ReportItem[]): void {
+    const takenDown = new Map<string, HeldCase>();
+    // What a doubt sent to a person, to take back if a later doubt in this run takes the fact down.
+    const sentToPerson = new Map<string, { edit: ReviewEdit; change: Change; held?: HeldCase }>();
+    const evidence = (item: ReportItem) =>
+      [...input.history, ...known].filter(
+        (r) => r === item || (r.type === "report" && (r.report.kind === "doubt" || r.report.kind === "fact") && decisions.get(r.id)?.outcome !== "refused"),
+      );
+    for (const item of items) {
+      const placeId = item.place as string;
+      const fact = item.report.fact as FactName;
+      const key = `${placeId}\u0000${fact}`;
+      const done = takenDown.get(key);
+      if (done) {
+        done.doubts!.push(item.id);
+        done.feedback.push(item.id);
+        decide(item, "applied", `${fact} was taken down after doubts from two sources`);
+        continue;
+      }
+      const place = record(placeId);
+      const earlier = evidence(item);
+      const decision = decideDoubt({ item, place, earlier });
+      if (decision.verdict === "refused") {
+        decide(item, "refused", decision.why);
+        continue;
+      }
+      // A doubt the intake held for a check takes nothing down on its own, though it still counts as a source.
+      const check = heldForCheck(item);
+      if (decision.verdict === "live" && decision.doubted && check === null) {
+        const { value, sources, doubts, confirmations } = decision.doubted;
+        delete (place.facts as Record<string, FactValue | undefined>)[fact];
+        setSource(place, fact, "feedback", item.received);
+        const counted = earlier.filter((r) => doubts.includes(r.id));
+        note(placeId, `${fact} taken down after doubts from ${sources} sources within ${WINDOW_DAYS} days`, true, counted);
+        for (const r of counted) {
+          if (!items.includes(r as ReportItem) || heldForCheck(r) !== null) continue;
+          const sent = sentToPerson.get(r.id);
+          if (sent) {
+            edits.splice(edits.indexOf(sent.edit), 1);
+            changes.splice(changes.indexOf(sent.change), 1);
+            if (sent.held) held.splice(held.indexOf(sent.held), 1);
+          }
+          decide(r, "applied", decision.why);
+        }
+        const doubted: DoubtedRecord = { fact, value, at: item.received };
+        const taken = decisions.get(item.id);
+        if (taken) taken.doubted = doubted;
+        downInRun.set(key, doubted);
+        const heldCase = doubtCase(placeId, place, fact, value, true, sources, doubts, confirmations);
+        held.push(heldCase);
+        takenDown.set(key, heldCase);
+        continue;
+      }
+      const edit: ReviewEdit = { kind: "note", place: placeId, feedback: item.id };
+      edits.push(edit);
+      const heldBy = check === null ? "" : `, held by the intake for ${check}`;
+      const from = FROM[place.fact_sources[fact] ?? ""];
+      const reason = decision.verdict === "held" ? decision.reason : undefined;
+      note(
+        placeId,
+        check !== null
+          ? `${fact} doubted${heldBy} (decide: keep it or remove it)`
+          : reason === "single_doubt"
+            ? `${fact} doubted by one traveller (decide: keep it or remove it)`
+            : reason === "protected_source" && from !== undefined
+              ? `${fact} doubted, but it came from ${from} (decide: keep it or remove it)`
+              : `${fact} doubted: ${decision.why} (decide: keep it or remove it)`,
+        false,
+        [item],
+      );
+      let heldCase: HeldCase | undefined;
+      if (reason === "single_doubt" && check === null) {
+        // One traveller doubts a fact that stays: a reviewer may dismiss it.
+        const value = (place.facts as Record<string, FactValue>)[fact]!;
+        const weight = weighFact({ place: placeId, fact, value, at: item.received, reports: earlier, ...(place.fact_dates?.[fact] ? { doubtsSince: place.fact_dates[fact] } : {}) });
+        heldCase = doubtCase(placeId, place, fact, value, false, weight.doubts.sources, weight.doubts.feedback, weight.confirmations.feedback);
+        held.push(heldCase);
+      }
+      sentToPerson.set(item.id, { edit, change: changes[changes.length - 1]!, ...(heldCase ? { held: heldCase } : {}) });
+      decide(item, "needs_review", check === null ? decision.why : `the intake held it for ${check}, so a person checks it`);
+    }
+  }
+
+  function doubtCase(
+    placeId: string,
+    place: Place,
+    fact: FactName,
+    value: FactValue,
+    takenDown: boolean,
+    sources: number,
+    doubts: readonly string[],
+    confirmations: readonly string[],
+  ): HeldCase {
+    return {
+      case: "fact_doubted",
+      place: placeId,
+      ...(place.standing !== undefined ? { standing: place.standing } : {}),
+      location: { lat: roundCoord(place.location.lat), lon: roundCoord(place.location.lon) },
+      kind: place.kind,
+      fact,
+      value,
+      taken_down: takenDown,
+      sources,
+      doubts: [...doubts],
+      confirmations: [...confirmations],
+      feedback: [...doubts, ...confirmations],
+    };
   }
 
   /**

@@ -256,6 +256,34 @@ describe("run", () => {
     expect(summary.review_pr_body).not.toContain("jo@");
   });
 
+  it("takes a doubted fact down with a held case, and a later run restores it and closes the case", async () => {
+    const withToilets: Place = { ...place, facts: { power: false, toilets: true }, fact_sources: { power: "osm", toilets: "feedback" }, fact_dates: { toilets: "2026-09-01T00:00:00Z" } };
+    await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace(withToilets));
+    const doubt = { type: "report", report: { kind: "doubt", fact: "toilets", note: "none I could find" } };
+    await pending(1, "2026-10-28T00:00:00Z", "aaaa", { ...doubt, attested: "app_attest", contributor: TRUSTED });
+    await pending(2, "2026-10-29T00:00:00Z", "bbbb", doubt);
+
+    const first = await run({ inbox, data, now: NOW });
+    const down = JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
+    expect(down.facts).toEqual({ power: false });
+    expect(down.fact_dates?.toilets).toBe("2026-10-29T00:00:00Z");
+    expect(heldCases(first.review_pr_body)).toEqual([expect.objectContaining({ case: "fact_doubted", fact: "toilets", value: true, taken_down: true, doubts: [id(1), id(2)] })]);
+    expect(first.review_pr_body).not.toContain("none I could find");
+    const kept = JSON.parse(await readFile(join(inbox, "applied", "2026-10-29", `${id(2)}.json`), "utf8")) as { outcome: Record<string, unknown> };
+    expect(kept.outcome.doubted).toEqual({ fact: "toilets", value: true, at: "2026-10-29T00:00:00Z" });
+
+    const confirm = { type: "report", report: { kind: "fact", fact: "toilets", value: true } };
+    await pending(3, "2026-11-01T00:00:00Z", "cccc", confirm);
+    await pending(4, "2026-11-02T00:00:00Z", "dddd", { ...confirm, attested: "app_attest" });
+    const second = await run({ inbox, data, now: new Date("2026-11-03T00:00:00Z") });
+    const back = JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
+    expect(back.facts).toEqual({ power: false, toilets: true });
+    expect(second.auto_pr_body).toContain("toilets restored after two travellers confirmed it (closes the fact_doubted case)");
+    expect(second.review_pr_body.split("\n").filter((l) => l.startsWith("- closed-case "))).toEqual([
+      `- closed-case ${JSON.stringify({ case: "fact_doubted", place: PLACE, fact: "toilets", settles: "restored", feedback: [id(3), id(4)] })}`,
+    ]);
+  });
+
   it("reports the new places it wrote for the first time", async () => {
     const newId = await newPlace(9, "2026-10-29T00:00:00Z", "aaaa", { lat: -30, lon: 140 });
     const summary = await run({ inbox, data, now: NOW });

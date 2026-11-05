@@ -111,6 +111,17 @@ describe("settleRecentChanges", () => {
     expect(await settleRecentChanges({ inbox, main, store: sent, now: NOW })).toEqual([id(1)]);
   });
 
+  it("sends a doubt takedown once main no longer has the fact", async () => {
+    const doubt = { type: "report", place: PLACE, attested: "apple", report: { kind: "doubt", fact: "power" } };
+    await decided("applied", 1, "2026-10-28T00:00:00Z", doubt);
+    await onMain(record);
+    const sent = store();
+    expect(await settleRecentChanges({ inbox, main, store: sent, now: NOW })).toEqual([]);
+    const { power: _, ...facts } = record.facts;
+    await onMain({ ...record, facts, fact_sources: { phone: "osm", power: "feedback" }, fact_dates: { power: "2026-10-28T00:00:00Z" } });
+    expect(await settleRecentChanges({ inbox, main, store: sent, now: NOW })).toEqual([id(1)]);
+  });
+
   it("counts a value main already has, and a place merged into another, and skips a place main doesn't have", async () => {
     await decided("applied", 1, "2026-10-28T00:00:00Z", fact("power", false));
     await decided("applied", 2, "2026-10-28T01:00:00Z", { ...fact("power", true), place: "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZB" });

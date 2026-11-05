@@ -17,7 +17,7 @@ export interface RecentStore {
 }
 
 /**
- * The intake's recent changes: facts and contact takedowns it put live at
+ * The intake's recent changes: facts, and contact and doubt takedowns, it put live at
  * send time, which apps lay over their release. Both calls name feedback ids,
  * skip ids with no recent change, and are safe to send again.
  */
@@ -163,19 +163,19 @@ export async function sendBlockList(options: { main: string; store: RecentStore 
   return contributors;
 }
 
-/** A `fact` or `contact` report about a released place, as the intake decides them at send time. */
+/** A `fact`, `contact` or `doubt` report about a released place, as the intake decides them at send time. */
 type ChangeReport = Extract<StoredFeedback, { type: "report" }> & { place: string };
 
 const isChangeReport = (item: StoredFeedback): item is ChangeReport =>
   item.type === "report" &&
-  (item.report.kind === "fact" || item.report.kind === "contact") &&
+  (item.report.kind === "fact" || item.report.kind === "contact" || item.report.kind === "doubt") &&
   typeof item.place === "string" &&
   typeof item.report.fact === "string";
 
 /**
  * Whether `place`, as it is on main, holds the change an applied report made:
  * the fact was set in that run or later, or it has the reported value (a
- * contact report: the contact is gone). A place merged into another counts,
+ * contact report or a doubt: the value is gone). A place merged into another counts,
  * as the data has moved on from it.
  */
 export function inDataOnMain(item: ChangeReport, place: Place | undefined): boolean {
@@ -186,11 +186,11 @@ export function inDataOnMain(item: ChangeReport, place: Place | undefined): bool
   const setAt = place.fact_dates?.[fact];
   if (typeof run === "string" && setAt !== undefined && setAt >= run) return true;
   const current = (place.facts as Record<string, unknown>)[fact];
-  return item.report.kind === "contact" ? current === undefined : current !== undefined && sameValue(current, item.report.value);
+  return item.report.kind === "fact" ? current !== undefined && sameValue(current, item.report.value) : current === undefined;
 }
 
 /**
- * Tells the intake which fact and contact reports applied in the last 90 days
+ * Tells the intake which fact, contact and doubt reports applied in the last 90 days
  * now have their change on `main`, so it keeps each recent change for 7 days
  * from this run and then drops it. `main` is checked out before the run, so a
  * change counts once the PR that wrote it has merged, never before: apps drop

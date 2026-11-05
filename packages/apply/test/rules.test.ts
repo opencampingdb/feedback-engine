@@ -380,6 +380,217 @@ describe("contact reports", () => {
   });
 });
 
+describe("doubts", () => {
+  const withToilets = (extra: Partial<Place> = {}) =>
+    place({
+      facts: { power: false, fee: true, toilets: true },
+      fact_sources: { power: "osm", fee: "osm", toilets: "feedback" },
+      fact_dates: { toilets: at(-30) },
+      ...extra,
+    });
+  const doubt = (day: number, device: string, name = "toilets", extra: Record<string, unknown> = {}) =>
+    ({ ...base(day, device), type: "report", report: { kind: "doubt", fact: name, note: "none I could find" }, ...extra }) as StoredFeedback;
+  const attested = (item: StoredFeedback) => ({ ...item, attested: "app_attest", contributor: ctr(item.device) }) as StoredFeedback;
+
+  it("sends one doubt to a reviewer as a fact_doubted case, and the fact stays", () => {
+    const d = attested(doubt(0, "dev-a"));
+    const out = run([d], { places: [withToilets()] });
+    expect(out.outcome(d)).toBe("needs_review");
+    expect(out.decisions[0]?.reason).toBe("one traveller doubts toilets, so a reviewer reads it");
+    expect(out.after()).toBeUndefined();
+    expect(out.edits).toEqual([{ kind: "note", place: PLACE, feedback: d.id }]);
+    expect(out.changes).toEqual([expect.objectContaining({ automatic: false, summary: "toilets doubted by one traveller (decide: keep it or remove it)" })]);
+    expect(out.held).toEqual([
+      {
+        case: "fact_doubted",
+        place: PLACE,
+        location: { lat: -36.85, lon: 144.55 },
+        kind: "free_camp",
+        fact: "toilets",
+        value: true,
+        taken_down: false,
+        sources: 1,
+        doubts: [d.id],
+        confirmations: [],
+        feedback: [d.id],
+      },
+    ]);
+  });
+
+  it("never writes a doubt's note to the PR", () => {
+    const out = run([attested(doubt(0, "dev-a"))], { places: [withToilets()] });
+    expect(JSON.stringify(out.changes)).not.toContain("none I could find");
+    expect(JSON.stringify(out.held)).not.toContain("none I could find");
+  });
+
+  it("takes a fact down on doubts from two sources, one attested, with the doubters' source and date, and lists the case", () => {
+    const confirm = fact(-5, "dev-c", "toilets", true);
+    const a = attested(doubt(0, "dev-a"));
+    const b = doubt(1, "dev-b");
+    const d2 = doubt(1.5, "dev-d");
+    const out = run([a, b], { now: 2, history: [applied(confirm)], places: [withToilets()] });
+    expect(out.outcome(a)).toBe("applied");
+    expect(out.outcome(b)).toBe("applied");
+    expect(out.decisions[1]?.doubted).toEqual({ fact: "toilets", value: true, at: at(1) });
+    expect(out.after()?.facts).toEqual({ power: false, fee: true });
+    expect(out.after()?.fact_sources.toilets).toBe("feedback");
+    expect(out.after()?.fact_dates?.toilets).toBe(at(1));
+    expect(out.edits).toEqual([]);
+    expect(out.changes).toEqual([
+      expect.objectContaining({ automatic: true, feedback: [a.id, b.id], summary: "toilets taken down after doubts from 2 sources within 90 days" }),
+    ]);
+    expect(out.held).toEqual([
+      {
+        case: "fact_doubted",
+        place: PLACE,
+        location: { lat: -36.85, lon: 144.55 },
+        kind: "free_camp",
+        fact: "toilets",
+        value: true,
+        taken_down: true,
+        sources: 2,
+        doubts: [a.id, b.id],
+        confirmations: [confirm.id],
+        feedback: [a.id, b.id, confirm.id],
+      },
+    ]);
+    // A third doubt in the same run joins the case.
+    const three = run([a, b, d2], { now: 2, places: [withToilets()] });
+    expect(three.decisions.map((d) => d.outcome)).toEqual(["applied", "applied", "applied"]);
+    expect(three.held).toEqual([expect.objectContaining({ case: "fact_doubted", doubts: [a.id, b.id, d2.id], feedback: [a.id, b.id, d2.id] })]);
+  });
+
+  it("counts a doubt from an earlier run, and doesn't take a fact down on two unattested doubts", () => {
+    const earlier = applied(attested(doubt(0, "dev-a")), "needs_review");
+    const r = doubt(30, "dev-b");
+    const out = run([r], { now: 31, history: [earlier], places: [withToilets()] });
+    expect(out.outcome(r)).toBe("applied");
+    expect(out.after()?.facts.toilets).toBeUndefined();
+    expect(out.held).toEqual([expect.objectContaining({ case: "fact_doubted", taken_down: true, doubts: [earlier.id, r.id] })]);
+    const unattested = run([doubt(0, "dev-a"), doubt(1, "dev-b")], { now: 2, places: [withToilets()] });
+    expect(unattested.after()).toBeUndefined();
+    expect(unattested.decisions.map((d) => d.outcome)).toEqual(["needs_review", "needs_review"]);
+    expect(unattested.decisions[1]?.reason).toContain("without attestation");
+  });
+
+  it("never takes down a fact from OSM or the owner, and refuses a doubt about a fact the place doesn't have", () => {
+    const owned = withToilets({ fact_sources: { power: "osm", fee: "osm", toilets: "owner" } });
+    const out = run([attested(doubt(0, "dev-a")), attested(doubt(1, "dev-b"))], { now: 2, places: [owned] });
+    expect(out.decisions.map((d) => d.outcome)).toEqual(["needs_review", "needs_review"]);
+    expect(out.after()).toBeUndefined();
+    expect(out.held).toEqual([]);
+    expect(out.changes[0]?.summary).toBe("toilets doubted, but it came from the owner (decide: keep it or remove it)");
+    const osm = run([attested(doubt(0, "dev-a", "power")), attested(doubt(1, "dev-b", "power"))], { now: 2, places: [withToilets()] });
+    expect(osm.after()).toBeUndefined();
+    expect(osm.changes[0]?.summary).toContain("came from OSM");
+    const none = attested(doubt(0, "dev-a", "pets"));
+    const refused = run([none], { places: [withToilets()] });
+    expect(refused.outcome(none)).toBe("refused");
+    expect(refused.decisions[0]?.reason).toBe("place has no pets");
+  });
+
+  it("takes back what a single doubt sent to a person when a later doubt in the run takes the fact down", () => {
+    const a = doubt(0, "dev-a");
+    const b = attested(doubt(1, "dev-b"));
+    const out = run([a, b], { now: 2, places: [withToilets()] });
+    expect(out.decisions.map((d) => d.outcome)).toEqual(["applied", "applied"]);
+    expect(out.edits).toEqual([]);
+    expect(out.changes.map((c) => c.automatic)).toEqual([true]);
+    expect(out.held).toEqual([expect.objectContaining({ taken_down: true })]);
+  });
+
+  it("takes nothing down on a doubt the intake held for a check, though it counts as a source", () => {
+    const held = { ...attested(doubt(1, "dev-b")), intake: { state: "held", held_reason: "text_check" } } as StoredFeedback;
+    const out = run([doubt(0, "dev-a"), held], { now: 2, places: [withToilets()] });
+    expect(out.after()).toBeUndefined();
+    expect(out.outcome(held)).toBe("needs_review");
+    expect(out.changes.at(-1)?.summary).toBe("toilets doubted, held by the intake for text_check (decide: keep it or remove it)");
+  });
+
+  describe("a fact doubts took down", () => {
+    // Taken down at day 1 in an earlier run: the inbox keeps the value on the doubt that did it.
+    const down = (extra: Partial<Place> = {}) =>
+      place({ facts: { power: false, fee: true }, fact_sources: { power: "osm", fee: "osm", toilets: "feedback" }, fact_dates: { toilets: at(1) }, ...extra });
+    const takedown = () =>
+      ({ ...attested(doubt(1, "dev-b")), outcome: { result: "applied", reason: "", run: at(1), doubted: { fact: "toilets", value: true, at: at(1) } } }) as unknown as StoredFeedback;
+    const history = () => [applied(doubt(0, "dev-a")), takedown()];
+
+    it("restores the value when two new travellers confirm it, and closes the case", () => {
+      const c1 = fact(3, "dev-c", "toilets", true);
+      const c2 = attested(fact(4, "dev-d", "toilets", true));
+      const out = run([c1, c2], { now: 5, history: history(), places: [down()] });
+      expect(out.decisions.map((d) => d.outcome)).toEqual(["applied", "applied"]);
+      expect(out.after()?.facts.toilets).toBe(true);
+      expect(out.after()?.fact_dates?.toilets).toBe(at(5));
+      expect(out.changes).toEqual([
+        expect.objectContaining({ automatic: true, feedback: [c1.id, c2.id], summary: "toilets restored after two travellers confirmed it (closes the fact_doubted case)" }),
+      ]);
+      expect(out.closed).toEqual([{ case: "fact_doubted", place: PLACE, fact: "toilets", settles: "restored", feedback: [c1.id, c2.id] }]);
+    });
+
+    it("keeps one new confirmation waiting for a second", () => {
+      const c1 = attested(fact(3, "dev-c", "toilets", true));
+      const out = run([c1], { now: 5, history: history(), places: [down()] });
+      expect(out.outcome(c1)).toBe("waiting");
+      expect(out.after()).toBeUndefined();
+      expect(out.closed).toEqual([]);
+    });
+
+    it("needs the confirmations to outnumber doubts sent since the takedown", () => {
+      const later = [applied(doubt(2, "dev-e"), "needs_review"), applied(doubt(2.5, "dev-f"), "needs_review")];
+      const c1 = fact(3, "dev-c", "toilets", true);
+      const c2 = attested(fact(4, "dev-d", "toilets", true));
+      const out = run([c1, c2], { now: 5, history: [...history(), ...later], places: [down()] });
+      expect(out.decisions.map((d) => d.outcome)).toEqual(["waiting", "waiting"]);
+      expect(out.decisions[0]?.reason).toBe("toilets was taken down after doubts, and returns when two new travellers confirm it");
+      expect(out.after()).toBeUndefined();
+    });
+
+    it("replaces the value with an attested report of another, and closes the case", () => {
+      const r = attested(fact(3, "dev-c", "toilets", false));
+      const out = run([r], { now: 5, history: [...history(), applied(fact(-10, "dev-e", "toilets", true))], places: [down()] });
+      expect(out.outcome(r)).toBe("applied");
+      expect(out.after()?.facts.toilets).toBe(false);
+      expect(out.changes).toEqual([expect.objectContaining({ automatic: true, summary: "toilets set to false (one attested report) (closes the fact_doubted case)" })]);
+      expect(out.closed).toEqual([{ case: "fact_doubted", place: PLACE, fact: "toilets", settles: "replaced", feedback: [r.id] }]);
+    });
+
+    it("closes the case when two devices without attestation agree on another value", () => {
+      const a = fact(3, "dev-c", "toilets", false);
+      const b = fact(4, "dev-d", "toilets", false);
+      const out = run([a, b], { now: 5, history: history(), places: [down()] });
+      expect(out.after()?.facts.toilets).toBe(false);
+      expect(out.closed).toEqual([{ case: "fact_doubted", place: PLACE, fact: "toilets", settles: "replaced", feedback: [a.id, b.id] }]);
+    });
+
+    it("has no open case once the fact was set again, or something else changed it", () => {
+      const c1 = attested(fact(3, "dev-c", "toilets", true));
+      const elsewhere = run([c1], { now: 5, history: history(), places: [down({ fact_dates: { toilets: at(2) } })] });
+      expect(elsewhere.outcome(c1)).toBe("applied");
+      expect(elsewhere.after()?.facts.toilets).toBe(true);
+      expect(elsewhere.closed).toEqual([]);
+      const back = run([c1], { now: 5, history: history(), places: [withToilets({ fact_dates: { toilets: at(2) } })] });
+      expect(back.outcome(c1)).toBe("applied");
+      expect(back.closed).toEqual([]);
+    });
+
+    it("restores a fact taken down earlier in the same run, but not on a confirmation sent before the takedown", () => {
+      const before = fact(0.5, "dev-e", "toilets", true);
+      const a = doubt(0, "dev-a");
+      const b = attested(doubt(1, "dev-b"));
+      const c = doubt(1.2, "dev-f");
+      const c1 = fact(2, "dev-c", "toilets", true);
+      const c2 = attested(fact(3, "dev-d", "toilets", true));
+      const out = run([before, a, b, c, c1, c2], { now: 4, places: [withToilets()] });
+      expect(out.outcome(before)).toBe("applied");
+      expect(out.decisions.find((d) => d.id === before.id)?.reason).toBe("counted as a confirmation of toilets before doubts took it down");
+      expect(out.held).toEqual([expect.objectContaining({ case: "fact_doubted", taken_down: true })]);
+      expect(out.after()?.facts.toilets).toBe(true);
+      expect(out.closed).toEqual([{ case: "fact_doubted", place: PLACE, fact: "toilets", settles: "restored", feedback: [c1.id, c2.id] }]);
+    });
+  });
+});
+
 describe("fact reports", () => {
   it("one report does not change a fact", () => {
     const r = fact(0, "dev-a", "power", true);
