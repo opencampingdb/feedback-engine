@@ -23,6 +23,13 @@ export interface MajorRoads {
   between(a: LatLon, b: LatLon): RoadCrossed | null;
 }
 
+/** Great-circle distance in metres, as the data repository works it out. */
+export function distanceM(a: LatLon, b: LatLon): number {
+  const rad = Math.PI / 180;
+  const h = Math.sin(((b.lat - a.lat) * rad) / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(((b.lon - a.lon) * rad) / 2) ** 2;
+  return 2 * 6_371_008.8 * Math.asin(Math.sqrt(h));
+}
+
 /** Grid cell, in degrees, as `pipeline/geometry.py` grids roads. */
 const CELL = 0.01;
 

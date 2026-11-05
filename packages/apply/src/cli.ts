@@ -42,7 +42,8 @@ with a private data repository: anyone who can read the PR can open the links.
 (pipeline.extract --geometry). A new place held as a possible duplicate is
 merged into the place it duplicates only when the two have the same name once
 tidied, are in the same group and less than 50 m apart, and no major road runs
-between them. Without it the run has no road data and assumes none.
+between them. Without it the run has no road data and merges no duplicate on
+its own: each goes to a reviewer as a duplicate case.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
 

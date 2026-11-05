@@ -143,7 +143,7 @@ export interface RulesInput {
   /**
    * The major roads in the data repository's geometry sidecar, for the rule
    * that keeps two places on opposite sides of a road apart. Left out, no
-   * road is assumed between two places.
+   * duplicate is merged without a reviewer.
    */
   roads?: MajorRoads;
   /**
@@ -1500,8 +1500,8 @@ export function applyRules(input: RulesInput): RulesOutput {
    * into without anyone asked, or undefined when a reviewer decides: a place
    * in the data (not one added in this run) with the same name once tidied,
    * in the same group, less than MERGE_DISTANCE_M away, with no major road
-   * between them in `roads` (when the run has no road data, none is
-   * assumed), and neither an owner's place nor a pair on the distinct list.
+   * between them in `roads`, and neither an owner's place nor a pair on the
+   * distinct list. A run without road data merges nothing on its own.
    */
   function mergeTarget(item: ReportItem, placeId: string): { place: Place; distance: number } | undefined {
     const other = (everyPlaceById ??= new Map((input.everyPlace ?? []).map((p) => [p.id, p]))).get(placeId);
@@ -1510,7 +1510,8 @@ export function applyRules(input: RulesInput): RulesOutput {
     if (distance >= MERGE_DISTANCE_M) return undefined;
     if (tidyName(item.report.name).toLowerCase() !== tidyName(other.name).toLowerCase()) return undefined;
     if (mergeProblem(draftOf(item), other, input.distinct) !== null) return undefined;
-    if (input.roads?.between(item.location!, other.location)) return undefined;
+    // Without road data, two places on opposite sides of a road look the same, so a reviewer decides.
+    if (!input.roads || input.roads.between(item.location!, other.location)) return undefined;
     return { place: other, distance: Math.round(distance) };
   }
 

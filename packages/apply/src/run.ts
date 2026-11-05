@@ -57,7 +57,7 @@ export interface RunOptions {
    * The data repository's geometry sidecar (`pipeline.extract --geometry`).
    * Its major roads keep a new place on the other side of a road from the
    * place it may duplicate from being merged into it. Left out, the run has
-   * no road data and assumes no road between them.
+   * no road data and merges no duplicate on its own: a reviewer decides.
    */
   geometry?: string;
   /** Licence id for new photo lines. Defaults to CC-BY-4.0. */

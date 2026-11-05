@@ -1618,9 +1618,11 @@ describe("new places", () => {
     const same = (extra: Record<string, unknown> = {}, location = near) =>
       added(0, "dev-a", { name: "LAKE EPPALOCK CAMP", contacts: { phone: "03 5555 0100" }, ...extra }, location);
 
+    const noRoad = { roads: { between: () => null } };
+
     it("merges a new place with the same name, in the same group, under 50 m away, into the place it duplicates", () => {
       const item = same();
-      const out = run([item]);
+      const out = run([item], { extra: noRoad });
       expect(out.outcome(item)).toBe("applied");
       expect(out.decisions[0]!.reason).toBe(`new place merged into ${PLACE}: the same name, 30 m away, in the same group, with no major road between`);
       expect(out.after(idOf(item))).toMatchObject({ id: idOf(item), status: "merged", merged_into: PLACE, name: "LAKE EPPALOCK CAMP", osm: null });
@@ -1630,12 +1632,14 @@ describe("new places", () => {
       expect(out.changes).toEqual([expect.objectContaining({ place: idOf(item), automatic: true, summary: expect.stringContaining(`merged into ${PLACE}`) })]);
     });
 
-    it("holds it for a reviewer when the name differs, it is 50 m or more away, or a major road runs between", () => {
+    it("holds it for a reviewer when the name differs, it is 50 m or more away, a major road runs between, or the run has no road data", () => {
       const roads = { between: () => ({ highway: "trunk", name: "Example Highway" }) };
       const cases: [StoredFeedback, Partial<RulesInput>][] = [
-        [same({ name: "Lake Eppalock North" }), {}],
-        [same({}, { lat: -36.8505, lon: 144.55 }), {}],
+        [same({ name: "Lake Eppalock North" }), noRoad],
+        [same({}, { lat: -36.8505, lon: 144.55 }), noRoad],
         [same(), { roads }],
+        // Without road data the run cannot tell opposite sides of a road apart, so a reviewer decides.
+        [same(), {}],
       ];
       for (const [item, extra] of cases) {
         const out = run([item], { extra });
@@ -1645,13 +1649,13 @@ describe("new places", () => {
     });
 
     it("never merges into a place with a verified owner, a pair a person found separate, or a place the intake would not list", () => {
-      const owned = run([same()], { places: [place({ owner_verified: true })] });
+      const owned = run([same()], { places: [place({ owner_verified: true })], extra: noRoad });
       expect(owned.decisions[0]!.outcome).toBe("needs_review");
       const item = same();
-      const distinct = run([item], { extra: { distinct: new Set([[PLACE, idOf(item)].sort().join(" ")]) } });
+      const distinct = run([item], { extra: { ...noRoad, distinct: new Set([[PLACE, idOf(item)].sort().join(" ")]) } });
       expect(distinct.outcome(item)).toBe("needs_review");
       const { attested: _attested, ...unattested } = same() as StoredFeedback & { attested?: string };
-      expect(run([unattested]).outcome(unattested)).toBe("needs_review");
+      expect(run([unattested], { extra: noRoad }).outcome(unattested)).toBe("needs_review");
     });
   });
 

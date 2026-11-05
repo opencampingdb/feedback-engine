@@ -1,5 +1,6 @@
-import { contactProblem, isContactFact, isDoubtFact, isFactName, isValidFactValue, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
+import { contactProblem, isContactFact, isDoubtFact, isFactName, isValidFactValue, tidyName, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
 import type { Settles } from "./decide.js";
+import { distanceM, majorRoads, type MajorRoads } from "./roads.js";
 import { dumpPlace, placePath } from "./serialise.js";
 import { setSource } from "./sources.js";
 import type { Place } from "./types.js";
@@ -21,7 +22,8 @@ import type { Place } from "./types.js";
  * always go to a person.
  */
 
-export { dumpPlace, placePath };
+export { dumpPlace, majorRoads, placePath };
+export type { MajorRoads };
 export type { Place };
 
 /**
@@ -350,6 +352,29 @@ export function mergeProblem(place: Place, other: Place | undefined, distinct: R
   if (other.owner_verified === true) return "the place it duplicates has a verified owner";
   if (other.group !== place.group) return "the two places are in different groups";
   if (distinct.has(pairKey(place.id, other.id))) return "moderation/distinct_places.json lists the two as separate places";
+  return null;
+}
+
+/** Without road data, a reviewer merges only places closer than this, with the same name. */
+export const MERGE_WITHOUT_ROADS_M = 25;
+
+/**
+ * Why a reviewer may not merge a new place into `other`, or null when it
+ * may: `mergeProblem`, and then the opposite-side rule. With `roads`, a pair
+ * whose straight line crosses a major road stays apart. Without road data,
+ * only the same name once tidied, less than MERGE_WITHOUT_ROADS_M apart, is
+ * merged.
+ */
+export function reviewerMergeProblem(place: Place, other: Place | undefined, distinct: ReadonlySet<string> = new Set(), roads?: MajorRoads): string | null {
+  const problem = mergeProblem(place, other, distinct);
+  if (problem !== null || !other) return problem;
+  if (roads) {
+    const road = roads.between(place.location, other.location);
+    return road ? `a major road runs between them (${road.name ?? road.ref ?? road.highway})` : null;
+  }
+  const sameName = place.name !== null && other.name !== null && tidyName(place.name).toLowerCase() === tidyName(other.name).toLowerCase();
+  if (!sameName) return "without road data, only places with the same name are merged";
+  if (distanceM(place.location, other.location) >= MERGE_WITHOUT_ROADS_M) return `without road data, only places less than ${MERGE_WITHOUT_ROADS_M} m apart are merged`;
   return null;
 }
 

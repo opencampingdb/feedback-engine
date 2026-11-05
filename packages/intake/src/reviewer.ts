@@ -10,7 +10,8 @@
  * model is asked only about what is left, at most MAX_MODEL_CASES a run. On
  * its own the model may approve a held or hidden new place, merge a held
  * duplicate into the place it duplicates (never into a place with a verified
- * owner, nor a pair on `moderation/distinct_places.json`), restore a
+ * owner, a pair on `moderation/distinct_places.json` or a pair across a major
+ * road; without road data, only the same name less than 25 m apart), restore a
  * withdrawn contact, take down a new place that is clear spam, restore or
  * keep down a fact doubts took down, dismiss doubts about a fact that
  * stays, and confirm `vehicle_access` on a place whose name says only heavy
@@ -33,7 +34,7 @@ import {
   dumpPlace,
   heldCaseKey,
   mergePlaces,
-  mergeProblem,
+  reviewerMergeProblem,
   pairKey,
   parseClosedCases,
   parseHeldCases,
@@ -45,6 +46,7 @@ import {
   type ReviewDecision,
   withDoNotMatch,
   type DoNotMatchEntry,
+  type MajorRoads,
 } from "@opencampingdb/apply/review";
 import type { AiLike } from "./checks.js";
 import { GitHubError, type GitHubApp, type GitHubAppConfig, type IssueComment } from "./github.js";
@@ -80,6 +82,13 @@ export interface ReviewerDeps {
   botLogins: readonly string[];
   now: () => number;
   onError?: (error: unknown) => void;
+  /**
+   * The major roads from the data repository's geometry sidecar, when the
+   * deployment has them. With them a merge across a major road is refused;
+   * without them only the same name, in the same group, less than 25 m apart
+   * is merged.
+   */
+  roads?: MajorRoads;
 }
 
 /** One decision, as the reviewer records it on the PR. */
@@ -406,7 +415,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         other = otherFile ? parsePlace(otherFile.text) : undefined;
         // A merge only where the rules allow one: never into an owner's place or a pair a person found separate.
         const pairs = c.case === "duplicate" ? await distinctPairs() : undefined;
-        const allowed = allowedDecisions(c).filter((d) => d !== "merge" || (other !== undefined && mergeProblem(place!, other, pairs) === null));
+        const allowed = allowedDecisions(c).filter((d) => d !== "merge" || reviewerMergeProblem(place!, other, pairs, deps.roads) === null);
         ({ decision, reason } = await askModel(deps.ai, deps.model, c, place!, other, allowed));
       }
       reason = safeReason(reason);

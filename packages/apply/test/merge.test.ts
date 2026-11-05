@@ -106,7 +106,10 @@ describe("merges in a run", async () => {
     const root = await mkdtemp(join(tmpdir(), "ocdb-merge-"));
     try {
       const { inbox, data } = await setUp(root);
-      const summary = await run({ inbox, data, now: new Date(AT) });
+      // A sidecar with no major road near the pair.
+      const geometry = join(root, "geometry.ndjson");
+      await put(geometry, '{"coords":[[145.0,-37.0],[145.1,-37.0]],"highway":"primary","road":5}\n');
+      const summary = await run({ inbox, data, now: new Date(AT), geometry });
       expect(summary.counts.applied).toBe(1);
       const tombstone = JSON.parse(await readFile(join(data, "places", "01", `${TOMBSTONE}.json`), "utf8")) as Place;
       expect(tombstone).toMatchObject({ status: "merged", merged_into: OLD });
@@ -116,8 +119,8 @@ describe("merges in a run", async () => {
     }
   });
 
-  it("does not merge a pair on the distinct list, or across a major road in the geometry sidecar", async () => {
-    for (const extra of ["distinct", "geometry"] as const) {
+  it("does not merge a pair on the distinct list, across a major road in the geometry sidecar, or without the sidecar", async () => {
+    for (const extra of ["distinct", "geometry", "no geometry"] as const) {
       const root = await mkdtemp(join(tmpdir(), "ocdb-merge-"));
       try {
         const { inbox, data } = await setUp(root);
@@ -125,14 +128,35 @@ describe("merges in a run", async () => {
         if (extra === "distinct") {
           const [a, b] = [OLD, TOMBSTONE].sort();
           await put(join(data, "moderation", "distinct_places.json"), JSON.stringify({ pairs: [{ a, b, added: "2026-11-05", reason: "other" }] }));
-        } else {
+          await put(geometry, "");
+        } else if (extra === "geometry") {
           await put(geometry, '{"coords":[[144.549,-36.85013],[144.551,-36.85013]],"highway":"primary","road":5}\n');
         }
-        const summary = await run({ inbox, data, now: new Date(AT), ...(extra === "geometry" ? { geometry } : {}) });
+        const summary = await run({ inbox, data, now: new Date(AT), ...(extra === "no geometry" ? {} : { geometry }) });
         expect(summary.counts.needs_review).toBe(1);
       } finally {
         await rm(root, { recursive: true, force: true });
       }
     }
+  });
+});
+
+describe("what a reviewer may merge", async () => {
+  const { reviewerMergeProblem } = await import("../src/review.js");
+  const near = { lat: -36.85018, lon: 144.55 }; // about 20 m
+  const further = { lat: -36.85036, lon: 144.55 }; // about 40 m
+  const crossing = { between: () => ({ highway: "trunk", name: "Example Highway" }) };
+  const clear = { between: () => null };
+
+  it("refuses a pair across a major road when the road data is there, and allows the rest", () => {
+    expect(reviewerMergeProblem(added({ name: "Other Name", location: further }), record(), new Set(), clear)).toBeNull();
+    expect(reviewerMergeProblem(added({ location: near }), record(), new Set(), crossing)).toBe("a major road runs between them (Example Highway)");
+  });
+
+  it("without road data, allows only the same name, in the same group, less than 25 m apart", () => {
+    expect(reviewerMergeProblem(added({ location: near }), record())).toBeNull();
+    expect(reviewerMergeProblem(added({ location: further }), record())).toBe("without road data, only places less than 25 m apart are merged");
+    expect(reviewerMergeProblem(added({ location: near, name: "Creek Bend North" }), record())).toBe("without road data, only places with the same name are merged");
+    expect(reviewerMergeProblem(added({ location: near }), record({ owner_verified: true }))).toBe("the place it duplicates has a verified owner");
   });
 });

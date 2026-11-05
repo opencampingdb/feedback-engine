@@ -2,6 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { reviewPrBody } from "../../apply/src/prbody.js";
 import type { HeldCase } from "../../apply/src/review.js";
+import { majorRoads } from "../../apply/src/roads.js";
 import { dumpPlace, placePath } from "../../apply/src/serialise.js";
 import type { Place } from "../../apply/src/types.js";
 import type { AiLike } from "../src/checks.js";
@@ -170,8 +171,8 @@ describe("the AI reviewer", () => {
     const told = caseOf(asked[0]!.input);
     expect(told).toMatchObject({ case: "duplicate", place: { id: id(0), name: "Creek Bend 0" }, possible_duplicate_of: { id: id(1), name: "Lakeside Park" }, distance_m: 140 });
     const schema = (asked[0]!.input.response_format as { json_schema: { properties: { decision: { enum: string[] } } } }).json_schema;
-    // Different names and kinds, but nothing rules a merge out, so the model may answer it.
-    expect(schema.properties.decision.enum).toEqual(["approve", "merge", "take_down", "leave"]);
+    // Different names, and no road data: a merge is not offered.
+    expect(schema.properties.decision.enum).toEqual(["approve", "take_down", "leave"]);
 
     expect(gh.read(0)).toMatchObject({ standing: "shown", updated: AT });
     expect(gh.files.get(placePath(id(0)))!.text).toBe(dumpPlace({ ...place(0), standing: "shown", updated: AT }));
@@ -329,7 +330,7 @@ describe("the AI reviewer", () => {
   describe("merging a duplicate", () => {
     const dup = (n: number, of: number) => heldCase(n, { case: "duplicate", standing: "held", duplicate_of: id(of), distance_m: 70 });
     const existing = (n: number, overrides: Partial<Place> = {}) =>
-      place(n, { standing: undefined, name: "Creek Bend Camp", facts: { toilets: true }, fact_sources: { name: "osm", toilets: "osm" }, fact_dates: undefined, ...overrides });
+      place(n, { standing: undefined, name: "Creek Bend 0", facts: { toilets: true }, fact_sources: { name: "osm", toilets: "osm" }, fact_dates: undefined, ...overrides });
     const enumOf = (input: Record<string, unknown>) =>
       (input.response_format as { json_schema: { properties: { decision: { enum: string[] } } } }).json_schema.properties.decision.enum;
 
@@ -345,6 +346,32 @@ describe("the AI reviewer", () => {
       expect(gh.read(1)).toMatchObject({ facts: { toilets: true, fee: false }, fact_sources: { fee: "feedback" }, fact_dates: { fee: AT }, updated: AT });
       expect(gh.read(0)).toMatchObject({ status: "merged", merged_into: id(1) });
       expect(gh.commits()[1]!.body!.message as string).toContain(`${REVIEWER}: merge held case duplicate on ${id(0)}`);
+    });
+
+    it("without road data, offers a merge only for the same name, in the same group, less than 25 m apart", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [dup(0, 1), dup(2, 3), dup(4, 5)]));
+      gh.put(place(0));
+      gh.put(existing(1, { location: { lat: -36.85018, lon: 144.55 } }));
+      gh.put(place(2));
+      gh.put(existing(3, { name: "Creek Bend 2", location: { lat: -36.85036, lon: 144.55 } }));
+      gh.put(place(4));
+      gh.put(existing(5, { name: "Creek Bend North" }));
+      const { ai, asked } = fakeAi(() => reply("leave", "unsure", false));
+      await run(gh, ai);
+      expect(asked.map((a) => enumOf(a.input))).toEqual([["approve", "merge", "take_down", "leave"], ["approve", "take_down", "leave"], ["approve", "take_down", "leave"]]);
+    });
+
+    it("with road data, refuses a merge across a major road and offers one otherwise, whatever the names", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [dup(0, 1), dup(2, 3)]));
+      gh.put(place(0, { location: { lat: -36.85, lon: 144.55 } }));
+      gh.put(existing(1, { name: "Another Name", location: { lat: -36.8504, lon: 144.55 } }));
+      gh.put(place(2, { location: { lat: -36.86, lon: 144.55 } }));
+      gh.put(existing(3, { name: "Another Name", location: { lat: -36.8604, lon: 144.55 } }));
+      // A primary road between places 2 and 3 only.
+      const roads = majorRoads(['{"coords":[[144.549,-36.8602],[144.551,-36.8602]],"highway":"primary","name":"Example Road","road":5}']);
+      const { ai, asked } = fakeAi(() => reply("leave", "unsure", false));
+      await createReviewer({ fetch: gh.fetch, now: () => clock, roads })({ ...env, AI: ai });
+      expect(asked.map((a) => enumOf(a.input))).toEqual([["approve", "merge", "take_down", "leave"], ["approve", "take_down", "leave"]]);
     });
 
     it("does not offer a merge into an owner's place or a pair a person found separate", async () => {
