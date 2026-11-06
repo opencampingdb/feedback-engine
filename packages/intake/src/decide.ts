@@ -413,18 +413,19 @@ export async function listChanges(db: D1Like, now: number, bbox?: Bbox): Promise
   const kept = isoSeconds(now - KEEP_IN_DATA_DAYS * DAY_MS);
   const last = (low: number, high: number) => Math.max(Math.floor(low), Math.ceil(high) - 1);
   const area = bbox ? "AND cell_lon BETWEEN ? AND ? AND cell_lat BETWEEN ? AND ?" : "";
+  // One pass over the visible changes, through the (place, fact) index, or the cell index within a box,
+  // numbering each place and fact's changes newest first. A NOT EXISTS self-join would search the index
+  // again for every row. Window functions are in SQLite's own engine, which D1 runs.
   const query = db.prepare(
-    `WITH visible AS (
-       SELECT * FROM recent_changes c
+    `SELECT place, fact, value, accepted, in_data_at FROM (
+       SELECT place, fact, value, accepted, in_data_at,
+         ROW_NUMBER() OVER (PARTITION BY place, fact ORDER BY accepted DESC, feedback_id DESC) AS newest
+       FROM recent_changes c
        WHERE (c.in_data_at IS NULL OR c.in_data_at >= ?)
          AND NOT EXISTS (SELECT 1 FROM blocked_contributors b WHERE b.contributor = c.contributor)
          ${area}
      )
-     SELECT place, fact, value, accepted, in_data_at FROM visible c
-     WHERE NOT EXISTS (
-       SELECT 1 FROM visible d
-       WHERE d.place = c.place AND d.fact = c.fact AND (d.accepted > c.accepted OR (d.accepted = c.accepted AND d.feedback_id > c.feedback_id))
-     )
+     WHERE newest = 1
      ORDER BY place, fact`,
   );
   const bound = bbox
