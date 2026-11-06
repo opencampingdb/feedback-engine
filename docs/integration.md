@@ -289,7 +289,7 @@ const recent = (await (await fetch(`${endpoint}/v1/places/recent?bbox=${bbox}`))
 const shown = places.map((place) => withRecentChanges(place, recent.changes ?? [], manifest.data_version));
 ```
 
-Each contributor (or install, without one) may send 3 new places a day. The fourth gets `429 rate_limited`.
+Each contributor (or install, without one) may send 10 new places a day. The eleventh gets `429 rate_limited`.
 
 ## 6. Reviews: contributors, reports and blocking
 
@@ -302,7 +302,7 @@ App stores ask any app that shows reviews to filter objectionable content, let p
 - One review per contributor per place: a newer one replaces the older.
 - A contributor's first review is held for a person. Once one of their reviews or other feedback has been accepted, later reviews are published at the next apply run.
 - Text sent word for word for another place is held for a person.
-- Each contributor may send 20 submissions a day (the app key can set `contributor_daily_limit`).
+- Each contributor may send 200 submissions a day (the app key can set `contributor_daily_limit`), and so may each install and each App Attest key. Each client network may send 500.
 
 **Was there.** Set `review.visited_nearby: true` only when your app saw the phone within its set distance of the place in the 60 days before the review, for example from a check or a saved visit. Never send the location. It is published with the review so apps can show it. An app key with `requires_visited_nearby` refuses reviews without it (`400 visited_nearby_required`).
 

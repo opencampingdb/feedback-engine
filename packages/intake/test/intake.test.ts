@@ -1,3 +1,4 @@
+import { DEVICE_DAILY_LIMIT, ORIGIN_DAILY_LIMIT } from "../src/ratelimit.js";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createAppJwt, importPrivateKey } from "../src/github.js";
@@ -228,10 +229,10 @@ describe("intake", () => {
     expect((await handle(post({ ...review, pad: "x".repeat(20_000) }), env())).status).toBe(413);
   });
 
-  it("limits each device to 20 a day", async () => {
+  it(`limits each device to ${DEVICE_DAILY_LIMIT} a day`, async () => {
     const kv = fakeKv();
-    const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 1000 } }) };
-    for (let i = 0; i < 20; i++) expect((await handle(post(review), e)).status).toBe(202);
+    const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 10_000 } }) };
+    for (let i = 0; i < DEVICE_DAILY_LIMIT; i++) expect((await handle(post(review), e)).status).toBe(202);
     const res = await handle(post(review), e);
     expect(res.status).toBe(429);
     expect(Number(res.headers.get("retry-after"))).toBe(12 * 60 * 60);
@@ -272,18 +273,18 @@ describe("intake", () => {
     expect(networkPrefix("1::2::3")).toBeUndefined();
   });
 
-  it("limits each client network to 100 a day, whatever device ids it sends", async () => {
+  it(`limits each client network to ${ORIGIN_DAILY_LIMIT} a day, whatever device ids it sends`, async () => {
     const kv = fakeKv();
-    const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 1000 } }) };
+    const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 10_000 } }) };
     const from = (ip: string, i: number) =>
       post(
         { ...review, device: `${String(i).padStart(8, "0")}-e2bb-4255-8caf-4136c566a962`, contributor: `acct_${String(i).padStart(16, "0")}` },
         { "cf-connecting-ip": ip },
       );
-    for (let i = 0; i < 100; i++) expect((await handle(from(`203.0.113.${i}`, i), e)).status).toBe(202);
-    expect((await handle(from("203.0.113.200", 100), e)).status).toBe(429);
+    for (let i = 0; i < ORIGIN_DAILY_LIMIT; i++) expect((await handle(from(`203.0.113.${i % 250}`, i), e)).status).toBe(202);
+    expect((await handle(from("203.0.113.251", ORIGIN_DAILY_LIMIT), e)).status).toBe(429);
     // Another network still gets through.
-    expect((await handle(from("198.51.100.7", 101), e)).status).toBe(202);
+    expect((await handle(from("198.51.100.7", ORIGIN_DAILY_LIMIT + 1), e)).status).toBe(202);
   });
 
   it("refuses owner submissions with 403 for a key limited to feedback", async () => {
