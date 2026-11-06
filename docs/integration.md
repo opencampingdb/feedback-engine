@@ -101,6 +101,9 @@ await feedback.report({
 });
 await feedback.reportFacts({ place: { newPlace: "draft-7" }, facts: { toilets: true, showers: true }, consent: true });
 // A ref that names no queued or sent new place throws FeedbackValidationError.
+// feedback.newPlace(ref) says where it stands: waiting, sent (with its ocdb_
+// id), dropped or unknown. Photos of the new place can wait too: see
+// docs/photos.md, "A photo of a place the traveller has just added".
 
 // Closed. Use kind "reopened" when it is open again.
 await feedback.report({ place, report: { kind: "closed", note: "Gate chained, sign says closed for works" }, consent: true });

@@ -282,7 +282,15 @@ export interface ReviewReportInput {
 }
 
 export interface PhotoInput {
-  place: string;
+  /**
+   * The place, or a new place still waiting for its id (`{ newPlace: <ref> }`).
+   * For a waiting place the photo is not uploaded yet: the client keeps a small
+   * record with `key` and uploads the files `loadPhoto(key)` gives it once the
+   * new place has its id (on `flush`).
+   */
+  place: PlaceTarget;
+  /** The app's own key for these files, for `loadPhoto` and `onPhotoSettled`. Required when `place` is a new place. */
+  key?: string;
   /** The signed-in traveller's opaque account id. Required for photos. */
   contributor: string;
   consent: boolean;
@@ -326,8 +334,29 @@ export interface PhotoErasureInput {
  */
 export type PhotoResult =
   | { status: "sent"; id: string }
+  /** The place is a new place still waiting for its id. The photo goes on a later `flush`; keep the files until `onPhotoSettled`. */
+  | { status: "waiting" }
   | { status: "rejected"; httpStatus: number; error?: string }
   | { status: "offline" };
+
+/** Where a new place a ref names stands: still `waiting` to be sent, `sent` with its `ocdb_` id, `dropped`, or `unknown`. */
+export type NewPlaceStatus = { status: "waiting" } | { status: "sent"; place: string } | { status: "dropped" } | { status: "unknown" };
+
+/**
+ * What became of a photo that waited for a new place's id. `sent` carries the
+ * photo id. `dropped` says why: `new_place_dropped` (the new place was dropped
+ * or refused), `photo_missing` (`loadPhoto` gave null), `rejected` (the photo
+ * service refused it, with `httpStatus` and `error`) or `expired` (it waited
+ * longer than `maxQueueAgeMs`). Either way the app can delete its files.
+ */
+export interface PhotoSettled {
+  key: string;
+  /** The ref of the new place the photo waited for. */
+  newPlace: string;
+  outcome:
+    | { status: "sent"; id: string; place: string }
+    | { status: "dropped"; reason: "new_place_dropped" | "photo_missing" | "rejected" | "expired"; httpStatus?: number; error?: string };
+}
 
 /**
  * A photo pass for the photo server's `x-photo-pass` header, or why there is
@@ -412,6 +441,12 @@ export interface FeedbackClient {
   flush(): Promise<FlushResult>;
   /** Number of items waiting to be sent. */
   pending(): Promise<number>;
+  /**
+   * Where the new place a `new_place` report's ref names stands: `waiting`,
+   * `sent` with its `ocdb_` id, `dropped`, or `unknown`. Pass it to a photo
+   * client as `resolveNewPlace`, so photos of a new place can wait for its id.
+   */
+  newPlace(ref: string): Promise<NewPlaceStatus>;
 }
 
 /**
@@ -448,7 +483,17 @@ export interface PhotoClient {
 }
 
 /** Options for a photo client: as for feedback, with the photo service's endpoint and app key. */
-export type PhotoClientOptions = FeedbackClientOptions;
+export interface PhotoClientOptions extends FeedbackClientOptions {
+  /**
+   * Where a new place stands, for photos of a place still waiting for its id:
+   * pass the feedback client's `newPlace`. Needed to photograph a new place.
+   */
+  resolveNewPlace?: (ref: string) => Promise<NewPlaceStatus>;
+  /** The files the app kept under `key`, or null when it no longer has them. Needed to photograph a new place. */
+  loadPhoto?: (key: string) => Promise<{ full: ArrayBuffer | Uint8Array; thumb: ArrayBuffer | Uint8Array } | null>;
+  /** Called once for each photo that waited for a new place, when it was uploaded or dropped. Errors in it are caught. */
+  onPhotoSettled?: (settled: PhotoSettled) => Promise<void> | void;
+}
 
 export class ConsentRequiredError extends Error {
   constructor() {
@@ -662,7 +707,7 @@ export function backoffDelay(attempts: number, random: () => number = Math.rando
   return Math.round(ceiling * (0.5 + random() * 0.5));
 }
 
-function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoClient {
+function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient {
   const {
     appKey,
     appVersion,
@@ -684,6 +729,7 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
   const deviceKey = `${storagePrefix}.device`;
   const queueKey = `${storagePrefix}.queue`;
   const newPlacesKey = `${storagePrefix}.newplaces`;
+  const waitingPhotosKey = `${storagePrefix}.waitingphotos`;
 
   if (!appKey) throw new Error("appKey is required");
   if (!appVersion) throw new Error("appVersion is required");
@@ -981,7 +1027,7 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
   }
 
   /** Sends a photo's meta in a header and both files, full then thumb, as the body. */
-  async function sendPhoto(input: PhotoInput): Promise<PhotoResult> {
+  async function uploadPhoto(input: Omit<PhotoInput, "place" | "key"> & { place: string }): Promise<PhotoResult> {
     if (input.consent !== true) throw new ConsentRequiredError();
     const full = input.full instanceof Uint8Array ? input.full : new Uint8Array(input.full);
     const thumb = input.thumb instanceof Uint8Array ? input.thumb : new Uint8Array(input.thumb);
@@ -1044,6 +1090,124 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
     const refused = attestationErrorIn(res.status, answer);
     if (refused) await callRefusalHook(options.onAttestationRejected, refused, answer);
     return { status: "rejected", httpStatus: res.status, ...(typeof answer.error === "string" ? { error: answer.error } : {}) };
+  }
+
+  /** Where the new place `ref` names stands (the feedback client's `newPlace`). */
+  function newPlace(ref: string): Promise<NewPlaceStatus> {
+    return serial(async () => {
+      const known = (await readNewPlaces()).get(ref);
+      if (known?.dropped) return { status: "dropped" } as const;
+      if (known?.place) return { status: "sent", place: known.place } as const;
+      return (await readQueue()).some((q) => q.ref === ref && isNewPlaceItem(q)) ? ({ status: "waiting" } as const) : ({ status: "unknown" } as const);
+    });
+  }
+
+  /** A photo kept until its new place has an id: the app keeps the files under `key`. */
+  interface WaitingPhoto {
+    key: string;
+    newPlace: string;
+    contributor: string;
+    queuedAt: number;
+  }
+  async function readWaitingPhotos(): Promise<WaitingPhoto[]> {
+    try {
+      const parsed: unknown = JSON.parse((await storage.getItem(waitingPhotosKey)) ?? "[]");
+      return Array.isArray(parsed) ? (parsed as WaitingPhoto[]) : [];
+    } catch {
+      return [];
+    }
+  }
+  async function writeWaitingPhotos(list: WaitingPhoto[]): Promise<void> {
+    if (list.length === 0) await storage.removeItem(waitingPhotosKey);
+    else await storage.setItem(waitingPhotosKey, JSON.stringify(list));
+  }
+
+  async function settlePhoto(settled: PhotoSettled): Promise<void> {
+    try {
+      await options.onPhotoSettled?.(settled);
+    } catch {
+      // The app's own clean-up failing must not stop the others.
+    }
+  }
+
+  /** Uploads a photo, or keeps it until its new place has an id. */
+  async function sendPhoto(input: PhotoInput): Promise<PhotoResult> {
+    if (input.consent !== true) throw new ConsentRequiredError();
+    const { place, key, ...rest } = input;
+    if (typeof place === "string") return uploadPhoto({ ...rest, place });
+    const ref = (place as Partial<NewPlaceRef> | null)?.newPlace;
+    const problems: string[] = [];
+    if (typeof ref !== "string" || ref.length < 1 || ref.length > MAX_REF_LENGTH) problems.push(`place.newPlace must be the ref of a new_place report, 1 to ${MAX_REF_LENGTH} characters`);
+    if (typeof key !== "string" || key.length < 1 || key.length > 200) problems.push("key must be the app's own key for the files, 1 to 200 characters, for a new place");
+    if (typeof input.contributor !== "string" || input.contributor.length === 0) problems.push("contributor is required for photos");
+    if (problems.length > 0) throw new FeedbackValidationError(problems);
+    if (!options.resolveNewPlace || !options.loadPhoto) {
+      throw new Error("Photos of a new place need the photo client's resolveNewPlace and loadPhoto options");
+    }
+    const status = await options.resolveNewPlace(ref!);
+    if (status.status === "sent") return uploadPhoto({ ...rest, place: status.place });
+    if (status.status === "dropped") throw new FeedbackValidationError([`the new place ${ref} was dropped, so its photo can't be sent`]);
+    if (status.status === "unknown") throw new FeedbackValidationError([`no new_place report with the ref ${ref} is queued or was sent`]);
+    await serial(async () => {
+      const list = await readWaitingPhotos();
+      if (!list.some((w) => w.key === key)) list.push({ key: key!, newPlace: ref!, contributor: input.contributor, queuedAt: now() });
+      await writeWaitingPhotos(list);
+    });
+    return { status: "waiting" };
+  }
+
+  /**
+   * Uploads the waiting photos whose new place now has an id, in the order
+   * they were taken, and drops those whose new place was dropped, whose files
+   * are gone or that waited too long. A photo that can't go now (offline,
+   * a passing refusal) stays for the next flush without holding up the rest.
+   */
+  async function flushWaitingPhotos(): Promise<void> {
+    const list = await serial(readWaitingPhotos);
+    if (list.length === 0) return;
+    const settledKeys = new Set<string>();
+    for (const w of list) {
+      const drop = async (reason: "new_place_dropped" | "photo_missing" | "rejected" | "expired", extra: { httpStatus?: number; error?: string } = {}) => {
+        settledKeys.add(w.key);
+        await settlePhoto({ key: w.key, newPlace: w.newPlace, outcome: { status: "dropped", reason, ...extra } });
+      };
+      if (now() - w.queuedAt > maxQueueAgeMs) {
+        await drop("expired");
+        continue;
+      }
+      const status = options.resolveNewPlace ? await options.resolveNewPlace(w.newPlace) : ({ status: "waiting" } as const);
+      if (status.status === "dropped" || status.status === "unknown") {
+        await drop("new_place_dropped");
+        continue;
+      }
+      if (status.status !== "sent") continue;
+      let files: Awaited<ReturnType<NonNullable<PhotoClientOptions["loadPhoto"]>>> = null;
+      try {
+        files = options.loadPhoto ? await options.loadPhoto(w.key) : null;
+      } catch {
+        continue; // the app could not read its files now; try again next flush
+      }
+      if (!files) {
+        await drop("photo_missing");
+        continue;
+      }
+      let result: PhotoResult;
+      try {
+        result = await uploadPhoto({ place: status.place, contributor: w.contributor, consent: true, full: files.full, thumb: files.thumb });
+      } catch {
+        await drop("rejected", { httpStatus: 0, error: "invalid_files" });
+        continue;
+      }
+      if (result.status === "sent") {
+        settledKeys.add(w.key);
+        await settlePhoto({ key: w.key, newPlace: w.newPlace, outcome: { status: "sent", id: result.id, place: status.place } });
+      } else if (result.status === "rejected" && !(result.httpStatus === 429 || result.httpStatus >= 500 || result.httpStatus === 408 || result.error?.startsWith("attestation"))) {
+        await drop("rejected", { httpStatus: result.httpStatus, ...(result.error ? { error: result.error } : {}) });
+      }
+      // offline, rate limited, busy or a refused assertion: it stays for the next flush
+    }
+    if (settledKeys.size === 0) return;
+    await serial(async () => writeWaitingPhotos((await readWaitingPhotos()).filter((w) => !settledKeys.has(w.key))));
   }
 
   // The current pass, and a request for a new one already under way.
@@ -1172,14 +1336,19 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
         "photo_report",
       ),
     erasePhotos: ({ contributor, consent, ref }) => submit({ place: null, contributor, consent, ref }, "photo_erasure"),
-    flush: flushNow,
+    flush: async () => {
+      const result = await flushNow();
+      await flushWaitingPhotos();
+      return result;
+    },
     pending: () => serial(async () => (await readQueue()).length),
+    newPlace,
   };
 }
 
 /** A client for Open Camping DB's feedback intake: reports, reviews, checks, fees and owner requests. */
 export function createFeedbackClient(options: FeedbackClientOptions): FeedbackClient {
-  const { photo: _photo, photoPass: _pass, reportPhoto: _report, erasePhotos: _erase, ...feedback } = createClient(options);
+  const { photo: _photo, photoPass: _pass, reportPhoto: _report, erasePhotos: _erase, ...feedback } = createClient(options as PhotoClientOptions);
   return feedback;
 }
 

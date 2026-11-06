@@ -63,7 +63,34 @@ Make two JPEGs on the phone, with the EXIF data (location, camera, time) removed
 | `{ status: "rejected", httpStatus, error }` | The intake refused it. `error` says why, for example `rate_limited`, `not_jpeg`, `sha256_mismatch`, `attestation_invalid` or `photo_not_allowed` (SafeSearch). |
 | `{ status: "offline" }` | The intake could not be reached, or the platform could not attest. Nothing was sent. |
 
-Photos are never queued, because the files are too big for the queue's storage. On `offline`, keep the files and call `photo` again later. The client checks that both files are JPEGs within the size limits before sending and throws `FeedbackValidationError` if not.
+Photos are never queued, because the files are too big for the queue's storage. On `offline`, keep the files and call `photo` again later.
+
+### A photo of a place the traveller has just added
+
+A place the traveller has just added has no id until its `new_place` report is sent. Its photos can wait in the SDK. Give the `new_place` report a `ref` (see the integration guide, section 5), and give the photo client the feedback client's `newPlace`, a loader for your files and a callback:
+
+```ts
+const photos = createPhotoClient({
+  // ...as above...
+  resolveNewPlace: feedback.newPlace, // where the new place stands
+  loadPhoto: async (key) => readMyFiles(key), // { full, thumb }, or null when gone
+  onPhotoSettled: async ({ key, outcome }) => deleteMyFiles(key), // uploaded or dropped
+});
+
+const result = await photos.photo({ place: { newPlace: "draft-7" }, key: "photo-123", contributor, consent: true, full, thumb });
+// { status: "waiting" } until the new place is sent
+```
+
+- While the new place waits, `photo` answers `{ status: "waiting" }`. The client keeps only a small record (`key`, the ref, the contributor and the time) in storage. Your app keeps the files under `key`.
+- Each `photos.flush()` uploads the waiting photos whose new place has been sent, in the order they were taken, under its `ocdb_` id, and calls `onPhotoSettled` with `{ status: "sent", id, place }`. Call it when the app comes to the foreground and after the feedback client sends.
+- A photo that can't go now (offline, rate limited, the service busy, a refused assertion) stays for the next flush, without holding up the others.
+- A photo is dropped, with `onPhotoSettled` saying why:
+  - `new_place_dropped`: the new place was dropped or refused;
+  - `photo_missing`: `loadPhoto` gave `null`;
+  - `rejected`: the photo service refused it, with `httpStatus` and `error`;
+  - `expired`: it waited longer than `maxQueueAgeMs`.
+- If the new place was sent already, `photo` uploads at once. If it was dropped, or the ref names no new place, `photo` throws `FeedbackValidationError`.
+- Waiting photos survive the app restarting. The client checks that both files are JPEGs within the size limits before sending and throws `FeedbackValidationError` if not.
 
 On the wire, the SDK sends the photo's meta (place, contributor, device, app version, consent and the SHA-256 and size of each file) as base64url JSON in the `x-photo-meta` header, and the full size file followed by the thumbnail as the body. Attestation covers the meta text, so the intake can check the files against the hashes it carries.
 
