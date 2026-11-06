@@ -18,7 +18,7 @@ import type {
 } from "./types.js";
 import { isFeedbackId, readProgress, type Progress } from "./progress.js";
 import { sha256Hex, sha256HexBytes } from "./sha256.js";
-import { MAX_PHOTO_BYTES, MAX_THUMB_BYTES, isPlaceId, newPlaceId, validateSubmission } from "./validate.js";
+import { MAX_PHOTO_BYTES, MAX_THUMB_BYTES, isPhotoId, isPlaceId, newPlaceId, validateSubmission } from "./validate.js";
 
 /** Storage the client keeps its queue and device id in. AsyncStorage matches this shape. */
 export interface StorageAdapter {
@@ -461,7 +461,7 @@ export interface FeedbackClient {
    * sent (`outcome.id` in `onAnswered`, or `id` in a `sent` result). Asks
    * `GET /v1/feedback/progress` at once, never queued, in calls of up to 100
    * ids, and answers one `Progress` for each id in the order given. An id
-   * that is not a feedback id (such as a photo's `pho_` id) is answered
+   * that is not a feedback id (such as a photo's `pho_` id, which `photos.progress` answers) is answered
    * `unknown` without asking. Throws `ProgressRequestError` when the intake
    * cannot be reached or refuses the call.
    */
@@ -499,6 +499,20 @@ export interface PhotoClient {
   flush(): Promise<FlushResult>;
   /** Number of items waiting to be sent. */
   pending(): Promise<number>;
+  /**
+   * Where each photo is, by the `pho_` id its upload answered (`id` in a
+   * `sent` result or in `onPhotoSettled`). Asks the photo intake's
+   * `GET /v1/photos/progress` at once, in calls of up to 100 ids, and answers
+   * one `Progress` for each id in the order given, as the feedback client's
+   * `progress` does: `received`, `waiting`, `accepted`, `held` (with
+   * `held_reason`, one of `PHOTO_HELD_REASONS`), `refused` (with `by` and
+   * `reason`), `in_data` (published in the photo records, with `in_data_at`)
+   * or `unknown`. Unlike feedback, a photo can leave `in_data`: hidden after
+   * reports it is `held`, removed it is `refused`. An id that is not a photo
+   * id is answered `unknown` without asking. Throws `ProgressRequestError`
+   * when the photo intake cannot be reached or refuses the call.
+   */
+  progress(ids: readonly string[]): Promise<Progress[]>;
 }
 
 /** Options for a photo client: as for feedback, with the photo service's endpoint and app key. */
@@ -742,7 +756,7 @@ export function backoffDelay(attempts: number, random: () => number = Math.rando
   return Math.round(ceiling * (0.5 + random() * 0.5));
 }
 
-function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient {
+function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoClient, "progress"> & { photoProgress: PhotoClient["progress"] } {
   const {
     appKey,
     appVersion,
@@ -1387,11 +1401,10 @@ function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient
     return passRequest;
   }
 
-  const progressUrl = `${options.endpoint.replace(/\/+$/, "")}/v1/feedback/progress`;
-
-  /** Each id's progress, asked for in calls of up to MAX_PROGRESS_IDS feedback ids. */
-  async function progress(ids: readonly string[]): Promise<Progress[]> {
-    const asked = [...new Set(ids.filter(isFeedbackId))];
+  /** Each id's progress at `path`, asked for in calls of up to MAX_PROGRESS_IDS ids that `isId` accepts. */
+  async function progressAt(path: string, isId: (id: string) => boolean, ids: readonly string[]): Promise<Progress[]> {
+    const progressUrl = `${options.endpoint.replace(/\/+$/, "")}${path}`;
+    const asked = [...new Set(ids.filter(isId))];
     const found = new Map<string, unknown>();
     for (let start = 0; start < asked.length; start += MAX_PROGRESS_IDS) {
       const part = asked.slice(start, start + MAX_PROGRESS_IDS);
@@ -1418,6 +1431,8 @@ function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient
     }
     return ids.map((id) => readProgress(id, found.get(id)));
   }
+  const progress = (ids: readonly string[]) => progressAt("/v1/feedback/progress", isFeedbackId, ids);
+  const photoProgress = (ids: readonly string[]) => progressAt("/v1/photos/progress", isPhotoId, ids);
 
   const claimResponse = (answer: Record<string, unknown>): OwnerClaimResponse => ({
     id: String(answer.id ?? ""),
@@ -1504,6 +1519,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient
     pending: () => serial(async () => (await readQueue()).length),
     newPlace,
     progress,
+    photoProgress,
   };
 }
 
@@ -1526,5 +1542,6 @@ export function createPhotoClient(options: PhotoClientOptions): PhotoClient {
     erasePhotos: client.erasePhotos,
     flush: client.flush,
     pending: client.pending,
+    progress: client.photoProgress,
   };
 }
