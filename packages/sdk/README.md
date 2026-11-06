@@ -11,6 +11,7 @@ await feedback.review({ place, review: { stars: 5, text: "Quiet and shady", visi
 ```
 
 - Submissions are validated, queued in the storage you pass and retried with backoff. Network errors, 429 and 5xx keep an item; 400 and 401 drop it.
+- `flush()` sends due items together, up to `maxBatchSize` (1 to 50, default 50) in one `POST /v1/feedback/batch` with one `attest` call over the batch body, so an Android app spends one Play Integrity token a batch, not one an item (Google's default is 10,000 requests a day across all installs). Each item is answered and settled as it would be alone; a whole-batch failure keeps every item. One due item goes alone to `POST /v1/feedback`, and an intake without the batch route (404 or 405) is sent one item at a time. See docs/integration.md, "Batches".
 - A random per-install device id is made once and kept in storage.
 - Nothing is sent unless `consent: true` is passed. Show `CONSENT_TEXT` first.
 - Show `ATTRIBUTION` wherever the data appears.
