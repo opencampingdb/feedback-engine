@@ -46,6 +46,16 @@ SAFESEARCH = "off"
 # Every minute: writes the queued items to the inbox, starts the apply when it
 # is due, and runs the AI reviewer when it is on and due. Does nothing without
 # RECENT_LIST, APPLY_WORKFLOW or AI_REVIEWER.
+# Workers Logs: one line per request from src/requestlog.ts (method, path,
+# status, refusal code, platform, time) and the Worker's own warnings.
+# Invocation logs are off, so request headers and bodies are never stored.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+invocation_logs = false
+
 [triggers]
 crons = ["* * * * *"]
 

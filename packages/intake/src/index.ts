@@ -16,6 +16,7 @@ import {
   isDoubtFact,
   isValidFactValue,
 } from "@opencampingdb/feedback";
+import { withRequestLog } from "./requestlog.js";
 import { AttestError, verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
 import { refuse, type RefusalBody } from "./refusal.js";
 import { fromBase64, hex, sha256, toBase64Url } from "./bytes.js";
@@ -1405,7 +1406,7 @@ const scheduled = createScheduled({ fetch: (input, init) => fetch(input, init), 
 
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
-    return handle(request, env);
+    return withRequestLog(request, () => handle(request, env));
   },
   /** The cron trigger in wrangler.toml, every minute. */
   async scheduled(_controller: unknown, env: Env): Promise<void> {
