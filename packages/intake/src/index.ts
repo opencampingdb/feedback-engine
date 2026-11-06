@@ -1605,6 +1605,7 @@ export function createHandler(deps: Deps) {
     }
     if (
       route !== "/v1/feedback" &&
+      route !== "/v1/feedback/batch" &&
       route !== "/v1/photos" &&
       route !== "/v1/photos/pass" &&
       route !== "/v1/attest/challenge" &&
@@ -1624,6 +1625,7 @@ export function createHandler(deps: Deps) {
     if (!app) return json(401, { error: "invalid_app_key" }, cors);
 
     if (route === "/v1/photos") return photo(request, env, app, cors);
+    if (route === "/v1/feedback/batch") return feedbackBatch(request, env, app, cors);
     const declared = Number(request.headers.get("content-length") ?? 0);
     if (declared > MAX_BODY_BYTES) return json(413, { error: "too_large" }, cors);
     if (route === "/v1/attest/challenge") return challenge(env, app, cors);
