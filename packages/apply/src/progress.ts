@@ -295,17 +295,18 @@ export const SENT_FILE = "progress/sent.json";
  * `progress/sent.json` in the inbox: the state last sent for each item in the
  * 90-day window, and when all of them were last sent.
  */
-interface SentRecord {
+export interface SentRecord<Value extends string = ProgressUpdate["state"]> {
   reconciled_at?: string;
-  items: Record<string, ProgressUpdate["state"]>;
+  items: Record<string, Value>;
 }
 
 /** States the intake never moves an item out of, so they are not sent again. */
 const FINAL_STATES: ReadonlySet<string> = new Set(["in_data", "refused"]);
 
-async function readSent(inbox: string): Promise<SentRecord> {
+/** The record of what was last sent, in `file` of the inbox. Empty when there is none. */
+export async function readSent<Value extends string = ProgressUpdate["state"]>(inbox: string, file = SENT_FILE): Promise<SentRecord<Value>> {
   try {
-    const parsed = JSON.parse(await readFile(join(inbox, SENT_FILE), "utf8")) as Partial<SentRecord>;
+    const parsed = JSON.parse(await readFile(join(inbox, file), "utf8")) as Partial<SentRecord<Value>>;
     return { ...(typeof parsed.reconciled_at === "string" ? { reconciled_at: parsed.reconciled_at } : {}), items: parsed.items ?? {} };
   } catch {
     return { items: {} };
@@ -416,13 +417,19 @@ export async function sendProgress(options: SendProgressOptions): Promise<{ sent
   }
   const next: SentRecord = {
     ...(reconcile && failed === 0 ? { reconciled_at: runAt } : record.reconciled_at !== undefined ? { reconciled_at: record.reconciled_at } : {}),
-    items: Object.fromEntries(Object.entries(items).sort(([a], [b]) => (a < b ? -1 : 1))),
+    items,
   };
-  const text = `${JSON.stringify(next, null, 2)}\n`;
-  const path = join(options.inbox, SENT_FILE);
+  return { sent, failed, recorded: await writeSent(options.inbox, SENT_FILE, next) };
+}
+
+/** Writes the record of what was sent to `file` in the inbox, items sorted by id. Returns whether the file changed. */
+export async function writeSent<Value extends string>(inbox: string, file: string, record: SentRecord<Value>): Promise<boolean> {
+  const sorted = { ...record, items: Object.fromEntries(Object.entries(record.items).sort(([a], [b]) => (a < b ? -1 : 1))) };
+  const text = `${JSON.stringify(sorted, null, 2)}\n`;
+  const path = join(inbox, file);
   const before = await readFile(path, "utf8").catch(() => undefined);
-  if (text === before) return { sent, failed, recorded: false };
+  if (text === before) return false;
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, text, "utf8");
-  return { sent, failed, recorded: true };
+  return true;
 }

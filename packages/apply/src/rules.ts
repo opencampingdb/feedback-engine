@@ -7,6 +7,7 @@ import {
   type FactName,
   type FactValue,
   type NewPlaceReportReason,
+  type PhotoHeldReason,
   type StoredFeedback,
 } from "@opencampingdb/feedback";
 import {
@@ -259,9 +260,24 @@ export function isVisible(review: Review, blocked: ReadonlySet<string> = new Set
   return review.hidden === undefined && !blocked.has(review.contributor);
 }
 
-/** Whether a stored item was applied by the rules (not held for a person, not refused). */
 /** A photo upload's photo id: `pho_` and the item's ulid. */
-const photoIdOf = (item: StoredFeedback) => `pho_${item.id.replace(/^fb_/, "")}`;
+export const photoIdOf = (item: Pick<StoredFeedback, "id">) => `pho_${item.id.replace(/^fb_/, "")}`;
+
+/** How the reason for holding a photo for a person starts, by its held reason in photo progress. */
+export const PHOTO_HELD_WHY = {
+  same_file: "the same file was sent for another place",
+  check_unavailable: "SafeSearch could not check it",
+  safesearch: "SafeSearch rates it",
+  first_photo: "first photo from this contributor",
+} as const satisfies Partial<Record<PhotoHeldReason, string>>;
+
+/** The held reason of a photo the rules held for a person, from the decision's reason. */
+export function photoHeldReason(reason: string | undefined): PhotoHeldReason | undefined {
+  const found = (Object.entries(PHOTO_HELD_WHY) as [PhotoHeldReason, string][]).find(([, why]) => reason?.startsWith(why));
+  return found?.[0];
+}
+
+/** Whether a stored item was applied by the rules (not held for a person, not refused). */
 
 function wasApplied(item: StoredFeedback): boolean {
   return (item as { outcome?: { result?: string } }).outcome?.result === "applied";
@@ -676,12 +692,12 @@ export function applyRules(input: RulesInput): RulesOutput {
       const flagged = rated !== undefined && safeSearchVerdict(rated) !== "pass";
       if (repeated || flagged || !trusted.has(item.contributor)) {
         const why = repeated
-          ? "the same file was sent for another place"
+          ? PHOTO_HELD_WHY.same_file
           : flagged
             ? rated === "unchecked"
-              ? "SafeSearch could not check it"
-              : `SafeSearch rates it adult ${rated.adult}, violence ${rated.violence}, racy ${rated.racy}`
-            : "first photo from this contributor";
+              ? PHOTO_HELD_WHY.check_unavailable
+              : `${PHOTO_HELD_WHY.safesearch} adult ${rated.adult}, violence ${rated.violence}, racy ${rated.racy}`
+            : PHOTO_HELD_WHY.first_photo;
         edits.push({ kind: "photo", place: item.place, photo, feedback: item.id });
         note(item.place, `photo ${photoId} (${photo.width} x ${photo.height}), ${why} (look at it before merging)`, false, [item], photoId);
         decide(item, "needs_review", `${why}, so a person checks it`);

@@ -107,6 +107,8 @@ export interface RunSummary {
    * (`sendProgress`).
    */
   decisions: RunDecision[];
+  /** The photos this run decided, by their feedback id, in the order they arrived: for photo progress (`sendPhotoProgress`). */
+  photo_decisions: RunDecision[];
 }
 
 /** An item a run decided, as the run summary lists it. */
@@ -392,6 +394,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     not_applied: [...new Set(decisions.filter((d) => d.outcome !== "applied" && d.outcome !== "waiting").map((d) => d.id))].sort(),
     refused: [...new Set(decisions.filter((d) => d.outcome === "refused").map((d) => d.id))].sort(),
     decisions: decisions.filter((d) => !photoIds.has(d.id)).map((d) => ({ id: d.id, place: d.place, outcome: d.outcome, reason: d.reason })),
+    photo_decisions: decisions.filter((d) => photoIds.has(d.id)).map((d) => ({ id: d.id, place: d.place, outcome: d.outcome, reason: d.reason })),
   };
 }
 

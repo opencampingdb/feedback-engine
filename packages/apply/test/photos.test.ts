@@ -262,6 +262,8 @@ describe("photo run", () => {
     for (const item of [photo, e]) await put(join(inbox, "pending", "2026-11-02", `${item.id}.json`), JSON.stringify(item));
     const summary = await run({ inbox, data, reviewData: review, now: new Date(NOW) });
     expect(summary.decisions.map((d) => d.id)).toEqual([e.id]);
+    // Photo progress takes them from photo_decisions.
+    expect(summary.photo_decisions.map((d) => d.id)).toEqual([photo.id]);
   });
 
   it("removes an erased contributor's photos and lists them in removed_photos.json", async () => {
@@ -304,6 +306,7 @@ describe("photo run", () => {
       const summary = await run({ inbox, data: photosRepo, places: ocdb, now: new Date(NOW), recentList: { ids: async () => new Set([NEW]) } });
       expect(summary.counts).toMatchObject({ waiting: 1, refused: 0 });
       expect(await isPending(p)).toBe(true);
+      expect(summary.photo_decisions).toEqual([{ id: p.id, place: NEW, outcome: "waiting", reason: expect.stringContaining("new place not in the data yet") }]);
     });
 
     it("refuses a photo of a place on neither the data nor the list", async () => {

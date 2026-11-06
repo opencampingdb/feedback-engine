@@ -3,6 +3,7 @@ import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import type { ReviewPr } from "./owners.js";
 import { intakeRecentList, intakeRecentStore, sendBlockList, sendDoubtCases, sendOverruled, settleRecentChanges, settleRecentPlaces } from "./recent.js";
+import { sendPhotoProgress } from "./photo-progress.js";
 import { sendProgress } from "./progress.js";
 import { run } from "./run.js";
 
@@ -37,6 +38,10 @@ last commit on <dir> that touched its file, so <dir> needs its last 14 days
 of history. Only items whose progress changed since the last send are sent,
 recorded in <inbox>/progress/sent.json, and every item on the first run
 after 00:00 UTC each Monday.
+With --places, --main and --intake instead send the app's photo intake each
+photo's progress from the last 90 days, for GET /v1/photos/progress, and
+nothing else: <dir> is a checkout of the records repository's main, and what
+was sent is recorded in <inbox>/progress/photos-sent.json.
 --review-prs (up to 100; owner approvals read the 30 most recent) and
 --auto-prs (the same JSON for --head feedback/auto) must be read before <dir>
 is checked out, so a merged PR's changes are on it.
@@ -131,7 +136,24 @@ async function main(): Promise<number> {
   if (values.summary) await writeFile(values.summary, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
   // The progress sent is recorded in the inbox, so the inbox commit carries it too.
   let progressRecorded = false;
-  if (values.main && values.intake && token) {
+  if (values.places && values.main && values.intake && token) {
+    // A photo run tells the photo intake only where each photo is.
+    const progress = await sendPhotoProgress({
+      inbox: values.inbox,
+      main: values.main,
+      store: intakeRecentStore(values.intake, token),
+      decisions: summary.photo_decisions,
+      ...(reviewPrs ? { reviewPrs } : {}),
+      ...(autoPrs ? { autoPrs } : {}),
+      ...(values["bot-login"] ? { botLogins: values["bot-login"] } : {}),
+      ...(now ? { now } : {}),
+    }).catch((error: unknown) => {
+      console.warn(`working out the progress of photos failed, trying again next run: ${String(error)}`);
+      return { sent: 0, failed: 0, recorded: false };
+    });
+    progressRecorded = progress.recorded;
+    console.log(`progress of ${progress.sent} photo(s) sent to the photo intake${progress.failed > 0 ? `, ${progress.failed} not sent` : ""}`);
+  } else if (values.main && values.intake && token) {
     const store = intakeRecentStore(values.intake, token);
     const settled = await settleRecentPlaces({ inbox: values.inbox, main: values.main, store, ...(now ? { now } : {}) });
     console.log(`${settled.length} new place(s) taken out of the recent places store`);
