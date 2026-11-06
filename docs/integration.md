@@ -323,6 +323,38 @@ const shown = places.map((place) => withRecentChanges(place, recent.changes ?? [
 
 Each contributor (or install, without one) may send 10 new places a day. The eleventh gets `429 rate_limited`.
 
+**Keeping the data fresh.** A data release follows each merge into the data within minutes, and the recent list covers only the minutes in between. On launch and once a day, read the release's `manifest.json`, and when its `data_version` is newer than the one you have, download the new release.
+
+### What became of a contribution
+
+Every item the intake accepts gets a progress record: where it is, from received to in the data. Ask with `feedback.progress(ids)`, by the id the intake answered when the item was sent: `outcome.id` in `onAnswered`, or `id` in a `sent` result. Keep that id with your own record of the contribution. Ask on launch and when the app shows the traveller their contributions.
+
+```ts
+import { progressInRelease } from "@opencampingdb/feedback";
+
+const progress = await feedback.progress(mine.map((c) => c.feedbackId)); // one answer per id, in the same order
+for (const p of progress) {
+  if (p.state === "in_data") showDone(p.id, progressInRelease(p, manifest.data_version) ? "in your data" : "in the next data update");
+  else if (p.state === "refused") showRefused(p.id, p.reason);
+  else showWaiting(p.id, p.state);
+}
+```
+
+`progress` calls the public `GET /v1/feedback/progress?ids=fb_...,fb_...` at once and never queues. It asks for up to 100 ids a call and splits a longer list. An id that is not a feedback id, such as a photo's `pho_` id, is answered `unknown` without asking. It throws `ProgressRequestError` when the intake cannot be reached (`httpStatus` 0) or refuses the call (`httpStatus` is the HTTP code), so try again later. The states are `PROGRESS_STATES`:
+
+| State | What it means | What to show |
+| --- | --- | --- |
+| `received` | The intake has it, and nothing is decided yet. `held_reason` says why when the intake held it at send time. | Sent, waiting for a decision. |
+| `live` | The intake put it live when it was sent, and it is not in the data yet. | Live: it shows through the recent changes. |
+| `waiting` | It needs more reports, or its place is not in the data yet. `reason` says which. | Waiting for others to confirm it. |
+| `accepted` | The rules accepted it, and it is on its way into the data. | Accepted. |
+| `held` | A reviewer decides it, as for a name, a description or an owner claim. | With a reviewer. |
+| `refused` | Refused, with `reason`. `by` is `rules` when the rules refused it, or `reviewer` when the review PR was merged or closed without it. | Not taken, with the reason. |
+| `in_data` | Its change is in the data, as of `in_data_at`. | Done. It shows from the next data release, or at once through the recent changes for a fact that went live. |
+| `unknown` | The intake has no record of it: not sent to this intake, or more than 90 days without a change. | Nothing. |
+
+`progressInRelease(progress, dataVersion)` is true when the change is `in_data` and its `in_data_at` is earlier than the commit time in your release's `data_version`, as `withRecentChanges` reads it. A new place merged into another place answers `in_data` with `place` set to the place it went into. A record never carries the traveller's words, a device or a contributor: only the state, the engine's reason, `held_reason`, `by`, the place and times. Records are kept for 90 days after they last change. A state this SDK does not know is answered `unknown`.
+
 ## 6. Reviews: contributors, reports and blocking
 
 App stores ask any app that shows reviews to filter objectionable content, let people report it and block abusive users. The engine does each part; the app supplies who wrote a review and the buttons.
