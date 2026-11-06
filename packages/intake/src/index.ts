@@ -491,7 +491,7 @@ function inboxConfig(env: Env): GitHubAppConfig {
 
 /**
  * Records an inbox write for the scheduled job, when it starts the apply: a
- * flush of the queue, or a photo written at once. The items are in the inbox
+ * flush of the queue. The items are in the inbox
  * already, so a failed record only leaves the run to the apply's own schedule.
  */
 async function noteInboxWrite(env: Env, nowMs: number): Promise<void> {
@@ -727,7 +727,8 @@ export function createHandler(deps: Deps) {
    * the base64url `x-photo-meta` header, and the attestation covers its text.
    * The body is the full size JPEG followed by the thumbnail, with the sizes
    * and SHA-256 the meta gives. Both files go to the private pending bucket,
-   * and the stored item to the inbox like any other feedback.
+   * and the stored item to the inbox like any other feedback: queued with
+   * RECENT_LIST, written at once without it.
    */
   async function photo(request: Request, env: Env, app: AppEntry, cors: Record<string, string>): Promise<Response> {
     if (!env.PHOTOS_PENDING) return json(404, { error: "not_found" }, cors);
@@ -822,22 +823,19 @@ export function createHandler(deps: Deps) {
       photo: { full_sha256, full_bytes, thumb_sha256, thumb_bytes, width: size.width, height: size.height, ...(ratings ? { safesearch: ratings } : {}) },
     } as StoredFeedback;
     const customMetadata = { place: submission.place, contributor };
+    const file = { id, path: `pending/${day}/${id}.json`, content: `${JSON.stringify(stored, null, 2)}\n` };
     try {
       await env.PHOTOS_PENDING.put(keys[0]!, full, { httpMetadata: { contentType: "image/jpeg" }, customMetadata });
       await env.PHOTOS_PENDING.put(keys[1]!, thumb, { httpMetadata: { contentType: "image/jpeg" }, customMetadata });
-      await github.createFile(
-        inboxConfig(env),
-        env.INBOX_BRANCH ?? "main",
-        `pending/${day}/${id}.json`,
-        `${JSON.stringify(stored, null, 2)}\n`,
-        `Add ${id}`,
-      );
+      // With RECENT_LIST the record is queued like any other item, and the scheduled job writes a
+      // minute's photos to the inbox in one commit (inbox-queue.ts). Without it, one commit each.
+      if (env.RECENT_LIST) await env.RECENT_LIST.batch([queueStatement(env.RECENT_LIST, file, deps.now())]);
+      else await github.createFile(inboxConfig(env), env.INBOX_BRANCH ?? "main", file.path, file.content, `Add ${id}`);
     } catch {
       // Files without an inbox item would never be reviewed, so they go too.
       await env.PHOTOS_PENDING.delete(keys).catch(() => undefined);
       return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
     }
-    await noteInboxWrite(env, deps.now());
     return json(202, { id: photoId }, cors);
   }
 
