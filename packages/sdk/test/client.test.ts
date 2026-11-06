@@ -10,6 +10,7 @@ import {
   tidyName,
   tidyText,
   type Answer,
+  type FactsInput,
   HELD_REASONS,
   itemDecision,
   keyIsUnusable,
@@ -509,5 +510,46 @@ describe("itemDecision", () => {
       "not_seasonal",
       "commons_report",
     ]);
+  });
+});
+
+describe("reportFacts", () => {
+  const edit: FactsInput = { place: PLACE, facts: { toilets: true, pets: "leashed", fee: false }, consent: true };
+
+  it("sends one fact report per fact, in order, and returns each fact's result", async () => {
+    const { client, calls } = setup([202]);
+    const results = await client.reportFacts(edit);
+    expect(calls.map((c) => (c.body as { report: unknown }).report)).toEqual([
+      { kind: "fact", fact: "toilets", value: true },
+      { kind: "fact", fact: "pets", value: "leashed" },
+      { kind: "fact", fact: "fee", value: false },
+    ]);
+    expect(calls.every((c) => (c.body as { place: string }).place === PLACE)).toBe(true);
+    expect(results.map((r) => [r.fact, r.result.status])).toEqual([
+      ["toilets", "sent"],
+      ["pets", "sent"],
+      ["fee", "sent"],
+    ]);
+  });
+
+  it("gives each fact's report the ref <ref>:<fact> for onAnswered", async () => {
+    const answers: Answer[] = [];
+    const { client } = setup([202], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    await client.reportFacts({ ...edit, ref: "edit-1" });
+    expect(answers.map((a) => a.ref)).toEqual(["edit-1:toilets", "edit-1:pets", "edit-1:fee"]);
+  });
+
+  it("skips facts left undefined, refuses without consent and refuses a ref over 90 characters", async () => {
+    const { client, calls } = setup([202]);
+    expect(await client.reportFacts({ place: PLACE, facts: { toilets: undefined }, consent: true })).toEqual([]);
+    await expect(client.reportFacts({ ...edit, consent: false })).rejects.toBeInstanceOf(ConsentRequiredError);
+    await expect(client.reportFacts({ ...edit, ref: "x".repeat(91) })).rejects.toBeInstanceOf(RangeError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("queues the facts it cannot send yet, to retry like any report", async () => {
+    const { client } = setup(["network"]);
+    const results = await client.reportFacts(edit);
+    expect(results.map((r) => r.result.status)).toEqual(["queued", "queued", "queued"]);
   });
 });

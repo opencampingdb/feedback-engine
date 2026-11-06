@@ -31,6 +31,9 @@ import { PASS_TTL_SECONDS, signPass } from "./pass.js";
 import {
   ATTEST_KEY_DAILY_LIMIT,
   checkAndCount,
+  countPlaceEdit,
+  placeEditState,
+  secondsToMidnightUtc,
   CONTRIBUTOR_DAILY_LIMIT,
   PHOTO_CONTRIBUTOR_DAILY_LIMIT,
   type KVLike,
@@ -1269,18 +1272,29 @@ export function createHandler(deps: Deps) {
         if (nowMs - Date.parse(target.added) > WITHDRAW_WINDOW_MS) return json(409, { error: "withdraw_window_closed" }, cors);
       }
     }
-    const limit = await checkAndCount(
-      env.RATE_LIMIT,
-      day,
-      device,
-      app.app,
-      isOwner ? (app.owner_daily_limit ?? app.daily_limit) : app.daily_limit,
-      nowMs,
-      kind,
-      origin,
-      extra,
-    );
-    if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
+    // A report about a released place is part of the device's edit of that
+    // place today: only the first counts against the daily limits.
+    const editedPlace =
+      !isOwner && (submission as FeedbackSubmission).type === "report" && typeof (submission as FeedbackSubmission).place === "string"
+        ? ((submission as FeedbackSubmission).place as string)
+        : undefined;
+    const edit = editedPlace === undefined ? undefined : await placeEditState(env.RATE_LIMIT, day, device, editedPlace);
+    if (edit === "full") return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(secondsToMidnightUtc(nowMs)) });
+    if (edit !== "more") {
+      const limit = await checkAndCount(
+        env.RATE_LIMIT,
+        day,
+        device,
+        app.app,
+        isOwner ? (app.owner_daily_limit ?? app.daily_limit) : app.daily_limit,
+        nowMs,
+        kind,
+        origin,
+        extra,
+      );
+      if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
+    }
+    if (editedPlace !== undefined) await countPlaceEdit(env.RATE_LIMIT, day, device, editedPlace);
 
     const id = `fb_${ulid(nowMs, deps.randomBytes)}`;
     /**

@@ -73,6 +73,17 @@ await feedback.report({
   consent: true,
 });
 
+// A traveller's edit of a place: every fact they set, in one call. Each fact
+// is its own report, decided on its own, and the call answers one result per
+// fact. An install's reports about one place in a day count once against the
+// daily limits, however many facts the edit has (up to 100).
+const results = await feedback.reportFacts({
+  place,
+  facts: { toilets: true, pets: "leashed", fee: false, caravans: true },
+  consent: true,
+  ref: "edit-42", // each fact's report gets the ref "edit-42:<fact>"
+});
+
 // Closed. Use kind "reopened" when it is open again.
 await feedback.report({ place, report: { kind: "closed", note: "Gate chained, sign says closed for works" }, consent: true });
 
@@ -302,7 +313,7 @@ App stores ask any app that shows reviews to filter objectionable content, let p
 - One review per contributor per place: a newer one replaces the older.
 - A contributor's first review is held for a person. Once one of their reviews or other feedback has been accepted, later reviews are published at the next apply run.
 - Text sent word for word for another place is held for a person.
-- Each contributor may send 200 submissions a day (the app key can set `contributor_daily_limit`), and so may each install and each App Attest key. Each client network may send 500.
+- Each contributor may send 200 submissions a day (the app key can set `contributor_daily_limit`), and so may each install and each App Attest key. Each client network may send 500. An install's reports about one released place in a day count as one submission, up to 100 reports a place, so a full edit of a place (`reportFacts`) costs one.
 
 **Was there.** Set `review.visited_nearby: true` only when your app saw the phone within its set distance of the place in the 60 days before the review, for example from a check or a saved visit. Never send the location. It is published with the review so apps can show it. An app key with `requires_visited_nearby` refuses reviews without it (`400 visited_nearby_required`).
 

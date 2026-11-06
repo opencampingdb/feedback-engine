@@ -21,6 +21,12 @@ export const CONTRIBUTOR_DAILY_LIMIT = 200;
 export const PHOTO_CONTRIBUTOR_DAILY_LIMIT = 10;
 /** Feedback per attested App Attest key per day. */
 export const ATTEST_KEY_DAILY_LIMIT = 200;
+/**
+ * Reports about one place from one device in one day. The first counts
+ * against the daily limits like any item; the rest of the edit (a traveller
+ * filling in many facts) don't, up to this many.
+ */
+export const PLACE_EDIT_DAILY_LIMIT = 100;
 const TTL_SECONDS = 2 * 24 * 60 * 60;
 
 export interface RateLimitResult {
@@ -29,7 +35,7 @@ export interface RateLimitResult {
   retryAfter: number;
 }
 
-function secondsToMidnightUtc(nowMs: number): number {
+export function secondsToMidnightUtc(nowMs: number): number {
   const d = new Date(nowMs);
   const midnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
   return Math.max(1, Math.ceil((midnight - nowMs) / 1000));
@@ -85,3 +91,24 @@ export async function checkAndCount(
   ]);
   return { allowed: true, retryAfter };
 }
+
+/**
+ * Where a report about `place` from this device stands today: `first` when the
+ * device has not reported on the place today, so the item counts against the
+ * daily limits as usual; `more` when it has, so the item is part of the same
+ * edit and doesn't count again; `full` past PLACE_EDIT_DAILY_LIMIT.
+ */
+export async function placeEditState(kv: KVLike, day: string, deviceHash: string, place: string): Promise<"first" | "more" | "full"> {
+  const count = Number((await kv.get(placeEditKey(day, deviceHash, place))) ?? 0);
+  if (count === 0) return "first";
+  return count >= PLACE_EDIT_DAILY_LIMIT ? "full" : "more";
+}
+
+/** Counts one more report about `place` from this device today. */
+export async function countPlaceEdit(kv: KVLike, day: string, deviceHash: string, place: string): Promise<void> {
+  const key = placeEditKey(day, deviceHash, place);
+  const count = Number((await kv.get(key)) ?? 0);
+  await kv.put(key, String(count + 1), { expirationTtl: TTL_SECONDS });
+}
+
+const placeEditKey = (day: string, deviceHash: string, place: string) => `pe:${day}:${deviceHash}:${place}`;

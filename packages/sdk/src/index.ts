@@ -21,6 +21,8 @@ export type {
   AttestationError,
   AttestationRefusal,
   CheckInput,
+  FactResult,
+  FactsInput,
   FeeInput,
   FeedbackClient,
   FeedbackClientOptions,
