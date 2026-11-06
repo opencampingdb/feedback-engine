@@ -17,7 +17,7 @@ import type {
   PhotoReportReason,
 } from "./types.js";
 import { sha256Hex, sha256HexBytes } from "./sha256.js";
-import { MAX_PHOTO_BYTES, MAX_THUMB_BYTES, validateSubmission } from "./validate.js";
+import { MAX_PHOTO_BYTES, MAX_THUMB_BYTES, isPlaceId, newPlaceId, validateSubmission } from "./validate.js";
 
 /** Storage the client keeps its queue and device id in. AsyncStorage matches this shape. */
 export interface StorageAdapter {
@@ -167,8 +167,22 @@ async function callRefusalHook(
   }
 }
 
+/**
+ * A place the traveller has just added and that is still waiting for its id:
+ * `newPlace` is the `ref` given to that `new_place` report. Items naming it
+ * wait in the queue, unsent, until the new place is sent; then they get its
+ * `ocdb_` id and are sent in order. If the new place is dropped, so are they.
+ */
+export interface NewPlaceRef {
+  newPlace: string;
+}
+
+/** A released place's `ocdb_` id, or a new place still waiting for its id. */
+export type PlaceTarget = string | NewPlaceRef;
+
 export interface ReportInput {
-  place: string | null;
+  /** The place, a new place waiting for its id, or null for a `new_place` report. */
+  place: PlaceTarget | null;
   location?: LatLon;
   report: ReportBody;
   /** The signed-in traveller's opaque account id, when there is one. */
@@ -183,7 +197,7 @@ export interface ReportInput {
 
 /** A traveller's edit of one released place: every fact they set, in one call. */
 export interface FactsInput {
-  place: string;
+  place: PlaceTarget;
   /** The facts the traveller set, each with its new value. A fact left undefined is skipped. */
   facts: { [F in FactName]?: PlaceFacts[F] | undefined };
   /** The signed-in traveller's opaque account id, when there is one. */
@@ -203,7 +217,7 @@ export interface FactResult {
 }
 
 export interface ReviewInput {
-  place: string;
+  place: PlaceTarget;
   review: ReviewBody;
   /** The signed-in traveller's opaque account id (a keyed hash, never a name or email). */
   contributor?: string;
@@ -216,7 +230,7 @@ export interface ReviewInput {
 }
 
 export interface FeeInput {
-  place: string;
+  place: PlaceTarget;
   fee: FeeBody;
   /** The signed-in traveller's opaque account id, as for a review. */
   contributor?: string;
@@ -229,7 +243,7 @@ export interface FeeInput {
 }
 
 export interface CheckInput {
-  place: string;
+  place: PlaceTarget;
   check: CheckBody;
   contributor?: string;
   consent: boolean;
@@ -483,16 +497,35 @@ interface QueueItem {
   queuedAt: number;
   attempts: number;
   nextAttemptAt: number;
+  /** The ref of the new place this item waits for. While set, `body.place` is a placeholder and the item is never sent. */
+  waitsFor?: string;
 }
+
+/** What became of a new place a ref names, kept so items queued later or after a restart can follow it. */
+interface NewPlaceRecord {
+  place?: string;
+  dropped?: true;
+  at: number;
+}
+
+/** Stands in for a new place's id in a waiting item, so the item validates. Never sent. */
+const PENDING_PLACE = "ocdb_00000000000000000000000000";
 
 /**
  * What became of a queued item. `id` is the intake's id for it (for a new
  * place, the id to pass to `newPlaceId`), and `state` and `heldReason` say
  * whether it went live or is held (`ItemDecision`). `httpStatus` is the intake's refusal,
- * or 0 when the SDK dropped the item unsent because it grew too old or the
- * queue was full.
+ * or 0 when the SDK dropped the item unsent because it grew too old, the
+ * queue was full, or (with `reason`) the new place it waited for was dropped.
  */
-export type AnswerOutcome = ({ kind: "sent"; id: string } & ItemDecision) | { kind: "dropped"; httpStatus: number };
+export type AnswerOutcome =
+  | ({ kind: "sent"; id: string } & ItemDecision)
+  | {
+      kind: "dropped";
+      httpStatus: number;
+      /** `new_place_dropped`: the item waited for a new place (`NewPlaceRef`) that was dropped or refused, so it was never sent. */
+      reason?: "new_place_dropped";
+    };
 
 /**
  * The intake's codes for why it held an item at send time. Adding a code is
@@ -650,6 +683,7 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
   const random = options.random ?? Math.random;
   const deviceKey = `${storagePrefix}.device`;
   const queueKey = `${storagePrefix}.queue`;
+  const newPlacesKey = `${storagePrefix}.newplaces`;
 
   if (!appKey) throw new Error("appKey is required");
   if (!appVersion) throw new Error("appVersion is required");
@@ -680,6 +714,31 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
       return [];
     }
   }
+
+  // What became of new places that items can wait for, by the new place's ref.
+  let newPlaces: Map<string, NewPlaceRecord> | undefined;
+  async function readNewPlaces(): Promise<Map<string, NewPlaceRecord>> {
+    if (newPlaces) return newPlaces;
+    const raw = await storage.getItem(newPlacesKey);
+    const map = new Map<string, NewPlaceRecord>();
+    try {
+      const parsed: unknown = raw ? JSON.parse(raw) : {};
+      if (parsed && typeof parsed === "object") for (const [k, v] of Object.entries(parsed as Record<string, NewPlaceRecord>)) map.set(k, v);
+    } catch {
+      // An unreadable record is treated as empty.
+    }
+    newPlaces = map;
+    return map;
+  }
+  async function writeNewPlaces(): Promise<void> {
+    if (!newPlaces) return;
+    const t = now();
+    for (const [k, v] of newPlaces) if (t - v.at > maxQueueAgeMs) newPlaces.delete(k);
+    if (newPlaces.size === 0) await storage.removeItem(newPlacesKey);
+    else await storage.setItem(newPlacesKey, JSON.stringify(Object.fromEntries(newPlaces)));
+  }
+  const isNewPlaceItem = (item: QueueItem) =>
+    item.ref !== undefined && item.body.type === "report" && (item.body as { report?: { kind?: string } }).report?.kind === "new_place";
 
   async function writeQueue(queue: QueueItem[]): Promise<void> {
     if (queue.length === 0) await storage.removeItem(queueKey);
@@ -754,6 +813,12 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
   const answers: Answer[] = [];
   function record(item: QueueItem, outcome: Outcome): void {
     if (waiting.has(item.localId)) outcomes.set(item.localId, outcome);
+    // A new place's answer settles the items waiting for it (`NewPlaceRef`).
+    if (isNewPlaceItem(item) && newPlaces) {
+      // A new place sent without a readable id can't be followed, so its items are dropped too.
+      const place = outcome.kind === "sent" ? newPlaceId(outcome.id) : undefined;
+      newPlaces.set(item.ref!, place !== undefined && isPlaceId(place) ? { place, at: now() } : { dropped: true, at: now() });
+    }
     if (options.onAnswered) answers.push({ ...(item.ref !== undefined ? { ref: item.ref } : {}), type: item.body.type, outcome });
   }
 
@@ -772,6 +837,7 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
   async function flushNow(): Promise<FlushResult> {
     const result = await serial(async () => {
       const queue = await readQueue();
+      const known = await readNewPlaces();
       const t = now();
       const kept: QueueItem[] = [];
       let sent = 0;
@@ -782,6 +848,21 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
           record(item, { kind: "dropped", httpStatus: 0 });
           dropped += 1;
           continue;
+        }
+        if (item.waitsFor !== undefined) {
+          const target = known.get(item.waitsFor);
+          if (target?.dropped) {
+            record(item, { kind: "dropped", httpStatus: 0, reason: "new_place_dropped" });
+            dropped += 1;
+            continue;
+          }
+          if (!target?.place) {
+            // Still waiting for its new place: kept unsent, and never in the way of the items after it.
+            kept.push(item);
+            continue;
+          }
+          (item.body as { place: string }).place = target.place;
+          delete item.waitsFor;
         }
         if (stopped || item.nextAttemptAt > t) {
           kept.push(item);
@@ -801,6 +882,7 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
         }
       }
       await writeQueue(kept);
+      await writeNewPlaces();
       return { sent, dropped, remaining: kept.length };
     });
     await tellAnswers();
@@ -816,6 +898,23 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
       throw new FeedbackValidationError([`ref must be a string of 1 to ${MAX_REF_LENGTH} characters`]);
     }
     const localId = await serial(async () => {
+      await readNewPlaces();
+      // A place still waiting for its id: follow its new place, or wait for it in the queue.
+      let waitsFor: string | undefined;
+      const target = input.place;
+      if (target !== null && typeof target === "object") {
+        const newPlace = (target as Partial<NewPlaceRef>).newPlace;
+        if (typeof newPlace !== "string" || newPlace.length < 1 || newPlace.length > MAX_REF_LENGTH) {
+          throw new FeedbackValidationError([`place.newPlace must be the ref of a new_place report, 1 to ${MAX_REF_LENGTH} characters`]);
+        }
+        const known = (await readNewPlaces()).get(newPlace);
+        if (known?.dropped) throw new FeedbackValidationError([`the new place ${newPlace} was dropped, so nothing can be sent about it`]);
+        if (known?.place) input = { ...input, place: known.place };
+        else if ((await readQueue()).some((q) => q.ref === newPlace && isNewPlaceItem(q))) {
+          waitsFor = newPlace;
+          input = { ...input, place: PENDING_PLACE };
+        } else throw new FeedbackValidationError([`no new_place report with the ref ${newPlace} is queued or was sent`]);
+      }
       const body = { ...input, type, device: await device(), app_version: appVersion, consent: true };
       const checked = validateSubmission(body, new Date(now()));
       if (!checked.ok) throw new FeedbackValidationError(checked.errors);
@@ -827,10 +926,12 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
         queuedAt: now(),
         attempts: 0,
         nextAttemptAt: 0,
+        ...(waitsFor !== undefined ? { waitsFor } : {}),
       };
       queue.push(item);
       while (queue.length > maxQueueLength) record(queue.shift()!, { kind: "dropped", httpStatus: 0 });
       await writeQueue(queue);
+      await writeNewPlaces();
       waiting.add(item.localId);
       return item.localId;
     });

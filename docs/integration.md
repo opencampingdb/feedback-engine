@@ -84,6 +84,24 @@ const results = await feedback.reportFacts({
   ref: "edit-42", // each fact's report gets the ref "edit-42:<fact>"
 });
 
+// Details for a place the traveller has just added, before its id is known:
+// give the new_place report a ref, and name the place as { newPlace: <ref> }.
+// Any report, reportFacts, check, fee or review can do this. The SDK keeps
+// those items in its queue, unsent, until the new place is sent, then gives
+// them its ocdb_ id and sends them in order. It survives restarts, and a
+// waiting item never holds up the items behind it. If the new place is
+// dropped or refused, the waiting items are dropped too: onAnswered gets
+// { kind: "dropped", httpStatus: 0, reason: "new_place_dropped" }.
+await feedback.report({
+  place: null,
+  location: { lat: -32.040723, lon: 152.540633 },
+  report: { kind: "new_place", name: "Diamond Beach Holiday Park" },
+  consent: true,
+  ref: "draft-7",
+});
+await feedback.reportFacts({ place: { newPlace: "draft-7" }, facts: { toilets: true, showers: true }, consent: true });
+// A ref that names no queued or sent new place throws FeedbackValidationError.
+
 // Closed. Use kind "reopened" when it is open again.
 await feedback.report({ place, report: { kind: "closed", note: "Gate chained, sign says closed for works" }, consent: true });
 

@@ -553,3 +553,94 @@ describe("reportFacts", () => {
     expect(results.map((r) => r.result.status)).toEqual(["queued", "queued", "queued"]);
   });
 });
+
+describe("items waiting for a new place's id (NewPlaceRef)", () => {
+  const NEW_ID = "fb_01M6R45Y75GTXQBS5ETC16CYSZ";
+  const NEW_PLACE = "ocdb_01M6R45Y75GTXQBS5ETC16CYSZ";
+  const newPlace = {
+    place: null,
+    location: { lat: -32.040723, lon: 152.540633 },
+    report: { kind: "new_place" as const, name: "Diamond Beach Holiday Park" },
+    consent: true,
+    ref: "np-1",
+  };
+  const sentNew = { status: 202, body: { id: NEW_ID } };
+  const bodies = (calls: { body: unknown }[]) => calls.map((c) => c.body as { place: string | null; report?: { kind: string; fact?: string } });
+
+  it("holds items about a new place until its id comes, then sends them with that id, in order", async () => {
+    const { client, calls, advance } = setup(["network", sentNew, 202]);
+    expect((await client.report(newPlace)).status).toBe("queued");
+    const facts = await client.reportFacts({ place: { newPlace: "np-1" }, facts: { toilets: true, pets: "leashed" }, consent: true });
+    expect(facts.map((f) => f.result.status)).toEqual(["queued", "queued"]);
+    // Only the new place was tried: the waiting items were never sent with the placeholder.
+    expect(calls).toHaveLength(1);
+    advance(60 * 60 * 1000);
+    await client.flush();
+    expect(bodies(calls).slice(1).map((b) => [b.place, b.report?.kind, b.report?.fact])).toEqual([
+      [null, "new_place", undefined],
+      [NEW_PLACE, "fact", "toilets"],
+      [NEW_PLACE, "fact", "pets"],
+    ]);
+  });
+
+  it("sends at once with the id when the new place was already sent", async () => {
+    const { client, calls } = setup([sentNew, 202]);
+    expect((await client.report(newPlace)).status).toBe("sent");
+    const result = await client.check({ place: { newPlace: "np-1" }, check: { visited: "2026-10-20", still_there: true }, consent: true });
+    expect(result.status).toBe("sent");
+    expect((calls[1]!.body as { place: string }).place).toBe(NEW_PLACE);
+  });
+
+  it("drops the waiting items, telling onAnswered why, when the new place is refused", async () => {
+    const answers: Answer[] = [];
+    const { client, calls, advance } = setup(["network", 400], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    await client.report(newPlace);
+    await client.report({ place: { newPlace: "np-1" }, report: { kind: "fact", fact: "toilets", value: true }, consent: true, ref: "t" });
+    advance(60 * 60 * 1000);
+    expect(await client.flush()).toEqual({ sent: 0, dropped: 2, remaining: 0 });
+    expect(answers.map((a) => [a.ref, a.outcome])).toEqual([
+      ["np-1", { kind: "dropped", httpStatus: 400 }],
+      ["t", { kind: "dropped", httpStatus: 0, reason: "new_place_dropped" }],
+    ]);
+    expect(calls).toHaveLength(2);
+    await expect(client.report({ place: { newPlace: "np-1" }, report: { kind: "fact", fact: "toilets", value: true }, consent: true })).rejects.toBeInstanceOf(
+      FeedbackValidationError,
+    );
+  });
+
+  it("keeps waiting across a restart, and sends once a new client sends the new place", async () => {
+    const first = setup(["network"]);
+    await first.client.report(newPlace);
+    await first.client.report({ place: { newPlace: "np-1" }, report: { kind: "fact", fact: "showers", value: true }, consent: true });
+    // A new client over the same storage, as after the app restarts.
+    const { fetch, calls } = fakeFetch([sentNew, 202]);
+    const second = createFeedbackClient({
+      endpoint: "https://intake.example/",
+      appKey: "key-1",
+      appVersion: "1.2.3",
+      storage: first.storage,
+      fetch,
+      now: () => 1_000_000 + 60 * 60 * 1000,
+      random: () => 0,
+    });
+    expect(await second.flush()).toEqual({ sent: 2, dropped: 0, remaining: 0 });
+    expect(bodies(calls).map((b) => b.place)).toEqual([null, NEW_PLACE]);
+  });
+
+  it("never lets a waiting item block the items behind it", async () => {
+    const { client, calls } = setup(["network", 202]);
+    await client.report(newPlace); // fails: the new place waits for a retry
+    await client.report({ place: { newPlace: "np-1" }, report: { kind: "fact", fact: "toilets", value: true }, consent: true });
+    // A check queued behind the waiting item goes at once.
+    expect((await client.check(check)).status).toBe("sent");
+    expect(bodies(calls).map((b) => b.place)).toEqual([null, PLACE]);
+  });
+
+  it("refuses a ref that names no queued or sent new place", async () => {
+    const { client, calls } = setup([202]);
+    await expect(client.report({ place: { newPlace: "unknown" }, report: { kind: "fact", fact: "toilets", value: true }, consent: true })).rejects.toBeInstanceOf(
+      FeedbackValidationError,
+    );
+    expect(calls).toHaveLength(0);
+  });
+});

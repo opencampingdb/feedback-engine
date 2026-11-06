@@ -23,6 +23,8 @@ export type {
   CheckInput,
   FactResult,
   FactsInput,
+  NewPlaceRef,
+  PlaceTarget,
   FeeInput,
   FeedbackClient,
   FeedbackClientOptions,

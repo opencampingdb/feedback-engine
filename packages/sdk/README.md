@@ -15,6 +15,7 @@ await feedback.review({ place, review: { stars: 5, text: "Quiet and shady", visi
 - Nothing is sent unless `consent: true` is passed. Show `CONSENT_TEXT` first.
 - Show `ATTRIBUTION` wherever the data appears.
 - Reviews, fees and `reportReview()` carry the signed-in traveller's opaque `contributor` id. Pass an `attest` function when the app key requires App Attest or Play Integrity; it gets the exact body and its SHA-256 at send time. A refused assertion keeps the item queued and calls `onAttestationRejected` (see below).
+- A place the traveller has just added can be named before its id is known, as `{ newPlace: <the new_place report's ref> }`, in `report`, `reportFacts`, `check`, `fee` and `review`. The items wait in the queue, unsent, until the new place is sent, then go with its `ocdb_` id in order. They're dropped with `reason: "new_place_dropped"` if it is dropped or refused.
 - `reportFacts({ place, facts, consent })` sends a traveller's edit of one place, every fact they set, in one call, and resolves with each fact's result. The intake counts an install's reports about one place in a day once against its daily limits.
 - Facts include `pets_months` (an OSM month range such as `May-Sep`, read with `monthsInRange`) and `vehicle_access` (`heavy_vehicles_only`). A `commons_mismatch` report says a Wikimedia Commons photo shown for a place is not of it.
 - `tidyName`, `tidyText` and `textProblem` tidy what a traveller types and find rude words, contact details and spam before it is sent. `withdraw()` takes back a new place the same install sent.
