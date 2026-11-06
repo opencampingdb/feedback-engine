@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
@@ -291,6 +291,25 @@ describe("idsOnPrs and turnedDown", () => {
 });
 
 describe("lastCommitTimes", () => {
+  it("dates a file last touched before a shallow checkout's range by the last commit", async () => {
+    const source = await mkdtemp(join(tmpdir(), "ocdb-progress-source-"));
+    const clone = await mkdtemp(join(tmpdir(), "ocdb-progress-clone-"));
+    await commitIn(source, `places/za/${PLACE}.json`, "{}", "2026-10-01T10:00:00Z");
+    // The oldest commit in range: git shows it as adding every file.
+    await commitIn(source, "NOTES.md", "notes", "2026-10-25T10:00:00Z");
+    await commitIn(source, `places/zb/${TARGET}.json`, "{}", "2026-10-30T10:00:00Z");
+    await commitIn(source, "README.md", "data", "2026-11-02T10:00:00Z");
+    await execFileP("git", ["clone", "-q", "--shallow-since=2026-10-20", `file://${source}`, join(clone, "main")]);
+    const times = await lastCommitTimes(join(clone, "main"), [`places/za/${PLACE}.json`, `places/zb/${TARGET}.json`], "2026-11-03T00:00:00Z");
+    expect(Object.fromEntries(times)).toEqual({
+      // Its commit is older than the checkout: the last commit stands in.
+      [`places/za/${PLACE}.json`]: "2026-11-02T10:00:00Z",
+      [`places/zb/${TARGET}.json`]: "2026-10-30T10:00:00Z",
+    });
+    await rm(source, { recursive: true, force: true });
+    await rm(clone, { recursive: true, force: true });
+  });
+
   let repo: string;
   beforeEach(async () => {
     repo = await mkdtemp(join(tmpdir(), "ocdb-progress-git-"));
@@ -371,7 +390,7 @@ describe("sendProgress", () => {
       botLogins: ["ocdb-bot"],
       now: NOW,
     });
-    expect(result).toEqual({ sent: 5, failed: 0 });
+    expect(result).toEqual({ sent: 5, failed: 0, recorded: true });
     expect(sent.progress).toHaveBeenCalledTimes(1);
     expect(sent.progress.mock.calls[0]![0]).toEqual([
       { id: id(1), place: PLACE, decided_at: RUN, state: "in_data", in_data_at: "2026-11-03T00:00:00Z" },
@@ -407,6 +426,68 @@ describe("sendProgress", () => {
     expect(sent.progress.mock.calls[0]![0]).toEqual([{ id: id(1), place: PLACE, decided_at: RUN, state: "refused", by: "reviewer", reason: AUTO_PR_CLOSED }]);
   });
 
+  describe("only what changed since the last send", () => {
+    const fact = (n: number, fact: string) => decided(n, report({ kind: "fact", fact, value: true }));
+    const at = (iso: string) => new Date(iso);
+    const sentIds = (s: ReturnType<typeof store>) => s.progress.mock.calls.flatMap((c) => c[0].map((u) => `${u.id.slice(-2)}:${u.state}`));
+    const send = (s: { progress: (items: readonly ProgressUpdate[]) => Promise<void> }, now: Date, decisions: Parameters<typeof sendProgress>[0]["decisions"] = []) =>
+      sendProgress({ inbox, main: mainDir, store: s, decisions, now });
+
+    it("sends nothing on a second run when nothing changed, and records what it sent in the inbox", async () => {
+      await inInbox(fact(1, "power"));
+      await inInbox(decided(2, report({ kind: "name", value: "Lake Eppalock Rest Area" }), "needs_review"));
+      await onMain(record);
+      const first = store();
+      expect(await send(first, NOW, [{ id: id(3), place: PLACE, outcome: "waiting", reason: "waiting" }])).toMatchObject({ sent: 3, recorded: true });
+      expect(JSON.parse(await readFile(join(inbox, "progress", "sent.json"), "utf8")).items).toEqual({ [id(1)]: "accepted", [id(2)]: "held", [id(3)]: "waiting" });
+      const second = store();
+      expect(await send(second, at("2026-11-03T01:00:00Z"), [{ id: id(3), place: PLACE, outcome: "waiting", reason: "waiting" }])).toMatchObject({ sent: 0, recorded: false });
+      expect(second.progress).not.toHaveBeenCalled();
+    });
+
+    it("sends only the item whose state changed, and never a final one again", async () => {
+      await inInbox(fact(1, "power"));
+      await inInbox(fact(2, "toilets"));
+      await onMain(record);
+      await send(store(), NOW);
+      await onMain(dated("power", RUN, { facts: { power: true } }));
+      const second = store();
+      await send(second, at("2026-11-03T01:00:00Z"));
+      expect(sentIds(second)).toEqual(["01:in_data"]);
+      const third = store();
+      await send(third, at("2026-11-03T02:00:00Z"));
+      expect(third.progress).not.toHaveBeenCalled();
+    });
+
+    it("sends a failed batch again on the next run", async () => {
+      await inInbox(fact(1, "power"));
+      await onMain(record);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      expect(await send({ progress: async () => Promise.reject(new Error("503")) }, NOW)).toMatchObject({ sent: 0, failed: 1 });
+      warn.mockRestore();
+      const retry = store();
+      await send(retry, at("2026-11-03T01:00:00Z"));
+      expect(sentIds(retry)).toEqual(["01:accepted"]);
+    });
+
+    it("sends all 90 days on the first run after midnight UTC each Monday", async () => {
+      await inInbox(fact(1, "power"));
+      await inInbox(decided(2, report({ kind: "fact", fact: "toilets", value: true }), "refused", "blocked"));
+      await onMain(record);
+      await send(store(), NOW);
+      // Sunday: nothing changed, nothing sent.
+      const sunday = store();
+      await send(sunday, at("2026-11-08T23:00:00Z"));
+      expect(sunday.progress).not.toHaveBeenCalled();
+      const monday = store();
+      await send(monday, at("2026-11-09T00:30:00Z"));
+      expect(sentIds(monday)).toEqual(["01:accepted", "02:refused"]);
+      const later = store();
+      await send(later, at("2026-11-09T06:00:00Z"));
+      expect(later.progress).not.toHaveBeenCalled();
+    });
+  });
+
   it("reads reviews, fees and the do-not-match list from main", async () => {
     await inInbox(decided(1, { type: "review", contributor: "ctr_0000000000000001", review: { stars: 4, text: "Quiet", visited: "2026-10" } }));
     await inInbox(decided(2, { type: "fee", contributor: "ctr_0000000000000001", fee: { amount: 30, site: "powered", paid: "2026-10" } }));
@@ -423,7 +504,7 @@ describe("sendProgress", () => {
   it("sends at most 500 items a call", async () => {
     const decisions = Array.from({ length: 1201 }, (_, i) => ({ id: id(i + 1), place: PLACE, outcome: "waiting" as const, reason: "waiting" }));
     const sent = store();
-    expect(await sendProgress({ inbox, main: mainDir, store: sent, decisions, now: NOW })).toEqual({ sent: 1201, failed: 0 });
+    expect(await sendProgress({ inbox, main: mainDir, store: sent, decisions, now: NOW })).toEqual({ sent: 1201, failed: 0, recorded: true });
     expect(sent.progress.mock.calls.map((c) => c[0].length)).toEqual([500, 500, 201]);
   });
 
@@ -437,7 +518,7 @@ describe("sendProgress", () => {
         if (calls === 1) throw new Error("the intake refused the progress: 503");
       }),
     };
-    expect(await sendProgress({ inbox, main: mainDir, store: failing, decisions, now: NOW })).toEqual({ sent: 100, failed: 500 });
+    expect(await sendProgress({ inbox, main: mainDir, store: failing, decisions, now: NOW })).toEqual({ sent: 100, failed: 500, recorded: true });
     expect(failing.progress).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("503"));
     warn.mockRestore();
@@ -445,7 +526,7 @@ describe("sendProgress", () => {
 
   it("calls nothing when there is nothing to send", async () => {
     const sent = store();
-    expect(await sendProgress({ inbox, main: mainDir, store: sent, decisions: [], now: NOW })).toEqual({ sent: 0, failed: 0 });
+    expect(await sendProgress({ inbox, main: mainDir, store: sent, decisions: [], now: NOW })).toMatchObject({ sent: 0, failed: 0 });
     expect(sent.progress).not.toHaveBeenCalled();
   });
 });

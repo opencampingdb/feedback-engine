@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { isFeedbackId, type StoredFeedback } from "@opencampingdb/feedback";
 import { DataRepo, readHistory } from "./io.js";
@@ -215,36 +217,83 @@ function decisionProgress(base: Omit<ProgressUpdate, "state">, result: Outcome, 
 
 const git = promisify(execFile);
 
-/** The commit time of `git log -1` in `repo`, for the files given, or undefined when git can't say. */
-async function commitTime(repo: string, files: readonly string[] = []): Promise<string | undefined> {
+/** The hash and commit time of `git log -1` in `repo`, for the files given, or undefined when git can't say. */
+async function lastCommit(repo: string, files: readonly string[] = []): Promise<{ hash: string; at: string } | undefined> {
   try {
-    const { stdout } = await git("git", ["-C", repo, "log", "-1", "--format=%ct", ...(files.length > 0 ? ["--", ...files] : [])]);
-    const seconds = Number(stdout.trim());
-    if (stdout.trim() === "" || !Number.isFinite(seconds)) return undefined;
-    return new Date(seconds * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const { stdout } = await git("git", ["-C", repo, "log", "-1", "--format=%H %ct", ...(files.length > 0 ? ["--", ...files] : [])]);
+    const [hash, seconds] = stdout.trim().split(" ");
+    if (!hash || !seconds || !Number.isFinite(Number(seconds))) return undefined;
+    return { hash, at: new Date(Number(seconds) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z") };
   } catch {
     return undefined;
+  }
+}
+
+/** The commits a shallow checkout starts from. Git shows each as adding every file, so they say nothing about when a file changed. */
+async function shallowRoots(repo: string): Promise<Set<string>> {
+  try {
+    const { stdout } = await git("git", ["-C", repo, "rev-parse", "--git-path", "shallow"]);
+    const text = await readFile(resolve(repo, stdout.trim()), "utf8");
+    return new Set(text.split("\n").filter(Boolean));
+  } catch {
+    return new Set();
   }
 }
 
 /**
  * When main got each file's current content: the commit time of the last
  * commit on main that touched it, so a data release built from that commit
- * or a later one has the change. A file git has no commit for gets the time
- * of main's last commit, and without git, `fallback`.
+ * or a later one has the change. A file with no commit in the checkout's
+ * history (a shallow checkout holds the last 14 days) gets the time of main's
+ * last commit, and without git, `fallback`.
  */
 export async function lastCommitTimes(repo: string, files: Iterable<string>, fallback: string): Promise<Map<string, string>> {
   const unique = [...new Set(files)];
   const out = new Map<string, string>();
   if (unique.length === 0) return out;
-  const head = (await commitTime(repo)) ?? fallback;
-  for (const file of unique) out.set(file, (await commitTime(repo, [file])) ?? head);
+  const head = (await lastCommit(repo))?.at ?? fallback;
+  const roots = await shallowRoots(repo);
+  for (const file of unique) {
+    const found = await lastCommit(repo, [file]);
+    out.set(file, found === undefined || roots.has(found.hash) ? head : found.at);
+  }
   return out;
+}
+
+/** Where the inbox keeps the progress last sent for each item. */
+export const SENT_FILE = "progress/sent.json";
+
+/**
+ * `progress/sent.json` in the inbox: the state last sent for each item in the
+ * 90-day window, and when all of them were last sent.
+ */
+interface SentRecord {
+  reconciled_at?: string;
+  items: Record<string, ProgressUpdate["state"]>;
+}
+
+/** States the intake never moves an item out of, so they are not sent again. */
+const FINAL_STATES: ReadonlySet<string> = new Set(["in_data", "refused"]);
+
+async function readSent(inbox: string): Promise<SentRecord> {
+  try {
+    const parsed = JSON.parse(await readFile(join(inbox, SENT_FILE), "utf8")) as Partial<SentRecord>;
+    return { ...(typeof parsed.reconciled_at === "string" ? { reconciled_at: parsed.reconciled_at } : {}), items: parsed.items ?? {} };
+  } catch {
+    return { items: {} };
+  }
+}
+
+/** 00:00 UTC on the Monday of `now`'s week, ISO 8601. */
+export function mondayOf(now: Date): string {
+  const day = (now.getUTCDay() + 6) % 7;
+  const monday = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - day);
+  return new Date(monday).toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
 export interface SendProgressOptions {
   inbox: string;
-  /** A checkout of the data repository's `main`, with its history, so each change is dated by its commit. */
+  /** A checkout of the data repository's `main`, with its last 14 days of history, so each change is dated by its commit. */
   main: string;
   store: ProgressStore;
   /** Every item this run decided, but photos. Those it left in `pending/` (waiting) and owner submissions are sent from here. */
@@ -263,20 +312,28 @@ export const PROGRESS_BATCH = 500;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Sends the intake every item's progress: each item decided in the last 90
- * days, from `applied/` and `refused/`, and this run's other decisions. A
- * change in the data is dated by the last commit on main that touched its
- * file. Sent in calls of up to 500. A call that fails is logged and the rest
- * are still sent, so the intake failing never fails the run. Returns how
- * many items were sent and how many were in failed calls.
+ * Sends the intake the progress of each item decided in the last 90 days,
+ * from `applied/` and `refused/`, and of this run's other decisions, when it
+ * differs from what `progress/sent.json` in the inbox says was last sent. An
+ * item last sent `in_data` or `refused` is final and not worked out again.
+ * The first run after 00:00 UTC each Monday sends every item. A change in
+ * the data is dated by the last commit on main that touched its file. Sent
+ * in calls of up to 500. A call that fails is logged, the rest are still
+ * sent and its items are sent again next run, so the intake failing never
+ * fails the run. Returns how many items were sent, how many were in failed
+ * calls, and whether `progress/sent.json` changed (for the inbox commit).
  */
-export async function sendProgress(options: SendProgressOptions): Promise<{ sent: number; failed: number }> {
+export async function sendProgress(options: SendProgressOptions): Promise<{ sent: number; failed: number; recorded: boolean }> {
   const now = options.now ?? new Date();
   const runAt = now.toISOString().replace(/\.\d{3}Z$/, "Z");
   const sinceDay = new Date(now.getTime() - (WINDOW_DAYS + 1) * DAY_MS).toISOString().slice(0, 10);
-  const history = [...(await readHistory(options.inbox, sinceDay)), ...(await readHistory(options.inbox, sinceDay, "refused"))].filter(
+  const window = [...(await readHistory(options.inbox, sinceDay)), ...(await readHistory(options.inbox, sinceDay, "refused"))].filter(
     (item) => item.type !== "photo",
   ) as DecidedItem[];
+  const record = await readSent(options.inbox);
+  const reconcile = (record.reconciled_at ?? "") < mondayOf(now);
+  const isFinal = (id: string) => !reconcile && FINAL_STATES.has(record.items[id] ?? "");
+  const history = window.filter((item) => !isFinal(item.id));
 
   const repo = new DataRepo(options.main);
   const places = await repo.places(history.map(placeOf).filter((p): p is string => p !== null));
@@ -307,23 +364,37 @@ export async function sendProgress(options: SendProgressOptions): Promise<{ sent
     if (update) updates.set(item.id, update);
   }
   for (const d of options.decisions) {
-    if (updates.has(d.id)) continue;
+    if (updates.has(d.id) || isFinal(d.id)) continue;
     const base = { id: d.id, ...(d.reason ? { reason: d.reason } : {}), ...(d.place !== null ? { place: d.place } : {}), decided_at: runAt };
     updates.set(d.id, decisionProgress(base, d.outcome, () => undefined));
   }
 
-  const all = [...updates.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
+  const due = [...updates.values()].filter((u) => reconcile || record.items[u.id] !== u.state).sort((a, b) => (a.id < b.id ? -1 : 1));
+  // The record keeps only items still in the window.
+  const inWindow = new Set([...window.map((i) => i.id), ...options.decisions.map((d) => d.id)]);
+  const items: SentRecord["items"] = Object.fromEntries(Object.entries(record.items).filter(([id]) => inWindow.has(id)));
   let sent = 0;
   let failed = 0;
-  for (let start = 0; start < all.length; start += PROGRESS_BATCH) {
-    const part = all.slice(start, start + PROGRESS_BATCH);
+  for (let start = 0; start < due.length; start += PROGRESS_BATCH) {
+    const part = due.slice(start, start + PROGRESS_BATCH);
     try {
       await options.store.progress(part);
       sent += part.length;
+      for (const u of part) items[u.id] = u.state;
     } catch (error) {
       failed += part.length;
       console.warn(`sending the progress of ${part.length} item(s) to the intake failed, trying again next run: ${String(error)}`);
     }
   }
-  return { sent, failed };
+  const next: SentRecord = {
+    ...(reconcile && failed === 0 ? { reconciled_at: runAt } : record.reconciled_at !== undefined ? { reconciled_at: record.reconciled_at } : {}),
+    items: Object.fromEntries(Object.entries(items).sort(([a], [b]) => (a < b ? -1 : 1))),
+  };
+  const text = `${JSON.stringify(next, null, 2)}\n`;
+  const path = join(options.inbox, SENT_FILE);
+  const before = await readFile(path, "utf8").catch(() => undefined);
+  if (text === before) return { sent, failed, recorded: false };
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, text, "utf8");
+  return { sent, failed, recorded: true };
 }

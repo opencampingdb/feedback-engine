@@ -33,7 +33,10 @@ on main, so it keeps those recent changes for 7 days from this run, and which
 items this run decided other than applying them, so their recent changes leave
 the list. They also send the intake every item's progress from the last 90
 days, for GET /v1/feedback/progress. Each change in the data is dated by the
-last commit on <dir> that touched its file, so <dir> needs its history.
+last commit on <dir> that touched its file, so <dir> needs its last 14 days
+of history. Only items whose progress changed since the last send are sent,
+recorded in <inbox>/progress/sent.json, and every item on the first run
+after 00:00 UTC each Monday.
 --review-prs (up to 100; owner approvals read the 30 most recent) and
 --auto-prs (the same JSON for --head feedback/auto) must be read before <dir>
 is checked out, so a merged PR's changes are on it.
@@ -126,16 +129,8 @@ async function main(): Promise<number> {
   if (values["auto-pr-body"]) await writeFile(values["auto-pr-body"], summary.auto_pr_body, "utf8");
   if (values["review-pr-body"]) await writeFile(values["review-pr-body"], summary.review_pr_body, "utf8");
   if (values.summary) await writeFile(values.summary, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
-  const output = process.env.GITHUB_OUTPUT;
-  if (output) {
-    const lines = [
-      `auto_changed=${summary.auto_changed}`,
-      `review_changed=${summary.review_changed}`,
-      `owner_claims=${summary.owner_claims}`,
-      `inbox_changed=${summary.inbox_changed}`,
-    ];
-    await appendFile(output, `${lines.join("\n")}\n`, "utf8");
-  }
+  // The progress sent is recorded in the inbox, so the inbox commit carries it too.
+  let progressRecorded = false;
   if (values.main && values.intake && token) {
     const store = intakeRecentStore(values.intake, token);
     const settled = await settleRecentPlaces({ inbox: values.inbox, main: values.main, store, ...(now ? { now } : {}) });
@@ -160,9 +155,20 @@ async function main(): Promise<number> {
       ...(now ? { now } : {}),
     }).catch((error: unknown) => {
       console.warn(`working out the progress of items failed, trying again next run: ${String(error)}`);
-      return { sent: 0, failed: 0 };
+      return { sent: 0, failed: 0, recorded: false };
     });
+    progressRecorded = progress.recorded;
     console.log(`progress of ${progress.sent} item(s) sent to the intake${progress.failed > 0 ? `, ${progress.failed} not sent` : ""}`);
+  }
+  const output = process.env.GITHUB_OUTPUT;
+  if (output) {
+    const lines = [
+      `auto_changed=${summary.auto_changed}`,
+      `review_changed=${summary.review_changed}`,
+      `owner_claims=${summary.owner_claims}`,
+      `inbox_changed=${summary.inbox_changed || progressRecorded}`,
+    ];
+    await appendFile(output, `${lines.join("\n")}\n`, "utf8");
   }
   const c = summary.counts;
   console.log(

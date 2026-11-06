@@ -206,9 +206,6 @@ jobs:
           repository: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
           ref: ${{ inputs.data-base-branch }}
           path: data-main
-          # With its history, so each change in the data is dated by the commit that brought it in.
-          fetch-depth: 0
-          filter: blob:none
           sparse-checkout: |
             places
             moderation
@@ -216,6 +213,21 @@ jobs:
             fees
           persist-credentials: false
           token: ${{ steps.data-token.outputs.token }}
+
+      # The last 14 days of main's history, so each change in the data is dated by the commit that
+      # brought it in. A file last changed before then is dated by main's last commit.
+      - name: Fetch 14 days of data main's history
+        if: inputs.intake-url != ''
+        env:
+          GH_TOKEN: ${{ steps.data-token.outputs.token }}
+          BASE_BRANCH: ${{ inputs.data-base-branch }}
+        working-directory: data-main
+        run: |
+          since="$(date -u -d '14 days ago' +%Y-%m-%d)"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --quiet --filter=blob:none --shallow-since="$since" origin "$BASE_BRANCH" ||
+            echo "::warning::could not fetch data main's history, so changes are dated by its last commit"
 
       - name: Check out Open Camping DB place records
         if: inputs.places-repository != ''
