@@ -24,6 +24,8 @@ export type {
   FactResult,
   FactsInput,
   NewPlaceRef,
+  NewPlaceStatus,
+  PhotoSettled,
   PlaceTarget,
   FeeInput,
   FeedbackClient,

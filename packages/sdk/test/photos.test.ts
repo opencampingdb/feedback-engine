@@ -258,3 +258,130 @@ describe("photo pass client", () => {
     expect(await client.photoPass()).toEqual({ status: "offline" });
   });
 });
+
+describe("photos of a new place waiting for its id", () => {
+  const NEW_PLACE = "ocdb_01M6R45Y75GTXQBS5ETC16CYSZ";
+  type Status = Awaited<ReturnType<NonNullable<Parameters<typeof createPhotoClient>[0]["resolveNewPlace"]>>>;
+
+  function setup(opts: { status?: () => Status; storage?: StorageAdapter; uploadStatus?: () => number; files?: Map<string, { full: Uint8Array; thumb: Uint8Array } | null> } = {}) {
+    let current: Status = { status: "waiting" };
+    const files = opts.files ?? new Map([["a", { full: jpeg(20, 1), thumb: jpeg(10, 1) }], ["b", { full: jpeg(20, 2), thumb: jpeg(10, 2) }]]);
+    const uploads: { place: string; bytes: number }[] = [];
+    const settled: unknown[] = [];
+    const storage = opts.storage ?? memoryStorage();
+    const client = createPhotoClient({
+      endpoint: "https://photos.example",
+      appKey: "key-1",
+      appVersion: "1.2.3",
+      storage,
+      fetch: async () => ({ status: 202, json: async () => ({}), headers: { get: () => null } }),
+      fetchPhoto: async (_url, init) => {
+        uploads.push({ place: decodeMeta(init.headers["x-photo-meta"]!).place, bytes: init.body.length });
+        return { status: opts.uploadStatus?.() ?? 202, json: async () => ({ id: `pho_01JBXK3M8Q4R5S6T7V8W9X0YZ${uploads.length}`, error: "x" }), headers: { get: () => null } };
+      },
+      resolveNewPlace: async () => (opts.status ? opts.status() : current),
+      loadPhoto: async (key) => files.get(key) ?? null,
+      onPhotoSettled: (s) => void settled.push(s),
+    });
+    const photo = (key: string) => client.photo({ place: { newPlace: "np-1" }, key, contributor: CONTRIBUTOR, consent: true, full: jpeg(20), thumb: jpeg(10) });
+    return { client, uploads, settled, storage, photo, set: (s: Status) => void (current = s) };
+  }
+
+  it("keeps the photos while the new place waits, then uploads them under its id, in order", async () => {
+    const t = setup();
+    expect(await t.photo("a")).toEqual({ status: "waiting" });
+    expect(await t.photo("b")).toEqual({ status: "waiting" });
+    await t.client.flush();
+    expect(t.uploads).toHaveLength(0);
+    t.set({ status: "sent", place: NEW_PLACE });
+    await t.client.flush();
+    expect(t.uploads.map((u) => u.place)).toEqual([NEW_PLACE, NEW_PLACE]);
+    expect(t.settled).toEqual([
+      { key: "a", newPlace: "np-1", outcome: { status: "sent", id: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZ1", place: NEW_PLACE } },
+      { key: "b", newPlace: "np-1", outcome: { status: "sent", id: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZ2", place: NEW_PLACE } },
+    ]);
+    // Settled photos are gone: another flush uploads nothing more.
+    await t.client.flush();
+    expect(t.uploads).toHaveLength(2);
+  });
+
+  it("uploads at once when the new place already has its id", async () => {
+    const t = setup({ status: () => ({ status: "sent", place: NEW_PLACE }) });
+    expect(await t.photo("a")).toEqual({ status: "sent", id: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZ1" });
+    expect(t.uploads.map((u) => u.place)).toEqual([NEW_PLACE]);
+  });
+
+  it("drops the waiting photos, saying why, when the new place is dropped, and refuses new ones", async () => {
+    const t = setup();
+    await t.photo("a");
+    t.set({ status: "dropped" });
+    await t.client.flush();
+    expect(t.uploads).toHaveLength(0);
+    expect(t.settled).toEqual([{ key: "a", newPlace: "np-1", outcome: { status: "dropped", reason: "new_place_dropped" } }]);
+    await expect(t.photo("b")).rejects.toBeInstanceOf(FeedbackValidationError);
+  });
+
+  it("drops a photo whose files are gone, and still uploads the others", async () => {
+    const files = new Map([["a", null], ["b", { full: jpeg(20, 2), thumb: jpeg(10, 2) }]]) as Map<string, { full: Uint8Array; thumb: Uint8Array } | null>;
+    const t = setup({ files });
+    await t.photo("a");
+    await t.photo("b");
+    t.set({ status: "sent", place: NEW_PLACE });
+    await t.client.flush();
+    expect(t.settled).toEqual([
+      { key: "a", newPlace: "np-1", outcome: { status: "dropped", reason: "photo_missing" } },
+      { key: "b", newPlace: "np-1", outcome: { status: "sent", id: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZ1", place: NEW_PLACE } },
+    ]);
+  });
+
+  it("keeps a photo that can't go now for the next flush, without holding up the next one", async () => {
+    let n = 0;
+    const t = setup({ uploadStatus: () => (++n === 1 ? 503 : 202) });
+    await t.photo("a");
+    await t.photo("b");
+    t.set({ status: "sent", place: NEW_PLACE });
+    await t.client.flush();
+    expect(t.settled.map((s) => (s as { key: string }).key)).toEqual(["b"]);
+    await t.client.flush();
+    expect(t.settled.map((s) => (s as { key: string }).key)).toEqual(["b", "a"]);
+  });
+
+  it("keeps waiting across a restart", async () => {
+    const storage = memoryStorage();
+    const first = setup({ storage });
+    await first.photo("a");
+    const second = setup({ storage, status: () => ({ status: "sent", place: NEW_PLACE }) });
+    await second.client.flush();
+    expect(second.uploads.map((u) => u.place)).toEqual([NEW_PLACE]);
+    expect(second.settled).toHaveLength(1);
+  });
+
+  it("follows the feedback client's new place: unknown, waiting, then sent with its id", async () => {
+    const storage = memoryStorage();
+    const client = (fetch: FetchLike, t: number) =>
+      createFeedbackClient({ endpoint: "https://intake.example", appKey: "key-1", appVersion: "1.2.3", storage, fetch, now: () => t, random: () => 0 });
+    const offline: FetchLike = async () => {
+      throw new TypeError("offline");
+    };
+    const online: FetchLike = async () => ({ status: 202, json: async () => ({ id: "fb_01M6R45Y75GTXQBS5ETC16CYSZ" }), headers: { get: () => null } });
+    const first = client(offline, 1_000_000);
+    expect(await first.newPlace("np-1")).toEqual({ status: "unknown" });
+    await first.report({ place: null, location: { lat: -32.04, lon: 152.54 }, report: { kind: "new_place", name: "Diamond Beach Holiday Park" }, consent: true, ref: "np-1" });
+    expect(await first.newPlace("np-1")).toEqual({ status: "waiting" });
+    // After a restart and past the backoff, a flush sends it.
+    const later = client(online, 1_000_000 + 24 * 60 * 60 * 1000);
+    await later.flush();
+    expect(await later.newPlace("np-1")).toEqual({ status: "sent", place: NEW_PLACE });
+  });
+
+  it("refuses a new place photo without a key, and needs resolveNewPlace and loadPhoto", async () => {
+    const t = setup();
+    await expect(t.client.photo({ place: { newPlace: "np-1" }, contributor: CONTRIBUTOR, consent: true, full: jpeg(20), thumb: jpeg(10) })).rejects.toBeInstanceOf(
+      FeedbackValidationError,
+    );
+    const bare = createPhotoClient({ endpoint: "https://photos.example", appKey: "key-1", appVersion: "1.2.3", storage: memoryStorage() });
+    await expect(bare.photo({ place: { newPlace: "np-1" }, key: "a", contributor: CONTRIBUTOR, consent: true, full: jpeg(20), thumb: jpeg(10) })).rejects.toThrow(
+      "resolveNewPlace and loadPhoto",
+    );
+  });
+});
