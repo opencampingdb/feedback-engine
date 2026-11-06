@@ -1,6 +1,7 @@
-import type { Progress, RefusedBy } from "@opencampingdb/feedback";
+import { MAX_PROGRESS_IDS, type Progress, type RefusedBy } from "@opencampingdb/feedback";
+import type { ProgressUpdate } from "@opencampingdb/apply/progress-update";
 import type { ItemState } from "./decide.js";
-import { chunks, type D1Like, type D1Statement } from "./recent.js";
+import { chunks, isoSeconds, type D1Like, type D1Statement } from "./recent.js";
 import { ulidTime } from "./ulid.js";
 
 /**
@@ -15,28 +16,8 @@ import { ulidTime } from "./ulid.js";
 export const KEEP_PROGRESS_DAYS = 90;
 /** Most items one `POST /v1/feedback/progress` may carry. */
 export const MAX_PROGRESS_ITEMS = 500;
-/** Most ids one `GET /v1/feedback/progress` may ask for. */
-export const MAX_PROGRESS_IDS = 100;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const isoSeconds = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
-
-/** The states the apply run sends. `received` and `live` come only from the intake, at send time. */
-export const APPLY_STATES = ["waiting", "accepted", "held", "refused", "in_data"] as const;
-export type ApplyState = (typeof APPLY_STATES)[number];
-
-/** One item of `POST /v1/feedback/progress`. */
-export interface ProgressUpdate {
-  id: string;
-  state: ApplyState;
-  reason?: string;
-  /** Only on `refused`, where it is required. */
-  by?: RefusedBy;
-  place?: string;
-  decided_at?: string;
-  /** Required on `in_data`. */
-  in_data_at?: string;
-}
 
 /**
  * The row an accepted feedback item gets when it is queued, for the same

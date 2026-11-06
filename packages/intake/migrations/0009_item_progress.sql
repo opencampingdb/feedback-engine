@@ -4,8 +4,8 @@
 -- when the send-time decision put it live, with held_reason when that decision held it. The apply run sends
 -- every item's later state with POST /v1/feedback/progress: waiting, accepted, held, refused or in_data.
 -- in_data is final, and refused is final unless the change later reaches the data. refused_by says who
--- refused it (rules or reviewer). in_data_at is the first time the apply saw the change in the data, and is
--- kept once set. Never the traveller's words, a device or a contributor. updated is when the row last
+-- refused it (rules or reviewer). in_data_at is the time of the data commit that brought the change in, as
+-- the apply first sends it, and is kept once set. Never the traveller's words, a device or a contributor. updated is when the row last
 -- changed; the scheduled job deletes rows 90 days after that.
 
 CREATE TABLE item_progress (

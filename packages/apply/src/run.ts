@@ -106,8 +106,11 @@ export interface RunSummary {
    * id, in the order they arrived: for the progress the intake keeps
    * (`sendProgress`).
    */
-  decisions: { id: string; place: string | null; outcome: Decision["outcome"]; reason: string }[];
+  decisions: RunDecision[];
 }
+
+/** An item a run decided, as the run summary lists it. */
+export type RunDecision = Pick<Decision, "id" | "place" | "outcome" | "reason">;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PROOF_BUDGET = { ms: 3 * 60_000, concurrency: 4 };

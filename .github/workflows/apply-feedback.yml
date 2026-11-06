@@ -180,21 +180,24 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.data-token.outputs.token }}
 
-      # Before data main is checked out, so every merged review PR read here is in that checkout:
-      # the apply counts a held change as turned down only when its PR is merged or closed without it.
-      - name: Read recent review PRs for owner approvals and progress
+      # Before data main is checked out, so every merged PR read here is in that checkout: the apply
+      # counts a change as turned down only when its PR is merged or closed without it.
+      - name: Read recent review and automatic PRs for owner approvals and progress
         env:
           GH_TOKEN: ${{ steps.data-token.outputs.token }}
           APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
           DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
         run: |
-          # The 30 most recent review PRs the bot opened in the data repository.
-          # PRs from forks on a branch of the same name are left out.
-          gh pr list --repo "$DATA_REPO" --head feedback/review --state all --limit 100 \
-            --json number,state,body,comments,author,isCrossRepository |
-            jq --arg slug "$APP_SLUG" '[.[] | select(.isCrossRepository == false and
-              (.author.login as $l | any($slug, "\($slug)[bot]", "app/\($slug)"; . == $l)))] | .[:30]' \
-            > "$RUNNER_TEMP/review-prs.json"
+          # The 100 most recent PRs the bot opened in the data repository from each branch. Owner
+          # approvals read the 30 most recent review PRs. PRs from forks on a branch of the same
+          # name are left out.
+          for kind in review auto; do
+            gh pr list --repo "$DATA_REPO" --head "feedback/$kind" --state all --limit 100 \
+              --json number,state,body,comments,author,isCrossRepository |
+              jq --arg slug "$APP_SLUG" '[.[] | select(.isCrossRepository == false and
+                (.author.login as $l | any($slug, "\($slug)[bot]", "app/\($slug)"; . == $l)))]' \
+              > "$RUNNER_TEMP/$kind-prs.json"
+          done
 
       - name: Check out data main for the recent places store
         if: inputs.intake-url != ''
@@ -203,6 +206,9 @@ jobs:
           repository: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
           ref: ${{ inputs.data-base-branch }}
           path: data-main
+          # With its history, so each change in the data is dated by the commit that brought it in.
+          fetch-depth: 0
+          filter: blob:none
           sparse-checkout: |
             places
             moderation
@@ -299,6 +305,7 @@ jobs:
           --data data-auto
           --review-data data-review
           --review-prs "$RUNNER_TEMP/review-prs.json"
+          --auto-prs "$RUNNER_TEMP/auto-prs.json"
           --bot-login "$APP_SLUG"
           --auto-pr-body "$RUNNER_TEMP/auto-pr-body.md"
           --review-pr-body "$RUNNER_TEMP/review-pr-body.md"

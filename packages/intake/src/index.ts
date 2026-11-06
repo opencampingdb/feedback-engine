@@ -15,8 +15,10 @@ import {
   isPlaceId,
   isDoubtFact,
   isValidFactValue,
-  newPlaceId,
+  isFeedbackId,
+  MAX_PROGRESS_IDS,
 } from "@opencampingdb/feedback";
+import { placeOf, PROGRESS_UPDATE_STATES, type ProgressUpdate } from "@opencampingdb/apply/progress-update";
 import { withRequestLog } from "./requestlog.js";
 import { AttestError, verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
 import { refuse, type RefusalBody } from "./refusal.js";
@@ -61,7 +63,6 @@ import { createChecks, pruneLiveCounts, releaseLive, type AiLike } from "./check
 import {
   decideAtSendTime,
   decidedHere,
-  isFeedbackId,
   listChanges,
   markInData,
   openDoubtCases,
@@ -74,16 +75,7 @@ import {
 } from "./decide.js";
 import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult } from "./inbox-queue.js";
 import { ulid } from "./ulid.js";
-import {
-  APPLY_STATES,
-  MAX_PROGRESS_IDS,
-  MAX_PROGRESS_ITEMS,
-  pruneProgress,
-  readProgress,
-  receivedStatement,
-  recordProgress,
-  type ProgressUpdate,
-} from "./progress.js";
+import { MAX_PROGRESS_ITEMS, pruneProgress, readProgress, receivedStatement, recordProgress } from "./progress.js";
 import { verifyPreview } from "@opencampingdb/apply/preview";
 
 /** `GET /v1/photos/review/<photo id>/<full|thumb>.jpg`: one held photo for a person checking the review PR. */
@@ -1160,7 +1152,7 @@ export function createHandler(deps: Deps) {
       const { id, state, reason, by, place, decided_at: decided, in_data_at: inData } = value as Record<string, unknown>;
       return (
         isFeedbackId(id) &&
-        (APPLY_STATES as readonly unknown[]).includes(state) &&
+        (PROGRESS_UPDATE_STATES as readonly unknown[]).includes(state) &&
         (reason === undefined || (typeof reason === "string" && reason.length <= 1000)) &&
         (state === "refused" ? by === "rules" || by === "reviewer" : by === undefined) &&
         (place === undefined || isPlaceId(place)) &&
@@ -1431,7 +1423,7 @@ export function createHandler(deps: Deps) {
       ? [
           receivedStatement(
             env.RECENT_LIST,
-            { id, received, place: stored.type === "report" && stored.report.kind === "new_place" ? newPlaceId(id) : stored.place },
+            { id, received, place: placeOf(stored) },
             decision?.answer,
           ),
         ]

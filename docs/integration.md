@@ -334,7 +334,7 @@ import { progressInRelease } from "@opencampingdb/feedback";
 
 const progress = await feedback.progress(mine.map((c) => c.feedbackId)); // one answer per id, in the same order
 for (const p of progress) {
-  if (p.state === "in_data") showDone(p.id, progressInRelease(p, manifest.data_version) ? "in your data" : "in the next data update");
+  if (p.state === "in_data") showDone(p.id, progressInRelease(p, manifest.data_version) ? "in your data" : "in the next data release");
   else if (p.state === "refused") showRefused(p.id, p.reason);
   else showWaiting(p.id, p.state);
 }
@@ -349,11 +349,11 @@ for (const p of progress) {
 | `waiting` | It needs more reports, or its place is not in the data yet. `reason` says which. | Waiting for others to confirm it. |
 | `accepted` | The rules accepted it, and it is on its way into the data. | Accepted. |
 | `held` | A reviewer decides it, as for a name, a description or an owner claim. | With a reviewer. |
-| `refused` | Refused, with `reason`. `by` is `rules` when the rules refused it, or `reviewer` when the review PR was merged or closed without it. | Not taken, with the reason. |
+| `refused` | Refused, with `reason`. `by` is `rules` when the rules refused it, or `reviewer` when a person merged or closed the review PR without it, or closed the automatic PR without merging. | Not taken, with the reason. |
 | `in_data` | Its change is in the data, as of `in_data_at`. | Done. It shows from the next data release, or at once through the recent changes for a fact that went live. |
 | `unknown` | The intake has no record of it: not sent to this intake, or more than 90 days without a change. | Nothing. |
 
-`progressInRelease(progress, dataVersion)` is true when the change is `in_data` and its `in_data_at` is earlier than the commit time in your release's `data_version`, as `withRecentChanges` reads it. A new place merged into another place answers `in_data` with `place` set to the place it went into. A record never carries the traveller's words, a device or a contributor: only the state, the engine's reason, `held_reason`, `by`, the place and times. Records are kept for 90 days after they last change. A state this SDK does not know is answered `unknown`.
+`in_data_at` is the time of the data commit that brought the change in. `progressInRelease(progress, dataVersion)` is true when the change is `in_data` and its `in_data_at` is no later than the commit time in your release's `data_version`, as `withRecentChanges` reads it. A new place merged into another place answers `in_data` with `place` set to the place it went into. A record never carries the traveller's words, a device or a contributor: only the state, the engine's reason, `held_reason`, `by`, the place and times. Records are kept for 90 days after they last change. An owner claim's progress stops at `accepted` or `held`: owner submissions answer directly, and what becomes of them after that is outside progress. A state this SDK does not know is answered `unknown`.
 
 ## 6. Reviews: contributors, reports and blocking
 

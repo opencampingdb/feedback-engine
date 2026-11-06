@@ -14,7 +14,7 @@ import { dataVersionTime } from "./recent.js";
  * - `in_data`: its change is in the data, with `in_data_at`.
  * - `unknown`: the intake has no record of it.
  *
- * Adding a state is additive; renaming or removing one is a breaking change.
+ * Adding a state is additive. Renaming or removing one is a breaking change.
  */
 export const PROGRESS_STATES = ["received", "live", "waiting", "accepted", "held", "refused", "in_data", "unknown"] as const;
 
@@ -41,7 +41,7 @@ export interface Progress {
   received?: string;
   /** When the apply last decided it, ISO 8601 UTC. */
   decided_at?: string;
-  /** When the apply first saw its change in the data, ISO 8601 UTC. Only on `in_data`. */
+  /** When its change reached the data: the time of the data commit that brought it in, ISO 8601 UTC. Only on `in_data`. */
   in_data_at?: string;
 }
 
@@ -77,13 +77,14 @@ export function readProgress(id: string, raw: unknown): Progress {
 
 /**
  * Whether the app's data release already has a contribution's change: true
- * when it is `in_data` and its `in_data_at` is earlier than the time in
- * `dataVersion`, the release's `data_version`. False when the version is not
- * in the `<commit time>-<short sha>` form.
+ * when it is `in_data` and its `in_data_at`, the time of the data commit that
+ * brought it in, is no later than the commit time in `dataVersion`, the
+ * release's `data_version`. False when the version is not in the
+ * `<commit time>-<short sha>` form.
  */
 export function progressInRelease(progress: Progress, dataVersion: string): boolean {
   const release = dataVersionTime(dataVersion);
   if (release === undefined || progress.state !== "in_data" || progress.in_data_at === undefined) return false;
   const at = Date.parse(progress.in_data_at);
-  return !Number.isNaN(at) && at < release;
+  return !Number.isNaN(at) && at <= release;
 }

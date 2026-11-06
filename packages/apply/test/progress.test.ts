@@ -1,10 +1,15 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
+import { promisify } from "node:util";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StoredFeedback } from "@opencampingdb/feedback";
 import {
-  idsOnDecidedReviewPrs,
+  AUTO_PR_CLOSED,
+  idsOnPrs,
+  lastCommitTimes,
+  turnedDown,
   itemInDataOnMain,
   progressOf,
   REVIEWER_DECLINED,
@@ -108,8 +113,9 @@ describe("itemInDataOnMain", () => {
     const item = decided(1, report({ kind: "new_place" }, { place: null, location: { lat: -30, lon: 140 } }));
     const own = `ocdb_${id(1).slice(3)}`;
     expect(itemInDataOnMain(item, main())).toEqual({ inData: false });
-    expect(itemInDataOnMain(item, main([{ ...record, id: own }]))).toEqual({ inData: true });
-    expect(itemInDataOnMain(item, main([{ ...record, id: own, status: "merged", merged_into: TARGET }]))).toEqual({ inData: true, place: TARGET });
+    const file = `places/${own.slice(-2).toLowerCase()}/${own}.json`;
+    expect(itemInDataOnMain(item, main([{ ...record, id: own }]))).toEqual({ inData: true, file });
+    expect(itemInDataOnMain(item, main([{ ...record, id: own, status: "merged", merged_into: TARGET }]))).toEqual({ inData: true, file, place: TARGET });
   });
 
   it("check: last_confirmed or the status dated by that run or later, or the place is a new place", () => {
@@ -180,13 +186,31 @@ describe("itemInDataOnMain", () => {
     expect(inData(item, main([merged]))).toBe(true);
   });
 
+  it("names the file each change is in, for dating it by its last commit", () => {
+    const fileOf = (item: StoredFeedback, data: MainData) => {
+      const found = itemInDataOnMain(item, data);
+      return found.inData ? found.file : undefined;
+    };
+    const who = { contributor: "ctr_0000000000000001" };
+    expect(fileOf(decided(1, report({ kind: "fact", fact: "power", value: false })), main())).toBe(`places/za/${PLACE}.json`);
+    const fee = decided(2, { type: "fee", ...who, fee: { amount: 30, site: "powered", paid: "2026-10" } });
+    expect(fileOf(fee, main([record], { fees: () => [{ id: `fee_${id(2).slice(3)}` } as Fee] }))).toBe(`fees/${PLACE}.ndjson`);
+    const review = decided(3, { type: "review", ...who, review: { stars: 4, text: "Quiet", visited: "2026-10" } });
+    expect(fileOf(review, main([record], { reviews: () => [{ id: `rev_${id(3).slice(3)}` } as Review] }))).toBe(`reviews/${PLACE}.ndjson`);
+    const commons = decided(4, report({ kind: "commons_mismatch", file: "Lake Pool 6.jpg" }));
+    expect(fileOf(commons, main([record], { doNotMatch: [{ place: PLACE, file: "Lake Pool 6.jpg" }] }))).toBe("moderation/commons-do-not-match.json");
+  });
+
   it("a place main doesn't have is not in the data", () => {
     expect(inData(decided(1, report({ kind: "fact", fact: "power", value: true })), main([]))).toBe(false);
   });
 });
 
 describe("progressOf", () => {
-  const ctx = (declined: string[] = []) => ({ declined: new Set(declined), runAt: "2026-11-03T00:00:00Z" });
+  const ctx = (review: string[] = [], auto: string[] = []) => ({
+    declined: { review: new Set(review), auto: new Set(auto) },
+    inDataAt: (file: string) => (file === `places/za/${PLACE}.json` ? "2026-11-02T10:00:00Z" : "2026-11-03T00:00:00Z"),
+  });
   const nameReport = (result = "needs_review") => decided(1, report({ kind: "name", value: "Lake Eppalock Rest Area" }), result, "names are checked by a person");
 
   it("maps every outcome to its state", () => {
@@ -197,10 +221,11 @@ describe("progressOf", () => {
     expect(progressOf(decided(1, fact, "awaiting_approval", "r"), main(), ctx())).toEqual({ ...base, state: "held" });
     expect(progressOf(decided(1, fact, "refused", "r"), main(), ctx())).toEqual({ ...base, state: "refused", by: "rules" });
     expect(progressOf(decided(1, fact, "waiting", "r"), main(), ctx())).toEqual({ ...base, state: "waiting" });
+    // in_data_at is when main got the place file.
     expect(progressOf(decided(1, fact, "applied", "r"), main([dated("power", RUN, { facts: { power: true } })]), ctx())).toEqual({
       ...base,
       state: "in_data",
-      in_data_at: "2026-11-03T00:00:00Z",
+      in_data_at: "2026-11-02T10:00:00Z",
     });
   });
 
@@ -218,6 +243,14 @@ describe("progressOf", () => {
     expect(progressOf(nameReport(), main([dated("name", RUN)]), ctx([id(1)]))).toMatchObject({ state: "in_data" });
   });
 
+  it("an applied change whose automatic PR was closed without merging is refused by the reviewer, unless main has it", () => {
+    const fact = decided(1, report({ kind: "fact", fact: "power", value: true }), "applied", "fact accepted");
+    expect(progressOf(fact, main(), ctx([], [id(1)]))).toEqual({ id: id(1), place: PLACE, decided_at: RUN, state: "refused", by: "reviewer", reason: AUTO_PR_CLOSED });
+    expect(progressOf(fact, main([dated("power", RUN, { facts: { power: true } })]), ctx([], [id(1)]))).toMatchObject({ state: "in_data" });
+    // A held item is decided by its review PR, not the automatic one.
+    expect(progressOf(nameReport(), main(), ctx([], [id(1)]))).toMatchObject({ state: "held" });
+  });
+
   it("items that never change the data keep their decision's state", () => {
     const other = decided(1, report({ kind: "other", note: "x" }), "needs_review");
     expect(progressOf(other, main(), ctx([id(1)]))).toMatchObject({ state: "held" });
@@ -226,22 +259,69 @@ describe("progressOf", () => {
   });
 });
 
-describe("idsOnDecidedReviewPrs", () => {
+describe("idsOnPrs and turnedDown", () => {
   const pr = (state: ReviewPr["state"], body: string, extra: Partial<ReviewPr> = {}): ReviewPr => ({
     number: 1, state, body, comments: [], author: { login: "ocdb-bot[bot]" }, isCrossRepository: false, ...extra,
   });
+  const none = { open: new Set<string>(), merged: new Set<string>(), closed: new Set<string>() };
 
-  it("reads the ids in merged and closed PRs the bot opened, in the body and the bot's comments", () => {
+  it("reads the ids on PRs the bot opened, in the body and the bot's comments, by the PR's state", () => {
     const prs = [
-      pr("MERGED", `- place: name (${id(1)})`, { comments: [{ author: { login: "ocdb-bot[bot]" }, body: `- (${id(2)})` }, { author: { login: "someone" }, body: id(3) }] }),
+      pr("MERGED", `- place: name (${id(1)})`, { comments: [{ author: { login: "ocdb-bot[bot]" }, body: `- (${id(2)}, ${id(8)})` }, { author: { login: "someone" }, body: id(3) }] }),
       pr("CLOSED", `(${id(4)})`),
       pr("OPEN", `(${id(5)})`),
       pr("MERGED", `(${id(6)})`, { author: { login: "someone" } }),
       pr("MERGED", `(${id(7)})`, { isCrossRepository: true }),
     ];
-    expect([...idsOnDecidedReviewPrs(prs, ["ocdb-bot"])].sort()).toEqual([id(1), id(2), id(4)]);
+    const ids = idsOnPrs(prs, ["ocdb-bot"]);
+    expect([...ids.merged].sort()).toEqual([id(1), id(2), id(8)]);
+    expect([...ids.closed]).toEqual([id(4)]);
+    expect([...ids.open]).toEqual([id(5)]);
+  });
+
+  it("an item on a closed review PR and then listed again on an open one is not turned down", () => {
+    const review = idsOnPrs([pr("OPEN", `held case (${id(1)})`), pr("CLOSED", `(${id(1)}, ${id(2)})`)], ["ocdb-bot"]);
+    expect([...turnedDown(review, none).review]).toEqual([id(2)]);
+  });
+
+  it("an item on a closed automatic PR is turned down, and not while an open automatic PR names it", () => {
+    expect([...turnedDown(none, idsOnPrs([pr("CLOSED", `(${id(1)})`), pr("MERGED", `(${id(2)})`)], ["ocdb-bot"])).auto]).toEqual([id(1)]);
+    expect([...turnedDown(none, idsOnPrs([pr("CLOSED", `(${id(1)})`), pr("OPEN", `(${id(1)})`)], ["ocdb-bot"])).auto]).toEqual([]);
   });
 });
+
+describe("lastCommitTimes", () => {
+  let repo: string;
+  beforeEach(async () => {
+    repo = await mkdtemp(join(tmpdir(), "ocdb-progress-git-"));
+  });
+  afterEach(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  it("dates each file by the last commit that touched it, an untracked one by the last commit, and falls back without git", async () => {
+    await commitIn(repo, `places/za/${PLACE}.json`, "{}", "2026-11-01T10:00:00Z");
+    await commitIn(repo, `fees/${PLACE}.ndjson`, "{}", "2026-11-02T10:00:00Z");
+    const times = await lastCommitTimes(repo, [`places/za/${PLACE}.json`, `places/zb/${TARGET}.json`], "2026-11-03T00:00:00Z");
+    expect(Object.fromEntries(times)).toEqual({ [`places/za/${PLACE}.json`]: "2026-11-01T10:00:00Z", [`places/zb/${TARGET}.json`]: "2026-11-02T10:00:00Z" });
+    const plain = await mkdtemp(join(tmpdir(), "ocdb-progress-plain-"));
+    expect(Object.fromEntries(await lastCommitTimes(plain, ["x"], "2026-11-03T00:00:00Z"))).toEqual({ x: "2026-11-03T00:00:00Z" });
+    await rm(plain, { recursive: true, force: true });
+  });
+});
+
+const execFileP = promisify(execFile);
+/** Writes `file` in the git repository `repo` and commits it, with the commit time `at`. */
+async function commitIn(repo: string, file: string, content: string, at: string): Promise<void> {
+  const env = { ...process.env, GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at };
+  const g = (...args: string[]) => execFileP("git", ["-C", repo, "-c", "commit.gpgsign=false", "-c", "user.name=test", "-c", "user.email=test@example.com", ...args], { env });
+  await mkdir(repo, { recursive: true });
+  await g("init", "-q");
+  await mkdir(dirname(join(repo, file)), { recursive: true });
+  await writeFile(join(repo, file), content);
+  await g("add", "-A");
+  await g("commit", "-q", "-m", `Add ${file}`);
+}
 
 describe("sendProgress", () => {
   let root: string;
@@ -300,6 +380,31 @@ describe("sendProgress", () => {
       { id: id(6), place: PLACE, decided_at: "2026-11-03T00:00:00Z", state: "waiting", reason: "a closed place needs a second device to reopen it" },
       { id: id(7), place: PLACE, decided_at: "2026-11-03T00:00:00Z", state: "held", reason: "proof found" },
     ]);
+  });
+
+  it("dates a change in the data by the last commit on main that touched its file", async () => {
+    await inInbox(decided(1, report({ kind: "fact", fact: "power", value: true })));
+    await commitIn(mainDir, `places/za/${PLACE}.json`, JSON.stringify(dated("power", RUN, { facts: { power: true } })), "2026-11-01T06:00:00Z");
+    await commitIn(mainDir, "README.md", "data", "2026-11-02T06:00:00Z");
+    const sent = store();
+    await sendProgress({ inbox, main: mainDir, store: sent, decisions: [], now: NOW });
+    expect(sent.progress.mock.calls[0]![0]).toEqual([{ id: id(1), place: PLACE, decided_at: RUN, state: "in_data", in_data_at: "2026-11-01T06:00:00Z" }]);
+  });
+
+  it("refuses an applied change whose automatic PR was closed without merging", async () => {
+    await inInbox(decided(1, report({ kind: "fact", fact: "power", value: true }), "applied", "fact accepted"));
+    await onMain(record);
+    const sent = store();
+    await sendProgress({
+      inbox,
+      main: mainDir,
+      store: sent,
+      decisions: [],
+      autoPrs: [{ number: 3, state: "CLOSED", body: `(${id(1)})`, comments: [], author: { login: "ocdb-bot[bot]" }, isCrossRepository: false }],
+      botLogins: ["ocdb-bot"],
+      now: NOW,
+    });
+    expect(sent.progress.mock.calls[0]![0]).toEqual([{ id: id(1), place: PLACE, decided_at: RUN, state: "refused", by: "reviewer", reason: AUTO_PR_CLOSED }]);
   });
 
   it("reads reviews, fees and the do-not-match list from main", async () => {

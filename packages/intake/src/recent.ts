@@ -54,7 +54,8 @@ export const KEEP_PLACE_IN_DATA_DAYS = 7;
 /** D1 allows 100 bound values in one statement. */
 const MAX_BOUND = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const isoSeconds = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+/** A time as the intake stamps it: ISO 8601 UTC to the second. */
+export const isoSeconds = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 
 /** `items` in runs of at most `size`. */
 export const chunks = <T>(items: readonly T[], size: number): T[][] =>

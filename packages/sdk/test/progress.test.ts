@@ -101,9 +101,14 @@ describe("progress", () => {
 describe("progressInRelease", () => {
   const inData = (at: string): Progress => ({ id: fbId(1), state: "in_data", in_data_at: at });
 
-  it("is true when the change was in the data before the release's commit time", () => {
+  it("is true when the change was in the data by the release's commit time", () => {
     expect(progressInRelease(inData("2026-11-03T08:59:59Z"), "20261103T090000Z-abc1234")).toBe(true);
-    expect(progressInRelease(inData("2026-11-03T09:00:00Z"), "20261103T090000Z-abc1234")).toBe(false);
+    expect(progressInRelease(inData("2026-11-03T09:00:01Z"), "20261103T090000Z-abc1234")).toBe(false);
+  });
+
+  it("is true for a release built from the commit that brought the change in", () => {
+    // in_data_at is that commit's time, and the release's data_version starts with it.
+    expect(progressInRelease(inData("2026-11-03T09:00:00Z"), "20261103T090000Z-abc1234")).toBe(true);
   });
 
   it("is false for any other state, and for a version it cannot read", () => {
