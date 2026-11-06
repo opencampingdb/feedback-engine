@@ -43,10 +43,10 @@ export type { Place };
  * `sources` doubting it, and the `doubts` and `confirmations` weighed; with
  * `taken_down` the doubts took it off the place, otherwise one traveller
  * doubts it and it stays. `vehicle_access_candidate`: a place whose name
- * says who may use it (such as "Truck Parking Bay") but whose OSM tags do
- * not, from `moderation/heavy-vehicle-candidates.csv` in the data
- * repository; `fact` is `vehicle_access`, `value` the value the name
- * suggests, and `feedback` is empty. `commons_mismatch`: travellers say the
+ * suggested `vehicle_access` while its OSM tags did not, listed by older
+ * versions of the apply; `feedback` is empty. Such cases are always left: a
+ * name alone never sets a fact, so the place is tagged in OSM instead.
+ * `commons_mismatch`: travellers say the
  * Commons photo `file` shown for the place is not of it, from `sources`
  * independent sources, not yet enough to put it on the do-not-match list.
  * Contact values a traveller sent, notes and device ids are never in it.
@@ -214,7 +214,7 @@ export function allowedDecisions(c: HeldCase): ReviewDecision[] {
     case "fact_doubted":
       return c.taken_down ? ["restore", "keep_down", "leave"] : ["dismiss", "leave"];
     case "vehicle_access_candidate":
-      return ["confirm", "leave"];
+      return ["leave"];
     case "commons_mismatch":
       return ["confirm", "dismiss", "leave"];
     default:
@@ -240,12 +240,8 @@ export function settleByRules(
     if (context.doNotMatch?.some((p) => p.place === c.place && p.file === c.file)) return leave("the Commons photo is on the do-not-match list already");
     return null;
   }
-  if (c.case === "vehicle_access_candidate") {
-    if (place.status !== "open") return leave("the place is not open");
-    if (place.facts.vehicle_access !== undefined) return leave("the place has vehicle_access already");
-    if (place.owner_verified === true) return leave("the place has a verified owner");
-    return null;
-  }
+  // A name alone never sets a fact: a mapper tags the place in OSM instead.
+  if (c.case === "vehicle_access_candidate") return leave("a name alone never sets a fact, so the place is tagged in OpenStreetMap");
   if (c.case === "fact_doubted") {
     const fact = c.fact!;
     const current = (place.facts as Record<string, unknown>)[fact];
@@ -284,8 +280,7 @@ export function settleByRules(
  * on a published first place it changes nothing. `take_down` hides the place
  * with a `hide` decision, so reports can't bring it back. `restore` sets the
  * withdrawn contact, or a fact doubts took down, back to the value the place
- * published. `confirm` sets the fact a `vehicle_access_candidate` names, as
- * from feedback. `keep_down` and `dismiss` change nothing, and neither does
+ * published. `keep_down` and `dismiss` change nothing, and neither does
  * `merge` here: it writes two records, with `mergePlaces`.
  */
 export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecision, at: string): Place | null {
@@ -293,7 +288,7 @@ export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecisio
   // A Commons photo goes on the do-not-match list (`withDoNotMatch`), not into the place record.
   if (c.case === "commons_mismatch") return null;
   const next = structuredClone(place);
-  if (decision === "restore" || (decision === "confirm" && c.case === "vehicle_access_candidate")) {
+  if (decision === "restore") {
     (next.facts as Record<string, FactValue>)[c.fact!] = c.value as FactValue;
     setSource(next, c.fact!, "feedback", at);
   } else if (decision === "take_down") {
@@ -307,31 +302,6 @@ export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecisio
   }
   next.updated = at;
   return next;
-}
-
-/**
- * The `vehicle_access_candidate` cases for the places in `candidates` (ids
- * from `moderation/heavy-vehicle-candidates.csv`), in that order: each open
- * place without `vehicle_access` that is not in `listed`, the places a run
- * listed before. The value is `heavy_vehicles_only`, the only one the
- * candidates file is for.
- */
-export function vehicleAccessCases(candidates: readonly string[], places: ReadonlyMap<string, Place>, listed: ReadonlySet<string>): HeldCase[] {
-  const out: HeldCase[] = [];
-  for (const id of new Set(candidates)) {
-    const place = places.get(id);
-    if (!place || listed.has(id) || place.status !== "open" || place.facts.vehicle_access !== undefined) continue;
-    out.push({
-      case: "vehicle_access_candidate",
-      place: id,
-      location: { lat: place.location.lat, lon: place.location.lon },
-      kind: place.kind,
-      fact: "vehicle_access",
-      value: "heavy_vehicles_only",
-      feedback: [],
-    });
-  }
-  return out;
 }
 
 /** One key for a pair of places, whichever comes first, as `moderation/distinct_places.json` lists them. */

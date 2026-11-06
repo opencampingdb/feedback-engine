@@ -157,7 +157,7 @@ export function reviewPrBody(
         "`fact_doubted` is a fact travellers say is wrong without giving the right value: with `taken_down` doubts from two sources took it off the place, " +
         "otherwise one traveller doubts it and it stays. `value` is what the place published, and `doubts` and `confirmations` name the reports weighed. " +
         "To restore it, set `facts.<fact>` back to `value`. Doubt notes are in the inbox, never here. " +
-        "`vehicle_access_candidate` is a place whose name says only heavy vehicles may use it while OSM does not: to confirm it, set `facts.vehicle_access` to `value`. " +
+        "`vehicle_access_candidate` lines come from older runs and are always left: a name alone never sets a fact, so tag the place in OpenStreetMap instead. " +
         "It comes from the data, so its `feedback` is empty, and each place is listed once. " +
         "`commons_mismatch` is a Commons photo `file` travellers say is not of the place: to confirm it, add the place and file to `moderation/commons-do-not-match.json`.",
       "",

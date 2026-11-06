@@ -166,23 +166,6 @@ async function readJsonFolder<T>(folder: string, name: RegExp): Promise<T[]> {
   return out;
 }
 
-/** Place ids the apply listed before as held cases of kind `name`: `listed/<name>.json`, `{"places": [...]}`. Empty when the file is missing. */
-export async function readListed(inbox: string, name: string): Promise<Set<string>> {
-  const path = join(inbox, "listed", `${name}.json`);
-  if (!(await exists(path))) return new Set();
-  return new Set((JSON.parse(await readFile(path, "utf8")) as { places?: string[] }).places ?? []);
-}
-
-/** Adds place ids to `listed/<name>.json`, sorted. Returns how many were added. */
-export async function addListed(inbox: string, name: string, ids: readonly string[]): Promise<number> {
-  const current = await readListed(inbox, name);
-  const added = ids.filter((id) => !current.has(id) && (current.add(id), true));
-  if (added.length === 0) return 0;
-  await mkdir(join(inbox, "listed"), { recursive: true });
-  await writeFile(join(inbox, "listed", `${name}.json`), `${JSON.stringify({ places: [...current].sort() }, null, 2)}\n`, "utf8");
-  return added.length;
-}
-
 /**
  * The fields of one CSV line, as Python's csv module writes them: fields
  * separated by commas, quoted with double quotes when they hold a comma, a
@@ -544,20 +527,6 @@ export class DataRepo {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, `${JSON.stringify({ photos }, null, 2)}\n`, "utf8");
     return "moderation/removed_photos.json";
-  }
-
-  /**
-   * Place ids in `moderation/heavy-vehicle-candidates.csv`: the `place`
-   * column of a CSV with a header line, in file order. Rows without a place
-   * id are skipped. Empty when the file is missing or has no `place` column.
-   */
-  async heavyVehicleCandidates(): Promise<string[]> {
-    const path = join(this.root, "moderation", "heavy-vehicle-candidates.csv");
-    if (!(await exists(path))) return [];
-    const [header, ...rows] = (await readFile(path, "utf8")).split(/\r?\n/).filter((line) => line.trim());
-    const column = header ? csvFields(header).map((f) => f.trim()).indexOf("place") : -1;
-    if (column < 0) return [];
-    return rows.map((row) => csvFields(row)[column]?.trim() ?? "").filter((id) => PLACE_FILE.test(`${id}.json`));
   }
 
   /** Pairs in `moderation/commons-do-not-match.json`. Empty when the file is missing. */

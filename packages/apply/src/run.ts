@@ -1,13 +1,11 @@
 import { resolve } from "node:path";
 import { isOwnerSubmission, type StoredFeedback, type StoredOwnerSubmission } from "@opencampingdb/feedback";
 import {
-  addListed,
   DataRepo,
   moveDecided,
   readAwaiting,
   readHistory,
   readOwners,
-  readListed,
   readPending,
   readRoads,
   refuseMalformed,
@@ -18,7 +16,6 @@ import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
 import { autoPrBody, reviewPrBody } from "./prbody.js";
 import { previewUrl, PREVIEW_TTL_SECONDS } from "./preview.js";
 import { checkProof as realCheckProof, type ProofResult } from "./proof.js";
-import { vehicleAccessCases } from "./review.js";
 import { applyEdit, applyHeldReview, applyRules, newPlaceIdOf, resolvePlace, WINDOW_DAYS, type Change, type Decision } from "./rules.js";
 import type { RecentList } from "./recent.js";
 import type { Fee, Place, Review } from "./types.js";
@@ -364,16 +361,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const autoChanged = autoFiles.length > 0;
   const ownerClaims = ownerResult.forReview.length > 0;
   // A held case is listed when this run wrote its place or its edit for a person.
-  let listedNow = 0;
   const held = crowdResult.held.filter((h) => crowdResult.places.has(h.place) || h.feedback.some((f) => effective.has(f)));
-  // Places whose name says only heavy vehicles may use them, listed once each for a reviewer.
-  const candidates = photosOnly ? [] : await auto.heavyVehicleCandidates();
-  if (candidates.length > 0) {
-    const records = new Map([...(await auto.places(candidates)), ...autoPlaces]);
-    const cases = vehicleAccessCases(candidates, records, await readListed(options.inbox, "vehicle_access_candidate"));
-    held.push(...cases);
-    listedNow = await addListed(options.inbox, "vehicle_access_candidate", cases.map((c) => c.place));
-  }
   const closed = crowdResult.closed;
   const reviewChanged = reviewFiles.length > 0 || reviewChanges.length > 0 || ownerClaims || held.length > 0 || closed.length > 0;
 
@@ -382,7 +370,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     auto_changed: autoChanged,
     review_changed: reviewChanged,
     owner_claims: ownerClaims,
-    inbox_changed: refusedMalformed + moved + ownersWritten + settled + listedNow > 0,
+    inbox_changed: refusedMalformed + moved + ownersWritten + settled > 0,
     counts,
     auto_files: autoFiles,
     review_files: reviewFiles,
