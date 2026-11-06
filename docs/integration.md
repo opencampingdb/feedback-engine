@@ -340,7 +340,7 @@ for (const p of progress) {
 }
 ```
 
-`progress` calls the public `GET /v1/feedback/progress?ids=fb_...,fb_...` at once and never queues. It asks for up to 100 ids a call and splits a longer list. An id that is not a feedback id, such as a photo's `pho_` id, is answered `unknown` without asking. It throws `ProgressRequestError` when the intake cannot be reached (`httpStatus` 0) or refuses the call (`httpStatus` is the HTTP code), so try again later. The states are `PROGRESS_STATES`:
+`progress` calls the public `GET /v1/feedback/progress?ids=fb_...,fb_...` at once and never queues. It asks for up to 100 ids a call and splits a longer list. An id that is not a feedback id, such as a photo's `pho_` id, is answered `unknown` without asking: ask the photo client's `photos.progress(ids)` for photos, which answers in the same shape (see [photos.md](photos.md), "What became of a photo"). It throws `ProgressRequestError` when the intake cannot be reached (`httpStatus` 0) or refuses the call (`httpStatus` is the HTTP code), so try again later. The states are `PROGRESS_STATES`:
 
 | State | What it means | What to show |
 | --- | --- | --- |

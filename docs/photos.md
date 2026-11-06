@@ -111,6 +111,33 @@ The stored item carries the ratings in `photo.safesearch`, and the review PR not
 
 Google processes these requests in memory, doesn't keep the images, and doesn't train on them ([Cloud Vision data usage](https://cloud.google.com/vision/docs/data-usage)). Name Google Cloud Vision as a processor in your privacy policy before turning it on. The [pricing page](https://cloud.google.com/vision/pricing) lists SafeSearch at the first 1,000 images a month free, then $1.50 per 1,000.
 
+## What became of a photo
+
+Each upload gets a progress record under the photo id it answered, so the app can show a traveller's photos with where each one is. Ask with `photos.progress(ids)`, which calls the photo intake's public `GET /v1/photos/progress?ids=pho_...,pho_...` at once, in calls of up to 100 ids, and answers one `Progress` per id in the order given, the same shape `feedback.progress` answers. An id that is not a photo id is answered `unknown` without asking. It throws `ProgressRequestError` when the photo intake cannot be reached or refuses the call.
+
+```ts
+const progress = await photos.progress(myPhotos.map((p) => p.id)); // pho_ ids, one answer each
+for (const p of progress) {
+  if (p.state === "in_data") showPublished(p.id);
+  else if (p.state === "refused") showRemoved(p.id, p.reason);
+  else showWaiting(p.id, p.state, p.held_reason);
+}
+```
+
+| State | What it means |
+| --- | --- |
+| `received` | The photo intake has it, and the apply has not decided it yet. |
+| `waiting` | Its place is a new place not in the data yet. |
+| `accepted` | The rules accepted it, and it is on the automatic PR, which has not merged yet. |
+| `held` | A person decides it, with `held_reason`: `first_photo` (a contributor's first photo), `same_file` (the same file was sent for another place), `safesearch` (SafeSearch rated it likely adult or violent, or very likely racy), `check_unavailable` (SafeSearch could not check it) or `reported` (hidden after reports, until a person decides). A photo SafeSearch flags is `held` from the moment it is uploaded. |
+| `refused` | Not published, or no longer, with `reason`. `by` is `rules` when the rules refused it or the contributor asked for their photos to be removed, and `reviewer` when a person merged or closed its PR without it, hid it, removed it or blocked the contributor. |
+| `in_data` | Published: its line is in the photo records on the records repository's `main`, as of `in_data_at`, the time of the commit that put it there. The Photo sync workflow serves it a few minutes later. |
+| `unknown` | The photo intake has no record of it: not uploaded to it, or more than 90 days without a change. |
+
+Unlike feedback, a published photo can leave `in_data`: reports that hide it make it `held` with `reported`, and a person who removes it makes it `refused`. A photo SafeSearch refuses at upload never gets an id or a record: the upload answers `422 photo_not_allowed`, and that answer is the app's only word on it.
+
+The records are kept in the photo intake's D1 database (the `item_progress` table, which feedback progress also uses), read from D1 only, and written by the photo apply run only when a photo's state changes, as recorded in `progress/photos-sent.json` in the inbox (every photo is sent again on the first run after 00:00 UTC each Monday). A record carries only the state, the engine's reason, `held_reason`, `by`, the place and times, never the contributor or a device. The apply follows photos decided in the last 90 days, and a record is kept for 90 days after it last changes. Photo reports and erasures are not covered.
+
 ## Report and remove
 
 Give each photo a Report action:
@@ -193,7 +220,7 @@ You need a Cloudflare account with a zone for the photo hosts, a GitHub account 
 5. **Intake.** Deploy `packages/intake` under its own Worker name with its own configuration, as [self-hosting.md](self-hosting.md) describes, plus: the pending bucket as `PHOTOS_PENDING`, the photo server's state namespace as `PHOTO_STATE`, `INBOX_REPO` set to your inbox repository, a custom domain for uploads, a D1 database as `RECENT_LIST` with the migrations applied, so the daily counters are in D1 and a minute's photos reach the inbox as one commit, and optionally `SAFESEARCH = "on"` with a `GOOGLE_SERVICE_ACCOUNT` that has the Cloud Vision API.
 6. **Pass secret and photo keys.** Make one long random secret, for example with `openssl rand -base64 48`, and set it as `PHOTO_PASS_SECRET` on both Workers. Set `PHOTO_KEYS` on the photo server, with JSON such as `{"<random key, 32 characters>": {"app": "example-app", "daily_limit": 100000}}`. The entry gives the app's daily limit to its passes as well. `daily_limit` counts the reads that reach R2, not those served from the cache. `DAILY_READ_CAP` caps all apps together. Changing `PHOTO_PASS_SECRET` on both Workers ends every pass at once.
 7. **Photo server.** Set `routes` in `packages/photos/wrangler.toml` (or an untracked deploy copy) to your photo host on a custom domain, bind the serving bucket as `PHOTOS` and the state namespace as `STATE`, and deploy. Serving only on the custom domain puts the edge cache in front of R2.
-8. **Workflows.** In the inbox repository, call the Apply feedback workflow hourly with `data-repository-name` set to your records repository, `places-repository: opencampingdb/data`, your `photo-licence` and `recent-places-url` set to Open Camping DB's intake, passing the GitHub App's client id and key. In the records repository, call the Photo sync workflow on each push to `main` and once a day, with your bucket names and an R2 API token (Object Read and Write on both buckets) as `r2-account-id`, `r2-access-key-id` and `r2-secret-access-key`. Pin both to a feedback-engine commit.
+8. **Workflows.** In the inbox repository, call the Apply feedback workflow hourly with `data-repository-name` set to your records repository, `places-repository: opencampingdb/data`, your `photo-licence` and `recent-places-url` set to Open Camping DB's intake, passing the GitHub App's client id and key. For photo progress, also set `intake-url` to your photo intake and pass its `PLACES_TOKEN` (a long random secret you set on the photo intake) as the `places-token` secret: each run then sends the photo intake where each photo is, and nothing else. Turn on **Allow auto-merge** (`allow_auto_merge`) in the records repository's settings, under General, Pull Requests, and protect `main` with a required status check, so the automatic PR merges itself once CI passes. Without it, photos from trusted contributors are never published until someone merges the automatic PR: the run says on the PR that it needs merging by hand and shows an error annotation naming the repository and the setting, without failing, so the inbox moves are still recorded. In the records repository, call the Photo sync workflow on each push to `main` and once a day, with your bucket names and an R2 API token (Object Read and Write on both buckets) as `r2-account-id`, `r2-access-key-id` and `r2-secret-access-key`. Pin both to a feedback-engine commit.
 9. **Check it.** Upload a test photo from a development build, merge the review PR, wait for the sync, then load the place's records and the photo with a pass. Report it as `illegal` and see it withheld, then erase it and see it gone.
 
 To stop serving at once, put the key `off` in the photo server's state namespace: the server answers `503 paused` within a minute. Delete the key to start again. Removing the custom domain also stops all serving.
