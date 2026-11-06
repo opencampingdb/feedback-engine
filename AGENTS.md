@@ -6,6 +6,16 @@ When an app needs something Open Camping DB doesn't have, build it here as a gen
 
 The Neutral workflow fails when a file or commit message matches the organisation's list of terms.
 
+## SDK versions
+
+`@opencampingdb/feedback` (`packages/sdk`) takes a version on every change that reaches apps:
+
+- **Patch** (0.14.1, 0.14.2): a fix or a small change to how an existing call behaves, with no new call, option or type.
+- **Minor** (0.15.0): a new call, option, field or type. The patch goes back to 0.
+- Before 1.0.0, a breaking change also moves the minor, and its PR says what apps must change.
+
+Bump `packages/sdk/package.json` and the `@opencampingdb/feedback` pins in the other packages' `package.json` in the same PR, run `npm install` so `package-lock.json` follows, and name the version in the PR title. Apps vendor the SDK from the merge commit.
+
 ## Agent skills
 
 ### Issue tracker
