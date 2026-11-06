@@ -10,6 +10,7 @@ import { inDataOnMain as changeReportOnMain } from "./recent.js";
 import type { DoNotMatchEntry } from "./review.js";
 import { feeIdOf, newPlaceIdOf, reviewIdOf, WINDOW_DAYS, WITHDRAWN, type Outcome } from "./rules.js";
 import type { RunDecision } from "./run.js";
+import { roundCoord } from "./serialise.js";
 import { feePath, placePath, reviewPath } from "./serialise.js";
 import type { Fee, Place, Review, SourceKey } from "./types.js";
 
@@ -70,6 +71,33 @@ const REPORT_KEYS: Partial<Record<string, SourceKey>> = {
 const DO_NOT_MATCH_FILE = "moderation/commons-do-not-match.json";
 
 /**
+ * Whether the place on main already holds what a name, description, kind,
+ * location or status report asks for. A review edit identical to what the
+ * place has writes nothing and dates nothing, so its item counts by its value.
+ */
+function holdsReportedValue(item: Extract<DecidedItem, { type: "report" }>, place: Place): boolean {
+  const report = item.report as { kind: string; value?: unknown; place_kind?: unknown };
+  switch (report.kind) {
+    case "name":
+      return typeof report.value === "string" && place.name === report.value;
+    case "description":
+      return typeof report.value === "string" && (place.description ?? "") === report.value;
+    case "kind":
+      return typeof report.place_kind === "string" && place.kind === report.place_kind;
+    case "wrong_location": {
+      const at = (item as { location?: { lat: number; lon: number } }).location;
+      return at !== undefined && place.location.lat === roundCoord(at.lat) && place.location.lon === roundCoord(at.lon);
+    }
+    case "closed":
+      return place.status === "closed";
+    case "reopened":
+      return place.status === "open";
+    default:
+      return false;
+  }
+}
+
+/**
  * Whether main holds the change an applied or reviewed item made, and the
  * file it is in. The apply stamps `fact_dates[key]` with the run's time
  * whenever it writes a change (by the rules or in a review draft), so a
@@ -106,7 +134,7 @@ export function itemInDataOnMain(item: DecidedItem, main: MainData): OnMain {
       const kind = item.report.kind;
       if (kind === "fact" || kind === "contact" || kind === "doubt") return onPlace(changeReportOnMain(item as Parameters<typeof changeReportOnMain>[0], place));
       const key = REPORT_KEYS[kind];
-      if (key !== undefined) return onPlace(datedByRun(place, key));
+      if (key !== undefined) return onPlace(datedByRun(place, key) || holdsReportedValue(item, place));
       if (kind === "remove") return onPlace(place.standing === "hidden");
       if (kind === "commons_mismatch") {
         return main.doNotMatch.some((p) => p.place === place.id && p.file === item.report.file) ? inDataIn(DO_NOT_MATCH_FILE) : notInData;
