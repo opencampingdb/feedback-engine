@@ -15,6 +15,7 @@ import {
   isPlaceId,
   isDoubtFact,
   isValidFactValue,
+  newPlaceId,
 } from "@opencampingdb/feedback";
 import { withRequestLog } from "./requestlog.js";
 import { AttestError, verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
@@ -73,6 +74,16 @@ import {
 } from "./decide.js";
 import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult } from "./inbox-queue.js";
 import { ulid } from "./ulid.js";
+import {
+  APPLY_STATES,
+  MAX_PROGRESS_IDS,
+  MAX_PROGRESS_ITEMS,
+  pruneProgress,
+  readProgress,
+  receivedStatement,
+  recordProgress,
+  type ProgressUpdate,
+} from "./progress.js";
 import { verifyPreview } from "@opencampingdb/apply/preview";
 
 /** `GET /v1/photos/review/<photo id>/<full|thumb>.jpg`: one held photo for a person checking the review PR. */
@@ -574,7 +585,7 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
     if (env.RECENT_LIST) {
       const db = env.RECENT_LIST;
       const nowMs = deps.now();
-      await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs)]).catch((error: unknown) => {
+      await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs), pruneProgress(db, nowMs)]).catch((error: unknown) => {
         console.warn(`pruning the recent list failed: ${String(error)}`);
       });
     }
@@ -1117,6 +1128,52 @@ export function createHandler(deps: Deps) {
     return json(200, { opened }, cors);
   }
 
+  /**
+   * `GET /v1/feedback/progress?ids=fb_...,fb_...`: where each of 1 to 100
+   * contributions is, by the id the intake answered when it was sent. Public,
+   * like the recent list, and never cached at the edge. Answers `{ "items" }`
+   * in the order asked, `{ id, state: "unknown" }` for an id it keeps nothing
+   * for, and 400 when an id is not a feedback id.
+   */
+  async function getProgress(env: Env, url: URL, cors: Record<string, string>): Promise<Response> {
+    if (!env.RECENT_LIST) return json(404, { error: "not_found" }, cors);
+    const ids = (url.searchParams.get("ids") ?? "").split(",").filter((id) => id !== "");
+    if (ids.length === 0 || ids.length > MAX_PROGRESS_IDS || !ids.every(isFeedbackId)) {
+      return json(400, { error: "invalid", details: [`ids must be 1 to ${MAX_PROGRESS_IDS} feedback ids, separated by commas`] }, cors);
+    }
+    return json(200, { items: await readProgress(env.RECENT_LIST, ids, deps.now()) }, cors);
+  }
+
+  /**
+   * `POST /v1/feedback/progress`, for the apply run: `{ "items": [{ id,
+   * state, reason?, by?, place?, decided_at?, in_data_at? }] }`, 1 to 500 of
+   * them, with `authorization: Bearer <PLACES_TOKEN>`. `state` is `waiting`,
+   * `accepted`, `held`, `refused` (with `by`: `rules` or `reviewer`) or
+   * `in_data` (with `in_data_at`). See `recordProgress` for how a row moves.
+   */
+  async function postProgress(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 32);
+    if (call instanceof Response) return call;
+    const items = call.body.items;
+    const isUpdate = (value: unknown): value is ProgressUpdate => {
+      if (typeof value !== "object" || value === null) return false;
+      const { id, state, reason, by, place, decided_at: decided, in_data_at: inData } = value as Record<string, unknown>;
+      return (
+        isFeedbackId(id) &&
+        (APPLY_STATES as readonly unknown[]).includes(state) &&
+        (reason === undefined || (typeof reason === "string" && reason.length <= 1000)) &&
+        (state === "refused" ? by === "rules" || by === "reviewer" : by === undefined) &&
+        (place === undefined || isPlaceId(place)) &&
+        (decided === undefined || isIsoSeconds(decided)) &&
+        (state === "in_data" ? isIsoSeconds(inData) : inData === undefined)
+      );
+    };
+    if (!Array.isArray(items) || items.length === 0 || items.length > MAX_PROGRESS_ITEMS || !items.every(isUpdate)) {
+      return json(400, { error: "invalid", details: [`items must be 1 to ${MAX_PROGRESS_ITEMS} progress updates`] }, cors);
+    }
+    return json(200, { updated: await recordProgress(call.db, items, deps.now()) }, cors);
+  }
+
   return async function handle(request: Request, env: Env): Promise<Response> {
     const cors = corsHeaders(request, env);
     const url = new URL(request.url);
@@ -1156,6 +1213,11 @@ export function createHandler(deps: Deps) {
     if (route === "/v1/places/recent/block") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return blockRecent(request, env, cors);
+    }
+    if (route === "/v1/feedback/progress") {
+      if (request.method === "GET") return getProgress(env, url, cors);
+      if (request.method === "POST") return postProgress(request, env, cors);
+      return json(405, { error: "method_not_allowed" }, { ...cors, allow: "GET, POST, OPTIONS" });
     }
     const review = REVIEW_ROUTE.exec(route);
     if (review) {
@@ -1364,8 +1426,18 @@ export function createHandler(deps: Deps) {
       stored.intake = decision.answer;
     }
 
+    // Where the item is, for GET /v1/feedback/progress: written with it, in the same batch.
+    const progressRow = env.RECENT_LIST
+      ? [
+          receivedStatement(
+            env.RECENT_LIST,
+            { id, received, place: stored.type === "report" && stored.report.kind === "new_place" ? newPlaceId(id) : stored.place },
+            decision?.answer,
+          ),
+        ]
+      : [];
     try {
-      await store(stored, decision && env.RECENT_LIST ? decision.writes(env.RECENT_LIST) : []);
+      await store(stored, [...(decision && env.RECENT_LIST ? decision.writes(env.RECENT_LIST) : []), ...progressRow]);
     } catch {
       // A live change that is not stored gives its place in the daily caps back.
       if (env.RECENT_LIST && decision?.slot) await releaseLive(env.RECENT_LIST, decision.slot).catch(() => undefined);
