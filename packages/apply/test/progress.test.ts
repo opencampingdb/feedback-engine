@@ -74,6 +74,23 @@ describe("itemInDataOnMain", () => {
     expect(inData(decided(2, report({ kind: "fact", fact: "power", value: false })), main())).toBe(true);
   });
 
+  it("name, description, kind, location and status: main already holds what the item asks for", () => {
+    // A description edit identical to the one a new place was published with writes no date, but is in the data.
+    expect(inData(decided(1, report({ kind: "description", value: "Shady sites by the water." }), "needs_review"), main([{ ...record, description: "Shady sites by the water." }]))).toBe(true);
+    expect(inData(decided(2, report({ kind: "description", value: "Shady sites." }), "needs_review"), main([{ ...record, description: "Shady sites by the water." }]))).toBe(false);
+    expect(inData(decided(3, report({ kind: "name", value: "Lake Eppalock Camp" }), "needs_review"), main())).toBe(true);
+    expect(inData(decided(4, report({ kind: "name", value: "Lake Eppalock Rest Area" }), "needs_review"), main())).toBe(false);
+    expect(inData(decided(5, report({ kind: "kind", place_kind: "free_camp" }), "needs_review"), main())).toBe(true);
+    expect(inData(decided(6, report({ kind: "kind", place_kind: "caravan_park" }), "needs_review"), main())).toBe(false);
+    expect(inData(decided(7, report({ kind: "wrong_location" }, { location: { lat: -36.85, lon: 144.55 } }), "needs_review"), main())).toBe(true);
+    expect(inData(decided(8, report({ kind: "wrong_location" }, { location: { lat: -36.86, lon: 144.55 } }), "needs_review"), main())).toBe(false);
+    expect(inData(decided(9, report({ kind: "wrong_location" })), main())).toBe(false);
+    expect(inData(decided(10, report({ kind: "closed" })), main([{ ...record, status: "closed" }]))).toBe(true);
+    expect(inData(decided(11, report({ kind: "closed" })), main())).toBe(false);
+    expect(inData(decided(12, report({ kind: "reopened" })), main())).toBe(true);
+    expect(inData(decided(13, report({ kind: "reopened" })), main([{ ...record, status: "closed" }]))).toBe(false);
+  });
+
   it("contact value: a fact report of a contact counts like any fact", () => {
     const item = decided(1, report({ kind: "fact", fact: "phone", value: "03 5555 0199" }));
     expect(inData(item, main())).toBe(false);
@@ -93,19 +110,20 @@ describe("itemInDataOnMain", () => {
     expect(inData(item, main([dated("power", LATER, { facts: { power: true, phone: "03 5555 0100" } })]))).toBe(true);
   });
 
-  for (const [kind, key, body] of [
-    ["name", "name", { value: "Lake Eppalock Rest Area" }],
-    ["description", "description", { value: "Shady sites by the water." }],
-    ["kind", "kind", { place_kind: "caravan_park" }],
-    ["wrong_location", "location", {}],
-    ["closed", "status", {}],
-    ["reopened", "status", {}],
+  for (const [kind, key, body, base] of [
+    ["name", "name", { value: "Lake Eppalock Rest Area" }, {}],
+    ["description", "description", { value: "Shady sites by the water." }, {}],
+    ["kind", "kind", { place_kind: "caravan_park" }, {}],
+    ["wrong_location", "location", {}, {}],
+    ["closed", "status", {}, {}],
+    ["reopened", "status", {}, { status: "closed" }],
   ] as const) {
     it(`${kind}: main has ${key} dated by that run or later`, () => {
       const item = decided(1, report({ kind, ...body }), "needs_review");
-      expect(inData(item, main())).toBe(false);
-      expect(inData(item, main([dated(key, BEFORE)]))).toBe(false);
-      expect(inData(item, main([dated(key, RUN)]))).toBe(true);
+      const differs = { ...record, ...base } as Place;
+      expect(inData(item, main([differs]))).toBe(false);
+      expect(inData(item, main([{ ...differs, fact_dates: { [key]: BEFORE } }]))).toBe(false);
+      expect(inData(item, main([{ ...differs, fact_dates: { [key]: RUN } }]))).toBe(true);
     });
   }
 
