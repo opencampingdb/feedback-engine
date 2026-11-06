@@ -76,6 +76,7 @@ import {
 } from "./decide.js";
 import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult } from "./inbox-queue.js";
 import { ulid } from "./ulid.js";
+import { latestRelease, parseRelease, recordRelease } from "./release.js";
 import { MAX_PROGRESS_ITEMS, pruneProgress, readProgress, receivedStatement, recordProgress } from "./progress.js";
 import { verifyPreview } from "@opencampingdb/apply/preview";
 
@@ -946,8 +947,12 @@ export function createHandler(deps: Deps) {
     const hit = await deps.cache?.match(cacheKey);
     if (hit) return withCors(hit);
     const nowMs = deps.now();
-    const [places, changes] = await Promise.all([listPlaces(env.RECENT_LIST, new Date(nowMs).toISOString(), bbox), listChanges(env.RECENT_LIST, nowMs, bbox)]);
-    const response = json(200, { places, changes }, { "cache-control": `public, max-age=${RECENT_CACHE_SECONDS}` });
+    const [places, changes, release] = await Promise.all([
+      listPlaces(env.RECENT_LIST, new Date(nowMs).toISOString(), bbox),
+      listChanges(env.RECENT_LIST, nowMs, bbox),
+      latestRelease(env.RECENT_LIST),
+    ]);
+    const response = json(200, { places, changes, ...(release ? { release } : {}) }, { "cache-control": `public, max-age=${RECENT_CACHE_SECONDS}` });
     await deps.cache?.put(cacheKey, response.clone());
     return withCors(response);
   }
@@ -1002,6 +1007,22 @@ export function createHandler(deps: Deps) {
     if ("problems" in update) return json(400, { error: "invalid", details: update.problems }, cors);
     await replaceCells(db, update, new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z"));
     return json(200, { cells: update.cells.length, places: update.places }, cors);
+  }
+
+  /**
+   * `POST /v1/release`, for the data release once it has loaded the place
+   * index: `{ "data_version", "layout_version"? }` with `authorization:
+   * Bearer <PLACES_TOKEN>`. The recent list then names it as `release`, with
+   * the time the intake was told. An older release than the one it has
+   * changes nothing. Answers the newest release it has.
+   */
+  async function announceRelease(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, 1024);
+    if (call instanceof Response) return call;
+    const release = parseRelease(call.body);
+    if ("problems" in release) return json(400, { error: "invalid", details: release.problems }, cors);
+    const published = new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
+    return json(200, { release: await recordRelease(call.db, release, published) }, cors);
   }
 
   /**
@@ -1241,6 +1262,10 @@ export function createHandler(deps: Deps) {
     if (route === "/v1/place-index/cells") {
       if (request.method !== "GET") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "GET" });
       return placeIndexCells(request, env, cors);
+    }
+    if (route === "/v1/release") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST" });
+      return announceRelease(request, env, cors);
     }
     if (route === "/v1/place-index") {
       if (request.method !== "PUT") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "PUT" });

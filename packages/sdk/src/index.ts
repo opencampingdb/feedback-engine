@@ -104,7 +104,7 @@ export {
 } from "./validate.js";
 export type { ValidationResult } from "./validate.js";
 export { dataVersionTime, withRecentChanges } from "./recent.js";
-export type { RecentChange, RecentList, RecentPlace, ReleasePlace } from "./recent.js";
+export type { RecentChange, RecentList, RecentPlace, RecentRelease, ReleasePlace } from "./recent.js";
 export { PROGRESS_STATES, isFeedbackId, progressInRelease } from "./progress.js";
 export type { Progress, ProgressState, RefusedBy } from "./progress.js";
 export { sha256Hex, sha256HexBytes } from "./sha256.js";
