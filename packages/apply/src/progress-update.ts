@@ -1,4 +1,4 @@
-import { newPlaceId, type RefusedBy, type StoredFeedback } from "@opencampingdb/feedback";
+import { newPlaceId, type PhotoHeldReason, type RefusedBy, type StoredFeedback } from "@opencampingdb/feedback";
 
 /**
  * What the apply sends the intake about each contribution
@@ -32,4 +32,16 @@ export interface ProgressUpdate {
 /** The place an item is about: a new place's own id for a `new_place` report, otherwise its `place`. */
 export function placeOf(item: Pick<StoredFeedback, "id" | "type" | "place"> & { report?: { kind?: string } }): string | null {
   return item.type === "report" && item.report?.kind === "new_place" ? newPlaceId(item.id) : item.place;
+}
+
+/**
+ * One item of the photo intake's `POST /v1/photos/progress`: a photo's
+ * progress by its `pho_` id, from the photo records on the records
+ * repository's main. As `ProgressUpdate`, with `held_reason` on `held`. A
+ * photo's state is where it is now, so unlike feedback it can leave
+ * `in_data` (hidden after reports, or removed).
+ */
+export interface PhotoProgressUpdate extends ProgressUpdate {
+  /** Only on `held`: `first_photo`, `same_file`, `safesearch`, `check_unavailable` or `reported`. */
+  held_reason?: PhotoHeldReason;
 }

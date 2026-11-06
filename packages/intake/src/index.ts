@@ -16,9 +16,11 @@ import {
   isDoubtFact,
   isValidFactValue,
   isFeedbackId,
+  isPhotoId,
+  PHOTO_HELD_REASONS,
   MAX_PROGRESS_IDS,
 } from "@opencampingdb/feedback";
-import { placeOf, PROGRESS_UPDATE_STATES, type ProgressUpdate } from "@opencampingdb/apply/progress-update";
+import { placeOf, PROGRESS_UPDATE_STATES, type PhotoProgressUpdate, type ProgressUpdate } from "@opencampingdb/apply/progress-update";
 import { withRequestLog } from "./requestlog.js";
 import { AttestError, verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
 import { refuse, type RefusalBody } from "./refusal.js";
@@ -82,7 +84,15 @@ import {
 import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult, type QueuedFile } from "./inbox-queue.js";
 import { monotonicUlids, ulid } from "./ulid.js";
 import { latestRelease, parseRelease, recordRelease } from "./release.js";
-import { MAX_PROGRESS_ITEMS, pruneProgress, readProgress, receivedStatement, recordProgress } from "./progress.js";
+import {
+  MAX_PROGRESS_ITEMS,
+  photoReceivedStatement,
+  pruneProgress,
+  readProgress,
+  receivedStatement,
+  recordPhotoProgress,
+  recordProgress,
+} from "./progress.js";
 import { verifyPreview } from "@opencampingdb/apply/preview";
 
 /** `GET /v1/photos/review/<photo id>/<full|thumb>.jpg`: one held photo for a person checking the review PR. */
@@ -865,7 +875,14 @@ export function createHandler(deps: Deps) {
       await env.PHOTOS_PENDING.put(keys[1]!, thumb, { httpMetadata: { contentType: "image/jpeg" }, customMetadata });
       // With RECENT_LIST the record is queued like any other item, and the scheduled job writes a
       // minute's photos to the inbox in one commit (inbox-queue.ts). Without it, one commit each.
-      if (env.RECENT_LIST) await env.RECENT_LIST.batch([queueStatement(env.RECENT_LIST, file, deps.now())]);
+      // Its progress row (GET /v1/photos/progress) goes in the same batch, under the photo id.
+      if (env.RECENT_LIST) {
+        const held = ratings === undefined || verdict(ratings) !== "hold" ? undefined : ratings === "unchecked" ? "check_unavailable" : "safesearch";
+        await env.RECENT_LIST.batch([
+          queueStatement(env.RECENT_LIST, file, deps.now()),
+          photoReceivedStatement(env.RECENT_LIST, { id: photoId, received, place: submission.place }, held),
+        ]);
+      }
       else await github.createFile(inboxConfig(env), env.INBOX_BRANCH ?? "main", file.path, file.content, `Add ${id}`);
     } catch {
       // Files without an inbox item would never be reviewed, so they go too.
@@ -1241,6 +1258,53 @@ export function createHandler(deps: Deps) {
   }
 
   /**
+   * `GET /v1/photos/progress?ids=pho_...,pho_...`: where each of 1 to 100
+   * photos is, by the photo id the upload answered. Only on a photo intake
+   * (one with a photo bucket and RECENT_LIST). Public and never cached, as
+   * for feedback, with the same answer: `{ "items" }` in the order asked,
+   * `unknown` for an id it keeps nothing for, and 400 when an id is not a
+   * photo id. Read from D1 only.
+   */
+  async function getPhotoProgress(env: Env, url: URL, cors: Record<string, string>): Promise<Response> {
+    if (!env.RECENT_LIST || !env.PHOTOS_PENDING) return json(404, { error: "not_found" }, cors);
+    const ids = (url.searchParams.get("ids") ?? "").split(",").filter((id) => id !== "");
+    if (ids.length === 0 || ids.length > MAX_PROGRESS_IDS || !ids.every(isPhotoId)) {
+      return json(400, { error: "invalid", details: [`ids must be 1 to ${MAX_PROGRESS_IDS} photo ids, separated by commas`] }, cors);
+    }
+    return json(200, { items: await readProgress(env.RECENT_LIST, ids, deps.now()) }, cors);
+  }
+
+  /**
+   * `POST /v1/photos/progress`, for the photo apply run: as
+   * `POST /v1/feedback/progress`, with photo ids and `held_reason` on
+   * `held`. See `recordPhotoProgress` for how a row moves.
+   */
+  async function postPhotoProgress(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    if (!env.PHOTOS_PENDING) return json(404, { error: "not_found" }, cors);
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 32);
+    if (call instanceof Response) return call;
+    const items = call.body.items;
+    const isUpdate = (value: unknown): value is PhotoProgressUpdate => {
+      if (typeof value !== "object" || value === null) return false;
+      const { id, state, reason, by, held_reason: held, place, decided_at: decided, in_data_at: inData } = value as Record<string, unknown>;
+      return (
+        isPhotoId(id) &&
+        (PROGRESS_UPDATE_STATES as readonly unknown[]).includes(state) &&
+        (reason === undefined || (typeof reason === "string" && reason.length <= 1000)) &&
+        (state === "refused" ? by === "rules" || by === "reviewer" : by === undefined) &&
+        (held === undefined || (state === "held" && (PHOTO_HELD_REASONS as readonly unknown[]).includes(held))) &&
+        (place === undefined || isPlaceId(place)) &&
+        (decided === undefined || isIsoSeconds(decided)) &&
+        (state === "in_data" ? isIsoSeconds(inData) : inData === undefined)
+      );
+    };
+    if (!Array.isArray(items) || items.length === 0 || items.length > MAX_PROGRESS_ITEMS || !items.every(isUpdate)) {
+      return json(400, { error: "invalid", details: [`items must be 1 to ${MAX_PROGRESS_ITEMS} photo progress updates`] }, cors);
+    }
+    return json(200, { updated: await recordPhotoProgress(call.db, items, deps.now()) }, cors);
+  }
+
+  /**
    * What the items of one request share: the app key, the client network, the
    * time, the daily counters and the decisions made so far. `text` is a single
    * item's body, whose attestation is checked once the item is read; a batch
@@ -1580,6 +1644,11 @@ export function createHandler(deps: Deps) {
     if (route === "/v1/feedback/progress") {
       if (request.method === "GET") return getProgress(env, url, cors);
       if (request.method === "POST") return postProgress(request, env, cors);
+      return json(405, { error: "method_not_allowed" }, { ...cors, allow: "GET, POST, OPTIONS" });
+    }
+    if (route === "/v1/photos/progress") {
+      if (request.method === "GET") return getPhotoProgress(env, url, cors);
+      if (request.method === "POST") return postPhotoProgress(request, env, cors);
       return json(405, { error: "method_not_allowed" }, { ...cors, allow: "GET, POST, OPTIONS" });
     }
     const review = REVIEW_ROUTE.exec(route);

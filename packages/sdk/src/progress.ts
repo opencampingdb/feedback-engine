@@ -31,8 +31,12 @@ export interface Progress {
   state: ProgressState;
   /** The engine's own words for the decision, such as why it was refused. */
   reason?: string;
-  /** Why the intake held the item when it was sent, one of `HELD_REASONS`. */
-  held_reason?: HeldReason;
+  /**
+   * For feedback, why the intake held the item when it was sent, one of
+   * `HELD_REASONS`. For a photo, why it is held now, one of
+   * `PHOTO_HELD_REASONS`, and only on `held`.
+   */
+  held_reason?: HeldReason | PhotoHeldReason;
   /** Only on `refused`. */
   by?: RefusedBy;
   /** The place it is about. For a new place merged into another, the place it was merged into. */
@@ -45,7 +49,25 @@ export interface Progress {
   in_data_at?: string;
 }
 
+/**
+ * Why a photo is held, in `photos.progress()`:
+ *
+ * - `first_photo`: the contributor's first photo, which a person looks at before it is published.
+ * - `same_file`: the same file was sent for another place.
+ * - `safesearch`: SafeSearch rates it likely adult or violent, or very likely racy.
+ * - `check_unavailable`: SafeSearch could not check it.
+ * - `reported`: hidden after reports (three contributors, or one illegal-content report) until a person decides.
+ *
+ * Adding a reason is additive.
+ */
+export const PHOTO_HELD_REASONS = ["first_photo", "same_file", "safesearch", "check_unavailable", "reported"] as const;
+
+/** Why a photo is held. See `PHOTO_HELD_REASONS`. */
+export type PhotoHeldReason = (typeof PHOTO_HELD_REASONS)[number];
+
 const STATES: ReadonlySet<string> = new Set(PROGRESS_STATES);
+// Read when called: client.ts, which lists HELD_REASONS, imports this module.
+const isKnownHeld = (reason: string) => (HELD_REASONS as readonly string[]).includes(reason) || (PHOTO_HELD_REASONS as readonly string[]).includes(reason);
 const FEEDBACK_ID = /^fb_[0-9A-HJKMNP-TV-Z]{26}$/;
 
 /** Whether `id` is a feedback id, the only kind of id the intake keeps progress for. */
@@ -66,7 +88,7 @@ export function readProgress(id: string, raw: unknown): Progress {
     id,
     state,
     ...text("reason"),
-    ...(typeof r.held_reason === "string" && (HELD_REASONS as readonly string[]).includes(r.held_reason) ? { held_reason: r.held_reason as HeldReason } : {}),
+    ...(typeof r.held_reason === "string" && isKnownHeld(r.held_reason) ? { held_reason: r.held_reason as HeldReason | PhotoHeldReason } : {}),
     ...(state === "refused" && (r.by === "rules" || r.by === "reviewer") ? { by: r.by } : {}),
     ...text("place"),
     ...text("received"),
