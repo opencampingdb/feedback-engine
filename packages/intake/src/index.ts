@@ -34,11 +34,12 @@ import { PASS_TTL_SECONDS, signPass } from "./pass.js";
 import {
   ATTEST_KEY_DAILY_LIMIT,
   checkAndCount,
-  countPlaceEdit,
-  placeEditState,
-  secondsToMidnightUtc,
+  checkCounters,
+  itemCounters,
+  pruneRateCounts,
   CONTRIBUTOR_DAILY_LIMIT,
   PHOTO_CONTRIBUTOR_DAILY_LIMIT,
+  type CountStore,
   type KVLike,
 } from "./ratelimit.js";
 import {
@@ -107,6 +108,10 @@ export interface Env {
   INBOX_BRANCH?: string;
   /** Comma separated list of allowed web origins, or `*`. */
   ALLOWED_ORIGINS?: string;
+  /**
+   * The daily counters of an intake without RECENT_LIST. With RECENT_LIST they
+   * are kept in D1 (`rate_counts`) and this namespace is not used.
+   */
   RATE_LIMIT: KVLike;
   /** Registered App Attest keys and open challenges. Needed when an app key has `ios`. */
   ATTEST?: KVLike;
@@ -469,6 +474,16 @@ function readKeyRecord(saved: string): AttestedKey | undefined {
   return { app, public_key, counter };
 }
 
+/** Where the daily counters are kept: D1 when the intake has it, KV otherwise (ratelimit.ts). */
+function countStore(env: Env): CountStore {
+  return env.RECENT_LIST ? { d1: env.RECENT_LIST } : { kv: env.RATE_LIMIT };
+}
+
+/** Writes counts that no batch of the route's own carries. Empty on KV, which counted already. */
+async function writeCounts(env: Env, writes: D1Statement[]): Promise<void> {
+  if (writes.length > 0 && env.RECENT_LIST) await env.RECENT_LIST.batch(writes);
+}
+
 /** The inbox the intake writes to, as the GitHub App sees it. */
 function inboxConfig(env: Env): GitHubAppConfig {
   return { appId: env.GH_APP_ID, privateKeyPem: env.GH_APP_PRIVATE_KEY, installationId: env.GH_INSTALLATION_ID, repo: env.INBOX_REPO };
@@ -577,7 +592,7 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
     if (env.RECENT_LIST) {
       const db = env.RECENT_LIST;
       const nowMs = deps.now();
-      await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs), pruneProgress(db, nowMs)]).catch((error: unknown) => {
+      await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs), pruneProgress(db, nowMs), pruneRateCounts(db, nowMs)]).catch((error: unknown) => {
         console.warn(`pruning the recent list failed: ${String(error)}`);
       });
     }
@@ -674,9 +689,10 @@ export function createHandler(deps: Deps) {
     if (network !== undefined) {
       const day = new Date(deps.now()).toISOString().slice(0, 10);
       const origin = await hashDevice(env.DEVICE_SALT, `ip:${network}`);
-      const counted = Number((await env.RATE_LIMIT.get(`r:${day}:${origin}`)) ?? 0);
-      if (counted >= REGISTER_ORIGIN_DAILY_LIMIT) return json(429, { error: "rate_limited" }, cors);
-      await env.RATE_LIMIT.put(`r:${day}:${origin}`, String(counted + 1), { expirationTtl: 2 * 24 * 60 * 60 });
+      const limit = await checkCounters(countStore(env), day, [{ key: `r:${day}:${origin}`, limit: REGISTER_ORIGIN_DAILY_LIMIT }], deps.now());
+      if (!limit.allowed) return json(429, { error: "rate_limited" }, cors);
+      // Counted before the attestation is checked, so failed attempts count too.
+      await writeCounts(env, limit.writes);
     }
     const kv = env.ATTEST;
     try {
@@ -762,12 +778,16 @@ export function createHandler(deps: Deps) {
     const origin = network === undefined ? undefined : await hashDevice(env.DEVICE_SALT, `ip:${network}`);
     const contributor = await hashContributor(env.DEVICE_SALT, app.app, submission.contributor!);
     const attestKey = proof?.keyId ? `ak_${await saltedHash(env.DEVICE_SALT, `key:${proof.keyId}`)}` : undefined;
-    const limit = await checkAndCount(env.RATE_LIMIT, day, device, app.app, app.daily_limit, nowMs, "feedback", origin, [
+    const counters = itemCounters(day, device, app.app, app.daily_limit, "feedback", origin, [
       { prefix: "c", id: contributor, limit: app.contributor_daily_limit ?? CONTRIBUTOR_DAILY_LIMIT },
       { prefix: "p", id: contributor, limit: PHOTO_CONTRIBUTOR_DAILY_LIMIT },
       ...(attestKey ? [{ prefix: "k", id: attestKey, limit: ATTEST_KEY_DAILY_LIMIT }] : []),
     ]);
+    const limit = await checkAndCount(countStore(env), day, counters, nowMs);
     if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
+    // Counted at once, before SafeSearch and the bucket, so uploads that are refused or fail still count
+    // and a flood of them can't run up the Vision bill.
+    await writeCounts(env, limit.writes);
 
     // After the limits, so a flood of uploads can't run up the Vision bill.
     let ratings: SafeSearchRatings | "unchecked" | undefined;
@@ -895,9 +915,9 @@ export function createHandler(deps: Deps) {
     const network = networkPrefix(request.headers.get("cf-connecting-ip") ?? "");
     const counters = [{ key: `pp:${day}:${device}`, limit: PASS_DEVICE_DAILY_LIMIT }];
     if (network !== undefined) counters.push({ key: `ppn:${day}:${await hashDevice(env.DEVICE_SALT, `ip:${network}`)}`, limit: PASS_ORIGIN_DAILY_LIMIT });
-    const counts = await Promise.all(counters.map((c) => env.RATE_LIMIT.get(c.key).then((v) => Number(v ?? 0))));
-    if (counts.some((n, i) => n >= counters[i]!.limit)) return json(429, { error: "rate_limited" }, cors);
-    await Promise.all(counters.map((c, i) => env.RATE_LIMIT.put(c.key, String(counts[i]! + 1), { expirationTtl: 2 * 24 * 60 * 60 })));
+    const limit = await checkCounters(countStore(env), day, counters, nowMs);
+    if (!limit.allowed) return json(429, { error: "rate_limited" }, cors);
+    await writeCounts(env, limit.writes);
 
     const expires = Math.floor(nowMs / 1000) + PASS_TTL_SECONDS;
     const pass = await signPass(env.PHOTO_PASS_SECRET, app.app, expires);
@@ -1332,35 +1352,26 @@ export function createHandler(deps: Deps) {
       !isOwner && (submission as FeedbackSubmission).type === "report" && typeof (submission as FeedbackSubmission).place === "string"
         ? ((submission as FeedbackSubmission).place as string)
         : undefined;
-    const edit = editedPlace === undefined ? undefined : await placeEditState(env.RATE_LIMIT, day, device, editedPlace);
-    if (edit === "full") return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(secondsToMidnightUtc(nowMs)) });
-    if (edit !== "more") {
-      const limit = await checkAndCount(
-        env.RATE_LIMIT,
-        day,
-        device,
-        app.app,
-        isOwner ? (app.owner_daily_limit ?? app.daily_limit) : app.daily_limit,
-        nowMs,
-        kind,
-        origin,
-        extra,
-      );
-      if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
-    }
-    if (editedPlace !== undefined) await countPlaceEdit(env.RATE_LIMIT, day, device, editedPlace);
+    const limit = await checkAndCount(
+      countStore(env),
+      day,
+      itemCounters(day, device, app.app, isOwner ? (app.owner_daily_limit ?? app.daily_limit) : app.daily_limit, kind, origin, extra),
+      nowMs,
+      editedPlace === undefined ? undefined : { deviceHash: device, place: editedPlace },
+    );
+    if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
 
     const id = `fb_${ulid(nowMs, deps.randomBytes)}`;
     /**
      * Stores the item for the inbox. With RECENT_LIST it is queued, in one D1
-     * batch with `alongside` (the send-time decision's rows), and the
+     * batch with its daily counts and `alongside` (the send-time decision's rows), and the
      * scheduled job writes it to the inbox within a minute (inbox-queue.ts).
      * Without it the item is written to the inbox at once, as one commit.
      */
     const store = async (stored: unknown, alongside: D1Statement[] = []) => {
       const file = { id, path: `pending/${day}/${id}.json`, content: `${JSON.stringify(stored, null, 2)}\n` };
       if (env.RECENT_LIST) {
-        await env.RECENT_LIST.batch([queueStatement(env.RECENT_LIST, file, deps.now()), ...alongside]);
+        await env.RECENT_LIST.batch([queueStatement(env.RECENT_LIST, file, deps.now()), ...limit.writes, ...alongside]);
         return;
       }
       await github.createFile(inboxConfig(env), env.INBOX_BRANCH ?? "main", file.path, file.content, `Add ${id}`);
