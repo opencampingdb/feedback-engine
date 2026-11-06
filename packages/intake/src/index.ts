@@ -35,7 +35,10 @@ import {
   ATTEST_KEY_DAILY_LIMIT,
   checkAndCount,
   checkCounters,
+  countSession,
   itemCounters,
+  secondsToMidnightUtc,
+  type CountSession,
   pruneRateCounts,
   CONTRIBUTOR_DAILY_LIMIT,
   PHOTO_CONTRIBUTOR_DAILY_LIMIT,
@@ -60,7 +63,7 @@ import {
   type StoredPlace,
 } from "./recent.js";
 import { cellHashes, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
-import { createChecks, pruneLiveCounts, releaseLive, type AiLike } from "./checks.js";
+import { createChecks, pruneLiveCounts, releaseLive, type AiLike, type LiveSlot } from "./checks.js";
 import {
   decideAtSendTime,
   decidedHere,
@@ -71,11 +74,13 @@ import {
   pruneDecisions,
   UNAVAILABLE,
   type DoubtCase,
+  noPending,
   type ItemState,
+  type PendingDecisions,
   type SendTimeDecision,
 } from "./decide.js";
-import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult } from "./inbox-queue.js";
-import { ulid } from "./ulid.js";
+import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult, type QueuedFile } from "./inbox-queue.js";
+import { monotonicUlids, ulid } from "./ulid.js";
 import { latestRelease, parseRelease, recordRelease } from "./release.js";
 import { MAX_PROGRESS_ITEMS, pruneProgress, readProgress, receivedStatement, recordProgress } from "./progress.js";
 import { verifyPreview } from "@opencampingdb/apply/preview";
@@ -218,6 +223,10 @@ interface AppEntry {
 const isLimit = (v: unknown): v is number => typeof v === "number" && v > 0;
 
 export const MAX_BODY_BYTES = 16 * 1024;
+/** Most items in one `POST /v1/feedback/batch`. */
+export const MAX_BATCH_ITEMS = 50;
+/** Largest batch body: MAX_BATCH_ITEMS items of MAX_BODY_BYTES each, and the JSON around them. */
+export const MAX_BATCH_BODY_BYTES = MAX_BODY_BYTES * MAX_BATCH_ITEMS + 1024;
 
 /** A UTC time to the second, as the intake stamps `received`, so it compares with them as text. */
 const isIsoSeconds = (value: unknown): value is string =>
@@ -437,6 +446,32 @@ type Attested =
   | { error: "attestation_required" }
   | RefusalBody
   | { error: "unavailable" };
+
+/** An item's proof, once its attestation is checked. */
+type Proof = { attested: "app_attest" | "play_integrity"; keyId?: string };
+
+/** An item the intake refused, with its status and answer. */
+interface ItemAnswer {
+  status: number;
+  body: Record<string, unknown>;
+  headers?: Record<string, string>;
+}
+
+/** An item that passed its checks and limits: what to store for it, its answer once stored, and what follows the store. */
+interface Admitted {
+  file: QueuedFile;
+  /** Its daily counts, decision and progress row, for the D1 batch that queues it. */
+  writes: D1Statement[];
+  /** The live change the checks took, to give back when the item is not stored. */
+  slot?: LiveSlot;
+  answer: Record<string, unknown>;
+  after: () => Promise<void>;
+}
+
+/** Over a daily limit: 429, with the seconds until the counters reset. */
+function rateLimited(retryAfter: number): ItemAnswer {
+  return { status: 429, body: { error: "rate_limited" }, headers: { "retry-after": String(retryAfter) } };
+}
 
 /** A storage error or an outage at Google: not a refusal, so the app keeps its key and tries again later. */
 function unavailable(cors: Record<string, string>): Response {
@@ -1205,6 +1240,303 @@ export function createHandler(deps: Deps) {
     return json(200, { updated: await recordProgress(call.db, items, deps.now()) }, cors);
   }
 
+  /**
+   * What the items of one request share: the app key, the client network, the
+   * time, the daily counters and the decisions made so far. `text` is a single
+   * item's body, whose attestation is checked once the item is read; a batch
+   * has `proof`, its attestation checked already over the whole body.
+   */
+  interface Intake {
+    request: Request;
+    env: Env;
+    app: AppEntry;
+    nowMs: number;
+    received: string;
+    day: string;
+    origin: string | undefined;
+    counts: CountSession;
+    pending: PendingDecisions;
+    nextId: () => string;
+    text?: string;
+    batch?: { proof: Proof | undefined };
+  }
+
+  async function newIntake(
+    request: Request,
+    env: Env,
+    app: AppEntry,
+    nowMs: number,
+    how: { text: string; nextId: () => string } | { batch: { proof: Proof | undefined }; nextId: () => string },
+  ): Promise<Intake> {
+    const received = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const day = received.slice(0, 10);
+    // Cloudflare sets CF-Connecting-IP to the client address. Only a salted hash of its network is kept.
+    const network = networkPrefix(request.headers.get("cf-connecting-ip") ?? "");
+    const origin = network === undefined ? undefined : await hashDevice(env.DEVICE_SALT, `ip:${network}`);
+    return { request, env, app, nowMs, received, day, origin, counts: countSession(countStore(env), day, nowMs), pending: noPending(), ...how };
+  }
+
+  /**
+   * Takes one feedback or owner submission, as `POST /v1/feedback` does and
+   * as each item of `POST /v1/feedback/batch` does: checks it, counts it
+   * against the daily limits and decides it at send time. Answers the item's
+   * refusal, or what to store for it, which the caller stores. Nothing is
+   * stored here, apart from the live change the checks take (`slot`).
+   */
+  async function admit(intake: Intake, body: unknown): Promise<Admitted | ItemAnswer> {
+    const { request, env, app, nowMs, received, day, origin } = intake;
+    const checked = validateSubmission(body, new Date(nowMs));
+    if (!checked.ok) return { status: 400, body: { error: "invalid", details: checked.errors } };
+    const submission = checked.value;
+    if (intake.batch && (submission.type === "photo" || isOwnerSubmission(submission))) {
+      return { status: 400, body: { error: "type_not_allowed_in_batch" } };
+    }
+    if (submission.type === "photo") return { status: 400, body: { error: "invalid", details: ["photos are sent to /v1/photos"] } };
+    // Photo reports and erasures belong to a photo service: an intake with a photo bucket.
+    if ((submission.type === "photo_report" || submission.type === "photo_erasure") && !env.PHOTOS_PENDING) {
+      return { status: 404, body: { error: "photos_not_served_here" } };
+    }
+    const device = await hashDevice(env.DEVICE_SALT, submission.device);
+    const isOwner = isOwnerSubmission(submission);
+    const kind: SubmissionKind = isOwner ? "owner" : "feedback";
+    if (app.kinds && !app.kinds.includes(kind)) return { status: 403, body: { error: "type_not_allowed_for_app_key" } };
+
+    let proof: Proof | undefined;
+    let contributor: string | undefined;
+    let attestKey: string | undefined;
+    let target: StoredPlace | undefined;
+    const extra: { prefix: string; id: string; limit: number }[] = [];
+    if (!isOwner) {
+      const feedback = submission as FeedbackSubmission;
+      if (intake.batch) proof = intake.batch.proof;
+      else if (app.requires_attestation) {
+        const result = await attest(request, env, app, intake.text ?? "");
+        if ("error" in result) {
+          return result.error === "unavailable"
+            ? { status: 503, body: { error: "unavailable" }, headers: { "retry-after": "60" } }
+            : { status: 401, body: result as unknown as Record<string, unknown> };
+        }
+        proof = result;
+      }
+      if (feedback.contributor !== undefined) contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
+      else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
+      if (proof?.keyId) attestKey = `ak_${await saltedHash(env.DEVICE_SALT, `key:${proof.keyId}`)}`;
+      // A signed-out install attested by Play Integrity has neither. Its new places still need a
+      // contributor to list and block them by, so the hashed install stands in.
+      if (contributor === undefined && proof && feedback.type === "report" && feedback.report.kind === "new_place") {
+        contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
+      }
+      if (contributor === undefined && ["review", "review_report", "fee", "photo_report", "photo_erasure"].includes(feedback.type)) {
+        return { status: 400, body: { error: "contributor_required" } };
+      }
+      if (feedback.type === "review" && app.requires_visited_nearby && feedback.review.visited_nearby !== true) {
+        return { status: 400, body: { error: "visited_nearby_required" } };
+      }
+      if (contributor) extra.push({ prefix: "c", id: contributor, limit: app.contributor_daily_limit ?? CONTRIBUTOR_DAILY_LIMIT });
+      if (attestKey) extra.push({ prefix: "k", id: attestKey, limit: ATTEST_KEY_DAILY_LIMIT });
+      if (feedback.type === "report" && feedback.report.kind === "new_place") {
+        extra.push({ prefix: "np", id: contributor ?? device, limit: NEW_PLACE_DAILY_LIMIT });
+      }
+      if (env.RECENT_LIST && feedback.place !== null && ["check", "report", "withdraw"].includes(feedback.type)) {
+        target = await getPlace(env.RECENT_LIST, feedback.place).catch(() => undefined);
+      }
+      // A withdraw is checked against the new place when the recent list has it. Otherwise the apply run checks it.
+      if (feedback.type === "withdraw" && target) {
+        if (target.device !== device || (target.attest_key !== undefined && target.attest_key !== attestKey)) {
+          return { status: 403, body: { error: "not_your_place" } };
+        }
+        if (nowMs - Date.parse(target.added) > WITHDRAW_WINDOW_MS) return { status: 409, body: { error: "withdraw_window_closed" } };
+      }
+    }
+    // A report about a released place is part of the device's edit of that
+    // place today: only the first counts against the daily limits.
+    const editedPlace =
+      !isOwner && (submission as FeedbackSubmission).type === "report" && typeof (submission as FeedbackSubmission).place === "string"
+        ? ((submission as FeedbackSubmission).place as string)
+        : undefined;
+    const limit = await intake.counts.check(
+      itemCounters(day, device, app.app, isOwner ? (app.owner_daily_limit ?? app.daily_limit) : app.daily_limit, kind, origin, extra),
+      editedPlace === undefined ? undefined : { deviceHash: device, place: editedPlace },
+    );
+    if (!limit.allowed) return rateLimited(limit.retryAfter);
+
+    const id = `fb_${intake.nextId()}`;
+    const fileFor = (stored: unknown) => ({ id, path: `pending/${day}/${id}.json`, content: `${JSON.stringify(stored, null, 2)}\n` });
+
+    if (isOwner) {
+      const secrets = submission.type === "owner_update" ? undefined : newOwnerSecrets(random);
+      const stored = await storeOwner(submission, { id, received, app: app.app, device }, secrets);
+      // The token is in this answer only. It is never stored or logged.
+      const answer = secrets ? { id, code: secrets.code, token: secrets.token } : { id };
+      return { file: fileFor(stored), writes: limit.writes, answer, after: async () => undefined };
+    }
+
+    const { type, place, location, app_version, consent, ...rest } = sanitise(submission as FeedbackSubmission);
+    const stored = {
+      id,
+      received,
+      app: app.app,
+      type,
+      place,
+      ...(location ? { location } : {}),
+      device,
+      ...(origin ? { origin } : {}),
+      ...(contributor ? { contributor } : {}),
+      ...(proof ? { attested: proof.attested } : {}),
+      ...(attestKey ? { attest_key: attestKey } : {}),
+      app_version,
+      consent,
+      ...("report" in rest ? { report: rest.report } : {}),
+      ...("review" in rest ? { review: rest.review } : {}),
+      ...("check" in rest ? { check: rest.check } : {}),
+      ...("review_report" in rest ? { review_report: rest.review_report } : {}),
+      ...("fee" in rest ? { fee: rest.fee } : {}),
+      ...("photo_report" in rest ? { photo_report: rest.photo_report } : {}),
+    } as StoredFeedback;
+
+    // Decided before the item is stored, and recorded in the same D1 batch that queues it.
+    let decision: SendTimeDecision | undefined;
+    if (env.RECENT_LIST && decidedHere(stored)) {
+      const db = env.RECENT_LIST;
+      // Without a contributor, the hashed install stands in for one, as it does for a signed-out install's new places.
+      const who = contributor ?? `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
+      const checks = createChecks({ db, fetch: deps.fetch, urlhausKey: env.URLHAUS_KEY, ai: env.AI, now: deps.now });
+      decision = await decideAtSendTime({
+        db,
+        checks,
+        item: stored,
+        submission: submission as FeedbackSubmission,
+        contributor: who,
+        pending: intake.pending,
+      }).catch((error: unknown) => {
+        console.warn(`deciding ${id} failed: ${String(error)}`);
+        return { answer: UNAVAILABLE, writes: () => [] };
+      });
+      // The apply reads it: an item held for a check goes to a person, never into the data on its own.
+      stored.intake = decision.answer;
+      // The items after it in a batch are decided as if it were stored already.
+      decision.pending?.(intake.pending);
+    }
+
+    const writes = env.RECENT_LIST
+      ? [
+          ...limit.writes,
+          ...(decision ? decision.writes(env.RECENT_LIST) : []),
+          // Where the item is, for GET /v1/feedback/progress: written with it, in the same batch.
+          receivedStatement(env.RECENT_LIST, { id, received, place: placeOf(stored) }, decision?.answer),
+        ]
+      : limit.writes;
+    const state: ItemState | undefined = decision?.answer;
+    return {
+      file: fileFor(stored),
+      writes,
+      ...(decision?.slot ? { slot: decision.slot } : {}),
+      answer: state ? { id, ...state } : { id },
+      // The item is stored already, so a failed write here still reaches the apply run.
+      after: async () => {
+        if (env.RECENT_LIST) {
+          await updateRecent(env.RECENT_LIST, submission as FeedbackSubmission, { id, received, device, target }).catch(() => undefined);
+        }
+        // An illegal-content report withholds the photo before a person sees it. The
+        // report is in the inbox already, so a failed write here still reaches a person.
+        if (stored.type === "photo_report" && stored.photo_report.reason === "illegal" && env.PHOTO_STATE) {
+          const value = JSON.stringify({ feedback: id, at: received });
+          await env.PHOTO_STATE.put(withheldKey(stored.photo_report.photo), value).catch(() => undefined);
+        }
+      },
+    };
+  }
+
+  /**
+   * Stores admitted items for the inbox. With RECENT_LIST they are queued, in
+   * one D1 batch with their daily counts, decisions and progress rows, so
+   * every item is stored or none is, and the scheduled job writes them to the
+   * inbox within a minute (inbox-queue.ts). Without it (a single item only)
+   * the item is written to the inbox at once, as one commit.
+   */
+  async function storeAdmitted(env: Env, items: readonly Admitted[]): Promise<void> {
+    if (items.length === 0) return;
+    const db = env.RECENT_LIST;
+    if (db) {
+      await db.batch(items.flatMap((item) => [queueStatement(db, item.file, deps.now()), ...item.writes]));
+      return;
+    }
+    for (const item of items) await github.createFile(inboxConfig(env), env.INBOX_BRANCH ?? "main", item.file.path, item.file.content, `Add ${item.file.id}`);
+  }
+
+  /** Gives back the live changes the checks took for items that were not stored after all. */
+  async function releaseSlots(env: Env, items: readonly Admitted[]): Promise<void> {
+    const db = env.RECENT_LIST;
+    if (!db) return;
+    for (const item of items) if (item.slot) await releaseLive(db, item.slot).catch(() => undefined);
+  }
+
+  /**
+   * `POST /v1/feedback/batch`: `{ "items": [<submission>, ...] }`, 1 to
+   * MAX_BATCH_ITEMS feedback submissions sent together, with one attestation
+   * over the whole body. Each item is taken as `POST /v1/feedback` takes it
+   * (`admit`), in order, and the answer, 200, gives each item's own answer in
+   * the same order: `{ "status": 202, "id", ... }` or `{ "status", "error",
+   * "details"? }`, with `retry_after` in seconds on a 429. Owner submissions
+   * and photos are refused per item, `type_not_allowed_in_batch`. A bad
+   * attestation, a bad app key, a body that is not a batch or is too large,
+   * and an app over its daily limit are answered for the whole batch as for
+   * one item. The accepted items are stored in one D1 transaction, so a
+   * storage failure stores none of them and answers 503. Needs RECENT_LIST:
+   * without it each item is a commit of its own and could not be stored all
+   * together, so the route answers 404 and the SDK sends one at a time.
+   */
+  async function feedbackBatch(request: Request, env: Env, app: AppEntry, cors: Record<string, string>): Promise<Response> {
+    if (!env.RECENT_LIST) return json(404, { error: "not_found" }, cors);
+    const declared = Number(request.headers.get("content-length") ?? 0);
+    if (declared > MAX_BATCH_BODY_BYTES) return json(413, { error: "too_large" }, cors);
+    const text = await request.text();
+    if (new TextEncoder().encode(text).length > MAX_BATCH_BODY_BYTES) return json(413, { error: "too_large" }, cors);
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return json(400, { error: "invalid", details: ["body must be JSON"] }, cors);
+    }
+    const items = (body as { items?: unknown } | null)?.items;
+    if (typeof body !== "object" || body === null || !Array.isArray(items) || items.length === 0 || items.length > MAX_BATCH_ITEMS) {
+      return json(400, { error: "invalid", details: [`items must be 1 to ${MAX_BATCH_ITEMS} submissions`] }, cors);
+    }
+    let proof: Proof | undefined;
+    if (app.requires_attestation) {
+      const result = await attest(request, env, app, text);
+      if ("error" in result) return refusedOrUnavailable(result, cors);
+      proof = result;
+    }
+    const nowMs = deps.now();
+    const intake = await newIntake(request, env, app, nowMs, { batch: { proof }, nextId: monotonicUlids(nowMs, deps.randomBytes) });
+    // An app over its daily limit is refused as a whole, as one item would be.
+    const [used = 0] = await intake.counts.counts([`a:${intake.day}:${app.app}`]);
+    if (used >= app.daily_limit) {
+      const refused = rateLimited(secondsToMidnightUtc(nowMs));
+      return json(429, refused.body, { ...cors, ...refused.headers });
+    }
+    const answers: (Admitted | ItemAnswer)[] = [];
+    for (const item of items) {
+      if (new TextEncoder().encode(JSON.stringify(item) ?? "").length > MAX_BODY_BYTES) answers.push({ status: 413, body: { error: "too_large" } });
+      else answers.push(await admit(intake, item));
+    }
+    const admitted = answers.filter((a): a is Admitted => "file" in a);
+    try {
+      await storeAdmitted(env, admitted);
+    } catch {
+      await releaseSlots(env, admitted);
+      return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
+    }
+    for (const item of admitted) await item.after();
+    const out = answers.map((a) => {
+      if ("file" in a) return { status: 202, ...a.answer };
+      const retry = a.headers?.["retry-after"];
+      return { status: a.status, ...a.body, ...(a.status === 429 && retry ? { retry_after: Number(retry) } : {}) };
+    });
+    return json(200, { items: out }, cors);
+  }
+
   return async function handle(request: Request, env: Env): Promise<Response> {
     const cors = corsHeaders(request, env);
     const url = new URL(request.url);
@@ -1307,180 +1639,18 @@ export function createHandler(deps: Deps) {
       return json(400, { error: "invalid", details: ["body must be JSON"] }, cors);
     }
     const nowMs = deps.now();
-    const checked = validateSubmission(body, new Date(nowMs));
-    if (!checked.ok) return json(400, { error: "invalid", details: checked.errors }, cors);
-
-    const received = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, "Z");
-    const day = received.slice(0, 10);
-    const device = await hashDevice(env.DEVICE_SALT, checked.value.device);
-    // Cloudflare sets CF-Connecting-IP to the client address. Only a salted hash of its network is kept.
-    const network = networkPrefix(request.headers.get("cf-connecting-ip") ?? "");
-    const origin = network === undefined ? undefined : await hashDevice(env.DEVICE_SALT, `ip:${network}`);
-
-    const submission = checked.value;
-    if (submission.type === "photo") return json(400, { error: "invalid", details: ["photos are sent to /v1/photos"] }, cors);
-    // Photo reports and erasures belong to a photo service: an intake with a photo bucket.
-    if ((submission.type === "photo_report" || submission.type === "photo_erasure") && !env.PHOTOS_PENDING) {
-      return json(404, { error: "photos_not_served_here" }, cors);
-    }
-    const isOwner = isOwnerSubmission(submission);
-    const kind: SubmissionKind = isOwner ? "owner" : "feedback";
-    if (app.kinds && !app.kinds.includes(kind)) return json(403, { error: "type_not_allowed_for_app_key" }, cors);
-
-    let proof: { attested: "app_attest" | "play_integrity"; keyId?: string } | undefined;
-    let contributor: string | undefined;
-    let attestKey: string | undefined;
-    let target: StoredPlace | undefined;
-    const extra: { prefix: string; id: string; limit: number }[] = [];
-    if (!isOwner) {
-      const feedback = submission as FeedbackSubmission;
-      if (app.requires_attestation) {
-        const result = await attest(request, env, app, text);
-        if ("error" in result) return refusedOrUnavailable(result, cors);
-        proof = result;
-      }
-      if (feedback.contributor !== undefined) contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
-      else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
-      if (proof?.keyId) attestKey = `ak_${await saltedHash(env.DEVICE_SALT, `key:${proof.keyId}`)}`;
-      // A signed-out install attested by Play Integrity has neither. Its new places still need a
-      // contributor to list and block them by, so the hashed install stands in.
-      if (contributor === undefined && proof && feedback.type === "report" && feedback.report.kind === "new_place") {
-        contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
-      }
-      if (contributor === undefined && ["review", "review_report", "fee", "photo_report", "photo_erasure"].includes(feedback.type)) {
-        return json(400, { error: "contributor_required" }, cors);
-      }
-      if (feedback.type === "review" && app.requires_visited_nearby && feedback.review.visited_nearby !== true) {
-        return json(400, { error: "visited_nearby_required" }, cors);
-      }
-      if (contributor) extra.push({ prefix: "c", id: contributor, limit: app.contributor_daily_limit ?? CONTRIBUTOR_DAILY_LIMIT });
-      if (attestKey) extra.push({ prefix: "k", id: attestKey, limit: ATTEST_KEY_DAILY_LIMIT });
-      if (feedback.type === "report" && feedback.report.kind === "new_place") {
-        extra.push({ prefix: "np", id: contributor ?? device, limit: NEW_PLACE_DAILY_LIMIT });
-      }
-      if (env.RECENT_LIST && feedback.place !== null && ["check", "report", "withdraw"].includes(feedback.type)) {
-        target = await getPlace(env.RECENT_LIST, feedback.place).catch(() => undefined);
-      }
-      // A withdraw is checked against the new place when the recent list has it. Otherwise the apply run checks it.
-      if (feedback.type === "withdraw" && target) {
-        if (target.device !== device || (target.attest_key !== undefined && target.attest_key !== attestKey)) {
-          return json(403, { error: "not_your_place" }, cors);
-        }
-        if (nowMs - Date.parse(target.added) > WITHDRAW_WINDOW_MS) return json(409, { error: "withdraw_window_closed" }, cors);
-      }
-    }
-    // A report about a released place is part of the device's edit of that
-    // place today: only the first counts against the daily limits.
-    const editedPlace =
-      !isOwner && (submission as FeedbackSubmission).type === "report" && typeof (submission as FeedbackSubmission).place === "string"
-        ? ((submission as FeedbackSubmission).place as string)
-        : undefined;
-    const limit = await checkAndCount(
-      countStore(env),
-      day,
-      itemCounters(day, device, app.app, isOwner ? (app.owner_daily_limit ?? app.daily_limit) : app.daily_limit, kind, origin, extra),
-      nowMs,
-      editedPlace === undefined ? undefined : { deviceHash: device, place: editedPlace },
-    );
-    if (!limit.allowed) return json(429, { error: "rate_limited" }, { ...cors, "retry-after": String(limit.retryAfter) });
-
-    const id = `fb_${ulid(nowMs, deps.randomBytes)}`;
-    /**
-     * Stores the item for the inbox. With RECENT_LIST it is queued, in one D1
-     * batch with its daily counts and `alongside` (the send-time decision's rows), and the
-     * scheduled job writes it to the inbox within a minute (inbox-queue.ts).
-     * Without it the item is written to the inbox at once, as one commit.
-     */
-    const store = async (stored: unknown, alongside: D1Statement[] = []) => {
-      const file = { id, path: `pending/${day}/${id}.json`, content: `${JSON.stringify(stored, null, 2)}\n` };
-      if (env.RECENT_LIST) {
-        await env.RECENT_LIST.batch([queueStatement(env.RECENT_LIST, file, deps.now()), ...limit.writes, ...alongside]);
-        return;
-      }
-      await github.createFile(inboxConfig(env), env.INBOX_BRANCH ?? "main", file.path, file.content, `Add ${id}`);
-    };
-
-    if (isOwner) {
-      const secrets = submission.type === "owner_update" ? undefined : newOwnerSecrets(random);
-      const stored = await storeOwner(submission, { id, received, app: app.app, device }, secrets);
-      try {
-        await store(stored);
-      } catch {
-        return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
-      }
-      // The token is in this answer only. It is never stored or logged.
-      return json(202, secrets ? { id, code: secrets.code, token: secrets.token } : { id }, cors);
-    }
-
-    const { type, place, location, app_version, consent, ...rest } = sanitise(submission as FeedbackSubmission);
-    const stored = {
-      id,
-      received,
-      app: app.app,
-      type,
-      place,
-      ...(location ? { location } : {}),
-      device,
-      ...(origin ? { origin } : {}),
-      ...(contributor ? { contributor } : {}),
-      ...(proof ? { attested: proof.attested } : {}),
-      ...(attestKey ? { attest_key: attestKey } : {}),
-      app_version,
-      consent,
-      ...("report" in rest ? { report: rest.report } : {}),
-      ...("review" in rest ? { review: rest.review } : {}),
-      ...("check" in rest ? { check: rest.check } : {}),
-      ...("review_report" in rest ? { review_report: rest.review_report } : {}),
-      ...("fee" in rest ? { fee: rest.fee } : {}),
-      ...("photo_report" in rest ? { photo_report: rest.photo_report } : {}),
-    } as StoredFeedback;
-
-    // Decided before the item is stored, and recorded in the same D1 batch that queues it.
-    let decision: SendTimeDecision | undefined;
-    if (env.RECENT_LIST && decidedHere(stored)) {
-      const db = env.RECENT_LIST;
-      // Without a contributor, the hashed install stands in for one, as it does for a signed-out install's new places.
-      const who = contributor ?? `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
-      const checks = createChecks({ db, fetch: deps.fetch, urlhausKey: env.URLHAUS_KEY, ai: env.AI, now: deps.now });
-      decision = await decideAtSendTime({ db, checks, item: stored, submission: submission as FeedbackSubmission, contributor: who }).catch(
-        (error: unknown) => {
-          console.warn(`deciding ${id} failed: ${String(error)}`);
-          return { answer: UNAVAILABLE, writes: () => [] };
-        },
-      );
-      // The apply reads it: an item held for a check goes to a person, never into the data on its own.
-      stored.intake = decision.answer;
-    }
-
-    // Where the item is, for GET /v1/feedback/progress: written with it, in the same batch.
-    const progressRow = env.RECENT_LIST
-      ? [
-          receivedStatement(
-            env.RECENT_LIST,
-            { id, received, place: placeOf(stored) },
-            decision?.answer,
-          ),
-        ]
-      : [];
+    const intake = await newIntake(request, env, app, nowMs, { text, nextId: () => ulid(nowMs, deps.randomBytes) });
+    const item = await admit(intake, body);
+    if (!("file" in item)) return json(item.status, item.body, { ...cors, ...item.headers });
     try {
-      await store(stored, [...(decision && env.RECENT_LIST ? decision.writes(env.RECENT_LIST) : []), ...progressRow]);
+      await storeAdmitted(env, [item]);
     } catch {
       // A live change that is not stored gives its place in the daily caps back.
-      if (env.RECENT_LIST && decision?.slot) await releaseLive(env.RECENT_LIST, decision.slot).catch(() => undefined);
+      await releaseSlots(env, [item]);
       return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
     }
-    // The item is stored already, so a failed write here still reaches the apply run.
-    const state: ItemState | undefined = decision?.answer;
-    if (env.RECENT_LIST) {
-      await updateRecent(env.RECENT_LIST, submission as FeedbackSubmission, { id, received, device, target }).catch(() => undefined);
-    }
-    // An illegal-content report withholds the photo before a person sees it. The
-    // report is in the inbox already, so a failed write here still reaches a person.
-    if (stored.type === "photo_report" && stored.photo_report.reason === "illegal" && env.PHOTO_STATE) {
-      const value = JSON.stringify({ feedback: id, at: received });
-      await env.PHOTO_STATE.put(withheldKey(stored.photo_report.photo), value).catch(() => undefined);
-    }
-    return json(202, state ? { id, ...state } : { id }, cors);
+    await item.after();
+    return json(202, item.answer, cors);
   };
 }
 

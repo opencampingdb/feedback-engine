@@ -107,10 +107,56 @@ export interface RateLimitResult {
  * would make every request wait on the others for no real gain.
  */
 export async function checkCounters(store: CountStore, day: string, counters: readonly Counter[], nowMs: number): Promise<RateLimitResult> {
-  const counts = await readCounts(store, counters.map((c) => c.key));
+  return countSession(store, day, nowMs).check(counters);
+}
+
+/**
+ * Daily counters for the items of one request, checked and counted in turn,
+ * so the second item of a batch sees the first one's counts as it would if
+ * the first had been sent alone and stored. Each counter is read once, the
+ * first time an item needs it, in one query for every counter that item
+ * needs that the session has not read yet.
+ */
+export interface CountSession {
+  /** Today's counts for `keys`, from what the session has read and counted. */
+  counts(keys: readonly string[]): Promise<number[]>;
+  /** Checks and counts one item, as `checkAndCount` does. */
+  check(counters: readonly Counter[], edit?: { deviceHash: string; place: string }): Promise<RateLimitResult>;
+}
+
+export function countSession(store: CountStore, day: string, nowMs: number): CountSession {
+  const known = new Map<string, number>();
   const retryAfter = secondsToMidnightUtc(nowMs);
-  if (counts.some((n, i) => n >= counters[i]!.limit)) return { allowed: false, retryAfter, writes: [] };
-  return { allowed: true, retryAfter, writes: await countStatements(store, day, counters.map((c) => c.key), counts) };
+  async function counts(keys: readonly string[]): Promise<number[]> {
+    const missing = [...new Set(keys.filter((key) => !known.has(key)))];
+    if (missing.length > 0) {
+      const read = await readCounts(store, missing);
+      missing.forEach((key, i) => known.set(key, read[i] ?? 0));
+    }
+    return keys.map((key) => known.get(key) ?? 0);
+  }
+  async function count(keys: readonly string[], current: readonly number[]): Promise<D1Statement[]> {
+    const writes = await countStatements(store, day, keys, current);
+    keys.forEach((key, i) => known.set(key, (current[i] ?? 0) + 1));
+    return writes;
+  }
+  return {
+    counts,
+    async check(counters, edit) {
+      const keys = counters.map((c) => c.key);
+      if (!edit) {
+        const current = await counts(keys);
+        if (current.some((n, i) => n >= counters[i]!.limit)) return { allowed: false, retryAfter, writes: [] };
+        return { allowed: true, retryAfter, writes: await count(keys, current) };
+      }
+      const editKey = `pe:${day}:${edit.deviceHash}:${edit.place}`;
+      const [edited = 0, ...current] = await counts([editKey, ...keys]);
+      if (edited >= PLACE_EDIT_DAILY_LIMIT) return { allowed: false, retryAfter, writes: [] };
+      if (edited > 0) return { allowed: true, retryAfter, writes: await count([editKey], [edited]) };
+      if (current.some((n, i) => n >= counters[i]!.limit)) return { allowed: false, retryAfter, writes: [] };
+      return { allowed: true, retryAfter, writes: await count([editKey, ...keys], [edited, ...current]) };
+    },
+  };
 }
 
 /**
@@ -155,15 +201,7 @@ export async function checkAndCount(
   nowMs: number,
   edit?: { deviceHash: string; place: string },
 ): Promise<RateLimitResult> {
-  if (!edit) return checkCounters(store, day, counters, nowMs);
-  const editKey = `pe:${day}:${edit.deviceHash}:${edit.place}`;
-  const counts = await readCounts(store, [editKey, ...counters.map((c) => c.key)]);
-  const retryAfter = secondsToMidnightUtc(nowMs);
-  const edited = counts[0]!;
-  if (edited >= PLACE_EDIT_DAILY_LIMIT) return { allowed: false, retryAfter, writes: [] };
-  if (edited > 0) return { allowed: true, retryAfter, writes: await countStatements(store, day, [editKey], [edited]) };
-  if (counts.slice(1).some((n, i) => n >= counters[i]!.limit)) return { allowed: false, retryAfter, writes: [] };
-  return { allowed: true, retryAfter, writes: await countStatements(store, day, [editKey, ...counters.map((c) => c.key)], counts) };
+  return countSession(store, day, nowMs).check(counters, edit);
 }
 
 /** Deletes the D1 counters from before yesterday (UTC). Counters in KV expire on their own. */
