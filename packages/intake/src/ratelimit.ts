@@ -5,18 +5,22 @@ export interface KVLike {
   delete(key: string): Promise<void>;
 }
 
-export const DEVICE_DAILY_LIMIT = 20;
+/**
+ * Feedback per hashed device per day. Each fact is one item, so a careful edit
+ * of one place can send 20 or more: the limit stops floods, not editors.
+ */
+export const DEVICE_DAILY_LIMIT = 200;
 /** Owner claims, listings and updates, per hashed device per day (SPEC "Owners"). */
 export const OWNER_DAILY_LIMIT = 5;
 /** Submissions per hashed client network per day, and owner submissions per network. */
-export const ORIGIN_DAILY_LIMIT = 100;
+export const ORIGIN_DAILY_LIMIT = 500;
 export const OWNER_ORIGIN_DAILY_LIMIT = 10;
 /** Feedback per contributor per day, unless the app key sets `contributor_daily_limit`. */
-export const CONTRIBUTOR_DAILY_LIMIT = 20;
+export const CONTRIBUTOR_DAILY_LIMIT = 200;
 /** Photo uploads per contributor per day. */
 export const PHOTO_CONTRIBUTOR_DAILY_LIMIT = 10;
 /** Feedback per attested App Attest key per day. */
-export const ATTEST_KEY_DAILY_LIMIT = 30;
+export const ATTEST_KEY_DAILY_LIMIT = 200;
 const TTL_SECONDS = 2 * 24 * 60 * 60;
 
 export interface RateLimitResult {

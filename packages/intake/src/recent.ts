@@ -42,7 +42,7 @@ export type Evidence =
 /** How long the adder may withdraw a new place outright. */
 export const WITHDRAW_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** New places per contributor (or device, without one) per day. */
-export const NEW_PLACE_DAILY_LIMIT = 3;
+export const NEW_PLACE_DAILY_LIMIT = 10;
 /** Seconds the recent list is cached at the edge. */
 export const RECENT_CACHE_SECONDS = 30;
 /** Most ids one removal call may name. */

@@ -1,3 +1,4 @@
+import { NEW_PLACE_DAILY_LIMIT } from "../src/recent.js";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import type { HeldReason as SdkHeldReason } from "@opencampingdb/feedback";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
@@ -167,7 +168,7 @@ const newPlace = (extra: { device?: string; contributor?: string | null; note?: 
   },
 });
 
-const otherDevice = (i: number) => `${i}c241101-e2bb-4255-8caf-4136c566a962`;
+const otherDevice = (i: number) => `${String(i).padStart(2, "0")}c24110-e2bb-4255-8caf-4136c566a962`;
 
 const recent = (query = "") => new Request(`https://intake.example/v1/places/recent${query}`);
 
@@ -225,14 +226,14 @@ describe("recent places", () => {
     expect(places[0]!.contributor).toMatch(/^ctr_[0-9a-f]{16}$/);
   });
 
-  it("refuses a contributor's fourth new place in a day, and takes it the next day", async () => {
-    for (let i = 0; i < 3; i++) await add({ device: otherDevice(i) });
-    const res = await handle(feedback(newPlace({ device: otherDevice(3) })), e);
+  it("refuses a contributor's new place past the daily limit, and takes it the next day", async () => {
+    for (let i = 0; i < NEW_PLACE_DAILY_LIMIT; i++) await add({ device: otherDevice(i) });
+    const res = await handle(feedback(newPlace({ device: otherDevice(NEW_PLACE_DAILY_LIMIT) })), e);
     expect(res.status).toBe(429);
     expect(await res.json()).toEqual({ error: "rate_limited" });
-    expect(await list()).toHaveLength(3);
+    expect(await list()).toHaveLength(NEW_PLACE_DAILY_LIMIT);
     clock += 24 * HOUR;
-    await add({ device: otherDevice(3) });
+    await add({ device: otherDevice(NEW_PLACE_DAILY_LIMIT) });
   });
 
   it("never lists the note, and lists the contacts the place is published with", async () => {
