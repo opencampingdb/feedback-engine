@@ -16,6 +16,7 @@ import type {
   ReviewReportReason,
   PhotoReportReason,
 } from "./types.js";
+import { isFeedbackId, readProgress, type Progress } from "./progress.js";
 import { sha256Hex, sha256HexBytes } from "./sha256.js";
 import { MAX_PHOTO_BYTES, MAX_THUMB_BYTES, isPlaceId, newPlaceId, validateSubmission } from "./validate.js";
 
@@ -47,7 +48,7 @@ export interface FeedbackClientOptions {
   /** Version of the app sending feedback. */
   appVersion: string;
   storage: StorageAdapter;
-  /** Defaults to the global `fetch`. */
+  /** Defaults to the global `fetch`. `progress()` calls it with method `GET` and no body. */
   fetch?: FetchLike;
   /** Fetch for photo uploads. Defaults to the global `fetch`. */
   fetchPhoto?: PhotoFetchLike;
@@ -447,6 +448,16 @@ export interface FeedbackClient {
    * client as `resolveNewPlace`, so photos of a new place can wait for its id.
    */
   newPlace(ref: string): Promise<NewPlaceStatus>;
+  /**
+   * Where each contribution is, by the id the intake answered when it was
+   * sent (`outcome.id` in `onAnswered`, or `id` in a `sent` result). Asks
+   * `GET /v1/feedback/progress` at once, never queued, in calls of up to 100
+   * ids, and answers one `Progress` for each id in the order given. An id
+   * that is not a feedback id (such as a photo's `pho_` id) is answered
+   * `unknown` without asking. Throws `ProgressRequestError` when the intake
+   * cannot be reached or refuses the call.
+   */
+  progress(ids: readonly string[]): Promise<Progress[]>;
 }
 
 /**
@@ -524,6 +535,19 @@ export class OwnerRequestError extends Error {
     this.details = details;
   }
 }
+
+/** `progress()` could not ask the intake (httpStatus 0), or the intake refused the call with httpStatus. */
+export class ProgressRequestError extends Error {
+  readonly httpStatus: number;
+  constructor(httpStatus: number) {
+    super(httpStatus === 0 ? "The intake could not be reached. Try again when online." : `The intake refused the progress call with ${httpStatus}`);
+    this.name = "ProgressRequestError";
+    this.httpStatus = httpStatus;
+  }
+}
+
+/** Most ids in one `GET /v1/feedback/progress` call. */
+export const MAX_PROGRESS_IDS = 100;
 
 export class FeedbackValidationError extends Error {
   readonly errors: string[];
@@ -1259,6 +1283,38 @@ function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient
     return passRequest;
   }
 
+  const progressUrl = `${options.endpoint.replace(/\/+$/, "")}/v1/feedback/progress`;
+
+  /** Each id's progress, asked for in calls of up to MAX_PROGRESS_IDS feedback ids. */
+  async function progress(ids: readonly string[]): Promise<Progress[]> {
+    const asked = [...new Set(ids.filter(isFeedbackId))];
+    const found = new Map<string, unknown>();
+    for (let start = 0; start < asked.length; start += MAX_PROGRESS_IDS) {
+      const part = asked.slice(start, start + MAX_PROGRESS_IDS);
+      let res: Awaited<ReturnType<FetchLike>>;
+      try {
+        // A GET carries no body.
+        res = await doFetch(`${progressUrl}?ids=${part.join(",")}`, { method: "GET", headers: { accept: "application/json" } } as unknown as Parameters<FetchLike>[1]);
+      } catch {
+        throw new ProgressRequestError(0);
+      }
+      if (res.status < 200 || res.status >= 300) throw new ProgressRequestError(res.status);
+      let answer: unknown;
+      try {
+        answer = await res.json();
+      } catch {
+        answer = undefined;
+      }
+      const items = (answer as { items?: unknown } | undefined)?.items;
+      if (!Array.isArray(items)) throw new ProgressRequestError(res.status);
+      for (const item of items) {
+        const id = (item as { id?: unknown } | null)?.id;
+        if (typeof id === "string" && part.includes(id)) found.set(id, item);
+      }
+    }
+    return ids.map((id) => readProgress(id, found.get(id)));
+  }
+
   const claimResponse = (answer: Record<string, unknown>): OwnerClaimResponse => ({
     id: String(answer.id ?? ""),
     code: String(answer.code ?? ""),
@@ -1343,6 +1399,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient
     },
     pending: () => serial(async () => (await readQueue()).length),
     newPlace,
+    progress,
   };
 }
 

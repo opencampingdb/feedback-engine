@@ -19,6 +19,7 @@ await feedback.review({ place, review: { stars: 5, text: "Quiet and shady", visi
 - A place the traveller has just added can be named before its id is known, as `{ newPlace: <the new_place report's ref> }`, in `report`, `reportFacts`, `check`, `fee` and `review`. The items wait in the queue, unsent, until the new place is sent, then go with its `ocdb_` id in order. They're dropped with `reason: "new_place_dropped"` if it is dropped or refused.
 - `reportFacts({ place, facts, consent })` sends a traveller's edit of one place, every fact they set, in one call, and resolves with each fact's result. The intake counts an install's reports about one place in a day once against its daily limits.
 - Facts include `pets_months` (an OSM month range such as `May-Sep`, read with `monthsInRange`) and `vehicle_access` (`heavy_vehicles_only`). A `commons_mismatch` report says a Wikimedia Commons photo shown for a place is not of it.
+- `progress(ids)` says what became of each contribution, by the id the intake answered when it was sent: `received`, `live`, `waiting`, `accepted`, `held`, `refused` (with `reason` and `by`), `in_data` (with `in_data_at`) or `unknown` (`PROGRESS_STATES`). `progressInRelease(progress, dataVersion)` says whether the app's data release has the change. See docs/integration.md, "What became of a contribution".
 - `tidyName`, `tidyText` and `textProblem` tidy what a traveller types and find rude words, contact details and spam before it is sent. `withdraw()` takes back a new place the same install sent.
 
 ## Refused assertion
