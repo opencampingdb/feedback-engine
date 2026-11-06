@@ -101,6 +101,12 @@ export interface RunSummary {
   not_applied: string[];
   /** The ones among `not_applied` this run refused. Only these count against a contributor's track record at the intake. */
   refused: string[];
+  /**
+   * Every item this run decided, but photos, which apps know by their `pho_`
+   * id, in the order they arrived: for the progress the intake keeps
+   * (`sendProgress`).
+   */
+  decisions: { id: string; place: string | null; outcome: Decision["outcome"]; reason: string }[];
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -346,6 +352,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   }
 
   const decisions = [...notPhotos, ...crowdResult.decisions, ...ownerResult.decisions] as Decision[];
+  const photoIds = new Set(crowd.filter((i) => i.type === "photo").map((i) => i.id));
   const refusedMalformed = await refuseMalformed(options.inbox, malformed, runAt);
   const moved = await moveDecided(options.inbox, pendingFiles, decisions, runAt, ownerResult.awaiting);
   const ownersWritten = await writeOwners(options.inbox, ownerResult.owners.values());
@@ -381,6 +388,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     new_places: newPlaces,
     not_applied: [...new Set(decisions.filter((d) => d.outcome !== "applied" && d.outcome !== "waiting").map((d) => d.id))].sort(),
     refused: [...new Set(decisions.filter((d) => d.outcome === "refused").map((d) => d.id))].sort(),
+    decisions: decisions.filter((d) => !photoIds.has(d.id)).map((d) => ({ id: d.id, place: d.place, outcome: d.outcome, reason: d.reason })),
   };
 }
 

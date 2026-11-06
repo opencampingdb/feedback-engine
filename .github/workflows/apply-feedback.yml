@@ -180,6 +180,22 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.data-token.outputs.token }}
 
+      # Before data main is checked out, so every merged review PR read here is in that checkout:
+      # the apply counts a held change as turned down only when its PR is merged or closed without it.
+      - name: Read recent review PRs for owner approvals and progress
+        env:
+          GH_TOKEN: ${{ steps.data-token.outputs.token }}
+          APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
+          DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
+        run: |
+          # The 30 most recent review PRs the bot opened in the data repository.
+          # PRs from forks on a branch of the same name are left out.
+          gh pr list --repo "$DATA_REPO" --head feedback/review --state all --limit 100 \
+            --json number,state,body,comments,author,isCrossRepository |
+            jq --arg slug "$APP_SLUG" '[.[] | select(.isCrossRepository == false and
+              (.author.login as $l | any($slug, "\($slug)[bot]", "app/\($slug)"; . == $l)))] | .[:30]' \
+            > "$RUNNER_TEMP/review-prs.json"
+
       - name: Check out data main for the recent places store
         if: inputs.intake-url != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -190,6 +206,8 @@ jobs:
           sparse-checkout: |
             places
             moderation
+            reviews
+            fees
           persist-credentials: false
           token: ${{ steps.data-token.outputs.token }}
 
@@ -258,20 +276,6 @@ jobs:
               echo "${kind}_open=false" >> "$GITHUB_OUTPUT"
             fi
           done
-
-      - name: Read recent review PRs for owner approvals
-        env:
-          GH_TOKEN: ${{ steps.data-token.outputs.token }}
-          APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
-          DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
-        run: |
-          # The 30 most recent review PRs the bot opened in the data repository.
-          # PRs from forks on a branch of the same name are left out.
-          gh pr list --repo "$DATA_REPO" --head feedback/review --state all --limit 100 \
-            --json number,state,body,comments,author,isCrossRepository |
-            jq --arg slug "$APP_SLUG" '[.[] | select(.isCrossRepository == false and
-              (.author.login as $l | any($slug, "\($slug)[bot]", "app/\($slug)"; . == $l)))] | .[:30]' \
-            > "$RUNNER_TEMP/review-prs.json"
 
       - name: Apply feedback
         id: apply

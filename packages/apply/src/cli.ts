@@ -3,6 +3,7 @@ import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import type { ReviewPr } from "./owners.js";
 import { intakeRecentList, intakeRecentStore, sendBlockList, sendDoubtCases, sendOverruled, settleRecentChanges, settleRecentPlaces } from "./recent.js";
+import { sendProgress } from "./progress.js";
 import { run } from "./run.js";
 
 const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>]
@@ -30,7 +31,9 @@ place leaves the store only once the PR that writes it is merged. They also
 tell the intake which applied fact and contact reports now have their change
 on main, so it keeps those recent changes for 7 days from this run, and which
 items this run decided other than applying them, so their recent changes leave
-the list.
+the list. They also send the intake every item's progress from the last 90
+days, for GET /v1/feedback/progress: --review-prs must be read before <dir>
+is checked out, so a merged review PR's changes are on it.
 --recent-places reads the recent list at GET <url>/v1/places/recent, with no
 token. Feedback about a new place on it that is not in the data yet stays in
 <inbox>/pending for a later run, instead of being refused. While the list
@@ -136,6 +139,20 @@ async function main(): Promise<number> {
     console.log(`${inData.length} applied report(s) in the data on main sent to the intake`);
     const cases = await sendDoubtCases({ inbox: values.inbox, store, ...(now ? { now } : {}) });
     console.log(`${cases.length} fact(s) taken down after doubts sent to the intake`);
+    // Failures are logged inside and never fail the run.
+    const progress = await sendProgress({
+      inbox: values.inbox,
+      main: values.main,
+      store,
+      decisions: summary.decisions,
+      ...(reviewPrs ? { reviewPrs } : {}),
+      ...(values["bot-login"] ? { botLogins: values["bot-login"] } : {}),
+      ...(now ? { now } : {}),
+    }).catch((error: unknown) => {
+      console.warn(`working out the progress of items failed, trying again next run: ${String(error)}`);
+      return { sent: 0, failed: 0 };
+    });
+    console.log(`progress of ${progress.sent} item(s) sent to the intake${progress.failed > 0 ? `, ${progress.failed} not sent` : ""}`);
   }
   const c = summary.counts;
   console.log(
