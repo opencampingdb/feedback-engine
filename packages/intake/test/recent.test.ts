@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import type { HeldReason } from "../src/decide.js";
 import { createHandler, createScheduled, type CacheLike, type Env } from "../src/index.js";
 import { insertPlace, type D1Like, type D1Statement } from "../src/recent.js";
+import { ulid } from "../src/ulid.js";
 import { fakeD1 } from "./fake-d1.js";
 import { listableKv } from "./fake-kv.js";
 
@@ -1413,5 +1414,158 @@ describe("send-time decisions", () => {
     expect(Object.keys(await send(report(PLACE, { kind: "name", value: "Lake Eppalock Rest Area" })))).toEqual(["id"]);
     expect(Object.keys(await send(report(PLACE, { kind: "closed" })))).toEqual(["id"]);
     expect(written()).toHaveLength(5);
+  });
+
+  describe("progress", () => {
+    const progressCall = (items: unknown, token = TOKEN) =>
+      handle(
+        new Request("https://intake.example/v1/feedback/progress", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          body: JSON.stringify({ items }),
+        }),
+        e,
+      );
+    const ask = async (query: string, headers: Record<string, string> = {}) => {
+      const res = await handle(new Request(`https://intake.example/v1/feedback/progress${query}`, { headers }), e);
+      return { status: res.status, headers: res.headers, body: (await res.json()) as { items?: Record<string, unknown>[] } };
+    };
+    const progressOf = async (id: string) => (await ask(`?ids=${id}`)).body.items![0]!;
+    const rows = () => store.db.prepare("SELECT feedback_id, state, held_reason, refused_by, in_data_at, updated FROM item_progress").all();
+    // Sent before rows were kept, on 1 November.
+    const OLD = `fb_${ulid(Date.parse("2026-11-01T00:00:00Z"), () => new Uint8Array(16))}`;
+
+    it("keeps a row from send time: live for a change put live, received with the held reason for a held one", async () => {
+      const live = (await send(fact(PLACE, "toilets", true))).id as string;
+      const held = (await send(report(PLACE, { kind: "doubt", fact: "toilets" }))).id as string;
+      const named = (await send(report(PLACE, { kind: "name", value: "Lake Eppalock Rest Area" }))).id as string;
+      expect(await progressOf(live)).toEqual({ id: live, state: "live", place: PLACE, received: "2026-11-03T09:00:00Z" });
+      expect(await progressOf(held)).toEqual({ id: held, state: "received", held_reason: "single_doubt", place: PLACE, received: "2026-11-03T09:00:00Z" });
+      // Items the intake doesn't decide are received, with nothing decided.
+      expect(await progressOf(named)).toEqual({ id: named, state: "received", place: PLACE, received: "2026-11-03T09:00:00Z" });
+    });
+
+    it("keeps a new place's row under its new place id, and never the traveller's words, device or contributor", async () => {
+      const id = (await send(newPlace())).id as string;
+      const answer = await progressOf(id);
+      expect(answer).toEqual({ id, state: "live", place: `ocdb_${id.slice(3)}`, received: "2026-11-03T09:00:00Z" });
+      expect(JSON.stringify(answer)).not.toMatch(/Gravel|ctr_|acct_/);
+    });
+
+    it("refuses an update from the apply without the token", async () => {
+      const res = await progressCall([{ id: OLD, state: "accepted" }], "not-the-token");
+      expect(res.status).toBe(401);
+      expect(rows()).toEqual([]);
+    });
+
+    it("refuses updates that are not progress the apply sends", async () => {
+      const good = { id: OLD, state: "accepted" };
+      for (const bad of [
+        [],
+        Array.from({ length: 501 }, () => good),
+        [{ ...good, id: "ocdb_01JB0000000000000000000001" }],
+        [{ ...good, state: "live" }],
+        [{ ...good, state: "unknown" }],
+        [{ id: OLD, state: "refused" }],
+        [{ id: OLD, state: "refused", by: "someone" }],
+        [{ ...good, by: "rules" }],
+        [{ id: OLD, state: "in_data" }],
+        [{ ...good, in_data_at: "2026-11-03T09:00:00Z" }],
+        [{ ...good, place: "x" }],
+        [{ ...good, decided_at: "yesterday" }],
+        "x",
+      ]) {
+        expect((await progressCall(bad)).status).toBe(400);
+      }
+      expect(rows()).toEqual([]);
+    });
+
+    it("takes an item it has no row for, received at the time in its id", async () => {
+      const res = await progressCall([{ id: OLD, state: "accepted", reason: "fee accepted", place: PLACE, decided_at: "2026-11-03T08:00:00Z" }]);
+      expect(await res.json()).toEqual({ updated: 1 });
+      expect(await progressOf(OLD)).toEqual({
+        id: OLD,
+        state: "accepted",
+        reason: "fee accepted",
+        place: PLACE,
+        received: "2026-11-01T00:00:00Z",
+        decided_at: "2026-11-03T08:00:00Z",
+      });
+    });
+
+    it("never moves a row back from in_data or refused, and keeps the first in_data_at", async () => {
+      const id = (await send(fact(PLACE, "toilets", true))).id as string;
+      const other = (await send(report(PLACE, { kind: "name", value: "Lake Eppalock Rest Area" }))).id as string;
+      clock += HOUR;
+      await progressCall([
+        { id, state: "in_data", reason: "fact set", decided_at: "2026-11-03T09:30:00Z", in_data_at: "2026-11-03T10:00:00Z" },
+        { id: other, state: "refused", by: "reviewer", reason: "a reviewer did not take the change into the data" },
+      ]);
+      clock += HOUR;
+      const later = await progressCall([
+        { id, state: "accepted", reason: "fact set" },
+        { id, state: "in_data", reason: "fact set", in_data_at: "2026-11-03T11:00:00Z" },
+        { id: other, state: "held", reason: "names are checked by a person" },
+        { id: other, state: "refused", by: "rules", reason: "something else" },
+      ]);
+      expect(await later.json()).toEqual({ updated: 0 });
+      expect(await progressOf(id)).toMatchObject({ state: "in_data", in_data_at: "2026-11-03T10:00:00Z" });
+      expect(await progressOf(other)).toMatchObject({ state: "refused", by: "reviewer", reason: "a reviewer did not take the change into the data" });
+      // A change a reviewer turned down that reached the data after all.
+      await progressCall([{ id: other, state: "in_data", in_data_at: "2026-11-03T11:00:00Z" }]);
+      expect(await progressOf(other)).toMatchObject({ state: "in_data", in_data_at: "2026-11-03T11:00:00Z" });
+      expect(await progressOf(other)).not.toHaveProperty("by");
+    });
+
+    it("keeps an in_data_at once set, takes a later time than its clock as now, and changes nothing when sent again", async () => {
+      const id = (await send(report(PLACE, { kind: "name", value: "Lake Eppalock Rest Area" }))).id as string;
+      await progressCall([{ id, state: "in_data", in_data_at: "2027-01-01T00:00:00Z" }]);
+      expect(await progressOf(id)).toMatchObject({ in_data_at: "2026-11-03T09:00:00Z" });
+      clock += HOUR;
+      expect(await (await progressCall([{ id, state: "in_data", in_data_at: "2026-11-03T10:00:00Z" }])).json()).toEqual({ updated: 0 });
+      expect(await progressOf(id)).toMatchObject({ in_data_at: "2026-11-03T09:00:00Z" });
+      // Waiting sent on every run moves nothing either.
+      const waiting = (await send(report(PLACE, { kind: "kind", place_kind: "caravan_park" }))).id as string;
+      await progressCall([{ id: waiting, state: "waiting", reason: "needs a second device", decided_at: "2026-11-03T10:00:00Z" }]);
+      clock += HOUR;
+      expect(await (await progressCall([{ id: waiting, state: "waiting", reason: "needs a second device", decided_at: "2026-11-03T11:00:00Z" }])).json()).toEqual({ updated: 0 });
+      expect(await progressOf(waiting)).toMatchObject({ state: "waiting", decided_at: "2026-11-03T10:00:00Z" });
+    });
+
+    it("answers known and unknown ids in the order asked, with CORS and not cached", async () => {
+      const id = (await send(fact(PLACE, "toilets", true))).id as string;
+      const unknown = "fb_01JC0000000000000000000099";
+      const answer = await ask(`?ids=${unknown},${id},${unknown}`, { origin: "https://app.example" });
+      expect(answer.status).toBe(200);
+      expect(answer.body.items!.map((i) => [i.id, i.state])).toEqual([
+        [unknown, "unknown"],
+        [id, "live"],
+        [unknown, "unknown"],
+      ]);
+      expect(answer.body.items![0]).toEqual({ id: unknown, state: "unknown" });
+      expect(answer.headers.get("access-control-allow-origin")).toBe("*");
+      expect(answer.headers.get("cache-control")).toBe("no-store");
+    });
+
+    it("answers 400 for too many ids, a bad id or none", async () => {
+      const many = Array.from({ length: 101 }, (_, i) => `fb_01JC${String(i).padStart(22, "0")}`);
+      expect((await ask(`?ids=${many.join(",")}`)).status).toBe(400);
+      expect((await ask(`?ids=${many.slice(0, 100).join(",")}`)).status).toBe(200);
+      expect((await ask(`?ids=${OLD},ocdb_01JB0000000000000000000001`)).status).toBe(400);
+      expect((await ask("?ids=")).status).toBe(400);
+      expect((await ask("")).status).toBe(400);
+    });
+
+    it("deletes rows 90 days after they last changed", async () => {
+      const id = (await send(fact(PLACE, "toilets", true))).id as string;
+      const changed = (await send(report(PLACE, { kind: "name", value: "Lake Eppalock Rest Area" }))).id as string;
+      clock = NOW + 60 * 24 * HOUR;
+      await progressCall([{ id: changed, state: "held", reason: "names are checked by a person" }]);
+      clock = NOW + 90 * 24 * HOUR + HOUR;
+      await createScheduled({ fetch: services.fetch, now: () => clock })(e);
+      expect(rows().map((r) => (r as { feedback_id: string }).feedback_id)).toEqual([changed]);
+      expect(await progressOf(id)).toEqual({ id, state: "unknown" });
+      expect(await progressOf(changed)).toMatchObject({ state: "held" });
+    });
   });
 });

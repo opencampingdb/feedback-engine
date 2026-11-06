@@ -256,6 +256,14 @@ describe("photo run", () => {
     expect(reviewLines.map((l) => JSON.parse(l).id)).toEqual([held.id.replace("fb_", "pho_")]);
   });
 
+  it("leaves photos out of the decisions it lists for progress, as apps know a photo by its pho_ id", async () => {
+    const photo = upload("kim", 4);
+    const e = erasure("sam");
+    for (const item of [photo, e]) await put(join(inbox, "pending", "2026-11-02", `${item.id}.json`), JSON.stringify(item));
+    const summary = await run({ inbox, data, reviewData: review, now: new Date(NOW) });
+    expect(summary.decisions.map((d) => d.id)).toEqual([e.id]);
+  });
+
   it("removes an erased contributor's photos and lists them in removed_photos.json", async () => {
     await put(join(data, "photos", `${PLACE}.ndjson`), `${dumpPhotoLine(photoLine(1, "sam"))}\n`);
     await put(join(review, "photos", `${PLACE}.ndjson`), `${dumpPhotoLine(photoLine(2, "sam"))}\n`);

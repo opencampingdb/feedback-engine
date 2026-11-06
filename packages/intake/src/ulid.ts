@@ -17,3 +17,10 @@ export function ulid(nowMs: number, randomBytes: (n: number) => Uint8Array = def
 function defaultRandomBytes(n: number): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(n));
 }
+
+/** The milliseconds a ULID's first 10 characters hold. */
+export function ulidTime(id: string): number {
+  let t = 0;
+  for (const ch of id.slice(0, 10)) t = t * 32 + CROCKFORD.indexOf(ch);
+  return t;
+}

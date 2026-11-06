@@ -2,6 +2,7 @@ import type { FactName, FactValue, StoredFeedback } from "@opencampingdb/feedbac
 import { sameValue } from "./decide.js";
 import { DataRepo, readHistory } from "./io.js";
 import { newPlaceIdOf, WINDOW_DAYS, WITHDRAWN, type DoubtedRecord } from "./rules.js";
+import type { ProgressStore } from "./progress.js";
 import type { Place } from "./types.js";
 
 /**
@@ -88,11 +89,12 @@ const REMOVE_BATCH = 500;
 
 /**
  * The intake's `POST /v1/places/recent/remove` and `POST /v1/places/recent/block`,
+ * the recent change calls and `POST /v1/feedback/progress`,
  * authorised with the places token the intake keeps as `PLACES_TOKEN`.
  * Removing an id that is not in the store does nothing, and the block list
  * replaces the last one, so sending either again is safe.
  */
-export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeof fetch = fetch): RecentStore & RecentChangeStore {
+export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeof fetch = fetch): RecentStore & RecentChangeStore & ProgressStore {
   const url = new URL("/v1/places/recent/remove", baseUrl).toString();
   const blockUrl = new URL("/v1/places/recent/block", baseUrl).toString();
   const post = async (path: string, ids: readonly string[], extra: (part: readonly string[]) => Record<string, unknown>, what: string) => {
@@ -124,6 +126,15 @@ export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeo
         });
         if (!response.ok) throw new Error(`the intake refused the doubt cases: ${response.status} ${await response.text()}`);
       }
+    },
+    async progress(items) {
+      // The caller sends at most 500 items a call (sendProgress).
+      const response = await fetcher(new URL("/v1/feedback/progress", baseUrl).toString(), {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      if (!response.ok) throw new Error(`the intake refused the progress: ${response.status} ${await response.text()}`);
     },
     async block(contributors) {
       const response = await fetcher(blockUrl, {

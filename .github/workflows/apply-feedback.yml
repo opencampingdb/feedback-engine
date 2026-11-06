@@ -180,6 +180,25 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.data-token.outputs.token }}
 
+      # Before data main is checked out, so every merged PR read here is in that checkout: the apply
+      # counts a change as turned down only when its PR is merged or closed without it.
+      - name: Read recent review and automatic PRs for owner approvals and progress
+        env:
+          GH_TOKEN: ${{ steps.data-token.outputs.token }}
+          APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
+          DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
+        run: |
+          # The 100 most recent PRs the bot opened in the data repository from each branch. Owner
+          # approvals read the 30 most recent review PRs. PRs from forks on a branch of the same
+          # name are left out.
+          for kind in review auto; do
+            gh pr list --repo "$DATA_REPO" --head "feedback/$kind" --state all --limit 100 \
+              --json number,state,body,comments,author,isCrossRepository |
+              jq --arg slug "$APP_SLUG" '[.[] | select(.isCrossRepository == false and
+                (.author.login as $l | any($slug, "\($slug)[bot]", "app/\($slug)"; . == $l)))]' \
+              > "$RUNNER_TEMP/$kind-prs.json"
+          done
+
       - name: Check out data main for the recent places store
         if: inputs.intake-url != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -190,8 +209,25 @@ jobs:
           sparse-checkout: |
             places
             moderation
+            reviews
+            fees
           persist-credentials: false
           token: ${{ steps.data-token.outputs.token }}
+
+      # The last 14 days of main's history, so each change in the data is dated by the commit that
+      # brought it in. A file last changed before then is dated by main's last commit.
+      - name: Fetch 14 days of data main's history
+        if: inputs.intake-url != ''
+        env:
+          GH_TOKEN: ${{ steps.data-token.outputs.token }}
+          BASE_BRANCH: ${{ inputs.data-base-branch }}
+        working-directory: data-main
+        run: |
+          since="$(date -u -d '14 days ago' +%Y-%m-%d)"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --quiet --filter=blob:none --shallow-since="$since" origin "$BASE_BRANCH" ||
+            echo "::warning::could not fetch data main's history, so changes are dated by its last commit"
 
       - name: Check out Open Camping DB place records
         if: inputs.places-repository != ''
@@ -259,20 +295,6 @@ jobs:
             fi
           done
 
-      - name: Read recent review PRs for owner approvals
-        env:
-          GH_TOKEN: ${{ steps.data-token.outputs.token }}
-          APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
-          DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
-        run: |
-          # The 30 most recent review PRs the bot opened in the data repository.
-          # PRs from forks on a branch of the same name are left out.
-          gh pr list --repo "$DATA_REPO" --head feedback/review --state all --limit 100 \
-            --json number,state,body,comments,author,isCrossRepository |
-            jq --arg slug "$APP_SLUG" '[.[] | select(.isCrossRepository == false and
-              (.author.login as $l | any($slug, "\($slug)[bot]", "app/\($slug)"; . == $l)))] | .[:30]' \
-            > "$RUNNER_TEMP/review-prs.json"
-
       - name: Apply feedback
         id: apply
         env:
@@ -295,6 +317,7 @@ jobs:
           --data data-auto
           --review-data data-review
           --review-prs "$RUNNER_TEMP/review-prs.json"
+          --auto-prs "$RUNNER_TEMP/auto-prs.json"
           --bot-login "$APP_SLUG"
           --auto-pr-body "$RUNNER_TEMP/auto-pr-body.md"
           --review-pr-body "$RUNNER_TEMP/review-pr-body.md"

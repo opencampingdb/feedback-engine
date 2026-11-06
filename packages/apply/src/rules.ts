@@ -69,6 +69,10 @@ const DRAFT_GROUP = "overnight";
  */
 /** The id a new place gets from its `new_place` report: `ocdb_` and the report's ulid, as the SDK's `newPlaceId` makes it. */
 export const newPlaceIdOf = (item: { id: string }) => `ocdb_${item.id.replace(/^fb_/, "")}`;
+/** The id a review gets from its feedback item: `rev_` and the item's ulid. */
+export const reviewIdOf = (item: { id: string }) => `rev_${item.id.replace(/^fb_/, "")}`;
+/** The id a fee gets from its feedback item: `fee_` and the item's ulid. */
+export const feeIdOf = (item: { id: string }) => `fee_${item.id.replace(/^fb_/, "")}`;
 
 /** Decision reasons the recent places store is settled by. */
 export const WITHDRAWN = { place: "the person who added it withdrew it", withdrawal: "new place withdrawn" } as const;
@@ -508,7 +512,7 @@ export function applyRules(input: RulesInput): RulesOutput {
         decide(item, "refused", "review has no contributor");
         continue;
       }
-      const reviewId = `rev_${item.id.replace(/^fb_/, "")}`;
+      const reviewId = reviewIdOf(item);
       const lines = linesOf(item.place);
       if (lines.some((r) => r.id === reviewId)) {
         decide(item, "applied", "review is already in the data");
@@ -563,7 +567,7 @@ export function applyRules(input: RulesInput): RulesOutput {
         lines = (input.fees?.(item.place) ?? []).map((f) => ({ ...f }));
         feeLines.set(item.place, lines);
       }
-      const feeId = `fee_${item.id.replace(/^fb_/, "")}`;
+      const feeId = feeIdOf(item);
       if (lines.some((f) => f.id === feeId)) {
         decide(item, "applied", "fee is already in the data");
         continue;

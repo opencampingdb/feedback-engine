@@ -3,11 +3,12 @@ import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import type { ReviewPr } from "./owners.js";
 import { intakeRecentList, intakeRecentStore, sendBlockList, sendDoubtCases, sendOverruled, settleRecentChanges, settleRecentPlaces } from "./recent.js";
+import { sendProgress } from "./progress.js";
 import { run } from "./run.js";
 
 const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>]
                   [--auto-pr-body <file>] [--review-pr-body <file>]
-                  [--review-prs <file>] [--bot-login <login>]
+                  [--review-prs <file>] [--auto-prs <file>] [--bot-login <login>]
                   [--summary <file>] [--now <ISO time>] [--places <dir>]
                   [--photo-licence <id>] [--main <dir> --intake <url>]
                   [--recent-places <url>] [--review-preview <url>]
@@ -30,7 +31,15 @@ place leaves the store only once the PR that writes it is merged. They also
 tell the intake which applied fact and contact reports now have their change
 on main, so it keeps those recent changes for 7 days from this run, and which
 items this run decided other than applying them, so their recent changes leave
-the list.
+the list. They also send the intake every item's progress from the last 90
+days, for GET /v1/feedback/progress. Each change in the data is dated by the
+last commit on <dir> that touched its file, so <dir> needs its last 14 days
+of history. Only items whose progress changed since the last send are sent,
+recorded in <inbox>/progress/sent.json, and every item on the first run
+after 00:00 UTC each Monday.
+--review-prs (up to 100; owner approvals read the 30 most recent) and
+--auto-prs (the same JSON for --head feedback/auto) must be read before <dir>
+is checked out, so a merged PR's changes are on it.
 --recent-places reads the recent list at GET <url>/v1/places/recent, with no
 token. Feedback about a new place on it that is not in the data yet stays in
 <inbox>/pending for a later run, instead of being refused. While the list
@@ -47,6 +56,9 @@ its own: each goes to a reviewer as a duplicate case.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
 
+/** How many of the most recent review PRs owner approvals read. */
+const OWNER_REVIEW_PRS = 30;
+
 async function main(): Promise<number> {
   const { values } = parseArgs({
     options: {
@@ -56,6 +68,7 @@ async function main(): Promise<number> {
       "auto-pr-body": { type: "string" },
       "review-pr-body": { type: "string" },
       "review-prs": { type: "string" },
+      "auto-prs": { type: "string" },
       "bot-login": { type: "string", multiple: true },
       summary: { type: "string" },
       now: { type: "string" },
@@ -97,10 +110,12 @@ async function main(): Promise<number> {
   const reviewPrs = values["review-prs"]
     ? (JSON.parse(await readFile(values["review-prs"], "utf8")) as ReviewPr[])
     : undefined;
+  const autoPrs = values["auto-prs"] ? (JSON.parse(await readFile(values["auto-prs"], "utf8")) as ReviewPr[]) : undefined;
   const summary = await run({
     inbox: values.inbox,
     data: values.data,
-    ...(reviewPrs ? { reviewPrs } : {}),
+    // Owner approvals read the 30 most recent review PRs; progress reads them all.
+    ...(reviewPrs ? { reviewPrs: reviewPrs.slice(0, OWNER_REVIEW_PRS) } : {}),
     ...(values["bot-login"] ? { botLogins: values["bot-login"] } : {}),
     ...(values["review-data"] ? { reviewData: values["review-data"] } : {}),
     ...(now ? { now } : {}),
@@ -114,16 +129,8 @@ async function main(): Promise<number> {
   if (values["auto-pr-body"]) await writeFile(values["auto-pr-body"], summary.auto_pr_body, "utf8");
   if (values["review-pr-body"]) await writeFile(values["review-pr-body"], summary.review_pr_body, "utf8");
   if (values.summary) await writeFile(values.summary, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
-  const output = process.env.GITHUB_OUTPUT;
-  if (output) {
-    const lines = [
-      `auto_changed=${summary.auto_changed}`,
-      `review_changed=${summary.review_changed}`,
-      `owner_claims=${summary.owner_claims}`,
-      `inbox_changed=${summary.inbox_changed}`,
-    ];
-    await appendFile(output, `${lines.join("\n")}\n`, "utf8");
-  }
+  // The progress sent is recorded in the inbox, so the inbox commit carries it too.
+  let progressRecorded = false;
   if (values.main && values.intake && token) {
     const store = intakeRecentStore(values.intake, token);
     const settled = await settleRecentPlaces({ inbox: values.inbox, main: values.main, store, ...(now ? { now } : {}) });
@@ -136,6 +143,32 @@ async function main(): Promise<number> {
     console.log(`${inData.length} applied report(s) in the data on main sent to the intake`);
     const cases = await sendDoubtCases({ inbox: values.inbox, store, ...(now ? { now } : {}) });
     console.log(`${cases.length} fact(s) taken down after doubts sent to the intake`);
+    // Failures are logged inside and never fail the run.
+    const progress = await sendProgress({
+      inbox: values.inbox,
+      main: values.main,
+      store,
+      decisions: summary.decisions,
+      ...(reviewPrs ? { reviewPrs } : {}),
+      ...(autoPrs ? { autoPrs } : {}),
+      ...(values["bot-login"] ? { botLogins: values["bot-login"] } : {}),
+      ...(now ? { now } : {}),
+    }).catch((error: unknown) => {
+      console.warn(`working out the progress of items failed, trying again next run: ${String(error)}`);
+      return { sent: 0, failed: 0, recorded: false };
+    });
+    progressRecorded = progress.recorded;
+    console.log(`progress of ${progress.sent} item(s) sent to the intake${progress.failed > 0 ? `, ${progress.failed} not sent` : ""}`);
+  }
+  const output = process.env.GITHUB_OUTPUT;
+  if (output) {
+    const lines = [
+      `auto_changed=${summary.auto_changed}`,
+      `review_changed=${summary.review_changed}`,
+      `owner_claims=${summary.owner_claims}`,
+      `inbox_changed=${summary.inbox_changed || progressRecorded}`,
+    ];
+    await appendFile(output, `${lines.join("\n")}\n`, "utf8");
   }
   const c = summary.counts;
   console.log(

@@ -7,7 +7,8 @@
       "@opencampingdb/feedback": ["./../sdk/src/index.ts"],
       "@opencampingdb/apply/decide": ["./../apply/src/decide.ts"],
       "@opencampingdb/apply/review": ["./../apply/src/review.ts"],
-      "@opencampingdb/apply/preview": ["./../apply/src/preview.ts"]
+      "@opencampingdb/apply/preview": ["./../apply/src/preview.ts"],
+      "@opencampingdb/apply/progress-update": ["./../apply/src/progress-update.ts"]
     },
     "noEmit": true
   },

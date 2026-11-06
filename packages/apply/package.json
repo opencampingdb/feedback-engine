@@ -17,6 +17,10 @@
     "./preview": {
       "types": "./dist/preview.d.ts",
       "default": "./dist/preview.js"
+    },
+    "./progress-update": {
+      "types": "./dist/progress-update.d.ts",
+      "default": "./dist/progress-update.js"
     }
   },
   "bin": {
@@ -31,6 +35,6 @@
     "apply": "node dist/cli.js"
   },
   "dependencies": {
-    "@opencampingdb/feedback": "0.15.0"
+    "@opencampingdb/feedback": "0.16.0"
   }
 }

@@ -14,6 +14,8 @@ export {
   itemDecision,
   OwnerRequestError,
   OwnerTermsRequiredError,
+  MAX_PROGRESS_IDS,
+  ProgressRequestError,
 } from "./client.js";
 export type {
   Answer,
@@ -103,6 +105,8 @@ export {
 export type { ValidationResult } from "./validate.js";
 export { dataVersionTime, withRecentChanges } from "./recent.js";
 export type { RecentChange, RecentList, RecentPlace, ReleasePlace } from "./recent.js";
+export { PROGRESS_STATES, isFeedbackId, progressInRelease } from "./progress.js";
+export type { Progress, ProgressState, RefusedBy } from "./progress.js";
 export { sha256Hex, sha256HexBytes } from "./sha256.js";
 export { REMOVED_MARKER, findContactDetails, findContactDetailsInHours, stripContactDetails } from "./text.js";
 export type { ContactDetailKind } from "./text.js";

@@ -24,7 +24,7 @@ import {
 } from "@opencampingdb/feedback";
 import type { CheckContributor, Checks, HeldReason as ChecksHeldReason, LiveSlot } from "./checks.js";
 import { getIndexedPlace, type Cell } from "./place-index.js";
-import { chunks, placeStatement, prunePlaceStatements, type Bbox, type D1Like, type D1Statement, type StoredPlace } from "./recent.js";
+import { chunks, isoSeconds, placeStatement, prunePlaceStatements, type Bbox, type D1Like, type D1Statement, type StoredPlace } from "./recent.js";
 
 /**
  * The intake deciding an item at send time, with the apply's own rules
@@ -98,7 +98,6 @@ export function decidedHere(item: StoredFeedback): item is ReportItem {
   return (kind === "fact" || kind === "contact" || kind === "doubt") && typeof item.place === "string" && typeof item.report.fact === "string";
 }
 
-const isoSeconds = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 
 /** A contributor's track record, and whether they are on the block list. */
 export async function contributorRecord(db: D1Like, contributor: string): Promise<CheckContributor & { blocked: boolean }> {
@@ -441,8 +440,6 @@ export async function listChanges(db: D1Like, now: number, bbox?: Bbox): Promise
   }));
 }
 
-/** A feedback id, as the intake makes them. */
-export const isFeedbackId = (value: unknown): value is string => typeof value === "string" && /^fb_[0-9A-HJKMNP-TV-Z]{26}$/.test(value);
 
 /** D1 allows 100 bound values in one statement. */
 const MAX_BOUND = 100;

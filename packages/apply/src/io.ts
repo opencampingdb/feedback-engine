@@ -2,7 +2,7 @@ import { createReadStream } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
+import { isFeedbackId, isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
 import type { AwaitingClaim, OwnerRecord } from "./owners.js";
 import { pairKey, withDoNotMatch, type DoNotMatchEntry } from "./review.js";
 import { majorRoads, type MajorRoads } from "./roads.js";
@@ -21,7 +21,6 @@ export interface PendingFile {
 const PLACE_READS = 64;
 const DAY_FOLDER = /^\d{4}-\d{2}-\d{2}$/;
 const FEEDBACK_FILE = /^fb_[0-9A-HJKMNP-TV-Z]{26}\.json$/;
-const FEEDBACK_ID = /^fb_[0-9A-HJKMNP-TV-Z]{26}$/;
 const RECEIVED = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
 /**
@@ -30,7 +29,7 @@ const RECEIVED = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
  */
 function storedProblem(item: StoredSubmission, expectedId?: string): string | undefined {
   if (typeof item !== "object" || item === null) return "the file is not a JSON object";
-  if (typeof item.id !== "string" || !FEEDBACK_ID.test(item.id) || (expectedId !== undefined && item.id !== expectedId)) {
+  if (typeof item.id !== "string" || !isFeedbackId(item.id) || (expectedId !== undefined && item.id !== expectedId)) {
     return "id does not match the file name";
   }
   if (typeof item.received !== "string" || !RECEIVED.test(item.received) || Number.isNaN(Date.parse(item.received))) {

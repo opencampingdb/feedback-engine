@@ -58,6 +58,10 @@ _Avoid_: dispute, flag, removal report (for a fact)
 A fact report of the value a place has, or had before doubts took it down, weighed against the doubts about it.
 _Avoid_: check (for a fact), vote
 
+**Progress**:
+Where a contribution is: received, live, waiting, accepted, held, refused or in the data.
+_Avoid_: status, outcome, decision
+
 **Held**:
 Accepted, but kept from apps until a reviewer decides.
 _Avoid_: pending, queued, quarantined
