@@ -220,9 +220,6 @@ function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
     ...(c.case === "commons_mismatch"
       ? ["In a commons_mismatch case, a traveller says a Wikimedia Commons photo shown for the place is not of it. You see only the photo's file name, matched to the place by its words and distance."]
       : []),
-    ...(c.case === "vehicle_access_candidate"
-      ? ["In a vehicle_access_candidate case, the place's name suggests only heavy vehicles may use it, and OpenStreetMap does not say so. Confirm only when the name clearly says trucks or heavy vehicles only, such as a truck parking bay or a heavy vehicle rest area."]
-      : []),
     "Answer with JSON only: {\"decision\": ..., \"reason\": ..., \"sure\": true or false}.",
     `The decisions you may give for this case are: ${allowed.join(", ")}.`,
     ...allowed.map((d) => `- ${d}: ${meaning(c, d)}.`),
