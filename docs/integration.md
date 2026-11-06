@@ -323,7 +323,7 @@ const shown = places.map((place) => withRecentChanges(place, recent.changes ?? [
 
 Each contributor (or install, without one) may send 10 new places a day. The eleventh gets `429 rate_limited`.
 
-**Keeping the data fresh.** A data release follows each merge into the data within minutes, and the recent list covers only the minutes in between. On launch and once a day, read the release's `manifest.json`, and when its `data_version` is newer than the one you have, download the new release.
+**Keeping the data fresh.** A data release follows each merge into the data within minutes, and the recent list covers only the minutes in between. On launch and once a day, read the release's `manifest.json`, and when its `data_version` is newer than the one you have, download the new release. The recent list also names the newest release once the release workflow has told the intake of it, `"release": {"data_version": "20261107T110000Z-abc1234", "published": "2026-11-07T11:04:00Z"}` (with `layout_version` when the release sends one), so an app that reads the list anyway can see a newer release without asking for the manifest. Compare the times with `dataVersionTime`. Intakes from before SDK 0.17.0, and one not yet told of a release, have no `release`.
 
 ### What became of a contribution
 

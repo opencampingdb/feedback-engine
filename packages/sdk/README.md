@@ -82,7 +82,7 @@ await feedback.report({ place: null, location, report: { kind: "new_place", name
 
 ## Recent changes
 
-`GET /v1/places/recent` on the intake answers a `RecentList`: new places not yet in a release, and `changes`, the changes to released places that went live. Lay them over a release place record with `withRecentChanges(place, changes, dataVersion)`, passing the `data_version` of the release you have. A change with `value` null takes the fact off. Changes the release already has, those whose `in_data_at` is earlier than the commit time at the front of `dataVersion` (`dataVersionTime` reads it), are skipped.
+`GET /v1/places/recent` on the intake answers a `RecentList`: new places not yet in a release, and `changes`, the changes to released places that went live. Lay them over a release place record with `withRecentChanges(place, changes, dataVersion)`, passing the `data_version` of the release you have. A change with `value` null takes the fact off. Changes the release already has, those whose `in_data_at` is earlier than the commit time at the front of `dataVersion` (`dataVersionTime` reads it), are skipped. `release`, a `RecentRelease`, names the newest data release the intake was told of, when it has been told of one.
 
 The full guide is [docs/integration.md](../../docs/integration.md). Licence: Apache 2.0.
 
