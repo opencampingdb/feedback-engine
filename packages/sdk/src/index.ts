@@ -15,6 +15,7 @@ export {
   OwnerRequestError,
   OwnerTermsRequiredError,
   MAX_PROGRESS_IDS,
+  MAX_BATCH_SIZE,
   ProgressRequestError,
 } from "./client.js";
 export type {
