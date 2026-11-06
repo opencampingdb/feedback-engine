@@ -1,4 +1,7 @@
 import type {
+  FactName,
+  FactValue,
+  PlaceFacts,
   AcceptedResponse,
   CheckBody,
   FeeBody,
@@ -178,6 +181,27 @@ export interface ReportInput {
   ref?: string;
 }
 
+/** A traveller's edit of one released place: every fact they set, in one call. */
+export interface FactsInput {
+  place: string;
+  /** The facts the traveller set, each with its new value. A fact left undefined is skipped. */
+  facts: { [F in FactName]?: PlaceFacts[F] | undefined };
+  /** The signed-in traveller's opaque account id, when there is one. */
+  contributor?: string;
+  consent: boolean;
+  /**
+   * The caller's own id for this edit, 1 to 90 characters. Each fact's report
+   * is queued with the ref `<ref>:<fact>`, passed back to `onAnswered`.
+   */
+  ref?: string;
+}
+
+/** What one fact of a `reportFacts` edit came to. */
+export interface FactResult {
+  fact: FactName;
+  result: SubmitResult;
+}
+
 export interface ReviewInput {
   place: string;
   review: ReviewBody;
@@ -340,6 +364,14 @@ export interface OwnerUpdateInput {
 
 export interface FeedbackClient {
   report(input: ReportInput): Promise<SubmitResult>;
+  /**
+   * Sends a traveller's edit of one place: one fact report for each fact, in
+   * the order given, each queued and retried like `report`. The intake counts
+   * an install's reports about one place in a day once against its daily
+   * limits, so a full edit costs no more than one fact. Resolves with each
+   * fact's result, in the same order.
+   */
+  reportFacts(input: FactsInput): Promise<FactResult[]>;
   review(input: ReviewInput): Promise<SubmitResult>;
   check(input: CheckInput): Promise<SubmitResult>;
   /** Reports what the traveller paid per night. Queued and retried like a review. */
@@ -1002,6 +1034,25 @@ function createClient(options: FeedbackClientOptions): FeedbackClient & PhotoCli
       return { id: String(answer.id ?? "") };
     },
     report: (input) => submit({ ...input }, "report"),
+    reportFacts: async ({ place, facts, contributor, consent, ref }) => {
+      if (ref !== undefined && (ref.length < 1 || ref.length > 90)) throw new RangeError("ref must be 1 to 90 characters");
+      const results: FactResult[] = [];
+      for (const [fact, value] of Object.entries(facts) as [FactName, FactValue | undefined][]) {
+        if (value === undefined) continue;
+        const result = await submit(
+          {
+            place,
+            report: { kind: "fact", fact, value },
+            ...(contributor !== undefined ? { contributor } : {}),
+            consent,
+            ...(ref !== undefined ? { ref: `${ref}:${fact}` } : {}),
+          },
+          "report",
+        );
+        results.push({ fact, result });
+      }
+      return results;
+    },
     review: (input) => submit({ ...input }, "review"),
     check: (input) => submit({ ...input }, "check"),
     fee: (input) => submit({ ...input }, "fee"),

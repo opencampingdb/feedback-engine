@@ -1,4 +1,4 @@
-import { DEVICE_DAILY_LIMIT, ORIGIN_DAILY_LIMIT } from "../src/ratelimit.js";
+import { DEVICE_DAILY_LIMIT, ORIGIN_DAILY_LIMIT, PLACE_EDIT_DAILY_LIMIT } from "../src/ratelimit.js";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createAppJwt, importPrivateKey } from "../src/github.js";
@@ -13,6 +13,7 @@ const { privateKey, publicKey } = generateKeyPairSync("rsa", {
 
 const APP_KEY = "test-app-key-0123456789";
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
+const OTHER_PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZB";
 const DEVICE = "3b241101-e2bb-4255-8caf-4136c566a962";
 const NOW = Date.parse("2026-10-30T12:00:00Z");
 
@@ -242,6 +243,32 @@ describe("intake", () => {
     // The next day the device may send again.
     clock += 24 * 60 * 60 * 1000;
     expect((await handle(post(review), e)).status).toBe(202);
+  });
+
+  it("counts a device's reports about one place in a day once, up to the place edit limit", async () => {
+    const kv = fakeKv();
+    const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 10_000 } }) };
+    const fact = { ...review, type: "report", review: undefined, report: { kind: "fact", fact: "toilets", value: true } };
+    for (let i = 0; i < PLACE_EDIT_DAILY_LIMIT; i++) expect((await handle(post(fact), e)).status).toBe(202);
+    // The whole edit used one item of the device's and the contributor's day.
+    const counts = [...kv.data].filter(([k]) => k.startsWith("d:") || k.startsWith("c:")).map(([, v]) => v);
+    expect(counts).toEqual(["1", "1"]);
+    // Past the place edit limit the device is refused for that place, but not for others.
+    expect((await handle(post(fact), e)).status).toBe(429);
+    expect((await handle(post(review), e)).status).toBe(202);
+    // The next day the edit starts again.
+    clock += 24 * 60 * 60 * 1000;
+    expect((await handle(post(fact), e)).status).toBe(202);
+  });
+
+  it("counts a report about another place, and a new place, against the daily limits as usual", async () => {
+    const kv = fakeKv();
+    const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 10_000 } }) };
+    const fact = { ...review, type: "report", review: undefined, report: { kind: "fact", fact: "toilets", value: true } };
+    expect((await handle(post(fact), e)).status).toBe(202);
+    expect((await handle(post({ ...fact, place: OTHER_PLACE }), e)).status).toBe(202);
+    const device = [...kv.data].find(([k]) => k.startsWith("d:"))!;
+    expect(device[1]).toBe("2");
   });
 
   it("limits each app to its daily limit", async () => {
