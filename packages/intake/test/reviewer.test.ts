@@ -65,15 +65,42 @@ interface Call {
   body?: Record<string, unknown>;
 }
 
-/** The data repository's review branch, its open PR and its comments, behind the GitHub REST API. */
+/**
+ * The data repository's review branch, its open PR and its comments, behind
+ * the GitHub REST API: the contents API for reads, and the Git Data API
+ * (refs, commits, trees with inline content on a base tree) for writes.
+ * `files` is the branch as it is now. Setting a file there is another writer
+ * committing it. A path in `conflicts` is changed by another writer just
+ * before each ref update, so the reviewer's commit has lost the race for it.
+ * `refStatus` answers the next ref updates with these statuses instead, and
+ * `meanwhile` runs one function before each, as another writer would.
+ */
 function fakeDataRepo(prBody: string | null) {
-  const files = new Map<string, { text: string; sha: string }>();
+  type Snapshot = Map<string, { text: string; sha: string }>;
+  const files: Snapshot = new Map();
   const comments: Comment[] = [];
   const calls: Call[] = [];
   const conflicts = new Set<string>();
+  const refStatus: number[] = [];
+  const meanwhile: (() => void)[] = [];
+  const commitObjects = new Map<string, { files: Snapshot; parents: string[]; message: string }>();
+  const treeObjects = new Map<string, Snapshot>();
   let shas = 0;
-  const put = (p: Place) => files.set(placePath(p.id), { text: dumpPlace(p), sha: `sha${++shas}` });
+  const next = (prefix: string) => `${prefix}${String(++shas).padStart(6, "0")}`;
+  const put = (p: Place) => files.set(placePath(p.id), { text: dumpPlace(p), sha: next("blob") });
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const same = (a: Snapshot, b: Snapshot) => a.size === b.size && [...a].every(([path, f]) => b.get(path)?.sha === f.sha);
+  let head = next("commit");
+  commitObjects.set(head, { files: new Map(), parents: [], message: "first" });
+  /** The head commit, after committing what other writers set in `files` since. */
+  const tip = () => {
+    if (!same(commitObjects.get(head)!.files, files)) {
+      const sha = next("commit");
+      commitObjects.set(sha, { files: new Map(files), parents: [head], message: "another writer" });
+      head = sha;
+    }
+    return head;
+  };
 
   async function fetch(input: string, init?: RequestInit): Promise<Response> {
     const method = init?.method ?? "GET";
@@ -92,27 +119,73 @@ function fakeDataRepo(prBody: string | null) {
       comments.push({ body: body!.body as string, user: { type: "Bot", login: INTAKE_BOT }, author_association: "NONE" });
       return json(201, {});
     }
-    if (rest.startsWith("contents/")) {
-      const path = rest.slice("contents/".length);
-      if (method === "GET") {
-        expect(url.searchParams.get("ref")).toBe(REVIEW_BRANCH);
+    if (rest.startsWith("contents/") && method === "GET") {
+      const ref = url.searchParams.get("ref")!;
+      const snapshot = ref === REVIEW_BRANCH ? files : commitObjects.get(ref)?.files;
+      if (!snapshot) return json(404, {});
+      const file = snapshot.get(rest.slice("contents/".length));
+      return file ? json(200, { encoding: "base64", content: Buffer.from(file.text).toString("base64"), sha: file.sha }) : json(404, {});
+    }
+    if (rest === `git/ref/heads/${REVIEW_BRANCH}` && method === "GET") return json(200, { object: { type: "commit", sha: tip() } });
+    if (rest.startsWith("git/commits/") && method === "GET") {
+      const sha = rest.slice("git/commits/".length);
+      if (!commitObjects.has(sha)) return json(404, {});
+      treeObjects.set(`tree-${sha}`, commitObjects.get(sha)!.files);
+      return json(200, { sha, tree: { sha: `tree-${sha}` } });
+    }
+    if (rest === "git/trees" && method === "POST") {
+      const base = treeObjects.get(body!.base_tree as string);
+      if (!base) return json(422, {});
+      const out: Snapshot = new Map(base);
+      for (const entry of body!.tree as { path: string; mode: string; type: string; content?: string }[]) {
+        if (entry.mode !== "100644" || entry.type !== "blob" || typeof entry.content !== "string") return json(422, {});
+        out.set(entry.path, { text: entry.content, sha: next("blob") });
+      }
+      const sha = next("tree");
+      treeObjects.set(sha, out);
+      return json(201, { sha });
+    }
+    if (rest === "git/commits" && method === "POST") {
+      const tree = treeObjects.get(body!.tree as string);
+      const parents = body!.parents as string[];
+      if (!tree || !parents.every((p) => commitObjects.has(p))) return json(422, {});
+      const sha = next("commit");
+      commitObjects.set(sha, { files: tree, parents, message: body!.message as string });
+      return json(201, { sha });
+    }
+    if (rest === `git/refs/heads/${REVIEW_BRANCH}` && method === "PATCH") {
+      meanwhile.shift()?.();
+      for (const path of conflicts) {
         const file = files.get(path);
-        return file ? json(200, { encoding: "base64", content: Buffer.from(file.text).toString("base64"), sha: file.sha }) : json(404, {});
+        if (file) files.set(path, { text: file.text, sha: next("blob") });
       }
-      if (method === "PUT") {
-        expect(body!.branch).toBe(REVIEW_BRANCH);
-        if (conflicts.has(path) || files.get(path)?.sha !== body!.sha) return json(409, {});
-        files.set(path, { text: Buffer.from(body!.content as string, "base64").toString("utf8"), sha: `sha${++shas}` });
-        return json(200, {});
-      }
+      const forced = refStatus.shift();
+      if (forced !== undefined) return json(forced, { message: "Update is not a fast forward" });
+      if (body!.force !== false) return json(400, { message: "the reviewer must never force" });
+      const sha = body!.sha as string;
+      if (commitObjects.get(sha)?.parents[0] !== tip()) return json(422, { message: "Update is not a fast forward" });
+      head = sha;
+      files.clear();
+      for (const [path, f] of commitObjects.get(sha)!.files) files.set(path, f);
+      return json(200, { object: { sha } });
     }
     return json(404, {});
   }
 
   const read = (n: number) => JSON.parse(files.get(placePath(id(n)))!.text) as Place;
-  const commits = () => calls.filter((c) => c.method === "PUT");
+  /** The commits the reviewer made, oldest first. */
+  const commits = () => calls.filter((c) => c.method === "POST" && c.url.endsWith("/git/commits"));
+  /** The commits on the branch that the reviewer made, oldest first. */
+  const landed = () => {
+    const out: string[] = [];
+    for (let sha: string | undefined = head; sha; sha = commitObjects.get(sha)!.parents[0]) {
+      const message = commitObjects.get(sha)!.message;
+      if (message !== "first" && message !== "another writer") out.unshift(message);
+    }
+    return out;
+  };
   const posted = () => calls.filter((c) => c.method === "POST" && c.url.endsWith("/comments")).map((c) => c.body!.body as string);
-  return { fetch, files, comments, calls, conflicts, put, read, commits, posted };
+  return { fetch, files, comments, calls, conflicts, refStatus, meanwhile, put, read, commits, landed, posted };
 }
 
 /** A Workers AI binding that answers from `answer`, and records what it was asked. */
@@ -247,7 +320,7 @@ describe("the AI reviewer", () => {
     expect(decidedKeys(gh.posted()[0]!)).toHaveLength(5);
   });
 
-  it("restores a withdrawn contact, and takes down a first place that is clear spam", async () => {
+  it("restores a withdrawn contact, and takes down a first place that is clear spam, in one commit for the run", async () => {
     const cases = [
       heldCase(0, { case: "contact_withdrawn", fact: "email", value: "stay@park.example.org", reasons: ["wrong"] }),
       heldCase(1, { case: "first_place", standing: "shown", contributor: "ctr_0123456789abcdef" }),
@@ -264,7 +337,11 @@ describe("the AI reviewer", () => {
     expect(gh.read(0).facts).toMatchObject({ email: "stay@park.example.org" });
     expect(gh.read(0).fact_sources.email).toBe("feedback");
     expect(gh.read(1)).toMatchObject({ standing: "hidden", moderator: { action: "hide", at: AT } });
-    expect(gh.commits()).toHaveLength(2);
+    expect(gh.commits()).toHaveLength(1);
+    const message = gh.commits()[0]!.body!.message as string;
+    expect(message).toContain(`${REVIEWER}: restore held case contact_withdrawn on ${id(0)}`);
+    expect(message).toContain(`${REVIEWER}: take_down held case first_place on ${id(1)}`);
+    expect(message).toContain("The email is the park's own.");
   });
 
   describe("fact_doubted cases", () => {
@@ -334,7 +411,7 @@ describe("the AI reviewer", () => {
     const enumOf = (input: Record<string, unknown>) =>
       (input.response_format as { json_schema: { properties: { decision: { enum: string[] } } } }).json_schema.properties.decision.enum;
 
-    it("merges a held new place into the place it duplicates: the kept place first, then the tombstone", async () => {
+    it("merges a held new place into the place it duplicates: the kept place and the tombstone in one commit", async () => {
       const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [dup(0, 1)]));
       gh.put(place(0, { facts: { fee: false }, fact_sources: { name: "feedback", location: "feedback", fee: "feedback" }, fact_dates: { name: AT, location: AT, fee: AT } }));
       gh.put(existing(1));
@@ -342,10 +419,10 @@ describe("the AI reviewer", () => {
 
       const result = await run(gh, ai);
       expect(result).toMatchObject({ decisions: [{ decision: "merge", committed: true }] });
-      expect(gh.commits().map((c) => c.url.split("/contents/")[1])).toEqual([placePath(id(1)), placePath(id(0))]);
+      expect(gh.commits()).toHaveLength(1);
       expect(gh.read(1)).toMatchObject({ facts: { toilets: true, fee: false }, fact_sources: { fee: "feedback" }, fact_dates: { fee: AT }, updated: AT });
       expect(gh.read(0)).toMatchObject({ status: "merged", merged_into: id(1) });
-      expect(gh.commits()[1]!.body!.message as string).toContain(`${REVIEWER}: merge held case duplicate on ${id(0)}`);
+      expect(gh.commits()[0]!.body!.message as string).toContain(`${REVIEWER}: merge held case duplicate on ${id(0)}`);
     });
 
     it("without road data, offers a merge only for the same name, in the same group, less than 25 m apart", async () => {
@@ -416,6 +493,16 @@ describe("the AI reviewer", () => {
       expect(result).toMatchObject({ decisions: [{ decision: "confirm", committed: true }, { decision: "dismiss", committed: false }] });
     });
 
+    it("puts two photos on the do-not-match list in one run, the second on top of the first", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [mismatch(0), mismatch(1, "Another River Pool.jpg")]));
+      gh.put(park(0));
+      gh.put(park(1));
+      const { ai } = fakeAi(() => reply("confirm", "The file names a river pool, not the park."));
+      await run(gh, ai);
+      expect(JSON.parse(gh.files.get(LIST)!.text).pairs.map((p: { place: string }) => p.place)).toEqual([id(0), id(1)]);
+      expect(gh.commits()).toHaveLength(1);
+    });
+
     it("leaves a pair already on the list without asking the model", async () => {
       const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [mismatch(0)]));
       gh.put(park(0));
@@ -476,7 +563,7 @@ describe("the AI reviewer", () => {
     const answers: unknown[] = [{ response: `\`\`\`json\n${text}\n\`\`\`` }, { choices: [{ message: { content: text } }] }];
     const { ai } = fakeAi(() => answers.shift());
     await run(gh, ai);
-    expect(gh.commits()).toHaveLength(2);
+    expect([gh.read(0).standing, gh.read(1).standing]).toEqual(["shown", "shown"]);
   });
 
   it("writes reasons without links, mentions or markup", async () => {
@@ -529,7 +616,8 @@ describe("the AI reviewer", () => {
     clock += REVIEW_EVERY_MS;
     await run(gh, ai);
     expect(asked).toHaveLength(MAX_MODEL_CASES + 2);
-    expect(gh.commits()).toHaveLength(MAX_MODEL_CASES + 2);
+    // One commit a run, however many cases it decided.
+    expect(gh.landed()).toHaveLength(2);
   });
 
   it("runs at most once every 10 minutes", async () => {
@@ -570,6 +658,48 @@ describe("the AI reviewer", () => {
     expect(await run(gh, ai)).toEqual({ outcome: "reviewed", pr: 7, decisions: [] });
     expect(gh.posted()).toHaveLength(0);
     gh.conflicts.clear();
+    clock += REVIEW_EVERY_MS;
+    await run(gh, ai);
+    expect(asked).toHaveLength(2);
+    expect(gh.read(0).standing).toBe("shown");
+  });
+
+  it("commits on top of what another writer committed meanwhile, and keeps their change", async () => {
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [heldCase(0, { case: "duplicate", standing: "held", duplicate_of: id(9), distance_m: 30 })]));
+    gh.put(place(0));
+    gh.put(place(5));
+    // Another writer changes a place this run does not touch, just before its first ref update.
+    gh.meanwhile.push(() => gh.put(place(5, { name: "Changed meanwhile" })));
+    const { ai } = fakeAi(() => reply("approve", "Separate."));
+    expect(await run(gh, ai)).toMatchObject({ outcome: "reviewed", decisions: [{ decision: "approve", committed: true }] });
+    expect(gh.read(0).standing).toBe("shown");
+    expect(gh.read(5).name).toBe("Changed meanwhile");
+    expect(gh.landed()).toHaveLength(1);
+    expect(gh.posted()).toHaveLength(1);
+  });
+
+  it("starts again from the new head when a ref update is refused, as the inbox flush does", async () => {
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [heldCase(0, { case: "duplicate", standing: "held", duplicate_of: id(9), distance_m: 30 })]));
+    gh.put(place(0));
+    gh.refStatus.push(422, 409);
+    const { ai } = fakeAi(() => reply("approve", "Separate."));
+    expect(await run(gh, ai)).toMatchObject({ outcome: "reviewed", decisions: [{ committed: true }] });
+    expect(gh.read(0).standing).toBe("shown");
+    expect(gh.landed()).toHaveLength(1);
+  });
+
+  it("gives up on a branch that keeps moving, records only what changed no place, and decides the rest next run", async () => {
+    const cases = [
+      heldCase(0, { case: "duplicate", standing: "held", duplicate_of: id(9), distance_m: 30 }),
+      heldCase(1, { case: "contacts", standing: "shown", contacts: ["website"] }),
+    ];
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+    gh.put(place(0));
+    gh.put(place(1, { standing: "shown" }));
+    gh.refStatus.push(422, 422, 422);
+    const { ai, asked } = fakeAi(() => reply("approve", "Separate."));
+    expect(await run(gh, ai)).toMatchObject({ decisions: [{ case: "contacts", decision: "leave", committed: false }] });
+    expect(gh.landed()).toHaveLength(0);
     clock += REVIEW_EVERY_MS;
     await run(gh, ai);
     expect(asked).toHaveLength(2);

@@ -327,17 +327,6 @@ export class GitHubApp {
     return { text: new TextDecoder().decode(bytes), sha: body.sha };
   }
 
-  /**
-   * Commits a new version of a file to `branch`. `sha` is the blob the change
-   * was made against, or undefined to create the file: GitHub answers 409
-   * when the file has moved on since (or 422 when it exists already), which
-   * throws a GitHubError with that status.
-   */
-  async updateFile(config: GitHubAppConfig, branch: string, path: string, content: string, sha: string | undefined, message: string): Promise<void> {
-    const res = await this.#call(config, REVIEW_WRITE, "PUT", `/repos/${config.repo}/contents/${path}`, { message, content: base64Utf8(content), sha, branch });
-    if (!res.ok) throw new GitHubError(`updating ${path} failed with ${res.status}`, res.status);
-  }
-
   /** Adds a comment to PR `number`. */
   async commentOnPullRequest(config: GitHubAppConfig, number: number, body: string): Promise<void> {
     const res = await this.#call(config, REVIEW_WRITE, "POST", `/repos/${config.repo}/issues/${number}/comments`, { body });

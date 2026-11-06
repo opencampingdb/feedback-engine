@@ -1,10 +1,10 @@
 /**
  * The AI reviewer: from the intake's scheduled job, it reads the held cases on
  * the data repository's `feedback/review` PR, decides the ones the rules can't
- * settle with a Workers AI model, commits each decision that changes a place
- * to the review branch and comments on the PR. Every decision names the
- * reviewer, `ai:<model>`, and gives the reason, and a person can reverse any
- * of them on the PR.
+ * settle with a Workers AI model, commits the run's decisions that change a
+ * place to the review branch as one commit, and comments on the PR once.
+ * Every decision names the reviewer, `ai:<model>`, and gives the reason, and
+ * a person can reverse any of them on the PR.
  *
  * Cheapest first: `settleByRules` decides first, with no model call, and the
  * model is asked only about what is left, at most MAX_MODEL_CASES a run. On
@@ -49,7 +49,7 @@ import {
   type MajorRoads,
 } from "@opencampingdb/apply/review";
 import type { AiLike } from "./checks.js";
-import { GitHubError, type GitHubApp, type GitHubAppConfig, type IssueComment } from "./github.js";
+import type { GitHubApp, GitHubAppConfig, IssueComment } from "./github.js";
 import type { D1Like } from "./recent.js";
 import { claimReviewRun } from "./runs.js";
 
@@ -68,6 +68,8 @@ export const MAX_MODEL_CASES = 5;
 export const REVIEW_TIMEOUT_MS = 30_000;
 /** Longest reason written to the PR. */
 export const MAX_REASON_CHARS = 200;
+/** Times a run's commit starts again from a branch that moved on before the run gives up until the next. */
+export const COMMIT_ATTEMPTS = 3;
 
 export interface ReviewerDeps {
   github: GitHubApp;
@@ -102,7 +104,7 @@ export interface ReviewRecord {
   reason: string;
   /** Settled by the rules, without asking the model. */
   by_rules: boolean;
-  /** The decision changed the place, in a commit to the review branch. */
+  /** The decision changed the place, in the run's commit to the review branch. */
   committed: boolean;
 }
 
@@ -165,7 +167,7 @@ const lineJson = (value: unknown) => JSON.stringify(value).replace(/[<>`@&]/g, (
 /** The reviewer's comment on the PR: one `review-decision` line per decision. */
 export function decisionComment(reviewer: string, records: readonly ReviewRecord[]): string {
   const lines = [
-    `Decisions by the reviewer \`${reviewer}\` on held cases in this PR. Each one that changes a place is a commit on this branch with the same reason. ` +
+    `Decisions by the reviewer \`${reviewer}\` on held cases in this PR. The ones that change a place are in one commit on this branch, with the same reasons. ` +
       "A person can reverse any of them by editing the place in this PR. `leave` means the case is for a person.",
     "",
     ...records.map((r) => `- review-decision ${lineJson(r)}`),
@@ -341,13 +343,30 @@ function doNotMatchOf(text: string): DoNotMatchEntry[] {
   }
 }
 
-const conflict = (error: unknown) => error instanceof GitHubError && (error.status === 409 || error.status === 422);
+/** A file as the run read it at its base commit (`sha`, undefined when it had none), and its new text. */
+interface Staged {
+  text: string;
+  sha: string | undefined;
+}
+
+/** A decision waiting for the run's commit, with the files it writes. */
+interface Pending {
+  record: ReviewRecord;
+  paths: string[];
+  /** What it decided, for the commit message: `<reviewer>: <decision> held case <case> on <place>`. */
+  title: string;
+  reason: string;
+}
 
 /**
- * One run of the reviewer, at most once every REVIEW_EVERY_MS. Decisions made
- * before a failure are still recorded on the PR. A model that fails stops the
- * run, and its case is asked about again next run. A commit that loses to a
- * newer version of the place is skipped, to try again next run.
+ * One run of the reviewer, at most once every REVIEW_EVERY_MS. Every file is
+ * read at the branch's head when the run starts, and a decision builds on
+ * the decisions before it in the same run. The decisions that change a place
+ * are committed together at the end, as one Git Data API commit (see
+ * `commitRun`), and the PR gets one comment. A model that fails stops the
+ * run: what it decided until then is still committed and recorded, and the
+ * failed case is asked about again next run. A decision whose file changed
+ * on the branch meanwhile is left out, to try again next run.
  */
 export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult> {
   const { github, data, branch } = deps;
@@ -373,12 +392,24 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
   }
 
   const reviewer = `ai:${deps.model}`;
-  const records: ReviewRecord[] = [];
+  const base = await github.branchHead(data, branch);
+  // What this run has written so far, by path: later decisions read it instead of the branch.
+  const staged = new Map<string, Staged>();
+  // The sha of each file read at the base, undefined for one it does not have.
+  const shas = new Map<string, string | undefined>();
+  const read = async (path: string): Promise<{ text: string } | null> => {
+    const own = staged.get(path);
+    if (own) return { text: own.text };
+    const file = await github.readFile(data, path, base);
+    shas.set(path, file?.sha);
+    return file;
+  };
+  const decisions: Pending[] = [];
   // Pairs a person found separate, read once and only for a duplicate case.
   let distinct: Set<string> | undefined;
   const distinctPairs = async () => {
     if (distinct) return distinct;
-    const file = await github.readFile(data, "moderation/distinct_places.json", branch);
+    const file = await read("moderation/distinct_places.json");
     let pairs: { a?: unknown; b?: unknown }[] = [];
     try {
       pairs = file ? ((JSON.parse(file.text) as { pairs?: { a?: unknown; b?: unknown }[] }).pairs ?? []) : [];
@@ -392,23 +423,23 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
   try {
     for (const [key, c] of cases) {
       const path = placePath(c.place);
-      const file = await github.readFile(data, path, branch);
+      const file = await read(path);
       const place = file ? parsePlace(file.text) : undefined;
       const closed = closedBy.get(key);
-      const list = c.case === "commons_mismatch" ? await github.readFile(data, DO_NOT_MATCH_PATH, branch) : null;
+      const list = c.case === "commons_mismatch" ? await read(DO_NOT_MATCH_PATH) : null;
       const settled = closed
         ? { decision: "leave" as const, reason: `the rules closed this case: travellers ${closed.settles} the fact` }
         : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [] });
       let decision: ReviewDecision;
       let reason: string;
-      let otherFile: { text: string; sha: string } | null = null;
+      let otherFile: { text: string } | null = null;
       let other: Place | undefined;
       if (settled) {
         ({ decision, reason } = settled);
       } else {
         if (asked >= MAX_MODEL_CASES) continue;
         asked++;
-        otherFile = c.case === "duplicate" && c.duplicate_of ? await github.readFile(data, placePath(c.duplicate_of), branch) : null;
+        otherFile = c.case === "duplicate" && c.duplicate_of ? await read(placePath(c.duplicate_of)) : null;
         other = otherFile ? parsePlace(otherFile.text) : undefined;
         // A merge only where the rules allow one: never into an owner's place or a pair a person found separate.
         const pairs = c.case === "duplicate" ? await distinctPairs() : undefined;
@@ -417,35 +448,98 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       }
       reason = safeReason(reason);
       const at = new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
-      const message = `${reviewer}: ${decision} held case ${c.case} on ${c.place}\n\n${reason}\n\nReviewer: ${reviewer}`;
-      // A merge writes the kept place first, then the tombstone: a tombstone on its own would lose the facts it carries.
-      const writes: { path: string; text: string; sha: string | undefined }[] = [];
+      // A merge writes the kept place and the tombstone, in the same commit.
+      const writes: { path: string; text: string }[] = [];
       if (decision === "merge" && place && file && other && otherFile) {
         const merged = mergePlaces(other, place, at);
-        writes.push({ path: placePath(other.id), text: dumpPlace(merged.kept), sha: otherFile.sha }, { path, text: dumpPlace(merged.tombstone), sha: file.sha });
+        writes.push({ path: placePath(other.id), text: dumpPlace(merged.kept) }, { path, text: dumpPlace(merged.tombstone) });
       } else if (decision === "confirm" && c.case === "commons_mismatch") {
         const entry: DoNotMatchEntry = { place: c.place, file: c.file!, added: at.slice(0, 10), source: "reviewer" };
-        writes.push({ path: DO_NOT_MATCH_PATH, text: withDoNotMatch(list?.text, [entry]), sha: list?.sha });
+        writes.push({ path: DO_NOT_MATCH_PATH, text: withDoNotMatch(list?.text, [entry]) });
       } else {
         const next = place && file ? applyDecision(place, c, decision, at) : null;
-        if (next && file) writes.push({ path, text: dumpPlace(next), sha: file.sha });
+        if (next && file) writes.push({ path, text: dumpPlace(next) });
       }
-      let lost = false;
       for (const write of writes) {
-        try {
-          await github.updateFile(data, branch, write.path, write.text, write.sha, message);
-        } catch (error) {
-          if (!conflict(error)) throw error;
-          lost = true;
-          break;
-        }
+        // Every file a decision writes was read first, so its sha at the base is known.
+        staged.set(write.path, { text: write.text, sha: shas.get(write.path) });
       }
-      if (lost) continue;
-      records.push({ key, case: c.case, place: c.place, decision, reviewer, reason, by_rules: settled !== null, committed: writes.length > 0 });
+      decisions.push({
+        record: { key, case: c.case, place: c.place, decision, reviewer, reason, by_rules: settled !== null, committed: writes.length > 0 },
+        paths: writes.map((w) => w.path),
+        title: `${reviewer}: ${decision} held case ${c.case} on ${c.place}`,
+        reason,
+      });
     }
   } catch (error) {
     (deps.onError ?? (() => undefined))(error);
   }
+  let kept: Pending[];
+  try {
+    kept = await commitRun(deps, base, decisions, staged, reviewer);
+  } catch (error) {
+    // Not known whether the commit landed: only the decisions that change nothing are recorded, the rest are asked again.
+    (deps.onError ?? (() => undefined))(error);
+    kept = decisions.filter((d) => d.paths.length === 0);
+  }
+  const records = kept.map((d) => d.record);
   if (records.length > 0) await github.commentOnPullRequest(data, pr.number, decisionComment(reviewer, records));
   return { outcome: "reviewed", pr: pr.number, decisions: records };
+}
+
+/**
+ * Commits the run's `staged` files to the review branch as one commit, the way
+ * the inbox flush does: it reads the branch head, builds a tree with the
+ * files' text inline on the head's tree, commits it, and moves the branch
+ * without force, starting again from the new head when the branch moved on,
+ * up to COMMIT_ATTEMPTS times. Before each tree, a file that changed on the
+ * branch since the run read it is left out with every decision that wrote
+ * it, and every decision that shares a file with one of those, so nothing
+ * another writer committed is written over. Returns the decisions to record:
+ * those that changed nothing, and those whose files landed.
+ */
+async function commitRun(deps: ReviewerDeps, base: string, decisions: Pending[], staged: Map<string, Staged>, reviewer: string): Promise<Pending[]> {
+  const { github, data, branch } = deps;
+  let left = decisions;
+  const writing = () => left.filter((d) => d.paths.length > 0);
+  let checkedAt = base;
+  for (let attempt = 0; attempt < COMMIT_ATTEMPTS && writing().length > 0; attempt++) {
+    const head = await github.branchHead(data, branch);
+    if (head !== checkedAt) {
+      const lost = new Set<string>();
+      for (const path of new Set(writing().flatMap((d) => d.paths))) {
+        if ((await github.readFile(data, path, head))?.sha !== staged.get(path)!.sha) lost.add(path);
+      }
+      left = withoutLost(left, lost);
+      checkedAt = head;
+      if (writing().length === 0) break;
+    }
+    const paths = [...new Set(writing().flatMap((d) => d.paths))];
+    const tree = await github.createTree(data, await github.commitTree(data, head), paths.map((path) => ({ path, content: staged.get(path)!.text })));
+    const commit = await github.createCommit(data, commitMessage(writing(), reviewer), tree, [head]);
+    if (await github.updateBranch(data, branch, commit)) return left;
+  }
+  // The branch kept moving: the decisions that change a place wait for the next run.
+  return left.filter((d) => d.paths.length === 0);
+}
+
+/** One decision's commit message, as before, or one line per decision with their reasons. */
+function commitMessage(decisions: readonly Pending[], reviewer: string): string {
+  if (decisions.length === 1) return `${decisions[0]!.title}\n\n${decisions[0]!.reason}\n\nReviewer: ${reviewer}`;
+  const lines = decisions.map((d) => `- ${d.title}: ${d.reason}`);
+  return `${reviewer}: ${decisions.length} decisions on held cases\n\n${lines.join("\n")}\n\nReviewer: ${reviewer}`;
+}
+
+/** `decisions` without those that write a path in `lost`, or share a path with one that does. */
+function withoutLost(decisions: Pending[], lost: Set<string>): Pending[] {
+  const gone = new Set(lost);
+  let left = decisions;
+  for (let changed = true; changed; ) {
+    changed = false;
+    const next = left.filter((d) => !d.paths.some((p) => gone.has(p)));
+    for (const d of left) if (!next.includes(d)) for (const p of d.paths) gone.add(p);
+    if (next.length !== left.length) changed = true;
+    left = next;
+  }
+  return left;
 }
