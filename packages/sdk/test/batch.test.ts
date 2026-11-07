@@ -154,6 +154,69 @@ describe("batched flush", () => {
     }
   });
 
+  it("sends each item of the round alone when the intake refuses the whole batch with 400, 403 or 413", async () => {
+    for (const status of [400, 403, 413]) {
+      const online = { value: true };
+      let batches = 0;
+      const intake = fakeIntake((call) => {
+        if (!online.value) return "network";
+        // The first batch is refused as a whole, the next is taken.
+        if (call.url.endsWith("/batch")) return ++batches === 1 ? { status, body: { error: "refused" } } : undefined;
+        // Alone, each item gets its own answer: the second is refused, the others accepted.
+        return call.body.check && (call.body.place as string) === place(1) ? { status: 400, body: { error: "invalid" } } : undefined;
+      });
+      const { client, answers, advance } = setup(intake, { maxBatchSize: 3 });
+      await queueOffline(client, online, 5);
+      advance(24 * 60 * 60 * 1000);
+      intake.calls.length = 0;
+      answers.length = 0;
+      expect(await client.flush(), `status ${status}`).toEqual({ sent: 4, dropped: 1, remaining: 0 });
+      expect(intake.calls.map((c) => c.url.replace("https://intake.example", ""))).toEqual([
+        "/v1/feedback/batch",
+        "/v1/feedback",
+        "/v1/feedback",
+        "/v1/feedback",
+        "/v1/feedback/batch",
+      ]);
+      expect(answers.map((a) => [a.ref, a.outcome.kind])).toEqual([
+        ["c0", "sent"],
+        ["c1", "dropped"],
+        ["c2", "sent"],
+        ["c3", "sent"],
+        ["c4", "sent"],
+      ]);
+    }
+  });
+
+  it("keeps batching after a whole-batch refusal, for the client's lifetime", async () => {
+    const online = { value: true };
+    let refuse = true;
+    const intake = fakeIntake((call) => (!online.value ? "network" : call.url.endsWith("/batch") && refuse ? { status: 413, body: { error: "too_large" } } : undefined));
+    const { client, advance } = setup(intake);
+    await queueOffline(client, online, 2);
+    advance(24 * 60 * 60 * 1000);
+    await client.flush();
+    refuse = false;
+    await queueOffline(client, online, 2, 10);
+    advance(24 * 60 * 60 * 1000);
+    intake.calls.length = 0;
+    expect(await client.flush()).toEqual({ sent: 2, dropped: 0, remaining: 0 });
+    expect(intake.calls.map((c) => c.url)).toEqual(["https://intake.example/v1/feedback/batch"]);
+  });
+
+  it("drops every item of the batch on 401 invalid_app_key", async () => {
+    const online = { value: true };
+    const intake = fakeIntake((call) => (!online.value ? "network" : call.url.endsWith("/batch") ? { status: 401, body: { error: "invalid_app_key" } } : undefined));
+    const { client, answers, advance } = setup(intake);
+    await queueOffline(client, online, 3);
+    advance(24 * 60 * 60 * 1000);
+    intake.calls.length = 0;
+    answers.length = 0;
+    expect(await client.flush()).toEqual({ sent: 0, dropped: 3, remaining: 0 });
+    expect(intake.calls).toHaveLength(1);
+    expect(answers.map((a) => a.outcome)).toEqual(Array.from({ length: 3 }, () => ({ kind: "dropped", httpStatus: 401 })));
+  });
+
   it("sends the items waiting for a new place in the next batch of the same flush, once a batch gives it its id", async () => {
     const online = { value: true };
     const intake = fakeIntake(() => (online.value ? undefined : "network"));

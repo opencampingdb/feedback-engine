@@ -916,13 +916,16 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
    * over the whole body, and settles each by its own answer. A failure of
    * the whole batch settles each item as that answer would settle it alone:
    * offline, 408, 429, 5xx and a refused assertion keep them all (the hook
-   * is called once), any other refusal drops them all. "fallback" when the
-   * intake has no batch route.
+   * is called once), and 401 `invalid_app_key` drops them all. "fallback"
+   * when the intake has no batch route (404, 405). "singly" when it refused
+   * the batch itself (400, 403, 413), which says nothing of each item: they
+   * are sent one at a time so each gets its own answer.
    */
-  async function sendBatch(items: readonly QueueItem[]): Promise<{ result: Sent; outcome?: Outcome }[] | "fallback"> {
+  async function sendBatch(items: readonly QueueItem[]): Promise<{ result: Sent; outcome?: Outcome }[] | "fallback" | "singly"> {
     const res = await post(batchUrl, JSON.stringify({ items: items.map((item) => item.body) }));
     if (!res) return items.map(() => ({ result: "stop" as const }));
     if (res.status === 404 || res.status === 405) return "fallback";
+    if (res.status === 400 || res.status === 403 || res.status === 413) return "singly";
     const answers = (res.answer as { items?: unknown } | null | undefined)?.items;
     if (res.status === 200 && Array.isArray(answers) && answers.length === items.length) {
       const out: { result: Sent; outcome?: Outcome }[] = [];
@@ -1032,8 +1035,9 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
           }
         } else if (due.length > 1) {
           let batch = await sendBatch(due);
-          if (batch === "fallback") {
-            batchRoute = false;
+          if (batch === "fallback" || batch === "singly") {
+            // Without a batch route, from now on. After a refused batch, only for this round.
+            if (batch === "fallback") batchRoute = false;
             batch = [];
             for (const item of due) {
               const one = await sendOne(item);
