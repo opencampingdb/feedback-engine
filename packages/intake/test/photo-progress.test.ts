@@ -105,12 +105,15 @@ const ask = async (ids: string[], env: Env = e) => {
   return { status: res.status, headers: res.headers, body: (await res.json()) as { items?: Record<string, unknown>[] } };
 };
 const progressOf = async (id: string) => (await ask([id])).body.items![0]!;
+/** The run time the photo apply sends with each update, unless an update gives its own. */
+const RUN_AT = "2026-11-03T02:00:00Z";
+const withRun = (items: unknown) => (Array.isArray(items) ? items.map((i) => (typeof i === "object" && i !== null && !("run_at" in i) ? { ...i, run_at: RUN_AT } : i)) : items);
 const post = (items: unknown, token = TOKEN) =>
   handle(
     new Request("https://photos-upload.example/v1/photos/progress", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      body: JSON.stringify({ items }),
+      body: JSON.stringify({ items: withRun(items) }),
     }),
     e,
   );
@@ -181,6 +184,8 @@ describe("photo progress at the photo intake", () => {
       [{ id: OLD, state: "accepted", held_reason: "first_photo" }],
       [{ id: OLD, state: "refused" }],
       [{ id: OLD, state: "in_data" }],
+      [{ ...good, run_at: "yesterday" }],
+      [{ ...good, run_at: undefined }],
       "x",
     ]) {
       expect((await post(bad)).status).toBe(400);
@@ -206,6 +211,51 @@ describe("photo progress at the photo intake", () => {
     expect(await progressOf(id)).not.toHaveProperty("in_data_at");
     await post([{ id, state: "refused", by: "reviewer", reason: "removed by a reviewer", place: PLACE }]);
     expect(await progressOf(id)).toEqual({ id, state: "refused", by: "reviewer", reason: "removed by a reviewer", place: PLACE, received: "2026-11-03T01:00:00Z" });
+  });
+
+  describe("runs that overlap", () => {
+    const at = (n: number) => `2026-11-03T0${n}:00:00Z`;
+    const state = async (id: string) => (await progressOf(id)).state;
+
+    it("refuses an update from an older run than the one that last wrote the row", async () => {
+      const id = (await send()).body.id!;
+      clock += 6 * 3_600_000;
+      // The later run saw the photo hidden after reports, and sent that first.
+      await post([{ id, state: "held", held_reason: "reported", place: PLACE, run_at: at(5) }]);
+      // An older run that read main before then finishes after it, with the photo still in the data.
+      const stale = await post([{ id, state: "in_data", place: PLACE, in_data_at: at(1), run_at: at(4) }]);
+      expect(await stale.json()).toEqual({ updated: 0 });
+      expect(await progressOf(id)).toMatchObject({ state: "held", held_reason: "reported" });
+    });
+
+    it("takes the same run's updates again, and a newer run's", async () => {
+      const id = (await send()).body.id!;
+      clock += 6 * 3_600_000;
+      await post([{ id, state: "accepted", place: PLACE, run_at: at(2) }]);
+      await post([{ id, state: "in_data", place: PLACE, in_data_at: at(2), run_at: at(2) }]);
+      expect(await state(id)).toBe("in_data");
+      await post([{ id, state: "held", held_reason: "reported", place: PLACE, run_at: at(3) }]);
+      expect(await state(id)).toBe("held");
+    });
+
+    it("moves the row's run on when a newer run sends the same state, so a run between them can't move it back", async () => {
+      const id = (await send()).body.id!;
+      clock += 6 * 3_600_000;
+      await post([{ id, state: "held", held_reason: "reported", place: PLACE, run_at: at(1) }]);
+      const before = store.db.prepare("SELECT updated FROM item_progress WHERE feedback_id = ?").get(id);
+      // A reconcile run at 5 sends the same state: the row's run moves, nothing else.
+      await post([{ id, state: "held", held_reason: "reported", place: PLACE, run_at: at(5) }]);
+      expect(store.db.prepare("SELECT updated FROM item_progress WHERE feedback_id = ?").get(id)).toEqual(before);
+      // A run at 3, older than 5, still holds the photo as published.
+      await post([{ id, state: "in_data", place: PLACE, in_data_at: at(1), run_at: at(3) }]);
+      expect(await state(id)).toBe("held");
+    });
+
+    it("takes any run's update for a row the upload wrote", async () => {
+      const id = (await send()).body.id!;
+      await post([{ id, state: "accepted", place: PLACE, run_at: at(1) }]);
+      expect(await state(id)).toBe("accepted");
+    });
   });
 
   it("takes a photo it has no row for, received at the time in its id", async () => {

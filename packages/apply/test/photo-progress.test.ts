@@ -12,6 +12,8 @@ import { intakeRecentStore } from "../src/recent.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const RUN = "2026-11-01T00:00:00Z";
+/** The run time sent with every update: the run's `now`. */
+const RUN_AT = "2026-11-03T00:00:00Z";
 const NOW = new Date("2026-11-03T00:00:00Z");
 const CONTRIBUTOR = "ctr_0123456789abcdef";
 const ulid = (n: number) => `01JC${String(n).padStart(22, "0")}`;
@@ -91,8 +93,8 @@ describe("sendPhotoProgress", () => {
     const s = store();
     await send(s);
     expect(byId(s)).toEqual({
-      [pho(1)]: { id: pho(1), state: "in_data", reason: "photo accepted", place: PLACE, decided_at: RUN, in_data_at: "2026-11-02T06:00:00Z" },
-      [pho(2)]: { id: pho(2), state: "in_data", reason: "first photo from this contributor, so a person checks it", place: PLACE, decided_at: RUN, in_data_at: "2026-11-02T06:00:00Z" },
+      [pho(1)]: { id: pho(1), state: "in_data", reason: "photo accepted", place: PLACE, decided_at: RUN, in_data_at: "2026-11-02T06:00:00Z", run_at: RUN_AT },
+      [pho(2)]: { id: pho(2), state: "in_data", reason: "first photo from this contributor, so a person checks it", place: PLACE, decided_at: RUN, in_data_at: "2026-11-02T06:00:00Z", run_at: RUN_AT },
     });
   });
 
@@ -130,8 +132,8 @@ describe("sendPhotoProgress", () => {
     const s = store();
     await send(s, { decisions: [{ id: fb(2), place: PLACE, outcome: "waiting", reason: "place ocdb_... is a new place not in the data yet" }] });
     expect(byId(s)).toEqual({
-      [pho(1)]: { id: pho(1), state: "refused", by: "rules", reason: "the contributor asked for their photos to be removed", place: PLACE, decided_at: RUN },
-      [pho(2)]: { id: pho(2), state: "waiting", reason: "place ocdb_... is a new place not in the data yet", place: PLACE, decided_at: "2026-11-03T00:00:00Z" },
+      [pho(1)]: { id: pho(1), state: "refused", by: "rules", reason: "the contributor asked for their photos to be removed", place: PLACE, decided_at: RUN, run_at: RUN_AT },
+      [pho(2)]: { id: pho(2), state: "waiting", reason: "place ocdb_... is a new place not in the data yet", place: PLACE, decided_at: "2026-11-03T00:00:00Z", run_at: RUN_AT },
     });
   });
 
@@ -166,7 +168,7 @@ describe("sendPhotoProgress", () => {
     const s = store();
     await send(s);
     const sent = byId(s);
-    expect(sent[pho(1)]).toEqual({ id: pho(1), state: "held", held_reason: "reported", reason: "hidden after reports, until a person decides", place: PLACE, decided_at: RUN });
+    expect(sent[pho(1)]).toEqual({ id: pho(1), state: "held", held_reason: "reported", reason: "hidden after reports, until a person decides", place: PLACE, decided_at: RUN, run_at: RUN_AT });
     expect(sent[pho(2)]).toMatchObject({ state: "refused", by: "reviewer", reason: "hidden by a reviewer" });
     expect(sent[pho(3)]).toMatchObject({ state: "refused", by: "reviewer", reason: "removed by a reviewer" });
     expect(sent[pho(4)]).toMatchObject({ state: "refused", by: "rules", reason: "removed at the contributor's request" });
@@ -232,6 +234,14 @@ describe("sendPhotoProgress", () => {
     });
   });
 
+  it("sends the run's time with every update, so the intake can refuse an older run's", async () => {
+    await inInbox(photo(1, "applied", "photo accepted"));
+    await inInbox(photo(2, "refused", "photo has no contributor"));
+    const s = store();
+    await send(s, { now: new Date("2026-11-03T04:05:06.789Z") });
+    expect(sentOf(s).map((u) => u.run_at)).toEqual(["2026-11-03T04:05:06Z", "2026-11-03T04:05:06Z"]);
+  });
+
   it("sends at most 500 photos a call", async () => {
     for (let n = 1; n <= 501; n++) await inInbox(photo(n, "applied", "photo accepted"));
     const s = store();
@@ -247,7 +257,7 @@ describe("intakeRecentStore photoProgress", () => {
       calls.push({ url, init });
       return new Response("{}", { status: 200 });
     }) as unknown as typeof fetch;
-    const items: PhotoProgressUpdate[] = [{ id: pho(1), state: "held", held_reason: "first_photo" }];
+    const items: PhotoProgressUpdate[] = [{ id: pho(1), state: "held", held_reason: "first_photo", run_at: RUN_AT }];
     await intakeRecentStore("https://photos-upload.example", "token-1", ok).photoProgress(items);
     expect(calls[0]!.url).toBe("https://photos-upload.example/v1/photos/progress");
     expect(calls[0]!.init.headers).toMatchObject({ authorization: "Bearer token-1" });

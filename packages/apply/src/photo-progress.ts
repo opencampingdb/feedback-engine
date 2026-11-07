@@ -64,6 +64,8 @@ export interface PhotoProgressContext {
   autoMerged: ReadonlySet<string>;
   /** When main got the photo lines in `file`. */
   inDataAt: (file: string) => string;
+  /** The time of this run, sent with every update (`run_at`). */
+  runAt: string;
 }
 
 /**
@@ -81,7 +83,7 @@ export function photoProgressOf(item: DecidedItem, main: PhotoMain, context: Pho
   if (result === undefined || typeof item.place !== "string") return undefined;
   const id = photoIdOf(item);
   const reason = item.outcome?.reason;
-  const base = { id, place: item.place, ...(item.outcome?.run ? { decided_at: item.outcome.run } : {}) };
+  const base = { id, place: item.place, ...(item.outcome?.run ? { decided_at: item.outcome.run } : {}), run_at: context.runAt };
   const refused = (by: "rules" | "reviewer", why: string | undefined): PhotoProgressUpdate => ({ ...base, state: "refused", by, ...(why ? { reason: why } : {}) });
 
   const removed = main.removed.get(id);
@@ -167,7 +169,7 @@ export async function sendPhotoProgress(options: SendPhotoProgressOptions): Prom
   // Each photo file on main, dated once by its last commit.
   const files = history.map((item) => main.lines.get(photoIdOf(item))).flatMap((line) => (line ? [photoPath(line.place)] : []));
   const times = await lastCommitTimes(options.main, files, runAt);
-  const context: PhotoProgressContext = { declined, autoMerged, inDataAt: (file) => times.get(file) ?? runAt };
+  const context: PhotoProgressContext = { declined, autoMerged, inDataAt: (file) => times.get(file) ?? runAt, runAt };
 
   const updates = new Map<string, PhotoProgressUpdate>();
   for (const item of history) {

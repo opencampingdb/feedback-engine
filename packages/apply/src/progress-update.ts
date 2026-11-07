@@ -44,4 +44,10 @@ export function placeOf(item: Pick<StoredFeedback, "id" | "type" | "place"> & { 
 export interface PhotoProgressUpdate extends ProgressUpdate {
   /** Only on `held`: `first_photo`, `same_file`, `safesearch`, `check_unavailable` or `reported`. */
   held_reason?: PhotoHeldReason;
+  /**
+   * The time of the run that sent it. The intake refuses an update from a
+   * run older than the one that last wrote the row, so an older run that
+   * finishes after a newer one can't move a photo back.
+   */
+  run_at: string;
 }
