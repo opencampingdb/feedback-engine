@@ -23,7 +23,8 @@ export type { PhotoProgressUpdate } from "./progress-update.js";
 /**
  * Where each photo is, sent to the app's photo intake after every photo run
  * so apps can ask about their own photos by `pho_` id
- * (`GET /v1/photos/progress`). Built from the photo inbox's decisions of the
+ * (`GET /v1/photos/progress`), and their photo reports and erasures by
+ * feedback id (`GET /v1/feedback/progress`). Built from the photo inbox's decisions of the
  * last 90 days, the photo records on the records repository's `main` and
  * the PRs from `feedback/review` and `feedback/auto`.
  */
@@ -200,17 +201,18 @@ export interface SendPhotoProgressOptions {
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Sends the photo intake the progress of each photo decided in the last 90
- * days, from `applied/` and `refused/`, and of this run's waiting photos,
- * when it differs from what `progress/photos-sent.json` in the inbox says
- * was last sent. Every photo is worked out on each run, since a published
- * photo can still be hidden or removed, and the first run after 00:00 UTC
- * each Monday sends every one. Reads only the inbox and the checkout of
- * main: no GitHub call. Sent in calls of up to 500. A call that fails is
- * logged, the rest are still sent and its photos are sent again next run,
- * so the intake failing never fails the run. Returns how many photos were
- * sent, how many were in failed calls, and whether the record changed (for
- * the inbox commit).
+ * Sends the photo intake the progress of each photo, photo report and
+ * erasure decided in the last 90 days, from `applied/` and `refused/`, and of
+ * this run's waiting photos, when it differs from what
+ * `progress/photos-sent.json` in the inbox says was last sent. Every one is
+ * worked out on each run, since a published photo can still be hidden or
+ * removed, and the first run after 00:00 UTC each Monday sends every one.
+ * An older photo that main's photo lines or removed list name is sent only
+ * when it leaves the data or comes back. Each update carries the run's time.
+ * Reads only the inbox and the checkout of main: no GitHub call. Sent in
+ * calls of up to 500 (`sendChanged`), so the intake failing never fails the
+ * run. Returns how many were sent, how many were in failed calls, and
+ * whether the record changed (for the inbox commit).
  */
 export async function sendPhotoProgress(options: SendPhotoProgressOptions): Promise<{ sent: number; failed: number; recorded: boolean }> {
   const now = options.now ?? new Date();
