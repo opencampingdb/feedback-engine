@@ -18,7 +18,7 @@ import type {
 } from "./types.js";
 import { isFeedbackId, readProgress, type Progress } from "./progress.js";
 import { sha256Hex, sha256HexBytes } from "./sha256.js";
-import { MAX_PHOTO_BYTES, MAX_THUMB_BYTES, isPlaceId, newPlaceId, validateSubmission } from "./validate.js";
+import { MAX_PHOTO_BYTES, MAX_THUMB_BYTES, isPhotoId, isPlaceId, newPlaceId, validateSubmission } from "./validate.js";
 
 /** Storage the client keeps its queue and device id in. AsyncStorage matches this shape. */
 export interface StorageAdapter {
@@ -65,9 +65,17 @@ export interface FeedbackClientOptions {
   /** Prefix for storage keys. Default `ocdb.feedback`. */
   storagePrefix?: string;
   /**
+   * Most queued items sent together in one `POST /v1/feedback/batch`, with
+   * one attestation over the batch, from 1 to MAX_BATCH_SIZE. Default
+   * MAX_BATCH_SIZE. A flush sends one item alone to `POST /v1/feedback`, and
+   * sends every item alone when the intake has no batch route.
+   */
+  maxBatchSize?: number;
+  /**
    * Proves the install to an intake whose app key requires attestation.
-   * Called each time a report, review, check, review report or fee is sent, with
-   * the exact body text and its SHA-256 (lower case hex). Return the
+   * Called each time a report, review, check, review report or fee is sent,
+   * and once for each batch of them, with the exact body text and its SHA-256
+   * (lower case hex). Return the
    * attestation headers: on iOS `x-attest-platform: ios`, `x-attest-key-id`
    * and `x-attest-assertion` (an App Attest assertion over the body's
    * SHA-256); on Android `x-attest-platform: android` and `x-attest-token` (a
@@ -453,7 +461,7 @@ export interface FeedbackClient {
    * sent (`outcome.id` in `onAnswered`, or `id` in a `sent` result). Asks
    * `GET /v1/feedback/progress` at once, never queued, in calls of up to 100
    * ids, and answers one `Progress` for each id in the order given. An id
-   * that is not a feedback id (such as a photo's `pho_` id) is answered
+   * that is not a feedback id (such as a photo's `pho_` id, which `photos.progress` answers) is answered
    * `unknown` without asking. Throws `ProgressRequestError` when the intake
    * cannot be reached or refuses the call.
    */
@@ -491,6 +499,20 @@ export interface PhotoClient {
   flush(): Promise<FlushResult>;
   /** Number of items waiting to be sent. */
   pending(): Promise<number>;
+  /**
+   * Where each photo is, by the `pho_` id its upload answered (`id` in a
+   * `sent` result or in `onPhotoSettled`). Asks the photo intake's
+   * `GET /v1/photos/progress` at once, in calls of up to 100 ids, and answers
+   * one `Progress` for each id in the order given, as the feedback client's
+   * `progress` does: `received`, `waiting`, `accepted`, `held` (with
+   * `held_reason`, one of `PHOTO_HELD_REASONS`), `refused` (with `by` and
+   * `reason`), `in_data` (published in the photo records, with `in_data_at`)
+   * or `unknown`. Unlike feedback, a photo can leave `in_data`: hidden after
+   * reports it is `held`, removed it is `refused`. An id that is not a photo
+   * id is answered `unknown` without asking. Throws `ProgressRequestError`
+   * when the photo intake cannot be reached or refuses the call.
+   */
+  progress(ids: readonly string[]): Promise<Progress[]>;
 }
 
 /** Options for a photo client: as for feedback, with the photo service's endpoint and app key. */
@@ -684,6 +706,9 @@ export interface Answer {
 
 type Outcome = AnswerOutcome;
 
+/** Most items in one batch: the intake's limit for `POST /v1/feedback/batch`. */
+export const MAX_BATCH_SIZE = 50;
+
 /** Longest `ref` a caller can give a submission. */
 export const MAX_REF_LENGTH = 100;
 
@@ -731,7 +756,7 @@ export function backoffDelay(attempts: number, random: () => number = Math.rando
   return Math.round(ceiling * (0.5 + random() * 0.5));
 }
 
-function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient {
+function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoClient, "progress"> & { photoProgress: PhotoClient["progress"] } {
   const {
     appKey,
     appVersion,
@@ -739,8 +764,15 @@ function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient
     maxQueueLength = 100,
     maxQueueAgeMs = 30 * DAY_MS,
     storagePrefix = "ocdb.feedback",
+    maxBatchSize = MAX_BATCH_SIZE,
   } = options;
+  if (!Number.isInteger(maxBatchSize) || maxBatchSize < 1 || maxBatchSize > MAX_BATCH_SIZE) {
+    throw new Error(`maxBatchSize must be a whole number from 1 to ${MAX_BATCH_SIZE}`);
+  }
   const url = `${options.endpoint.replace(/\/+$/, "")}/v1/feedback`;
+  const batchUrl = `${url}/batch`;
+  // An intake without the batch route (404 or 405) is sent one item at a time from then on.
+  let batchRoute = true;
   const photoUrl = `${options.endpoint.replace(/\/+$/, "")}/v1/photos`;
   const passUrl = `${photoUrl}/pass`;
   const doFetch: FetchLike =
@@ -815,65 +847,110 @@ function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient
     else await storage.setItem(queueKey, JSON.stringify(queue));
   }
 
-  async function sendOne(item: QueueItem): Promise<"sent" | "drop" | "retry" | "stop"> {
-    const body = JSON.stringify(item.body);
+  type Sent = "sent" | "drop" | "stop";
+
+  /**
+   * What one item's answer means: `sent`, `drop`, or `stop` (kept, and the
+   * flush stops). Network errors, 408, 429, 5xx and a refused assertion keep
+   * it. Any other refusal drops it. A 429 with a retry-after waits that long.
+   * The outcome is given back to be recorded, in order, by the caller.
+   */
+  async function settle(item: QueueItem, status: number, answer: unknown, retryAfter: number): Promise<{ result: Sent; outcome?: Outcome }> {
+    if (status >= 200 && status < 300) {
+      const id = (answer as { id?: unknown } | null | undefined)?.id;
+      // A 2xx without a readable body still means the intake has it.
+      return { result: "sent", outcome: { kind: "sent", id: typeof id === "string" ? id : "", ...itemDecision(answer) } };
+    }
+    if (status === 429) {
+      if (Number.isFinite(retryAfter) && retryAfter > 0) {
+        item.attempts += 1;
+        item.nextAttemptAt = now() + retryAfter * 1000;
+      }
+      return { result: "stop" };
+    }
+    if (status >= 500 || status === 408) return { result: "stop" };
+    // A refused assertion keeps the item: the next try brings a fresh
+    // assertion or token. Any other 401 (an unknown app key) drops it.
+    const error = attestationErrorIn(status, answer);
+    if (error) {
+      await callRefusalHook(options.onAttestationRejected, error, answer);
+      return { result: "stop" };
+    }
+    return { result: "drop", outcome: { kind: "dropped", httpStatus: status } };
+  }
+
+  /** Posts `body` with its attestation. Undefined when it could not be attested or sent: try again later. */
+  async function post(to: string, body: string): Promise<{ status: number; answer: unknown; retryAfter: number } | undefined> {
     let attestation: Record<string, string> = {};
     if (options.attest) {
       try {
         attestation = await options.attest({ body, bodySha256: sha256Hex(body) });
       } catch {
-        return "stop"; // the platform could not attest now, so try again later
+        return undefined; // the platform could not attest now, so try again later
       }
     }
     let res: Awaited<ReturnType<FetchLike>>;
     try {
-      res = await doFetch(url, {
-        method: "POST",
-        headers: { ...attestation, "content-type": "application/json", "x-app-key": appKey },
-        body,
-      });
+      res = await doFetch(to, { method: "POST", headers: { ...attestation, "content-type": "application/json", "x-app-key": appKey }, body });
     } catch {
-      return "stop"; // offline or the host is unreachable
+      return undefined; // offline or the host is unreachable
     }
-    if (res.status >= 200 && res.status < 300) {
-      let id = "";
-      let decision: ItemDecision = {};
-      try {
-        const body = (await res.json()) as { id?: unknown };
-        if (typeof body.id === "string") id = body.id;
-        decision = itemDecision(body);
-      } catch {
-        // A 2xx without a readable body still means the intake has it.
-      }
-      record(item, { kind: "sent", id, ...decision });
-      return "sent";
+    let answer: unknown;
+    try {
+      answer = await res.json();
+    } catch {
+      answer = undefined;
     }
-    if (res.status === 429) {
-      const retryAfter = Number(res.headers.get("retry-after"));
-      if (Number.isFinite(retryAfter) && retryAfter > 0) {
-        item.attempts += 1;
-        item.nextAttemptAt = now() + retryAfter * 1000;
+    return { status: res.status, answer, retryAfter: Number(res.headers.get("retry-after")) };
+  }
+
+  /** Sends one item to `POST /v1/feedback`. */
+  async function sendOne(item: QueueItem): Promise<{ result: Sent; outcome?: Outcome }> {
+    const res = await post(url, JSON.stringify(item.body));
+    if (!res) return { result: "stop" };
+    return settle(item, res.status, res.answer, res.retryAfter);
+  }
+
+  /**
+   * Sends items together to `POST /v1/feedback/batch`, with one attestation
+   * over the whole body, and settles each by its own answer. A failure of
+   * the whole batch settles each item as that answer would settle it alone:
+   * offline, 408, 429, 5xx and a refused assertion keep them all (the hook
+   * is called once), and 401 `invalid_app_key` drops them all. "fallback"
+   * when the intake has no batch route (404, 405). "singly" when it refused
+   * the batch itself (400, 403, 413), which says nothing of each item: they
+   * are sent one at a time so each gets its own answer.
+   */
+  async function sendBatch(items: readonly QueueItem[]): Promise<{ result: Sent; outcome?: Outcome }[] | "fallback" | "singly"> {
+    const res = await post(batchUrl, JSON.stringify({ items: items.map((item) => item.body) }));
+    if (!res) return items.map(() => ({ result: "stop" as const }));
+    if (res.status === 404 || res.status === 405) return "fallback";
+    if (res.status === 400 || res.status === 403 || res.status === 413) return "singly";
+    const answers = (res.answer as { items?: unknown } | null | undefined)?.items;
+    if (res.status === 200 && Array.isArray(answers) && answers.length === items.length) {
+      const out: { result: Sent; outcome?: Outcome }[] = [];
+      for (const [i, item] of items.entries()) {
+        const answer = answers[i] as { status?: unknown; retry_after?: unknown } | null;
+        const status = typeof answer?.status === "number" ? answer.status : 0;
+        out.push(await settle(item, status, answer, Number(answer?.retry_after)));
       }
-      return "stop";
+      return out;
     }
-    if (res.status >= 500 || res.status === 408) return "stop";
-    if (res.status === 401) {
-      // A refused assertion keeps the item: the next try brings a fresh
-      // assertion or token. Any other 401 (an unknown app key) drops it.
-      let answer: unknown;
-      try {
-        answer = await res.json();
-      } catch {
-        answer = undefined;
-      }
-      const error = attestationErrorIn(res.status, answer);
-      if (error) {
-        await callRefusalHook(options.onAttestationRejected, error, answer);
-        return "stop";
-      }
+    if (res.status >= 200 && res.status < 300) return Promise.all(items.map((item) => settle(item, res.status, undefined, NaN)));
+    const first = await settle(items[0]!, res.status, res.answer, res.retryAfter);
+    const rest = await Promise.all(
+      items.slice(1).map(async (item) => (first.result === "stop" ? settleKept(item, res.status, res.retryAfter) : settle(item, res.status, res.answer, res.retryAfter))),
+    );
+    return [first, ...rest];
+  }
+
+  /** The rest of a batch kept as a whole: a 429's wait, without calling the refusal hook again. */
+  async function settleKept(item: QueueItem, status: number, retryAfter: number): Promise<{ result: Sent }> {
+    if (status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) {
+      item.attempts += 1;
+      item.nextAttemptAt = now() + retryAfter * 1000;
     }
-    record(item, { kind: "dropped", httpStatus: res.status });
-    return "drop";
+    return { result: "stop" };
   }
 
   // Outcomes are kept only for items a report(), review(), check() or reportReview() call is waiting on.
@@ -904,53 +981,98 @@ function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient
     }
   }
 
+  /**
+   * Sends the due items, in queue order, in batches of up to maxBatchSize.
+   * An item waiting for a new place's id joins a batch once the id is known,
+   * which can be from an earlier batch of the same flush. The flush stops
+   * after the first answer that keeps an item to try again.
+   */
   async function flushNow(): Promise<FlushResult> {
     const result = await serial(async () => {
       const queue = await readQueue();
       const known = await readNewPlaces();
       const t = now();
-      const kept: QueueItem[] = [];
+      const done = new Set<QueueItem>();
+      const tried = new Set<QueueItem>();
       let sent = 0;
       let dropped = 0;
       let stopped = false;
-      for (const item of queue) {
-        if (t - item.queuedAt > maxQueueAgeMs) {
-          record(item, { kind: "dropped", httpStatus: 0 });
-          dropped += 1;
-          continue;
-        }
-        if (item.waitsFor !== undefined) {
-          const target = known.get(item.waitsFor);
-          if (target?.dropped) {
-            record(item, { kind: "dropped", httpStatus: 0, reason: "new_place_dropped" });
+      for (;;) {
+        // Outcomes are recorded in queue order within each round, as each item is reached.
+        const outcomes = new Map<QueueItem, Outcome>();
+        const due: QueueItem[] = [];
+        for (const item of queue) {
+          if (done.has(item) || tried.has(item)) continue;
+          if (t - item.queuedAt > maxQueueAgeMs) {
+            outcomes.set(item, { kind: "dropped", httpStatus: 0 });
+            done.add(item);
             dropped += 1;
             continue;
           }
-          if (!target?.place) {
+          if (item.waitsFor !== undefined) {
+            const target = known.get(item.waitsFor);
+            if (target?.dropped) {
+              outcomes.set(item, { kind: "dropped", httpStatus: 0, reason: "new_place_dropped" });
+              done.add(item);
+              dropped += 1;
+              continue;
+            }
             // Still waiting for its new place: kept unsent, and never in the way of the items after it.
-            kept.push(item);
-            continue;
+            if (!target?.place) continue;
+            (item.body as { place: string }).place = target.place;
+            delete item.waitsFor;
           }
-          (item.body as { place: string }).place = target.place;
-          delete item.waitsFor;
+          if (stopped || item.nextAttemptAt > t || due.length >= maxBatchSize) continue;
+          due.push(item);
         }
-        if (stopped || item.nextAttemptAt > t) {
-          kept.push(item);
-          continue;
+        const attemptsBefore = new Map(due.map((item) => [item, item.attempts]));
+        const results = new Map<QueueItem, { result: Sent; outcome?: Outcome }>();
+        if (due.length === 1 || (due.length > 1 && !batchRoute)) {
+          for (const item of due) {
+            const one = await sendOne(item);
+            results.set(item, one);
+            if (one.result === "stop") break;
+          }
+        } else if (due.length > 1) {
+          let batch = await sendBatch(due);
+          if (batch === "fallback" || batch === "singly") {
+            // Without a batch route, from now on. After a refused batch, only for this round.
+            if (batch === "fallback") batchRoute = false;
+            batch = [];
+            for (const item of due) {
+              const one = await sendOne(item);
+              batch.push(one);
+              if (one.result === "stop") break;
+            }
+          }
+          batch.forEach((one, i) => results.set(due[i]!, one));
         }
-        const before = item.attempts;
-        const result = await sendOne(item);
-        if (result === "sent") sent += 1;
-        else if (result === "drop") dropped += 1;
-        else {
-          if (item.attempts === before) {
+        for (const [item, one] of results) {
+          tried.add(item);
+          if (one.outcome) outcomes.set(item, one.outcome);
+          if (one.result === "sent") {
+            sent += 1;
+            done.add(item);
+          } else if (one.result === "drop") {
+            dropped += 1;
+            done.add(item);
+          } else {
+            stopped = true;
+          }
+        }
+        for (const item of queue) {
+          const outcome = outcomes.get(item);
+          if (outcome) record(item, outcome);
+        }
+        for (const [item, one] of results) {
+          if (one.result === "stop" && item.attempts === attemptsBefore.get(item)) {
             item.attempts += 1;
             item.nextAttemptAt = t + backoffDelay(item.attempts, random);
           }
-          kept.push(item);
-          stopped = true;
         }
+        if (results.size === 0) break;
       }
+      const kept = queue.filter((item) => !done.has(item));
       await writeQueue(kept);
       await writeNewPlaces();
       return { sent, dropped, remaining: kept.length };
@@ -1283,11 +1405,10 @@ function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient
     return passRequest;
   }
 
-  const progressUrl = `${options.endpoint.replace(/\/+$/, "")}/v1/feedback/progress`;
-
-  /** Each id's progress, asked for in calls of up to MAX_PROGRESS_IDS feedback ids. */
-  async function progress(ids: readonly string[]): Promise<Progress[]> {
-    const asked = [...new Set(ids.filter(isFeedbackId))];
+  /** Each id's progress at `path`, asked for in calls of up to MAX_PROGRESS_IDS ids that `isId` accepts. */
+  async function progressAt(path: string, isId: (id: string) => boolean, ids: readonly string[]): Promise<Progress[]> {
+    const progressUrl = `${options.endpoint.replace(/\/+$/, "")}${path}`;
+    const asked = [...new Set(ids.filter(isId))];
     const found = new Map<string, unknown>();
     for (let start = 0; start < asked.length; start += MAX_PROGRESS_IDS) {
       const part = asked.slice(start, start + MAX_PROGRESS_IDS);
@@ -1314,6 +1435,8 @@ function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient
     }
     return ids.map((id) => readProgress(id, found.get(id)));
   }
+  const progress = (ids: readonly string[]) => progressAt("/v1/feedback/progress", isFeedbackId, ids);
+  const photoProgress = (ids: readonly string[]) => progressAt("/v1/photos/progress", isPhotoId, ids);
 
   const claimResponse = (answer: Record<string, unknown>): OwnerClaimResponse => ({
     id: String(answer.id ?? ""),
@@ -1400,6 +1523,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & PhotoClient
     pending: () => serial(async () => (await readQueue()).length),
     newPlace,
     progress,
+    photoProgress,
   };
 }
 
@@ -1422,5 +1546,6 @@ export function createPhotoClient(options: PhotoClientOptions): PhotoClient {
     erasePhotos: client.erasePhotos,
     flush: client.flush,
     pending: client.pending,
+    progress: client.photoProgress,
   };
 }

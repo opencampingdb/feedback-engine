@@ -1,15 +1,18 @@
 # Limits to watch
 
-The limits the intake, the apply and the data release run into, on Workers Paid. Figures are from the providers' own pages, checked on 4 November 2026. Check them again before relying on a figure near its limit.
+The limits the intake, the apply and the data release run into, on Workers Paid. Figures are from the providers' own pages, checked on 4 November 2026, and the KV, D1, Cache API, GitHub and Play Integrity figures again on 7 November 2026. Check them again before relying on a figure near its limit.
 
 ## The ones we would hit first
 
 | Limit | Allowance | What uses it |
 |---|---|---|
-| GitHub content-creating requests (secondary limit) | 80 a minute, 500 an hour, per app installation | With `RECENT_LIST`, accepted items are queued in D1 and the scheduled job writes up to 200 a minute to the inbox as one commit (a tree, a commit and a ref update: 3 requests, 180 an hour, plus a retry when the branch moved on). The intake's ceiling is 200 items a minute, 12,000 an hour; past it the queue grows and drains at that rate, and apps are never refused for it. Photo uploads, and every item on an intake without `RECENT_LIST`, stay one commit each, so there 500 items an hour is the ceiling, and past it GitHub answers 403 or 429 and the intake answers 503 `storage_unavailable`, so apps retry. The AI reviewer's commits to the data repository count against the same installation. |
+| GitHub content-creating requests (secondary limit) | 80 a minute, 500 an hour, per app installation | With `RECENT_LIST`, accepted items are queued in D1 and the scheduled job writes up to 200 a minute to the inbox as one commit (a tree, a commit and a ref update: 3 requests, 180 an hour, plus a retry when the branch moved on). The intake's ceiling is 200 items a minute, 12,000 an hour; past it the queue grows and drains at that rate, and apps are never refused for it. Photo uploads are queued the same way, so a photo service with `RECENT_LIST` writes a minute's photos as one commit. Every item on an intake without `RECENT_LIST` stays one commit each, so there 500 items an hour is the ceiling, and past it GitHub answers 403 or 429 and the intake answers 503 `storage_unavailable`, so apps retry. The AI reviewer's commits to the data repository count against the same installation: one commit a run (3 requests), at most once every 10 minutes, however many cases it decides. |
 | GitHub REST requests (primary limit) | At least 5,000 an hour per installation, rising with repositories and users up to 12,500 | Inbox writes (a flush is about 6 requests a minute with items queued, 360 an hour), starting workflows and the AI reviewer's reads and commits. |
+| Play Integrity requests | By default "up to 10,000 total requests per day across all installs", per app, and Google can raise it on request | Every Android item that needs attestation carries one token. A flush sends up to 50 items in one `POST /v1/feedback/batch` with one token over the batch body, so 10,000 tokens a day carry up to 500,000 items. Sent one at a time, contributions from an app's Android installs would stop at 10,000 a day across all of them. App Attest assertions are made on the device and have no such quota, and a batch uses one too. |
 | Workers AI free allocation | 10,000 Neurons a day, then US$0.011 per 1,000 Neurons | Llama Guard 3 costs about 44 Neurons per 1,000 input tokens, so an item of about 300 tokens is about 13 Neurons, and roughly 750 checks a day are free. The AI reviewer's Llama 3.3 70B costs about 27 Neurons per 1,000 input tokens and 205 per 1,000 output tokens, so a case of about 1,500 tokens in and 100 out is about 60 Neurons, and roughly 160 cases a day are free. |
-| KV writes to one key | 1 a second | Rate limits and challenges. The recent list is in D1 because of KV's limits (ADR 0001). |
+| KV writes to one key | 1 a second, on every plan. KV is eventually consistent | App Attest keys and challenges. The daily counters were in KV, and every item wrote the app's counter, so the intake stopped at about one item a second. With `RECENT_LIST` they are in D1 (`rate_counts`). An intake without it still keeps them in KV, and with them KV's limit of about one item a second, so D1 is needed at scale. The recent list is in D1 because of KV's limits (ADR 0001). |
+| D1 queries | One at a time per database: "If your average query takes 1 ms, you can run at most 1,000 queries per second" | Every request that touches the recent list database. A submission reads its counters in one query and writes them in the batch that stores it, beside its send-time decision. A batch of items reads each counter once and stores every accepted item in one D1 batch, which D1 runs as one transaction ("Batched statements are SQL transactions"), so a failure stores none of them. The recent list is cached at the edge by box, so most reads never reach D1. |
+| Cache API | Works on custom domains only, and each data centre keeps its own copy | The recent list's edge cache. On a `workers.dev` address every read of the list reaches D1. |
 
 ## Workers Paid included allowances (US$5 a month)
 
@@ -34,7 +37,7 @@ The limits the intake, the apply and the data release run into, on Workers Paid.
 | Memory | 128 MB per isolate | Parsing a place index upload. |
 | Worker size | 64 MiB uncompressed | The intake bundle is about 150 KiB. |
 | Cron triggers | 250 per account | The intake uses one, every minute. |
-| D1 queries per invocation | 1,000 (a batch counts as one) | Place index uploads, the send-time decision, the minute's inbox flush. |
+| D1 queries per invocation | 1,000 (a batch counts as one) | Place index uploads, the send-time decision, the minute's inbox flush. A `POST /v1/feedback/batch` of 50 fact reports that go live makes about 9 reads an item for its counters, decision and checks (451 measured on the test database), and stores them all in one batch. A batch of reviews makes 2. |
 | D1 statement length | 100 KB | Batched inserts. |
 | D1 bound parameters | 100 per query | Batched inserts. |
 | D1 row or string size | 2 MB | A place index row. |
@@ -53,6 +56,9 @@ The URLhaus API page states no rate limit or quota. Each link costs one lookup, 
 - https://developers.cloudflare.com/workers/platform/limits/
 - https://developers.cloudflare.com/d1/platform/limits/
 - https://developers.cloudflare.com/kv/platform/limits/
+- https://developers.cloudflare.com/workers/runtime-apis/cache/
 - https://developers.cloudflare.com/workers-ai/platform/pricing/
 - https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
 - https://urlhaus-api.abuse.ch/
+- https://developer.android.com/google/play/integrity/overview
+- https://developers.cloudflare.com/d1/worker-api/d1-database/

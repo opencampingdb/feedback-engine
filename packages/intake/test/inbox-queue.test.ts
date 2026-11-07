@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GitHubApp } from "../src/github.js";
 import {
@@ -384,6 +384,77 @@ describe("queued writes through the intake", () => {
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "storage_unavailable" });
     expect(db.db.prepare("SELECT count(*) AS n FROM inbox_queue").get()).toEqual({ n: 0 });
+  });
+
+  /** A photo upload: the meta in its header, the full size JPEG and the thumbnail in the body. */
+  function upload(n: number) {
+    const full = new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0, 3, 0, 4, 0x03, ...new Array(9).fill(0), ...new Array(40).fill(n), 0xff, 0xd9]);
+    const sha = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+    const meta = {
+      type: "photo",
+      place: PLACE,
+      device: "3b241101-e2bb-4255-8caf-4136c566a962",
+      contributor: `acct_3f9a8b7c6d5e4f${String(n).padStart(2, "0")}`,
+      app_version: "1.0.0",
+      consent: true,
+      photo: { full_sha256: sha(full), full_bytes: full.length, thumb_sha256: sha(full), thumb_bytes: full.length },
+    };
+    return new Request("https://intake.example/v1/photos", {
+      method: "POST",
+      headers: { "x-app-key": APP_KEY, "x-photo-meta": Buffer.from(JSON.stringify(meta)).toString("base64url") },
+      body: new Uint8Array([...full, ...full]),
+    });
+  }
+
+  function bucket() {
+    const objects = new Map<string, Uint8Array>();
+    return {
+      objects,
+      put: async (key: string, value: Uint8Array) => void objects.set(key, value),
+      delete: async (keys: string | string[]) => {
+        for (const k of Array.isArray(keys) ? keys : [keys]) objects.delete(k);
+      },
+    };
+  }
+
+  it("queues photo uploads, answering 202 with the photo id, and the scheduled job writes a minute's photos in one commit", async () => {
+    const photos = bucket();
+    const e = { ...env, PHOTOS_PENDING: photos };
+    const handle = createHandler({ fetch: git.fetch, now: () => clock, randomBytes: () => crypto.getRandomValues(new Uint8Array(16)) });
+    const ids: string[] = [];
+    for (let n = 0; n < 8; n++) {
+      const res = await handle(upload(n), e);
+      expect(res.status).toBe(202);
+      const { id } = (await res.json()) as { id: string };
+      expect(id).toMatch(/^pho_[0-9A-Z]{26}$/);
+      ids.push(id);
+      clock += 5_000;
+    }
+    // The files are in the bucket, and nothing has reached GitHub yet.
+    expect(photos.objects.size).toBe(16);
+    expect(git.calls).toEqual([]);
+    await createScheduled({ fetch: git.fetch, now: () => clock })(env);
+    const commits = git.log().filter((c) => c.message !== "first");
+    expect(commits).toHaveLength(1);
+    expect(commits[0]!.message).toBe("Add 8 items");
+    expect(git.pending().map((p) => `pho_${String(p.id).slice(3)}`).sort()).toEqual([...ids].sort());
+    expect(git.pending().every((p) => p.type === "photo")).toBe(true);
+  });
+
+  it("removes a photo's files again when it cannot be queued", async () => {
+    const photos = bucket();
+    const failing: D1Like = {
+      prepare: (sql) => db.prepare(sql),
+      batch: async (list) => {
+        if (list.some((s) => (s as unknown as { sql: string }).sql.includes("inbox_queue"))) throw new Error("D1 is down");
+        return db.batch(list);
+      },
+    };
+    const handle = createHandler({ fetch: git.fetch, now: () => clock });
+    const res = await handle(upload(1), { ...env, RECENT_LIST: failing, PHOTOS_PENDING: photos });
+    expect(res.status).toBe(503);
+    expect(photos.objects.size).toBe(0);
+    expect(git.calls).toEqual([]);
   });
 
   it("writes each item at once, as before, without RECENT_LIST", async () => {

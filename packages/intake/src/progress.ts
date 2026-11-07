@@ -1,5 +1,5 @@
 import { MAX_PROGRESS_IDS, type Progress, type RefusedBy } from "@opencampingdb/feedback";
-import type { ProgressUpdate } from "@opencampingdb/apply/progress-update";
+import type { PhotoProgressUpdate, ProgressUpdate } from "@opencampingdb/apply/progress-update";
 import type { ItemState } from "./decide.js";
 import { chunks, isoSeconds, type D1Like, type D1Statement } from "./recent.js";
 import { ulidTime } from "./ulid.js";
@@ -135,4 +135,76 @@ export async function readProgress(db: D1Like, ids: readonly string[], now: numb
 /** Deletes rows that have not changed for 90 days. For the scheduled job. */
 export async function pruneProgress(db: D1Like, now: number): Promise<void> {
   await db.prepare("DELETE FROM item_progress WHERE updated < ?").bind(isoSeconds(now - KEEP_PROGRESS_DAYS * DAY_MS)).run();
+}
+
+/**
+ * The row a photo gets at upload, in the batch that queues it, under the
+ * photo id the upload answers: `held` with `safesearch` or
+ * `check_unavailable` when SafeSearch flagged it or could not check it (the
+ * apply always holds those for a person), otherwise `received`.
+ */
+export function photoReceivedStatement(
+  db: D1Like,
+  photo: { id: string; received: string; place: string },
+  held: "safesearch" | "check_unavailable" | undefined,
+): D1Statement {
+  return db
+    .prepare("INSERT OR IGNORE INTO item_progress (feedback_id, state, held_reason, place, received, updated) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(photo.id, held ? "held" : "received", held ?? null, photo.place, photo.received, photo.received);
+}
+
+/**
+ * Records what the photo apply says about each photo. A photo's state is
+ * where it is now on the records repository's main, so a row takes each
+ * state it is sent, including leaving `in_data` when the photo is hidden
+ * after reports or removed. `held_reason` is kept only on `held` and
+ * `in_data_at` only on `in_data`, where the first one sent is kept while the
+ * photo stays in the data. Runs can overlap, so an update from a run older
+ * than the row's `run_at` is refused, and a newer run moves `run_at` on even
+ * when it changes nothing else. A row's `updated` moves only when its
+ * state, reason, held reason, refusal or place changes. Returns the rows
+ * written, those whose run alone moved included.
+ */
+export async function recordPhotoProgress(db: D1Like, items: readonly PhotoProgressUpdate[], now: number): Promise<number> {
+  const at = isoSeconds(now);
+  const capped = (time: string | undefined) => (time === undefined ? null : Date.parse(time) > now ? at : time);
+  const changed = `(item_progress.state IS NOT excluded.state
+           OR item_progress.reason IS NOT excluded.reason
+           OR item_progress.held_reason IS NOT excluded.held_reason
+           OR item_progress.refused_by IS NOT excluded.refused_by
+           OR (excluded.place IS NOT NULL AND item_progress.place IS NOT excluded.place))`;
+  const statements = items.map((item) =>
+    db
+      .prepare(
+        `INSERT INTO item_progress (feedback_id, state, reason, held_reason, refused_by, place, received, decided_at, in_data_at, updated, run_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT (feedback_id) DO UPDATE SET
+           state = excluded.state,
+           reason = excluded.reason,
+           held_reason = excluded.held_reason,
+           refused_by = excluded.refused_by,
+           place = COALESCE(excluded.place, item_progress.place),
+           decided_at = excluded.decided_at,
+           in_data_at = CASE WHEN excluded.state = 'in_data' THEN COALESCE(CASE WHEN item_progress.state = 'in_data' THEN item_progress.in_data_at END, excluded.in_data_at) END,
+           updated = CASE WHEN ${changed} THEN excluded.updated ELSE item_progress.updated END,
+           run_at = excluded.run_at
+         WHERE (item_progress.run_at IS NULL OR excluded.run_at >= item_progress.run_at)
+           AND (${changed} OR item_progress.run_at IS NULL OR excluded.run_at > item_progress.run_at)`,
+      )
+      .bind(
+        item.id,
+        item.state,
+        item.reason ?? null,
+        item.state === "held" ? (item.held_reason ?? null) : null,
+        item.state === "refused" ? (item.by ?? null) : null,
+        item.place ?? null,
+        isoSeconds(ulidTime(item.id.slice(item.id.indexOf("_") + 1))),
+        capped(item.decided_at),
+        item.state === "in_data" ? capped(item.in_data_at) : null,
+        at,
+        item.run_at,
+      ),
+  );
+  const results = await db.batch(statements);
+  return results.reduce<number>((sum, result) => sum + ((result as { meta?: { changes?: number } } | null)?.meta?.changes ?? 0), 0);
 }

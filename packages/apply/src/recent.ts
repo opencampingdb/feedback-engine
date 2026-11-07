@@ -3,6 +3,7 @@ import { sameValue } from "./decide.js";
 import { DataRepo, readHistory } from "./io.js";
 import { newPlaceIdOf, WINDOW_DAYS, WITHDRAWN, type DoubtedRecord } from "./rules.js";
 import type { ProgressStore } from "./progress.js";
+import type { PhotoProgressStore } from "./photo-progress.js";
 import type { Place } from "./types.js";
 
 /**
@@ -94,7 +95,7 @@ const REMOVE_BATCH = 500;
  * Removing an id that is not in the store does nothing, and the block list
  * replaces the last one, so sending either again is safe.
  */
-export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeof fetch = fetch): RecentStore & RecentChangeStore & ProgressStore {
+export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeof fetch = fetch): RecentStore & RecentChangeStore & ProgressStore & PhotoProgressStore {
   const url = new URL("/v1/places/recent/remove", baseUrl).toString();
   const blockUrl = new URL("/v1/places/recent/block", baseUrl).toString();
   const post = async (path: string, ids: readonly string[], extra: (part: readonly string[]) => Record<string, unknown>, what: string) => {
@@ -135,6 +136,15 @@ export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeo
         body: JSON.stringify({ items }),
       });
       if (!response.ok) throw new Error(`the intake refused the progress: ${response.status} ${await response.text()}`);
+    },
+    async photoProgress(items) {
+      // The caller sends at most 500 photos a call (sendPhotoProgress).
+      const response = await fetcher(new URL("/v1/photos/progress", baseUrl).toString(), {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      if (!response.ok) throw new Error(`the photo intake refused the photo progress: ${response.status} ${await response.text()}`);
     },
     async block(contributors) {
       const response = await fetcher(blockUrl, {

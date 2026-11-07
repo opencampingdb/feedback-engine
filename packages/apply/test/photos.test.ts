@@ -159,6 +159,22 @@ describe("photo rules", () => {
     expect(rules([ok], { photos: [photoLine(1, "sam")] }).outcome(ok)).toBe("applied");
   });
 
+  it("keeps the held reason's code with the decision of each photo it holds", () => {
+    const calm = { adult: "VERY_UNLIKELY", violence: "VERY_UNLIKELY", racy: "UNLIKELY", medical: "VERY_UNLIKELY", spoof: "VERY_UNLIKELY" } as const;
+    const rated = (n: number, safesearch: unknown) => {
+      const item = upload("sam", n) as StoredFeedback & { photo: Record<string, unknown> };
+      return { ...item, photo: { ...item.photo, safesearch } } as StoredFeedback;
+    };
+    const first = upload("kim", 2);
+    const flagged = rated(3, { ...calm, adult: "LIKELY" });
+    const unchecked = rated(4, "unchecked");
+    const copy = upload("sam", 5, OTHER);
+    const trusted = upload("sam", 6);
+    const out = rules([first, flagged, unchecked, copy, trusted], { photos: [photoLine(1, "sam"), photoLine(9, "sam", { sha256: sha(5) })] });
+    const heldReason = (item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.held_reason;
+    expect([first, flagged, unchecked, copy, trusted].map(heldReason)).toEqual(["first_photo", "safesearch", "check_unavailable", "same_file", undefined]);
+  });
+
   it("holds a file already sent for another place, even from a trusted contributor", () => {
     const p = upload("sam", 3, OTHER);
     const out = rules([p], { photos: [photoLine(1, "sam", { sha256: sha(3) })] });
@@ -262,6 +278,11 @@ describe("photo run", () => {
     for (const item of [photo, e]) await put(join(inbox, "pending", "2026-11-02", `${item.id}.json`), JSON.stringify(item));
     const summary = await run({ inbox, data, reviewData: review, now: new Date(NOW) });
     expect(summary.decisions.map((d) => d.id)).toEqual([e.id]);
+    // Photo progress takes them from photo_decisions, with the held reason's code.
+    expect(summary.photo_decisions).toEqual([{ id: photo.id, place: PLACE, outcome: "needs_review", reason: expect.any(String), held_reason: "first_photo" }]);
+    // The inbox keeps the code with the outcome, for later runs.
+    const moved = JSON.parse(await readFile(join(inbox, "applied", "2026-11-02", `${photo.id}.json`), "utf8")) as { outcome: Record<string, unknown> };
+    expect(moved.outcome).toMatchObject({ result: "needs_review", held_reason: "first_photo" });
   });
 
   it("removes an erased contributor's photos and lists them in removed_photos.json", async () => {
@@ -304,6 +325,7 @@ describe("photo run", () => {
       const summary = await run({ inbox, data: photosRepo, places: ocdb, now: new Date(NOW), recentList: { ids: async () => new Set([NEW]) } });
       expect(summary.counts).toMatchObject({ waiting: 1, refused: 0 });
       expect(await isPending(p)).toBe(true);
+      expect(summary.photo_decisions).toEqual([{ id: p.id, place: NEW, outcome: "waiting", reason: expect.stringContaining("new place not in the data yet") }]);
     });
 
     it("refuses a photo of a place on neither the data nor the list", async () => {

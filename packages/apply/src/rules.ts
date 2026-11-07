@@ -7,6 +7,7 @@ import {
   type FactName,
   type FactValue,
   type NewPlaceReportReason,
+  type PhotoHeldReason,
   type StoredFeedback,
 } from "@opencampingdb/feedback";
 import {
@@ -95,6 +96,8 @@ export interface Decision {
   place: string | null;
   outcome: Outcome;
   reason: string;
+  /** On a photo held for a person: why, as photo progress names it. The inbox keeps it with the outcome. */
+  held_reason?: PhotoHeldReason;
   /**
    * On the doubt that took a fact down: the fact, the value it had and the
    * date set on it. The inbox keeps it with the outcome, and later runs read
@@ -259,10 +262,18 @@ export function isVisible(review: Review, blocked: ReadonlySet<string> = new Set
   return review.hidden === undefined && !blocked.has(review.contributor);
 }
 
-/** Whether a stored item was applied by the rules (not held for a person, not refused). */
 /** A photo upload's photo id: `pho_` and the item's ulid. */
-const photoIdOf = (item: StoredFeedback) => `pho_${item.id.replace(/^fb_/, "")}`;
+export const photoIdOf = (item: Pick<StoredFeedback, "id">) => `pho_${item.id.replace(/^fb_/, "")}`;
 
+/** The reason given for holding a photo for a person, by its held reason in photo progress. */
+export const PHOTO_HELD_WHY = {
+  same_file: "the same file was sent for another place",
+  check_unavailable: "SafeSearch could not check it",
+  safesearch: "SafeSearch rates it",
+  first_photo: "first photo from this contributor",
+} as const satisfies Partial<Record<PhotoHeldReason, string>>;
+
+/** Whether a stored item was applied by the rules (not held for a person, not refused). */
 function wasApplied(item: StoredFeedback): boolean {
   return (item as { outcome?: { result?: string } }).outcome?.result === "applied";
 }
@@ -335,8 +346,8 @@ export function applyRules(input: RulesInput): RulesOutput {
   let everyPlaceById: Map<string, Place> | undefined;
   const doNotMatch: DoNotMatchEntry[] = [];
 
-  const decide = (item: StoredFeedback, outcome: Outcome, reason: string) => {
-    decisions.set(item.id, { id: item.id, place: item.place, outcome, reason });
+  const decide = (item: StoredFeedback, outcome: Outcome, reason: string, heldReason?: PhotoHeldReason) => {
+    decisions.set(item.id, { id: item.id, place: item.place, outcome, reason, ...(heldReason ? { held_reason: heldReason } : {}) });
   };
   const record = (id: string): Place => {
     const existing = working.get(id);
@@ -675,16 +686,14 @@ export function applyRules(input: RulesInput): RulesOutput {
       const rated = item.photo.safesearch;
       const flagged = rated !== undefined && safeSearchVerdict(rated) !== "pass";
       if (repeated || flagged || !trusted.has(item.contributor)) {
-        const why = repeated
-          ? "the same file was sent for another place"
-          : flagged
-            ? rated === "unchecked"
-              ? "SafeSearch could not check it"
-              : `SafeSearch rates it adult ${rated.adult}, violence ${rated.violence}, racy ${rated.racy}`
-            : "first photo from this contributor";
+        const held: keyof typeof PHOTO_HELD_WHY = repeated ? "same_file" : flagged ? (rated === "unchecked" ? "check_unavailable" : "safesearch") : "first_photo";
+        const why =
+          held === "safesearch" && rated !== undefined && rated !== "unchecked"
+            ? `${PHOTO_HELD_WHY.safesearch} adult ${rated.adult}, violence ${rated.violence}, racy ${rated.racy}`
+            : PHOTO_HELD_WHY[held];
         edits.push({ kind: "photo", place: item.place, photo, feedback: item.id });
         note(item.place, `photo ${photoId} (${photo.width} x ${photo.height}), ${why} (look at it before merging)`, false, [item], photoId);
-        decide(item, "needs_review", `${why}, so a person checks it`);
+        decide(item, "needs_review", `${why}, so a person checks it`, held);
         continue;
       }
       lines.push(photo);

@@ -75,10 +75,35 @@ export type HeldReason = RulesHeldReason | ChecksHeldReason | RefusedReason | "u
 /** What the answer to an accepted item adds. */
 export type ItemState = { state: "live" } | { state: "held"; held_reason: HeldReason };
 
+/**
+ * What the items decided earlier in the same batch will write when the batch
+ * is stored, so each later item is decided as if those were stored already,
+ * as it would be had each item been sent alone (`decideAtSendTime`).
+ */
+export interface DecidedInRequest {
+  /** Recent changes, in the order they were decided. */
+  changes: { place: string; fact: string; value: string | null; accepted: string }[];
+  /** Report evidence, in the order it was decided. */
+  evidence: EvidenceRow[];
+  /** Doubt cases by place and fact: opened with the value the place had, or closed (null). */
+  cases: Map<string, { value: string; taken_down_at: string } | null>;
+  /** Accepted items by contributor. */
+  accepted: Map<string, number>;
+}
+
+/** Nothing decided yet: for a single item, or the start of a batch. */
+export function noneDecided(): DecidedInRequest {
+  return { changes: [], evidence: [], cases: new Map(), accepted: new Map() };
+}
+
+const caseKey = (place: string, fact: string) => `${place}\u0000${fact}`;
+
 /** What the intake decided, and the writes that record it once the item is in the inbox. */
 export interface SendTimeDecision {
   answer: ItemState;
   writes: (db: D1Like) => D1Statement[];
+  /** Adds what `writes` will store to what was decided in the request, once the item is accepted into the batch. */
+  addToDecided?: (decided: DecidedInRequest) => void;
   /** The live change the checks took from the daily caps, to give back with `releaseLive` when the item is not recorded. */
   slot?: LiveSlot;
 }
@@ -100,7 +125,11 @@ export function decidedHere(item: StoredFeedback): item is ReportItem {
 
 
 /** A contributor's track record, and whether they are on the block list. */
-export async function contributorRecord(db: D1Like, contributor: string): Promise<CheckContributor & { blocked: boolean }> {
+export async function contributorRecord(
+  db: D1Like,
+  contributor: string,
+  decided: DecidedInRequest = noneDecided(),
+): Promise<CheckContributor & { blocked: boolean }> {
   const row = await db
     .prepare(
       `SELECT COALESCE((SELECT accepted FROM contributor_records WHERE contributor = ?1), 0) AS accepted,
@@ -109,7 +138,8 @@ export async function contributorRecord(db: D1Like, contributor: string): Promis
     )
     .bind(contributor)
     .first<{ accepted: number; taken_down: number; blocked: number }>();
-  return { id: contributor, accepted: row?.accepted ?? 0, taken_down: row?.taken_down ?? 0, blocked: row?.blocked === 1 };
+  const accepted = (row?.accepted ?? 0) + (decided.accepted.get(contributor) ?? 0);
+  return { id: contributor, accepted, taken_down: row?.taken_down ?? 0, blocked: row?.blocked === 1 };
 }
 
 /** Counts one more accepted item for a contributor. */
@@ -126,7 +156,7 @@ function acceptedStatement(db: D1Like, contributor: string): D1Statement {
  * a change the data already held when the release last loaded the place's
  * cell: the index has it, or whatever has replaced it since.
  */
-export async function placeNow(db: D1Like, id: string): Promise<(PlaceState & { cell: Cell }) | undefined> {
+export async function placeNow(db: D1Like, id: string, decided: DecidedInRequest = noneDecided()): Promise<(PlaceState & { cell: Cell }) | undefined> {
   const indexed = await getIndexedPlace(db, id);
   if (indexed === undefined) return undefined;
   const [cellLon, cellLat] = indexed.cell;
@@ -145,7 +175,7 @@ export async function placeNow(db: D1Like, id: string): Promise<(PlaceState & { 
   const facts: Record<string, unknown> = { ...indexed.facts };
   const sources: Record<string, string> = { ...indexed.fact_sources };
   const dates: Record<string, string> = { ...indexed.fact_dates };
-  for (const change of results) {
+  for (const change of [...results, ...decided.changes.filter((c) => c.place === id)]) {
     if (change.value === null) delete facts[change.fact];
     else facts[change.fact] = JSON.parse(change.value) as unknown;
     sources[change.fact] = "feedback";
@@ -168,11 +198,18 @@ interface EvidenceRow {
 }
 
 /** The fact, contact and doubt reports the intake decided about a place and fact in the 90 days up to `at`, as the rules read them. */
-export async function earlierReports(db: D1Like, place: string, fact: string, at: number): Promise<StoredFeedback[]> {
-  const { results } = await db
+export async function earlierReports(
+  db: D1Like,
+  place: string,
+  fact: string,
+  at: number,
+  decided: DecidedInRequest = noneDecided(),
+): Promise<StoredFeedback[]> {
+  const { results: stored } = await db
     .prepare("SELECT * FROM report_evidence WHERE place = ? AND fact = ? AND received >= ? ORDER BY received, feedback_id")
     .bind(place, fact, isoSeconds(at - WINDOW_DAYS * DAY_MS))
     .all<EvidenceRow>();
+  const results = [...stored, ...decided.evidence.filter((row) => row.place === place && row.fact === fact)];
   return results.map(
     (row) =>
       ({
@@ -191,6 +228,23 @@ export async function earlierReports(db: D1Like, place: string, fact: string, at
               : { kind: "doubt", fact: row.fact },
       }) as unknown as StoredFeedback,
   );
+}
+
+/** The report evidence row an item's decision stores. */
+function evidenceRow(item: ReportItem): EvidenceRow {
+  const { kind, fact, value, reason } = item.report;
+  return {
+    feedback_id: item.id,
+    place: item.place as string,
+    fact: fact as string,
+    kind: kind as EvidenceRow["kind"],
+    value: kind === "fact" && value !== undefined ? JSON.stringify(value) : null,
+    reason: kind === "contact" ? (reason ?? null) : null,
+    received: item.received,
+    device: item.device,
+    origin: item.origin ?? null,
+    attested: item.attested ?? null,
+  };
 }
 
 function evidenceStatement(db: D1Like, item: ReportItem, state: "live" | "held"): D1Statement {
@@ -215,7 +269,9 @@ function evidenceStatement(db: D1Like, item: ReportItem, state: "live" | "held")
 }
 
 /** The open case for a fact doubts took down on a place, as `decideFact` reads it, or undefined when there is none. */
-export async function openDoubt(db: D1Like, place: string, fact: string): Promise<OpenDoubt | undefined> {
+export async function openDoubt(db: D1Like, place: string, fact: string, decided: DecidedInRequest = noneDecided()): Promise<OpenDoubt | undefined> {
+  const batched = decided.cases.get(caseKey(place, fact));
+  if (batched !== undefined) return batched === null ? undefined : { value: JSON.parse(batched.value) as OpenDoubt["value"], at: batched.taken_down_at };
   const row = await db
     .prepare("SELECT value, taken_down_at FROM doubt_cases WHERE place = ? AND fact = ? AND closed_by IS NULL")
     .bind(place, fact)
@@ -264,6 +320,18 @@ export async function openDoubtCases(db: D1Like, cases: readonly DoubtCase[]): P
  * place and fact (replacing a closed one), with the value the place had and
  * the takedown's time, and a restore or replacement closes it.
  */
+/** What `caseStatements` writes, added to the batch's decisions so far. */
+function decidedCase(decided: DecidedInRequest, item: ReportItem, decision: Extract<ItemDecision, { verdict: "live" }>): void {
+  if (decision.doubtTakedown !== undefined) {
+    const value = { value: JSON.stringify(decision.doubtTakedown.value), taken_down_at: item.received };
+    decided.cases.set(caseKey(item.place as string, decision.doubtTakedown.fact), value);
+  } else if (decision.settles !== undefined) {
+    const key = caseKey(item.place as string, item.report.fact as string);
+    // Closing changes only an open case, as the UPDATE does. Whether one is open in D1 is not known here, and a closed one reads as none.
+    decided.cases.set(key, null);
+  }
+}
+
 function caseStatements(db: D1Like, item: ReportItem, decision: Extract<ItemDecision, { verdict: "live" }>): D1Statement[] {
   if (decision.doubtTakedown !== undefined) {
     return [
@@ -294,42 +362,54 @@ export interface DecideInput {
   submission: FeedbackSubmission;
   /** The hashed contributor id, or the hashed install standing in for one. */
   contributor: string;
+  /** What items earlier in the same batch decided. None for an item sent alone. */
+  decided?: DecidedInRequest;
 }
 
-const held = (reason: HeldReason, writes: SendTimeDecision["writes"] = () => []): SendTimeDecision => ({
+const held = (reason: HeldReason, writes: SendTimeDecision["writes"] = () => [], addToDecided?: SendTimeDecision["addToDecided"]): SendTimeDecision => ({
   answer: { state: "held", held_reason: reason },
   writes,
+  ...(addToDecided ? { addToDecided } : {}),
 });
-const live = (writes: SendTimeDecision["writes"], slot?: LiveSlot): SendTimeDecision => ({ answer: { state: "live" }, writes, ...(slot ? { slot } : {}) });
+const live = (writes: SendTimeDecision["writes"], addToDecided: (decided: DecidedInRequest) => void, slot?: LiveSlot): SendTimeDecision => ({
+  answer: { state: "live" },
+  writes,
+  addToDecided,
+  ...(slot ? { slot } : {}),
+});
+/** A held item's evidence: written, and known to the items after it in the batch. */
+const heldWithEvidence = (reason: HeldReason, item: ReportItem): SendTimeDecision =>
+  held(reason, (d) => [evidenceStatement(d, item, "held")], (p) => void p.evidence.push(evidenceRow(item)));
+const countAccepted = (decided: DecidedInRequest, contributor: string) => decided.accepted.set(contributor, (decided.accepted.get(contributor) ?? 0) + 1);
 
 /** Decides one item that `decidedHere` says the intake decides. Reads D1 and runs the checks, and writes nothing. */
 export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDecision> {
-  const { db, checks, item, submission, contributor } = input;
-  const record = await contributorRecord(db, contributor);
+  const { db, checks, item, submission, contributor, decided = noneDecided() } = input;
+  const record = await contributorRecord(db, contributor, decided);
   if (record.blocked) return held("blocked");
   if (item.report.kind === "new_place") return decideNewPlace(input, record);
   // The app hides the photo for this traveller. Everyone else waits for the apply: two sources, or a reviewer.
   if (item.report.kind === "commons_mismatch") return held("commons_report");
 
   const placeId = item.place as string;
-  const place = await placeNow(db, placeId);
+  const place = await placeNow(db, placeId, decided);
   if (place === undefined) return held("unknown_place");
-  const earlier = await earlierReports(db, placeId, item.report.fact as string, Date.parse(item.received));
+  const earlier = await earlierReports(db, placeId, item.report.fact as string, Date.parse(item.received), decided);
   const kind = item.report.kind;
-  const openCase = kind === "fact" ? await openDoubt(db, placeId, item.report.fact as string) : undefined;
+  const openCase = kind === "fact" ? await openDoubt(db, placeId, item.report.fact as string, decided) : undefined;
   const decision =
     kind === "fact"
       ? decideFact({ item, place, earlier, ...(openCase === undefined ? {} : { openCase }) })
       : kind === "doubt" ? decideDoubt({ item, place, earlier }) : decideContactReport({ item, place, earlier });
   if (decision.verdict === "refused") return held(decision.reason);
-  if (decision.verdict === "held") return held(decision.reason, (d) => [evidenceStatement(d, item, "held")]);
+  if (decision.verdict === "held") return heldWithEvidence(decision.reason, item);
   // An item without attestation is never live from the intake. The apply's two-device rule still runs.
-  if (item.attested === undefined) return held("not_attested", (d) => [evidenceStatement(d, item, "held")]);
+  if (item.attested === undefined) return heldWithEvidence("not_attested", item);
   // The place already has the value: nothing to show, and nothing for the checks.
-  if (decision.changes.length === 0) return live((d) => [evidenceStatement(d, item, "live")]);
+  if (decision.changes.length === 0) return live((d) => [evidenceStatement(d, item, "live")], (p) => void p.evidence.push(evidenceRow(item)));
 
   const checked = await checks.check(submission, { ...record, origin: item.origin, attest_key: item.attest_key });
-  if ("held" in checked) return held(checked.held, (d) => [evidenceStatement(d, item, "held")]);
+  if ("held" in checked) return heldWithEvidence(checked.held, item);
   const [cellLon, cellLat] = place.cell;
   return live((d) => [
     evidenceStatement(d, item, "live"),
@@ -342,7 +422,14 @@ export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDeci
         .bind(item.id, change.place, change.fact, change.value === null ? null : JSON.stringify(change.value), item.received, cellLon, cellLat, contributor),
     ),
     acceptedStatement(d, contributor),
-  ], checked.slot);
+  ], (p) => {
+    p.evidence.push(evidenceRow(item));
+    decidedCase(p, item, decision);
+    for (const change of decision.changes) {
+      p.changes.push({ place: change.place, fact: change.fact, value: change.value === null ? null : JSON.stringify(change.value), accepted: item.received });
+    }
+    countAccepted(p, contributor);
+  }, checked.slot);
 }
 
 /**
@@ -391,7 +478,7 @@ async function decideNewPlace({ checks, item, submission }: DecideInput, record:
     ...(fields.fee !== undefined ? { fee: fields.fee } : {}),
     ...(Object.keys(contacts).length > 0 ? { contacts } : {}),
   };
-  return live((d) => [placeStatement(d, place), acceptedStatement(d, record.id)], checked.slot);
+  return live((d) => [placeStatement(d, place), acceptedStatement(d, record.id)], (p) => countAccepted(p, record.id), checked.slot);
 }
 
 interface ChangeRow {
@@ -413,18 +500,19 @@ export async function listChanges(db: D1Like, now: number, bbox?: Bbox): Promise
   const kept = isoSeconds(now - KEEP_IN_DATA_DAYS * DAY_MS);
   const last = (low: number, high: number) => Math.max(Math.floor(low), Math.ceil(high) - 1);
   const area = bbox ? "AND cell_lon BETWEEN ? AND ? AND cell_lat BETWEEN ? AND ?" : "";
+  // One pass over the visible changes, through the (place, fact) index, or the cell index within a box,
+  // numbering each place and fact's changes newest first. A NOT EXISTS self-join would search the index
+  // again for every row. Window functions are in SQLite's own engine, which D1 runs.
   const query = db.prepare(
-    `WITH visible AS (
-       SELECT * FROM recent_changes c
+    `SELECT place, fact, value, accepted, in_data_at FROM (
+       SELECT place, fact, value, accepted, in_data_at,
+         ROW_NUMBER() OVER (PARTITION BY place, fact ORDER BY accepted DESC, feedback_id DESC) AS newest
+       FROM recent_changes c
        WHERE (c.in_data_at IS NULL OR c.in_data_at >= ?)
          AND NOT EXISTS (SELECT 1 FROM blocked_contributors b WHERE b.contributor = c.contributor)
          ${area}
      )
-     SELECT place, fact, value, accepted, in_data_at FROM visible c
-     WHERE NOT EXISTS (
-       SELECT 1 FROM visible d
-       WHERE d.place = c.place AND d.fact = c.fact AND (d.accepted > c.accepted OR (d.accepted = c.accepted AND d.feedback_id > c.feedback_id))
-     )
+     WHERE newest = 1
      ORDER BY place, fact`,
   );
   const bound = bbox

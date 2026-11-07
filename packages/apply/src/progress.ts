@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { isFeedbackId, type StoredFeedback } from "@opencampingdb/feedback";
+import { isFeedbackId, type PhotoHeldReason, type StoredFeedback } from "@opencampingdb/feedback";
 import { DataRepo, readHistory } from "./io.js";
 import type { ReviewPr } from "./owners.js";
 import { placeOf, type ProgressUpdate } from "./progress-update.js";
@@ -38,7 +38,7 @@ export interface MainData {
 }
 
 /** An inbox item with the outcome the run that decided it kept on it, as `applied/` and `refused/` hold them. */
-export type DecidedItem = StoredFeedback & { outcome?: { result?: Outcome; reason?: string; run?: string } };
+export type DecidedItem = StoredFeedback & { outcome?: { result?: Outcome; reason?: string; run?: string; held_reason?: PhotoHeldReason } };
 
 /**
  * Whether main holds an item's change. When it does, `file` is the file in
@@ -295,17 +295,18 @@ export const SENT_FILE = "progress/sent.json";
  * `progress/sent.json` in the inbox: the state last sent for each item in the
  * 90-day window, and when all of them were last sent.
  */
-interface SentRecord {
+export interface SentRecord<Value extends string = ProgressUpdate["state"]> {
   reconciled_at?: string;
-  items: Record<string, ProgressUpdate["state"]>;
+  items: Record<string, Value>;
 }
 
 /** States the intake never moves an item out of, so they are not sent again. */
 const FINAL_STATES: ReadonlySet<string> = new Set(["in_data", "refused"]);
 
-async function readSent(inbox: string): Promise<SentRecord> {
+/** The record of what was last sent, in `file` of the inbox. Empty when there is none. */
+export async function readSent<Value extends string = ProgressUpdate["state"]>(inbox: string, file = SENT_FILE): Promise<SentRecord<Value>> {
   try {
-    const parsed = JSON.parse(await readFile(join(inbox, SENT_FILE), "utf8")) as Partial<SentRecord>;
+    const parsed = JSON.parse(await readFile(join(inbox, file), "utf8")) as Partial<SentRecord<Value>>;
     return { ...(typeof parsed.reconciled_at === "string" ? { reconciled_at: parsed.reconciled_at } : {}), items: parsed.items ?? {} };
   } catch {
     return { items: {} };
@@ -397,32 +398,85 @@ export async function sendProgress(options: SendProgressOptions): Promise<{ sent
     updates.set(d.id, decisionProgress(base, d.outcome, () => undefined));
   }
 
-  const due = [...updates.values()].filter((u) => reconcile || record.items[u.id] !== u.state).sort((a, b) => (a.id < b.id ? -1 : 1));
   // The record keeps only items still in the window.
   const inWindow = new Set([...window.map((i) => i.id), ...options.decisions.map((d) => d.id)]);
-  const items: SentRecord["items"] = Object.fromEntries(Object.entries(record.items).filter(([id]) => inWindow.has(id)));
+  return sendChanged({
+    inbox: options.inbox,
+    file: SENT_FILE,
+    record,
+    reconcile,
+    runAt,
+    updates: updates.values(),
+    value: (u) => u.state,
+    keep: (id) => inWindow.has(id),
+    send: (part) => options.store.progress(part),
+    what: "item(s) to the intake",
+  });
+}
+
+export interface SendChangedOptions<Update extends { id: string }, Value extends string> {
+  inbox: string;
+  /** The record of what was last sent, in the inbox. */
+  file: string;
+  record: SentRecord<Value>;
+  /** Send every update, whatever the record says (the first run each Monday). */
+  reconcile: boolean;
+  runAt: string;
+  updates: Iterable<Update>;
+  /** What the record keeps for an update: an update is sent when this differs from the record's. */
+  value: (update: Update) => Value;
+  /** What the record holds for an id. Defaults to the record's own entry. */
+  last?: (id: string) => Value | undefined;
+  /** Whether the record keeps an id it holds, with the value it holds for it. */
+  keep: (id: string, value: Value) => boolean;
+  send: (part: readonly Update[]) => Promise<void>;
+  /** What a failed call is logged as sending, such as "item(s) to the intake". */
+  what: string;
+}
+
+/**
+ * The send both progress runs share: sends the updates whose value differs
+ * from the record's (every one when reconciling), in id order, in calls of
+ * up to PROGRESS_BATCH. A call that fails is logged, the rest are still
+ * sent, and its updates are sent again next run, so the intake failing never
+ * fails the run. Then writes the record: what each sent update was, the
+ * entries `keep` keeps, and when the last reconcile that sent everything ran.
+ */
+export async function sendChanged<Update extends { id: string }, Value extends string>(
+  options: SendChangedOptions<Update, Value>,
+): Promise<{ sent: number; failed: number; recorded: boolean }> {
+  const { record, reconcile, runAt, value } = options;
+  const last = options.last ?? ((id: string) => record.items[id]);
+  const due = [...options.updates].filter((u) => reconcile || last(u.id) !== value(u)).sort((a, b) => (a.id < b.id ? -1 : 1));
+  const items = Object.fromEntries(Object.entries(record.items).filter(([id, v]) => options.keep(id, v))) as Record<string, Value>;
   let sent = 0;
   let failed = 0;
   for (let start = 0; start < due.length; start += PROGRESS_BATCH) {
     const part = due.slice(start, start + PROGRESS_BATCH);
     try {
-      await options.store.progress(part);
+      await options.send(part);
       sent += part.length;
-      for (const u of part) items[u.id] = u.state;
+      for (const u of part) items[u.id] = value(u);
     } catch (error) {
       failed += part.length;
-      console.warn(`sending the progress of ${part.length} item(s) to the intake failed, trying again next run: ${String(error)}`);
+      console.warn(`sending the progress of ${part.length} ${options.what} failed, trying again next run: ${String(error)}`);
     }
   }
-  const next: SentRecord = {
+  const next: SentRecord<Value> = {
     ...(reconcile && failed === 0 ? { reconciled_at: runAt } : record.reconciled_at !== undefined ? { reconciled_at: record.reconciled_at } : {}),
-    items: Object.fromEntries(Object.entries(items).sort(([a], [b]) => (a < b ? -1 : 1))),
+    items,
   };
-  const text = `${JSON.stringify(next, null, 2)}\n`;
-  const path = join(options.inbox, SENT_FILE);
+  return { sent, failed, recorded: await writeSent(options.inbox, options.file, next) };
+}
+
+/** Writes the record of what was sent to `file` in the inbox, items sorted by id. Returns whether the file changed. */
+export async function writeSent<Value extends string>(inbox: string, file: string, record: SentRecord<Value>): Promise<boolean> {
+  const sorted = { ...record, items: Object.fromEntries(Object.entries(record.items).sort(([a], [b]) => (a < b ? -1 : 1))) };
+  const text = `${JSON.stringify(sorted, null, 2)}\n`;
+  const path = join(inbox, file);
   const before = await readFile(path, "utf8").catch(() => undefined);
-  if (text === before) return { sent, failed, recorded: false };
+  if (text === before) return false;
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, text, "utf8");
-  return { sent, failed, recorded: true };
+  return true;
 }

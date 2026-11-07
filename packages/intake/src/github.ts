@@ -103,6 +103,17 @@ export async function createAppJwt(appId: string, key: CryptoKey, nowMs: number)
 interface CachedToken {
   token: string;
   expiresAt: number;
+  /** The repository and installation the token is for, and what it may do. */
+  scope: string;
+  permissions: TokenPermissions;
+}
+
+/** Whether a token with `held` may do everything `wanted` asks: each permission at the same level or `write` for `read`. */
+function covers(held: TokenPermissions, wanted: TokenPermissions): boolean {
+  return Object.entries(wanted).every(([name, level]) => {
+    const has = (held as Record<string, string | undefined>)[name];
+    return has === level || (has === "write" && level === "read");
+  });
 }
 
 export class GitHubError extends Error {
@@ -130,15 +141,18 @@ export class GitHubApp {
 
   /**
    * Returns an installation token limited to the configured repository and
-   * the given permissions (`contents: write` by default). Each set of
-   * permissions gets a token of its own, so a permission the App lacks never
-   * stops the inbox writes.
+   * the given permissions (`contents: write` by default). A token already
+   * held for the repository that covers them is used again, so a run that
+   * asks for `contents` and `pull_requests` first and then `contents` alone
+   * asks GitHub once. Otherwise each set of permissions gets a token of its
+   * own, so a permission the App lacks never stops the inbox writes.
    */
   async token(config: GitHubAppConfig, permissions: TokenPermissions = CONTENTS_WRITE): Promise<string> {
-    const cacheKey = `${config.appId}/${config.installationId}/${config.repo}/${JSON.stringify(permissions)}`;
-    const cached = this.#cached.get(cacheKey);
-    if (cached && cached.expiresAt - this.now() > REFRESH_MARGIN_MS) {
-      return cached.token;
+    const scope = `${config.appId}/${config.installationId}/${config.repo}`;
+    const cacheKey = `${scope}/${JSON.stringify(permissions)}`;
+    const fresh = (t: CachedToken) => t.expiresAt - this.now() > REFRESH_MARGIN_MS;
+    for (const cached of this.#cached.values()) {
+      if (cached.scope === scope && fresh(cached) && covers(cached.permissions, permissions)) return cached.token;
     }
     const jwt = await createAppJwt(config.appId, await this.#importKey(config.privateKeyPem), this.now());
     const repoName = config.repo.split("/")[1];
@@ -155,7 +169,7 @@ export class GitHubApp {
     });
     if (!res.ok) throw new GitHubError(`installation token request failed with ${res.status}`, res.status);
     const body = (await res.json()) as { token: string; expires_at: string };
-    this.#cached.set(cacheKey, { token: body.token, expiresAt: Date.parse(body.expires_at) });
+    this.#cached.set(cacheKey, { token: body.token, expiresAt: Date.parse(body.expires_at), scope, permissions });
     return body.token;
   }
 
@@ -325,17 +339,6 @@ export class GitHubApp {
     if (body.encoding !== "base64" || typeof body.content !== "string") throw new GitHubError(`reading ${path} gave no content`, res.status);
     const bytes = Uint8Array.from(atob(body.content.replace(/\s+/g, "")), (c) => c.charCodeAt(0));
     return { text: new TextDecoder().decode(bytes), sha: body.sha };
-  }
-
-  /**
-   * Commits a new version of a file to `branch`. `sha` is the blob the change
-   * was made against, or undefined to create the file: GitHub answers 409
-   * when the file has moved on since (or 422 when it exists already), which
-   * throws a GitHubError with that status.
-   */
-  async updateFile(config: GitHubAppConfig, branch: string, path: string, content: string, sha: string | undefined, message: string): Promise<void> {
-    const res = await this.#call(config, REVIEW_WRITE, "PUT", `/repos/${config.repo}/contents/${path}`, { message, content: base64Utf8(content), sha, branch });
-    if (!res.ok) throw new GitHubError(`updating ${path} failed with ${res.status}`, res.status);
   }
 
   /** Adds a comment to PR `number`. */

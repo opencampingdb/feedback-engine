@@ -410,7 +410,9 @@ describe("a caller's own ref and onAnswered", () => {
 
   it("keeps sending when onAnswered throws", async () => {
     const answers: Answer[] = [];
+    // One at a time, so each try is a call of its own (batches are in batch.test.ts).
     const { client, calls, advance } = setup(["network", "network", 202], 1_000_000, {
+      maxBatchSize: 1,
       onAnswered: (a) => {
         answers.push(a);
         throw new Error("app record store failed");
@@ -568,7 +570,8 @@ describe("items waiting for a new place's id (NewPlaceRef)", () => {
   const bodies = (calls: { body: unknown }[]) => calls.map((c) => c.body as { place: string | null; report?: { kind: string; fact?: string } });
 
   it("holds items about a new place until its id comes, then sends them with that id, in order", async () => {
-    const { client, calls, advance } = setup(["network", sentNew, 202]);
+    // One at a time, so each item is a call of its own (batches are in batch.test.ts).
+    const { client, calls, advance } = setup(["network", sentNew, 202], 1_000_000, { maxBatchSize: 1 });
     expect((await client.report(newPlace)).status).toBe("queued");
     const facts = await client.reportFacts({ place: { newPlace: "np-1" }, facts: { toilets: true, pets: "leashed" }, consent: true });
     expect(facts.map((f) => f.result.status)).toEqual(["queued", "queued"]);

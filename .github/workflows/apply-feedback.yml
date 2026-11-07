@@ -5,7 +5,10 @@
 # The data repository must sit in the same organisation as the inbox.
 #
 # Each run keeps at most two open PRs to data, on fixed branches:
-#   feedback/auto    automatic changes only, merges itself when CI passes
+#   feedback/auto    automatic changes only, merges itself when CI passes. The data
+#                    repository needs Allow auto-merge (allow_auto_merge) on and a required
+#                    check on the base branch for that. Without them the run shows an error
+#                    annotation and the PR says it needs merging by hand, and the run goes on.
 #   feedback/review  changes and reports a person decides on, label needs-review
 # When a PR from a branch is already open, the run adds a commit and a comment
 # to it instead of opening another. Owner claims and listings go to
@@ -71,7 +74,9 @@ on:
           withdrawn ones, out of the intake's recent places store, and sends
           it the block list. It also tells the intake which applied fact and
           contact reports the base branch now holds, and which items the run
-          decided other than applying them.
+          decided other than applying them. With places-repository set, it is
+          the app's photo intake instead, and each run sends it only where
+          each photo is (GET /v1/photos/progress).
         type: string
         default: ""
       recent-places-url:
@@ -211,6 +216,7 @@ jobs:
             moderation
             reviews
             fees
+            photos
           persist-credentials: false
           token: ${{ steps.data-token.outputs.token }}
 
@@ -335,21 +341,41 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         working-directory: data-auto
         run: |
+          body="$RUNNER_TEMP/auto-pr-body.md"
+          # Asks GitHub to merge PR $1 once CI passes. Where it can't (allow_auto_merge off, or
+          # no required check on the base branch), says so loudly and returns 1, never failing
+          # the run: the inbox moves still have to be recorded.
+          auto_merge() {
+            if out="$(gh pr merge "$1" --repo "$DATA_REPO" --auto --squash 2>&1)"; then return 0; fi
+            echo "$out"
+            echo "::error title=Auto-merge is off on ${DATA_REPO}::The automatic PR ${1} on ${DATA_REPO} needs merging by hand, so its changes wait until someone merges it. Turn on Allow auto-merge (allow_auto_merge) in the repository's settings, under General, Pull Requests, and protect ${BASE_BRANCH} with a required status check."
+            return 1
+          }
+          # The apply writes that the PR merges itself. Says instead that it needs merging by hand.
+          by_hand() {
+            sed -i.orig "s|so this PR merges itself once CI passes\.|but auto-merge is off on ${DATA_REPO}, so this PR needs merging by hand once CI passes.|" "$body"
+            rm -f "$body.orig"
+          }
           git add -A
           git commit -m "Apply feedback automatically (run ${RUN_ID})"
           if [ "$PR_OPEN" = "true" ]; then
             git push origin HEAD:refs/heads/feedback/auto
-            gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$RUNNER_TEMP/auto-pr-body.md"
+            # Asked again each run while it is not set, in case the setting was turned on since.
+            set_already="$(gh pr view "$PR_NUMBER" --repo "$DATA_REPO" --json autoMergeRequest --jq '.autoMergeRequest != null' || echo false)"
+            if [ "$set_already" != "true" ] && ! auto_merge "$PR_NUMBER"; then by_hand; fi
+            gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$body"
             echo "pr=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           else
             # No open PR uses the branch, so it can be replaced.
             git push --force origin HEAD:refs/heads/feedback/auto
             url="$(gh pr create --repo "$DATA_REPO" --base "$BASE_BRANCH" --head feedback/auto \
-              --title "Feedback: automatic changes" --body-file "$RUNNER_TEMP/auto-pr-body.md")"
+              --title "Feedback: automatic changes" --body-file "$body")"
             echo "pr=${url}" >> "$GITHUB_OUTPUT"
-            # Repositories without auto-merge (or branch protection) merge by hand.
-            gh pr merge "$url" --auto --squash ||
-              echo "::notice::Auto-merge is not available on ${DATA_REPO}, so merge ${url} by hand."
+            if ! auto_merge "$url"; then
+              by_hand
+              gh pr edit "$url" --repo "$DATA_REPO" --body-file "$body" ||
+                echo "::warning::could not say on ${url} that it needs merging by hand"
+            fi
           fi
 
       - name: Publish changes for review

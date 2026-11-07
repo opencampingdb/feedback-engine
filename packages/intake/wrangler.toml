@@ -59,6 +59,8 @@ invocation_logs = false
 [triggers]
 crons = ["* * * * *"]
 
+# The daily counters of an intake without RECENT_LIST. With RECENT_LIST bound
+# they are kept in D1 (rate_counts) and this namespace is no longer read or written.
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
 id = "REPLACE_ME_KV_NAMESPACE_ID"

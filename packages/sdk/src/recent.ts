@@ -47,11 +47,27 @@ export interface RecentChange {
   in_data_at: string | null;
 }
 
+/**
+ * The newest data release the intake knows of, announced by the data
+ * repository's release workflow once the release is out. An app whose
+ * release has an older `data_version` can fetch the newer one.
+ */
+export interface RecentRelease {
+  /** The release's `<commit time>-<short sha>`, as in its manifest. */
+  data_version: string;
+  /** When the intake was told of it, ISO 8601 UTC. */
+  published: string;
+  /** The release's file layout, when the release sends one. */
+  layout_version?: number;
+}
+
 /** What `GET /v1/places/recent` answers. */
 export interface RecentList {
   places: RecentPlace[];
   /** Absent from intakes older than SDK 0.10.0. */
   changes?: RecentChange[];
+  /** Absent before the intake has been told of a release, and from intakes older than SDK 0.17.0. */
+  release?: RecentRelease;
 }
 
 /** The part of a release place record (`places.ndjson.gz`) that `withRecentChanges` reads and writes. */
