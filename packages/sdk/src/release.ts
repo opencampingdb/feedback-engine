@@ -3,7 +3,11 @@ import { sha256HexBytes } from "./sha256.js";
 /** Where the data repository publishes the newest release's manifest. */
 export const DEFAULT_MANIFEST_URL = "https://github.com/opencampingdb/data/releases/latest/download/manifest.json";
 
-/** The most changesets one update applies. A longer path downloads the whole database instead. */
+/**
+ * The most changesets one update applies. A longer path downloads the whole
+ * database instead, as does a chain whose files add up to at least the
+ * database's own `bytes`.
+ */
 export const MAX_CHANGESET_CHAIN = 50;
 
 /**
@@ -16,14 +20,17 @@ export interface ReleaseDatabaseAdapter {
   /** The `layout_version` in the database's `release` table, or null when the app has no database yet. */
   currentLayoutVersion(): Promise<number | null>;
   /**
-   * Apply one changeset (already checked and decompressed) inside a
-   * transaction, all or nothing: when it throws, the database must be as it
-   * was before the call.
+   * Apply the chain of changesets (each already checked and decompressed) in
+   * order, inside one exclusive transaction, all or nothing: when it throws,
+   * the database must be on the release it started from.
    */
-  applyChangeset(bytes: Uint8Array): Promise<void>;
+  applyChangesets(chain: Uint8Array[]): Promise<void>;
   /**
    * Swap in a whole database file (already checked and decompressed) in one
-   * step: when it throws, the app must still read its old database.
+   * step: when it throws, the app must still read its old database. The
+   * updater holds no other copy of `bytes` and drops the download before the
+   * call, so writing them to a file straight away keeps the phone's memory
+   * to this one copy.
    */
   replaceDatabase(bytes: Uint8Array): Promise<void>;
 }
@@ -42,6 +49,12 @@ export interface ReleaseUpdaterOptions {
   adapter: ReleaseDatabaseAdapter;
   /** The database layouts (`layout_version`) this build can read. */
   readableLayouts: readonly number[];
+  /**
+   * The record formats (`format_version`) this build can read. A release of
+   * a format higher than all of them is not downloaded (`format_unsupported`).
+   * A lower one is read, as CONNECTING.md says.
+   */
+  readableFormats: readonly number[];
   /** Defaults to `DEFAULT_MANIFEST_URL`. */
   manifestUrl?: string;
   /** Defaults to `globalThis.fetch`. */
@@ -53,14 +66,15 @@ export interface ReleaseUpdaterOptions {
   gunzip?: Gunzip;
 }
 
-export type ReleaseUpdateStatus = "up_to_date" | "updated" | "replaced" | "layout_unsupported" | "failed";
+export type ReleaseUpdateStatus = "up_to_date" | "updated" | "replaced" | "layout_unsupported" | "format_unsupported" | "failed";
 
 /**
  * Why an update stopped. `network`: a request failed or answered other than
  * 2xx. `manifest`: the manifest is not one the updater can read. `checksum`: a
  * download's size or SHA-256 is not the manifest's. `gunzip`: a download did
  * not decompress. `read`, `apply`, `replace`: that adapter call threw.
- * `mismatch`: after the update, the database names another release than the
+ * `mismatch`: after the update, even after a whole database replaced a chain
+ * that left the wrong release, the database names another release than the
  * manifest's.
  */
 export type ReleaseUpdateReason = "network" | "manifest" | "checksum" | "gunzip" | "read" | "apply" | "replace" | "mismatch";
@@ -97,12 +111,13 @@ interface ChangesetEntry extends ReleaseFile {
 
 interface Manifest {
   data_version: string;
+  format_version: number;
   layout_version: number;
   database: ReleaseFile;
   changesets: ChangesetEntry[];
 }
 
-class Stop extends Error {
+class UpdateStopped extends Error {
   constructor(readonly reason: ReleaseUpdateReason) {
     super(reason);
   }
@@ -114,14 +129,21 @@ const isFile = (value: unknown): value is ReleaseFile =>
   isRecord(value) && typeof value.url === "string" && typeof value.sha256 === "string" && Number.isInteger(value.bytes);
 
 function readManifest(value: unknown): Manifest {
-  if (!isRecord(value) || typeof value.data_version !== "string" || !Number.isInteger(value.layout_version) || !isFile(value.database)) {
-    throw new Stop("manifest");
+  if (
+    !isRecord(value) ||
+    typeof value.data_version !== "string" ||
+    !Number.isInteger(value.format_version) ||
+    !Number.isInteger(value.layout_version) ||
+    !isFile(value.database)
+  ) {
+    throw new UpdateStopped("manifest");
   }
   const changesets = Array.isArray(value.changesets)
     ? value.changesets.filter((entry: unknown): entry is ChangesetEntry => isFile(entry) && typeof (entry as unknown as Record<string, unknown>).from === "string" && typeof (entry as unknown as Record<string, unknown>).to === "string")
     : [];
   return {
     data_version: value.data_version,
+    format_version: value.format_version as number,
     layout_version: value.layout_version as number,
     database: value.database,
     changesets: changesets.map((entry) => ({ ...entry, day: entry.day === true })),
@@ -136,17 +158,17 @@ function readManifest(value: unknown): Manifest {
 function changesetPath<C extends { from: string; to: string; day: boolean }>(changesets: readonly C[], from: string, to: string): C[] | null {
   if (from === to) return [];
   // For each release reached: the changeset into it and how many of the path's files are not daily.
-  const best = new Map<string, { via: C | null; plain: number }>([[from, { via: null, plain: 0 }]]);
+  const best = new Map<string, { via: C | null; nonDaily: number }>([[from, { via: null, nonDaily: 0 }]]);
   let frontier = [from];
   while (frontier.length > 0 && !best.has(to)) {
-    const level = new Map<string, { via: C; plain: number }>();
+    const level = new Map<string, { via: C; nonDaily: number }>();
     for (const at of frontier) {
       const here = best.get(at)!;
       for (const edge of changesets) {
         if (edge.from !== at || best.has(edge.to)) continue;
-        const plain = here.plain + (edge.day ? 0 : 1);
+        const nonDaily = here.nonDaily + (edge.day ? 0 : 1);
         const known = level.get(edge.to);
-        if (!known || plain < known.plain) level.set(edge.to, { via: edge, plain });
+        if (!known || nonDaily < known.nonDaily) level.set(edge.to, { via: edge, nonDaily });
       }
     }
     for (const [release, step] of level) best.set(release, step);
@@ -190,89 +212,102 @@ async function decompressionStreamGunzip(bytes: Uint8Array): Promise<Uint8Array>
  * database. See docs/integration.md, "Keeping the data current".
  */
 export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpdater {
-  const { adapter, readableLayouts } = options;
+  const { adapter, readableLayouts, readableFormats } = options;
+  const wholeNumbers = (list: readonly number[] | undefined) => Array.isArray(list) && list.length > 0 && list.every(Number.isInteger);
+  if (!wholeNumbers(readableLayouts)) throw new TypeError("createReleaseUpdater: readableLayouts must list the layout versions this build reads");
+  if (!wholeNumbers(readableFormats)) throw new TypeError("createReleaseUpdater: readableFormats must list the format versions this build reads");
+  const newestFormat = Math.max(...readableFormats);
   const manifestUrl = options.manifestUrl ?? DEFAULT_MANIFEST_URL;
   const doFetch: ReleaseFetchLike = options.fetch ?? ((url, init) => (globalThis.fetch as unknown as ReleaseFetchLike)(url, init));
-  let gunzip = options.gunzip;
-  if (!gunzip) {
-    if (typeof globalThis.DecompressionStream !== "function") {
-      throw new TypeError("createReleaseUpdater: this runtime has no DecompressionStream, so pass a gunzip option");
-    }
-    gunzip = decompressionStreamGunzip;
-  }
-  const undo = gunzip;
+  let gunzipFn: Gunzip;
+  if (options.gunzip) gunzipFn = options.gunzip;
+  else if (typeof globalThis.DecompressionStream === "function") gunzipFn = decompressionStreamGunzip;
+  else throw new TypeError("createReleaseUpdater: this runtime has no DecompressionStream, so pass a gunzip option");
 
   async function get(url: string, accept: string) {
     let res: Awaited<ReturnType<ReleaseFetchLike>>;
     try {
       res = await doFetch(url, { method: "GET", headers: { accept } });
     } catch {
-      throw new Stop("network");
+      throw new UpdateStopped("network");
     }
-    if (res.status < 200 || res.status >= 300) throw new Stop("network");
+    if (res.status < 200 || res.status >= 300) throw new UpdateStopped("network");
     return res;
   }
 
+  /**
+   * Downloads a file, checks its size and SHA-256, and undoes gzip. The
+   * download is hashed in place and is unreachable once this returns, so a
+   * whole database is held at most twice (compressed and not) while gunzip
+   * runs, and once after.
+   */
   async function download(file: ReleaseFile): Promise<Uint8Array> {
     const res = await get(file.url, "application/octet-stream");
     let gz: Uint8Array;
     try {
       gz = new Uint8Array(await res.arrayBuffer());
     } catch {
-      throw new Stop("network");
+      throw new UpdateStopped("network");
     }
-    if (gz.length !== file.bytes || sha256HexBytes(gz) !== file.sha256.toLowerCase()) throw new Stop("checksum");
+    if (gz.length !== file.bytes || sha256HexBytes(gz) !== file.sha256.toLowerCase()) throw new UpdateStopped("checksum");
     try {
-      return await undo(gz);
+      return await gunzipFn(gz);
     } catch {
-      throw new Stop("gunzip");
+      throw new UpdateStopped("gunzip");
     }
   }
 
-  async function call<T>(reason: ReleaseUpdateReason, run: () => Promise<T>): Promise<T> {
+  /** Runs an adapter call, stopping the update with `reason` when it throws. */
+  async function orStop<T>(reason: ReleaseUpdateReason, run: () => Promise<T>): Promise<T> {
     try {
       return await run();
     } catch {
-      throw new Stop(reason);
+      throw new UpdateStopped(reason);
     }
+  }
+
+  /** Downloads the whole database and swaps it in, then reads back the release it holds. */
+  async function replaceWhole(manifest: Manifest): Promise<string | null> {
+    const database = await download(manifest.database);
+    await orStop("replace", () => adapter.replaceDatabase(database));
+    return orStop("read", () => adapter.currentDataVersion());
   }
 
   return {
     async update(updateOptions = {}) {
       let dataVersion: string | null = null;
       try {
-        dataVersion = await call("read", () => adapter.currentDataVersion());
+        dataVersion = await orStop("read", () => adapter.currentDataVersion());
         if (updateOptions.knownDataVersion !== undefined && updateOptions.knownDataVersion === dataVersion) {
           return { status: "up_to_date", dataVersion };
         }
         const res = await get(manifestUrl, "application/json");
         const manifest = readManifest(await res.json().catch(() => undefined));
+        if (manifest.format_version > newestFormat) return { status: "format_unsupported", dataVersion };
         if (!readableLayouts.includes(manifest.layout_version)) return { status: "layout_unsupported", dataVersion };
-        const layout = dataVersion === null ? null : await call("read", () => adapter.currentLayoutVersion());
+        const layout = dataVersion === null ? null : await orStop("read", () => adapter.currentLayoutVersion());
         if (manifest.data_version === dataVersion && manifest.layout_version === layout) return { status: "up_to_date", dataVersion };
 
         const path = dataVersion !== null && layout === manifest.layout_version ? changesetPath(manifest.changesets, dataVersion, manifest.data_version) : null;
-        let status: ReleaseUpdateStatus;
-        if (path && path.length > 0 && path.length <= MAX_CHANGESET_CHAIN) {
+        const chainBytes = path?.reduce((sum, entry) => sum + entry.bytes, 0) ?? 0;
+        if (path && path.length > 0 && path.length <= MAX_CHANGESET_CHAIN && chainBytes < manifest.database.bytes) {
           // Download and check every file before touching the database, so a
           // failed download leaves it on its release.
-          const changesets: Uint8Array[] = [];
-          for (const entry of path) changesets.push(await download(entry));
-          for (const changeset of changesets) {
-            await call("apply", () => adapter.applyChangeset(changeset));
-          }
-          status = "updated";
-        } else {
-          const database = await download(manifest.database);
-          await call("replace", () => adapter.replaceDatabase(database));
-          status = "replaced";
+          const chain: Uint8Array[] = [];
+          for (const entry of path) chain.push(await download(entry));
+          await orStop("apply", () => adapter.applyChangesets(chain));
+          dataVersion = await orStop("read", () => adapter.currentDataVersion());
+          if (dataVersion === manifest.data_version) return { status: "updated", dataVersion };
+          // The chain left another release than the manifest's, as an apply
+          // that settles conflicts by replacing rows can: start again from the
+          // whole database.
         }
-        dataVersion = await call("read", () => adapter.currentDataVersion());
+        dataVersion = await replaceWhole(manifest);
         if (dataVersion !== manifest.data_version) return { status: "failed", dataVersion, reason: "mismatch" };
-        return { status, dataVersion };
+        return { status: "replaced", dataVersion };
       } catch (error) {
-        const reason = error instanceof Stop ? error.reason : "read";
-        // After a failed step the database is on the last release it reached.
+        const reason = error instanceof UpdateStopped ? error.reason : "read";
+        // A failed chain or replace leaves the database on the release it had.
         const now = await adapter.currentDataVersion().catch(() => dataVersion);
         return { status: "failed", dataVersion: now, reason };
       }

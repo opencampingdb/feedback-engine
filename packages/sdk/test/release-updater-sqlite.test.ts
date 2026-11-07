@@ -54,16 +54,21 @@ async function gzip(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-/** The adapter an app writes, over node:sqlite: each changeset in a transaction, aborting on any conflict. */
+/**
+ * The adapter an app writes, over node:sqlite: the whole chain in one
+ * exclusive transaction, aborting on any conflict, as CONNECTING.md says.
+ */
 function adapterFor(db: Database): ReleaseDatabaseAdapter {
   return {
     currentDataVersion: async () => (db.prepare("SELECT data_version FROM release").get()?.data_version as string | undefined) ?? null,
     currentLayoutVersion: async () => (db.prepare("SELECT layout_version FROM release").get()?.layout_version as number | undefined) ?? null,
-    applyChangeset: async (bytes) => {
-      db.exec("BEGIN IMMEDIATE");
+    applyChangesets: async (chain) => {
+      db.exec("BEGIN EXCLUSIVE");
       try {
-        const applied = db.applyChangeset(bytes, { onConflict: () => constants.SQLITE_CHANGESET_ABORT });
-        if (!applied) throw new Error("the changeset conflicts with the database");
+        for (const bytes of chain) {
+          const applied = db.applyChangeset(bytes, { onConflict: () => constants.SQLITE_CHANGESET_ABORT });
+          if (!applied) throw new Error("a changeset conflicts with the database");
+        }
         db.exec("COMMIT");
       } catch (error) {
         db.exec("ROLLBACK");
@@ -87,9 +92,10 @@ async function serve(changesets: { from: string; to: string; bytes: Uint8Array }
     }),
   );
   const manifest = {
+    format_version: 12,
     data_version: latest,
     layout_version: 1,
-    database: { file: "ocdb.sqlite.gz", url: "https://example.org/ocdb.sqlite.gz", sha256: "0".repeat(64), bytes: 1 },
+    database: { file: "ocdb.sqlite.gz", url: "https://example.org/ocdb.sqlite.gz", sha256: "0".repeat(64), bytes: 1_000_000 },
     changesets: entries,
   };
   const fetch: ReleaseFetchLike = async (url) => {
@@ -110,7 +116,7 @@ describe.skipIf(!sessions)("createReleaseUpdater with node:sqlite", () => {
     const phone = releaseDatabase(V1, [["ocdb_a", "River Bend", "camp_site"], ["ocdb_b", "Old Rest Stop", "rest_area"]]);
     phone.exec("CREATE TABLE own_places (id TEXT PRIMARY KEY, name TEXT); INSERT INTO own_places VALUES ('new_1', 'My Spot');");
 
-    const result = await createReleaseUpdater({ adapter: adapterFor(phone), readableLayouts: [1], fetch, manifestUrl: MANIFEST_URL }).update();
+    const result = await createReleaseUpdater({ adapter: adapterFor(phone), readableLayouts: [1], readableFormats: [12], fetch, manifestUrl: MANIFEST_URL }).update();
 
     expect(result).toEqual({ status: "updated", dataVersion: V3 });
     expect(phone.prepare("SELECT id, name, kind FROM places ORDER BY id").all().map((row) => ({ ...row }))).toEqual(
@@ -124,12 +130,26 @@ describe.skipIf(!sessions)("createReleaseUpdater with node:sqlite", () => {
     // Someone wrote to a release table, which a changeset expects untouched.
     const phone = releaseDatabase(V1, [["ocdb_a", "Edited on the phone", "camp_site"], ["ocdb_b", "Old Rest Stop", "rest_area"]]);
 
-    const result = await createReleaseUpdater({ adapter: adapterFor(phone), readableLayouts: [1], fetch, manifestUrl: MANIFEST_URL }).update();
+    const result = await createReleaseUpdater({ adapter: adapterFor(phone), readableLayouts: [1], readableFormats: [12], fetch, manifestUrl: MANIFEST_URL }).update();
 
     expect(result).toEqual({ status: "failed", dataVersion: V1, reason: "apply" });
     expect(phone.prepare("SELECT id, name FROM places ORDER BY id").all().map((row) => ({ ...row }))).toEqual([
       { id: "ocdb_a", name: "Edited on the phone" },
       { id: "ocdb_b", name: "Old Rest Stop" },
+    ]);
+  });
+
+  it("leaves the database on the release it started from when a later changeset in the chain conflicts", async () => {
+    const fetch = await serve([{ from: V1, to: V2, bytes: changeset(r1 as Database, r2 as Database) }, { from: V2, to: V3, bytes: changeset(r2 as Database, r3 as Database) }], V3);
+    // The first changeset leaves ocdb_b alone and applies. The second deletes it, which conflicts with the edit.
+    const phone = releaseDatabase(V1, [["ocdb_a", "River Bend", "camp_site"], ["ocdb_b", "Edited on the phone", "rest_area"]]);
+
+    const result = await createReleaseUpdater({ adapter: adapterFor(phone), readableLayouts: [1], readableFormats: [12], fetch, manifestUrl: MANIFEST_URL }).update();
+
+    expect(result).toEqual({ status: "failed", dataVersion: V1, reason: "apply" });
+    expect(phone.prepare("SELECT id, name FROM places ORDER BY id").all().map((row) => ({ ...row }))).toEqual([
+      { id: "ocdb_a", name: "River Bend" },
+      { id: "ocdb_b", name: "Edited on the phone" },
     ]);
   });
 });
