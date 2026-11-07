@@ -506,6 +506,235 @@ import { ATTRIBUTION } from "@opencampingdb/feedback";
 <Text style={{ fontSize: 11, opacity: 0.7 }}>{ATTRIBUTION}</Text>;
 ```
 
+## 10. Keeping the data current
+
+Each Open Camping DB release comes as an SQLite database, `ocdb.sqlite.gz`, with changesets that update the databases of the last 50 releases to it. The tables, columns and indexes, and how the changesets are made, are in the data repository's [CONNECTING.md](https://github.com/opencampingdb/data/blob/main/CONNECTING.md), sections "The SQLite database" and "Changesets". `layout_version`, in the manifest and in the database's `release` table, names the version of those tables, and no changeset crosses a change of it.
+
+### The release updater
+
+`createReleaseUpdater` keeps the app's copy of the database at the newest release. The app gives it an adapter over its own SQLite library:
+
+```ts
+interface ReleaseDatabaseAdapter {
+  currentDataVersion(): Promise<string | null>; // release.data_version, or null with no database
+  currentLayoutVersion(): Promise<number | null>; // release.layout_version, or null with no database
+  applyChangeset(bytes: Uint8Array): Promise<void>; // in a transaction, all or nothing
+  replaceDatabase(bytes: Uint8Array): Promise<void>; // swap the whole file in one step
+}
+
+const updater = createReleaseUpdater({
+  adapter,
+  readableLayouts: [1], // the layout versions this build reads
+  gunzip, // where there is no DecompressionStream, as in React Native
+  // fetch: defaults to globalThis.fetch, which must follow redirects
+  // manifestUrl: defaults to https://github.com/opencampingdb/data/releases/latest/download/manifest.json
+});
+
+const result = await updater.update({ knownDataVersion: recent.release?.data_version });
+// { status: "up_to_date" | "updated" | "replaced" | "layout_unsupported" | "failed", dataVersion, reason? }
+```
+
+`update()` does this:
+
+1. When `knownDataVersion`, the recent list's `release.data_version`, is the database's own, it answers `up_to_date` with no request.
+2. Otherwise it fetches the manifest, one request. When its `layout_version` is not in `readableLayouts` it stops, keeps the database and answers `layout_unsupported`. When its `data_version` is the database's own, it answers `up_to_date`.
+3. It downloads the whole database when the app has none, when the layout differs from the database's, when no chain of changesets in the manifest leads from the database's `data_version` to the newest, or when the chain is more than 50 files (`MAX_CHANGESET_CHAIN`). It answers `replaced`.
+4. Otherwise it takes the chain with the fewest files, and of two as short, the one with more daily changesets. It downloads every file on it and checks each one's `bytes` and `sha256` before applying any, undoes gzip, then applies them in order, each with one `applyChangeset` call, and answers `updated`.
+5. Either way it reads `data_version` back from the adapter, and answers `failed` with `mismatch` when that is not the manifest's.
+
+`update()` never throws. On any failure it answers `failed` with a `reason`: `network` (a request failed or answered other than 2xx), `manifest`, `checksum`, `gunzip`, `read`, `apply` or `replace` (that adapter call threw), or `mismatch`. A failed download or checksum leaves the database as it was, because nothing is applied until every file has passed. Each changeset is applied in its own transaction, so when one fails partway through a chain, the database stays on the last release it reached, which is a whole release, and `dataVersion` names it. The next run carries on from there. A failed replace leaves the old database in use. `dataVersion` is always the release the app's database holds after the run, so compare contribution progress against it (`progressInRelease`).
+
+When to ask is the app's decision. Ask at most once an hour, and only when the recent list says a newer release exists: pass its `release.data_version` as `knownDataVersion`, and the updater makes no request while the two agree.
+
+Gzip is undone with `DecompressionStream` where the runtime has it, as in browsers and Node. React Native 0.88 and Expo SDK 58 don't provide it, so pass `gunzip`, a function from the gzipped bytes to the plain bytes, such as `gunzipSync` from the pure JavaScript [`fflate`](https://www.npmjs.com/package/fflate) package. `createReleaseUpdater` throws when there is neither. The fetch must answer `arrayBuffer()`, which the fetch in Expo and React Native does.
+
+### Keep the traveller's own data apart
+
+A changeset expects the release tables exactly as the release left them, and a whole database replaces them. So treat the release database as read only: add no rows, tables or triggers to it. Keep what the traveller makes, such as the places they added, their edits to released places, and links from the ids the app stored to the places they moved to, in a database of the app's own, attach the release to it, and read both through views.
+
+```sql
+-- In the app's own database, traveller.sqlite.
+CREATE TABLE IF NOT EXISTS added_places (
+  id TEXT PRIMARY KEY, -- the ocdb_ id from newPlaceId once the report is sent
+  name TEXT,
+  kind TEXT NOT NULL,
+  lat REAL NOT NULL,
+  lon REAL NOT NULL,
+  record TEXT NOT NULL, -- the place as the app shows it, as JSON
+  added TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS place_edits (
+  place TEXT PRIMARY KEY, -- a released place's id
+  name TEXT, -- NULL keeps the release's
+  kind TEXT,
+  facts TEXT, -- a JSON object of the facts the traveller set, laid over the release's
+  edited TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS merged_ids (
+  id TEXT PRIMARY KEY, -- an id the app stored
+  merged_into TEXT NOT NULL -- the place it now points at
+);
+```
+
+With the release database open as `main` and the app's own attached as `own`, these views read both. A view in `main` cannot name a table in an attached database, and the release database is read only, so make them `TEMP` views, again each time the connection opens:
+
+```sql
+CREATE TEMP VIEW all_places AS
+SELECT p.id, COALESCE(e.name, p.name) AS name, COALESCE(e.kind, p.kind) AS kind, p."group", p.lat, p.lon, p.state,
+  CASE WHEN e.facts IS NULL THEN p.record
+       ELSE json_set(p.record, '$.facts', json_patch(json_extract(p.record, '$.facts'), e.facts)) END AS record,
+  'release' AS source
+FROM main.places AS p
+LEFT JOIN own.place_edits AS e ON e.place = p.id
+UNION ALL
+SELECT a.id, a.name, a.kind, NULL, a.lat, a.lon, NULL, a.record, 'traveller'
+FROM own.added_places AS a
+WHERE NOT EXISTS (SELECT 1 FROM main.places WHERE id = a.id) -- the release has it now
+  AND NOT EXISTS (SELECT 1 FROM main.merged WHERE id = a.id)
+  AND NOT EXISTS (SELECT 1 FROM own.merged_ids WHERE id = a.id);
+
+CREATE TEMP VIEW place_redirects AS
+SELECT id, merged_into FROM main.merged
+UNION ALL
+SELECT id, merged_into FROM own.merged_ids WHERE id NOT IN (SELECT id FROM main.merged);
+```
+
+`all_places` prefers the traveller's name, kind and facts over a released place's, and shows a place the traveller added until a release has it under the same id, when the release's version takes over. Look an id the app stored up in `place_redirects` when `all_places` doesn't have it. Removing the traveller's data clears the app's own tables and leaves the release as it is.
+
+### Expo SQLite
+
+This adapter uses `expo-sqlite` (Expo SDK 58), whose `SQLiteSession.applyChangesetAsync` applies a session changeset, and `fflate` for gzip:
+
+```sh
+npx expo install expo-sqlite
+npm install fflate
+```
+
+Each release database is a file of its own, and the name of the one in use is kept in `expo-sqlite/kv-store`. Replacing the database writes the new file, opens it and only then moves the name over, so the app reads its old database until the new one is ready, and an interrupted replace leaves it on the old one.
+
+```ts
+// release-database.ts
+import Storage from "expo-sqlite/kv-store";
+import { backupDatabaseAsync, deleteDatabaseAsync, deserializeDatabaseAsync, openDatabaseAsync, type SQLiteDatabase } from "expo-sqlite";
+import { gunzipSync } from "fflate";
+import { createReleaseUpdater, type ReleaseDatabaseAdapter } from "@opencampingdb/feedback";
+
+const CURRENT = "example-app.release-file";
+const TRAVELLER_TABLES = `...`; // the CREATE TABLE statements above
+const TRAVELLER_VIEWS = `...`; // the CREATE TEMP VIEW statements above
+
+let traveller: SQLiteDatabase | null = null;
+let release: SQLiteDatabase | null = null;
+
+async function travellerDatabase(): Promise<SQLiteDatabase> {
+  if (!traveller) {
+    traveller = await openDatabaseAsync("traveller.sqlite");
+    await traveller.execAsync(TRAVELLER_TABLES);
+  }
+  return traveller;
+}
+
+async function openRelease(name: string): Promise<SQLiteDatabase> {
+  const db = await openDatabaseAsync(name);
+  try {
+    await db.runAsync("ATTACH DATABASE ? AS own", (await travellerDatabase()).databasePath);
+    await db.execAsync(TRAVELLER_VIEWS);
+    return db;
+  } catch (error) {
+    await db.closeAsync();
+    throw error;
+  }
+}
+
+/** The release database, with the traveller's tables attached, or null before the first one. */
+export async function releaseDatabase(): Promise<SQLiteDatabase | null> {
+  if (release) return release;
+  const name = await Storage.getItemAsync(CURRENT);
+  if (name) release = await openRelease(name);
+  return release;
+}
+
+async function releaseRow() {
+  const db = await releaseDatabase();
+  return db ? await db.getFirstAsync<{ data_version: string; layout_version: number }>("SELECT data_version, layout_version FROM main.release") : null;
+}
+
+const adapter: ReleaseDatabaseAdapter = {
+  currentDataVersion: async () => (await releaseRow())?.data_version ?? null,
+  currentLayoutVersion: async () => (await releaseRow())?.layout_version ?? null,
+
+  async applyChangeset(bytes) {
+    const db = await releaseDatabase();
+    if (!db) throw new Error("no release database");
+    // A connection of its own, with only the release database open: a throw rolls the whole changeset back.
+    await db.withExclusiveTransactionAsync(async (txn) => {
+      const session = await txn.createSessionAsync();
+      try {
+        await session.applyChangesetAsync(bytes);
+      } finally {
+        await session.closeAsync();
+      }
+    });
+  },
+
+  async replaceDatabase(bytes) {
+    const name = `ocdb-${Date.now()}.sqlite`;
+    let next: SQLiteDatabase | null = null;
+    try {
+      const incoming = await deserializeDatabaseAsync(bytes); // throws when the bytes aren't an SQLite database
+      try {
+        const file = await openDatabaseAsync(name);
+        try {
+          await backupDatabaseAsync({ sourceDatabase: incoming, destDatabase: file });
+        } finally {
+          await file.closeAsync();
+        }
+      } finally {
+        await incoming.closeAsync();
+      }
+      next = await openRelease(name);
+      const previous = await Storage.getItemAsync(CURRENT);
+      await Storage.setItemAsync(CURRENT, name); // the step that moves the app to the new release
+      const old = release;
+      release = next;
+      // The app is on the new release now, so tidying up must not fail the replace.
+      await old?.closeAsync().catch(() => {});
+      if (previous) await deleteDatabaseAsync(previous).catch(() => {});
+    } catch (error) {
+      if (next && release !== next) await next.closeAsync().catch(() => {});
+      if (release !== next) await deleteDatabaseAsync(name).catch(() => {});
+      throw error;
+    }
+  },
+};
+
+export const releaseUpdater = createReleaseUpdater({
+  adapter,
+  readableLayouts: [1],
+  gunzip: (bytes) => gunzipSync(bytes),
+});
+
+const HOUR = 60 * 60 * 1000;
+let lastAsked = 0;
+
+/** Call when the app opens or comes to the front, with the recent list's newest release. */
+export async function updateRelease(knownDataVersion: string | undefined) {
+  if (Date.now() - lastAsked < HOUR) return;
+  lastAsked = Date.now();
+  const result = await releaseUpdater.update({ knownDataVersion });
+  if (result.status === "failed") console.warn("data update failed", result.reason); // try again next time
+  return result;
+}
+```
+
+Three things to know about it:
+
+- `applyChangesetAsync` in expo-sqlite settles a conflict by replacing the row, where `sqlite3changeset_apply` in the data repository's own check aborts. Applied to its own `from` release, a changeset has no conflicts, and the updater only ever applies a chain that starts from the database's `data_version`, so this matters only when something wrote to the release tables. Keep them read only. The updater also reads `data_version` back after the chain and answers `mismatch` when it is not the newest release.
+- `withExclusiveTransactionAsync` runs on a new connection, so the attached `own` database and the temp views are not on it, and the changeset touches the release tables alone. Other writes to the release database would fail with `database is locked` meanwhile, and the app makes none.
+- The app's other code should read through `releaseDatabase()` each time rather than keep the connection, because a replace closes the old one. Run `updateRelease` when no screen is in the middle of reading the release, or reopen what a screen shows after it answers `updated` or `replaced`.
+
+An app that ships a database in its build can copy it in on first launch with `importDatabaseFromAssetAsync`, then set `CURRENT` to its name. Until then `currentDataVersion` answers null, and the first update downloads the whole database.
+
 ## On the web
 
 Pass a storage adapter over `localStorage`. The intake answers CORS requests from the origins its operator allows.
