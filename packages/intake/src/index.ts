@@ -1310,9 +1310,10 @@ export function createHandler(deps: Deps) {
 
   /**
    * `POST /v1/photos/progress`, for the photo apply run: as
-   * `POST /v1/feedback/progress`, with photo ids, `held_reason` on `held`,
-   * and `run_at`, the run's time, on every update. See
-   * `recordPhotoProgress` for how a row moves.
+   * `POST /v1/feedback/progress`, with photo ids and `held_reason` on
+   * `held`, and the feedback ids of photo reports and erasures, which apps
+   * read with `GET /v1/feedback/progress`. Every update carries `run_at`,
+   * the run's time. See `recordPhotoProgress` for how a row moves.
    */
   async function postPhotoProgress(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
     if (!env.PHOTOS_PENDING) return json(404, { error: "not_found" }, cors);
@@ -1322,13 +1323,14 @@ export function createHandler(deps: Deps) {
     const isUpdate = (value: unknown): value is PhotoProgressUpdate => {
       if (typeof value !== "object" || value === null) return false;
       const { id, state, reason, by, held_reason: held, place, decided_at: decided, in_data_at: inData, run_at: runAt } = value as Record<string, unknown>;
+      // A photo's progress by its photo id, or a photo report's or erasure's by its feedback id.
       return (
-        isPhotoId(id) &&
+        (isPhotoId(id) || isFeedbackId(id)) &&
         isIsoSeconds(runAt) &&
         (PROGRESS_UPDATE_STATES as readonly unknown[]).includes(state) &&
         (reason === undefined || (typeof reason === "string" && reason.length <= 1000)) &&
         (state === "refused" ? by === "rules" || by === "reviewer" : by === undefined) &&
-        (held === undefined || (state === "held" && (PHOTO_HELD_REASONS as readonly unknown[]).includes(held))) &&
+        (held === undefined || (state === "held" && isPhotoId(id) && (PHOTO_HELD_REASONS as readonly unknown[]).includes(held))) &&
         (place === undefined || isPlaceId(place)) &&
         (decided === undefined || isIsoSeconds(decided)) &&
         (state === "in_data" ? isIsoSeconds(inData) : inData === undefined)

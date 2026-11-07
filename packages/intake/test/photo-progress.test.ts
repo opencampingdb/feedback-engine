@@ -263,6 +263,20 @@ describe("photo progress at the photo intake", () => {
     expect(await progressOf(OLD)).toEqual({ id: OLD, state: "refused", by: "rules", reason: "photo has no contributor", place: PLACE, received: "2026-11-01T00:00:00Z" });
   });
 
+  it("takes the progress of a photo report or erasure by its feedback id, served from /v1/feedback/progress", async () => {
+    const report = `fb_${ulid(Date.parse("2026-11-02T00:00:00Z"), () => new Uint8Array(16).fill(3))}`;
+    const res = await post([
+      { id: report, state: "in_data", reason: "photo reports are read by a person", place: PLACE, decided_at: "2026-11-02T01:00:00Z", in_data_at: "2026-11-02T02:00:00Z" },
+    ]);
+    expect(await res.json()).toEqual({ updated: 1 });
+    const read = await handle(new Request(`https://photos-upload.example/v1/feedback/progress?ids=${report}`), e);
+    expect(((await read.json()) as { items: unknown[] }).items).toEqual([
+      { id: report, state: "in_data", reason: "photo reports are read by a person", place: PLACE, received: "2026-11-02T00:00:00Z", decided_at: "2026-11-02T01:00:00Z", in_data_at: "2026-11-02T02:00:00Z" },
+    ]);
+    // A photo's held reason is never a report's.
+    expect((await post([{ id: report, state: "held", held_reason: "reported" }])).status).toBe(400);
+  });
+
   it("leaves feedback progress to /v1/feedback/progress", async () => {
     const id = (await send()).body.id!;
     const res = await handle(new Request(`https://photos-upload.example/v1/feedback/progress?ids=${id}`), e);

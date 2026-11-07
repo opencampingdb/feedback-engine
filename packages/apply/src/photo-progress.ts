@@ -112,6 +112,53 @@ export function photoProgressOf(item: DecidedItem, main: PhotoMain, context: Pho
   return { ...base, state: "accepted", ...withReason };
 }
 
+/** Where main keeps the photos taken out of the records, which dates a removal. */
+export const REMOVED_PHOTOS_FILE = "moderation/removed_photos.json";
+/** Where main keeps the blocked contributors, which dates a block. */
+export const BLOCKED_FILE = "moderation/blocked_contributors.json";
+
+/**
+ * A photo report's or erasure's progress, by its feedback id, from its
+ * decision and main. The rules hold a report for a person and accept an
+ * erasure. A report is `in_data` once main no longer shows the photo
+ * (hidden, removed, or its contributor blocked), and `refused` by the
+ * reviewer when a person merged or closed the review PR and kept it. An
+ * erasure is `in_data` once main holds no photo line from the contributor,
+ * and `refused` by the reviewer when its automatic PR closed without
+ * merging. `in_data_at` is the commit time of the file that took the photo
+ * out: its photo file, the removed list or the block list.
+ */
+export function photoFeedbackProgressOf(item: DecidedItem, main: PhotoMain, context: PhotoProgressContext): PhotoProgressUpdate | undefined {
+  const result = item.outcome?.result;
+  if (result === undefined || (item.type !== "photo_report" && item.type !== "photo_erasure")) return undefined;
+  const reason = item.outcome?.reason;
+  const base = {
+    id: item.id,
+    ...(typeof item.place === "string" ? { place: item.place } : {}),
+    ...(reason ? { reason } : {}),
+    ...(item.outcome?.run ? { decided_at: item.outcome.run } : {}),
+    run_at: context.runAt,
+  };
+  if (result === "refused") return { ...base, state: "refused", by: "rules" };
+  if (result === "waiting") return { ...base, state: "waiting" };
+  const inData = (file: string): PhotoProgressUpdate => ({ ...base, state: "in_data", in_data_at: context.inDataAt(file) });
+
+  if (item.type === "photo_report") {
+    const photo = item.photo_report.photo;
+    const line = main.lines.get(photo);
+    if (main.removed.has(photo)) return inData(REMOVED_PHOTOS_FILE);
+    if (line?.hidden !== undefined) return inData(photoPath(line.place));
+    if (line !== undefined && main.blocked.has(line.contributor)) return inData(BLOCKED_FILE);
+    if (context.declined.review.has(item.id)) return { ...base, state: "refused", by: "reviewer", reason: REVIEWER_DECLINED };
+    return { ...base, state: result === "applied" ? "accepted" : "held" };
+  }
+  const contributor = item.contributor;
+  const left = [...main.lines.values()].some((line) => line.contributor === contributor);
+  if (!left) return inData(REMOVED_PHOTOS_FILE);
+  if (context.declined.auto.has(item.id)) return { ...base, state: "refused", by: "reviewer", reason: AUTO_PR_CLOSED };
+  return { ...base, state: result === "applied" ? "accepted" : "held" };
+}
+
 /** What the record keeps for a photo: its state, with the held reason or who refused it. */
 const signature = (u: PhotoProgressUpdate) => [u.state, u.held_reason ?? u.by].filter(Boolean).join(":");
 
@@ -150,14 +197,14 @@ export async function sendPhotoProgress(options: SendPhotoProgressOptions): Prom
   const now = options.now ?? new Date();
   const runAt = now.toISOString().replace(/\.\d{3}Z$/, "Z");
   const sinceDay = new Date(now.getTime() - (WINDOW_DAYS + 1) * DAY_MS).toISOString().slice(0, 10);
-  const isPhoto = (item: StoredFeedback) => item.type === "photo";
-  const history = [...(await readHistory(options.inbox, sinceDay)), ...(await readHistory(options.inbox, sinceDay, "refused"))].filter(isPhoto) as DecidedItem[];
+  const isPhotoItem = (item: StoredFeedback) => item.type === "photo" || item.type === "photo_report" || item.type === "photo_erasure";
+  const history = [...(await readHistory(options.inbox, sinceDay)), ...(await readHistory(options.inbox, sinceDay, "refused"))].filter(isPhotoItem) as DecidedItem[];
   const record = await readSent<string>(options.inbox, PHOTO_SENT_FILE);
   const reconcile = (record.reconciled_at ?? "") < mondayOf(now);
 
   const repo = new DataRepo(options.main);
   const main: PhotoMain = {
-    lines: new Map(history.length > 0 ? (await repo.allPhotos()).map((p) => [p.id, p]) : []),
+    lines: new Map((await repo.allPhotos()).map((p) => [p.id, p])),
     removed: new Map((await repo.removedPhotos()).map((r) => [r.photo, r.reason])),
     blocked: await repo.blocked(),
   };
@@ -166,14 +213,12 @@ export async function sendPhotoProgress(options: SendPhotoProgressOptions): Prom
   const declined = turnedDown(idsOnPrs(options.reviewPrs ?? [], botLogins), auto);
   const autoMerged = new Set([...auto.merged].filter((id) => !auto.open.has(id)));
 
-  // Each photo file on main, dated once by its last commit.
-  const files = history.map((item) => main.lines.get(photoIdOf(item))).flatMap((line) => (line ? [photoPath(line.place)] : []));
-  const times = await lastCommitTimes(options.main, files, runAt);
-  const context: PhotoProgressContext = { declined, autoMerged, inDataAt: (file) => times.get(file) ?? runAt, runAt };
+  // in_data_at names its file until the updates due are known, then each file is dated once by its last commit.
+  const context: PhotoProgressContext = { declined, autoMerged, inDataAt: (file) => `${UNDATED}${file}`, runAt };
 
   const updates = new Map<string, PhotoProgressUpdate>();
   for (const item of history) {
-    const update = photoProgressOf(item, main, context);
+    const update = item.type === "photo" ? photoProgressOf(item, main, context) : photoFeedbackProgressOf(item, main, context);
     if (update) updates.set(update.id, update);
   }
   for (const d of options.decisions) {
@@ -185,17 +230,25 @@ export async function sendPhotoProgress(options: SendPhotoProgressOptions): Prom
     if (update) updates.set(id, update);
   }
 
-  // The record keeps only photos still in the window.
+  const due = [...updates.values()].filter((u) => reconcile || record.items[u.id] !== signature(u));
+  const undated = due.flatMap((u) => (u.in_data_at?.startsWith(UNDATED) ? [u.in_data_at.slice(UNDATED.length)] : []));
+  const times = await lastCommitTimes(options.main, undated, runAt);
+  for (const u of due) if (u.in_data_at?.startsWith(UNDATED)) u.in_data_at = times.get(u.in_data_at.slice(UNDATED.length)) ?? runAt;
+
+  // The record keeps only items still in the window.
   return sendChanged({
     inbox: options.inbox,
     file: PHOTO_SENT_FILE,
     record,
     reconcile,
     runAt,
-    updates: updates.values(),
+    updates: due,
     value: signature,
     keep: (id) => updates.has(id),
     send: (part) => options.store.photoProgress(part),
     what: "photo(s) to the photo intake",
   });
 }
+
+/** Marks an in_data_at not dated yet, followed by the file that will date it. */
+const UNDATED = "\u0000";
