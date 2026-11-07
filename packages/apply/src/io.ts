@@ -293,7 +293,13 @@ export async function moveDecided(
     const target = join(inbox, folder, file.day, basename(file.path));
     await mkdir(dirname(target), { recursive: true });
     // A doubt that took a fact down keeps the value, so later runs find the open case.
-    const outcome = { result: decision.outcome, reason: decision.reason, run: runAt, ...(decision.doubted ? { doubted: decision.doubted } : {}) };
+    const outcome = {
+      result: decision.outcome,
+      reason: decision.reason,
+      run: runAt,
+      ...(decision.held_reason ? { held_reason: decision.held_reason } : {}),
+      ...(decision.doubted ? { doubted: decision.doubted } : {}),
+    };
     const withOutcome = { ...file.item, outcome };
     await writeFile(target, `${JSON.stringify(withOutcome, null, 2)}\n`, "utf8");
     await rm(file.path);

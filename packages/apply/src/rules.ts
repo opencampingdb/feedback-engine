@@ -96,6 +96,8 @@ export interface Decision {
   place: string | null;
   outcome: Outcome;
   reason: string;
+  /** On a photo held for a person: why, as photo progress names it. The inbox keeps it with the outcome. */
+  held_reason?: PhotoHeldReason;
   /**
    * On the doubt that took a fact down: the fact, the value it had and the
    * date set on it. The inbox keeps it with the outcome, and later runs read
@@ -263,19 +265,13 @@ export function isVisible(review: Review, blocked: ReadonlySet<string> = new Set
 /** A photo upload's photo id: `pho_` and the item's ulid. */
 export const photoIdOf = (item: Pick<StoredFeedback, "id">) => `pho_${item.id.replace(/^fb_/, "")}`;
 
-/** How the reason for holding a photo for a person starts, by its held reason in photo progress. */
+/** The reason given for holding a photo for a person, by its held reason in photo progress. */
 export const PHOTO_HELD_WHY = {
   same_file: "the same file was sent for another place",
   check_unavailable: "SafeSearch could not check it",
   safesearch: "SafeSearch rates it",
   first_photo: "first photo from this contributor",
 } as const satisfies Partial<Record<PhotoHeldReason, string>>;
-
-/** The held reason of a photo the rules held for a person, from the decision's reason. */
-export function photoHeldReason(reason: string | undefined): PhotoHeldReason | undefined {
-  const found = (Object.entries(PHOTO_HELD_WHY) as [PhotoHeldReason, string][]).find(([, why]) => reason?.startsWith(why));
-  return found?.[0];
-}
 
 /** Whether a stored item was applied by the rules (not held for a person, not refused). */
 function wasApplied(item: StoredFeedback): boolean {
@@ -350,8 +346,8 @@ export function applyRules(input: RulesInput): RulesOutput {
   let everyPlaceById: Map<string, Place> | undefined;
   const doNotMatch: DoNotMatchEntry[] = [];
 
-  const decide = (item: StoredFeedback, outcome: Outcome, reason: string) => {
-    decisions.set(item.id, { id: item.id, place: item.place, outcome, reason });
+  const decide = (item: StoredFeedback, outcome: Outcome, reason: string, heldReason?: PhotoHeldReason) => {
+    decisions.set(item.id, { id: item.id, place: item.place, outcome, reason, ...(heldReason ? { held_reason: heldReason } : {}) });
   };
   const record = (id: string): Place => {
     const existing = working.get(id);
@@ -690,16 +686,14 @@ export function applyRules(input: RulesInput): RulesOutput {
       const rated = item.photo.safesearch;
       const flagged = rated !== undefined && safeSearchVerdict(rated) !== "pass";
       if (repeated || flagged || !trusted.has(item.contributor)) {
-        const why = repeated
-          ? PHOTO_HELD_WHY.same_file
-          : flagged
-            ? rated === "unchecked"
-              ? PHOTO_HELD_WHY.check_unavailable
-              : `${PHOTO_HELD_WHY.safesearch} adult ${rated.adult}, violence ${rated.violence}, racy ${rated.racy}`
-            : PHOTO_HELD_WHY.first_photo;
+        const held: keyof typeof PHOTO_HELD_WHY = repeated ? "same_file" : flagged ? (rated === "unchecked" ? "check_unavailable" : "safesearch") : "first_photo";
+        const why =
+          held === "safesearch" && rated !== undefined && rated !== "unchecked"
+            ? `${PHOTO_HELD_WHY.safesearch} adult ${rated.adult}, violence ${rated.violence}, racy ${rated.racy}`
+            : PHOTO_HELD_WHY[held];
         edits.push({ kind: "photo", place: item.place, photo, feedback: item.id });
         note(item.place, `photo ${photoId} (${photo.width} x ${photo.height}), ${why} (look at it before merging)`, false, [item], photoId);
-        decide(item, "needs_review", `${why}, so a person checks it`);
+        decide(item, "needs_review", `${why}, so a person checks it`, held);
         continue;
       }
       lines.push(photo);

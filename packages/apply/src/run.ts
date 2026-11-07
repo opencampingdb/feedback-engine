@@ -112,7 +112,7 @@ export interface RunSummary {
 }
 
 /** An item a run decided, as the run summary lists it. */
-export type RunDecision = Pick<Decision, "id" | "place" | "outcome" | "reason">;
+export type RunDecision = Pick<Decision, "id" | "place" | "outcome" | "reason" | "held_reason">;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PROOF_BUDGET = { ms: 3 * 60_000, concurrency: 4 };
@@ -394,7 +394,9 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     not_applied: [...new Set(decisions.filter((d) => d.outcome !== "applied" && d.outcome !== "waiting").map((d) => d.id))].sort(),
     refused: [...new Set(decisions.filter((d) => d.outcome === "refused").map((d) => d.id))].sort(),
     decisions: decisions.filter((d) => !photoIds.has(d.id)).map((d) => ({ id: d.id, place: d.place, outcome: d.outcome, reason: d.reason })),
-    photo_decisions: decisions.filter((d) => photoIds.has(d.id)).map((d) => ({ id: d.id, place: d.place, outcome: d.outcome, reason: d.reason })),
+    photo_decisions: decisions
+      .filter((d) => photoIds.has(d.id))
+      .map((d) => ({ id: d.id, place: d.place, outcome: d.outcome, reason: d.reason, ...(d.held_reason ? { held_reason: d.held_reason } : {}) })),
   };
 }
 

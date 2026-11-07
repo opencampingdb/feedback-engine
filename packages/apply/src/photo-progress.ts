@@ -14,7 +14,7 @@ import {
   writeSent,
   type DecidedItem,
 } from "./progress.js";
-import { photoHeldReason, photoIdOf, WINDOW_DAYS } from "./rules.js";
+import { photoIdOf, WINDOW_DAYS } from "./rules.js";
 import type { RunDecision } from "./run.js";
 import { photoPath } from "./serialise.js";
 import type { Photo, RemovedPhotos } from "./types.js";
@@ -103,7 +103,7 @@ export function photoProgressOf(item: DecidedItem, main: PhotoMain, context: Pho
   if (result === "waiting") return { ...base, state: "waiting", ...withReason };
   if (result === "needs_review" || result === "awaiting_approval") {
     if (context.declined.review.has(item.id)) return refused("reviewer", REVIEWER_DECLINED);
-    const held = photoHeldReason(reason);
+    const held = item.outcome?.held_reason;
     return { ...base, state: "held", ...(held ? { held_reason: held } : {}), ...withReason };
   }
   if (context.declined.auto.has(item.id)) return refused("reviewer", AUTO_PR_CLOSED);
@@ -178,7 +178,8 @@ export async function sendPhotoProgress(options: SendPhotoProgressOptions): Prom
   for (const d of options.decisions) {
     const id = photoIdOf(d);
     if (updates.has(id) || d.place === null) continue;
-    const decided = { id: d.id, type: "photo", place: d.place, outcome: { result: d.outcome, reason: d.reason, run: runAt } } as unknown as DecidedItem;
+    const outcome = { result: d.outcome, reason: d.reason, run: runAt, ...(d.held_reason ? { held_reason: d.held_reason } : {}) };
+    const decided = { id: d.id, type: "photo", place: d.place, outcome } as unknown as DecidedItem;
     const update = photoProgressOf(decided, main, context);
     if (update) updates.set(id, update);
   }

@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { isFeedbackId, type StoredFeedback } from "@opencampingdb/feedback";
+import { isFeedbackId, type PhotoHeldReason, type StoredFeedback } from "@opencampingdb/feedback";
 import { DataRepo, readHistory } from "./io.js";
 import type { ReviewPr } from "./owners.js";
 import { placeOf, type ProgressUpdate } from "./progress-update.js";
@@ -38,7 +38,7 @@ export interface MainData {
 }
 
 /** An inbox item with the outcome the run that decided it kept on it, as `applied/` and `refused/` hold them. */
-export type DecidedItem = StoredFeedback & { outcome?: { result?: Outcome; reason?: string; run?: string } };
+export type DecidedItem = StoredFeedback & { outcome?: { result?: Outcome; reason?: string; run?: string; held_reason?: PhotoHeldReason } };
 
 /**
  * Whether main holds an item's change. When it does, `file` is the file in

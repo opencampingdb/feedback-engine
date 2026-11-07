@@ -33,7 +33,7 @@ async function commitIn(repo: string, file: string, content: string, at: string)
 }
 
 /** A photo as the inbox keeps it once a run decided it. */
-function photo(n: number, result: string, reason: string, extra: Record<string, unknown> = {}): StoredFeedback {
+function photo(n: number, result: string, reason: string, { held, ...extra }: Record<string, unknown> = {}): StoredFeedback {
   return {
     id: fb(n),
     received: "2026-10-31T00:00:00Z",
@@ -45,7 +45,7 @@ function photo(n: number, result: string, reason: string, extra: Record<string, 
     app_version: "1.0.0",
     consent: true,
     photo: { full_sha256: "a".repeat(64), full_bytes: 100, thumb_sha256: "b".repeat(64), thumb_bytes: 10, width: 1600, height: 1200 },
-    outcome: { result, reason, run: RUN },
+    outcome: { result, reason, run: RUN, ...(held ? { held_reason: held } : {}) },
     ...extra,
   } as unknown as StoredFeedback;
 }
@@ -98,18 +98,31 @@ describe("sendPhotoProgress", () => {
 
   it("is accepted while the automatic PR waits, and held with its reason while the review PR waits", async () => {
     await inInbox(photo(1, "applied", "photo accepted"));
-    await inInbox(photo(2, "needs_review", "first photo from this contributor, so a person checks it"));
-    await inInbox(photo(3, "needs_review", "the same file was sent for another place, so a person checks it"));
-    await inInbox(photo(4, "needs_review", "SafeSearch rates it adult LIKELY, violence UNLIKELY, racy POSSIBLE, so a person checks it"));
-    await inInbox(photo(5, "needs_review", "SafeSearch could not check it, so a person checks it"));
+    await inInbox(photo(2, "needs_review", "first photo from this contributor, so a person checks it", { held: "first_photo" }));
+    await inInbox(photo(3, "needs_review", "the same file was sent for another place, so a person checks it", { held: "same_file" }));
+    await inInbox(photo(4, "needs_review", "SafeSearch rates it adult LIKELY, violence UNLIKELY, racy POSSIBLE, so a person checks it", { held: "safesearch" }));
+    await inInbox(photo(5, "needs_review", "SafeSearch could not check it, so a person checks it", { held: "check_unavailable" }));
     const s = store();
-    await send(s, { reviewPrs: [pr("OPEN", [fb(2), fb(3), fb(4), fb(5)])], autoPrs: [pr("OPEN", [fb(1)])] });
+    await send(s, {
+      reviewPrs: [pr("OPEN", [fb(2), fb(3), fb(4), fb(5), fb(6)])],
+      autoPrs: [pr("OPEN", [fb(1)])],
+      decisions: [{ id: fb(6), place: PLACE, outcome: "needs_review", reason: "first photo from this contributor, so a person checks it", held_reason: "first_photo" }],
+    });
     const sent = byId(s);
     expect(sent[pho(1)]).toMatchObject({ state: "accepted" });
     expect(sent[pho(2)]).toMatchObject({ state: "held", held_reason: "first_photo", reason: "first photo from this contributor, so a person checks it" });
     expect(sent[pho(3)]).toMatchObject({ state: "held", held_reason: "same_file" });
     expect(sent[pho(4)]).toMatchObject({ state: "held", held_reason: "safesearch" });
     expect(sent[pho(5)]).toMatchObject({ state: "held", held_reason: "check_unavailable" });
+    expect(sent[pho(6)]).toMatchObject({ state: "held", held_reason: "first_photo" });
+  });
+
+  it("takes the held reason from the decision, never from the words of its reason", async () => {
+    await inInbox(photo(1, "needs_review", "first photo from this contributor, so a person checks it"));
+    const s = store();
+    await send(s, { reviewPrs: [pr("OPEN", [fb(1)])] });
+    expect(byId(s)[pho(1)]).toMatchObject({ state: "held" });
+    expect(byId(s)[pho(1)]).not.toHaveProperty("held_reason");
   });
 
   it("is refused by the rules with their reason, and waiting while its new place is not in the data", async () => {
@@ -172,7 +185,7 @@ describe("sendPhotoProgress", () => {
     const at = (iso: string) => new Date(iso);
 
     it("sends nothing on a second run when nothing changed, and records what it sent in the inbox", async () => {
-      await inInbox(photo(1, "needs_review", "first photo from this contributor, so a person checks it"));
+      await inInbox(photo(1, "needs_review", "first photo from this contributor, so a person checks it", { held: "first_photo" }));
       const first = store();
       expect(await send(first, { now: at("2026-11-03T00:00:00Z") })).toEqual({ sent: 1, failed: 0, recorded: true });
       expect(JSON.parse(await readFile(join(inbox, PHOTO_SENT_FILE), "utf8"))).toEqual({ reconciled_at: "2026-11-03T00:00:00Z", items: { [pho(1)]: "held:first_photo" } });
