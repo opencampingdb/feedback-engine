@@ -230,6 +230,41 @@ describe("POST /v1/feedback/batch", () => {
     expect(rows("rate_counts")).toEqual([]);
   });
 
+  it("measures each item as sent, so an item answers 413 in a batch exactly when it would alone", async () => {
+    const LIMIT = 16 * 1024;
+    // Spaces and \u escapes the intake reads but JSON.stringify would not write back.
+    const spaced = (item: object, pad: number) => `{${" ".repeat(pad)}${JSON.stringify(item).slice(1)}`;
+    const escaped = (item: object) => JSON.stringify(item).replace(/"Quiet and shady\."/, `"${"\\u0051".repeat(2800)}"`);
+    const wide = spaced(review(placeOf(1)), LIMIT);
+    const fits = spaced(review(placeOf(2)), LIMIT - JSON.stringify(review(placeOf(2))).length);
+    const quoted = escaped(review(placeOf(3)));
+    expect(new TextEncoder().encode(wide).length).toBeGreaterThan(LIMIT);
+    expect(new TextEncoder().encode(fits).length).toBe(LIMIT);
+    expect(new TextEncoder().encode(quoted).length).toBeGreaterThan(LIMIT);
+    // Read and written again, each is well under the limit.
+    for (const text of [wide, fits, quoted]) expect(JSON.stringify(JSON.parse(text)).length).toBeLessThan(LIMIT);
+
+    const alone = async (text: string) => {
+      const res = await handle(
+        new Request("https://intake.example/v1/feedback", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-app-key": APP_KEY, "x-attest-platform": "android", "x-attest-token": `ok:${sha(text)}` },
+          body: text,
+        }),
+        env(fakeD1()),
+      );
+      return res.status;
+    };
+    expect([await alone(wide), await alone(fits), await alone(quoted)]).toEqual([413, 202, 413]);
+
+    const text = `{"items":[${JSON.stringify(review(PLACE))}, ${wide},\n${fits} , ${quoted}]}`;
+    const res = await handle(batch([], { text }), e);
+    expect(res.status).toBe(200);
+    const answers = ((await res.json()) as { items: ItemAnswer[] }).items;
+    expect(answers.map((a) => a.status)).toEqual([202, 413, 202, 413]);
+    expect(answers[1]).toEqual({ status: 413, error: "too_large" });
+  });
+
   it("answers the whole batch 429 when the app is at its daily limit", async () => {
     const small = env(store, { daily_limit: 2 });
     expect((await send([review(placeOf(1)), review(placeOf(2)), review(placeOf(3))], small)).map((a) => a.status)).toEqual([202, 202, 429]);

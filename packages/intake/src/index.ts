@@ -83,6 +83,7 @@ import {
 } from "./decide.js";
 import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult, type QueuedFile } from "./inbox-queue.js";
 import { monotonicUlids, ulid } from "./ulid.js";
+import { arrayElementTexts } from "./json-text.js";
 import { latestRelease, parseRelease, recordRelease } from "./release.js";
 import {
   MAX_PROGRESS_ITEMS,
@@ -283,6 +284,39 @@ function json(status: number, body: unknown, extra: Record<string, string> = {})
     status,
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extra },
   });
+}
+
+/** A body the intake would not read, with the answer to give. */
+type BodyRefused = { ok: false; status: 400 | 413; body: Record<string, unknown> };
+
+const utf8Length = (text: string) => new TextEncoder().encode(text).length;
+
+/** Whether the request says, in its content-length, that its body is more than `max` bytes. */
+function declaredTooLarge(request: Request, max: number): boolean {
+  return Number(request.headers.get("content-length") ?? 0) > max;
+}
+
+/** The body as text when it is at most `max` bytes of UTF-8, as declared and as read, or a 413. */
+async function readBody(request: Request, max: number): Promise<{ ok: true; text: string } | BodyRefused> {
+  const tooLarge: BodyRefused = { ok: false, status: 413, body: { error: "too_large" } };
+  if (declaredTooLarge(request, max)) return tooLarge;
+  const text = await request.text();
+  return utf8Length(text) > max ? tooLarge : { ok: true, text };
+}
+
+/**
+ * A JSON body of at most `max` bytes: the text as sent, which attestation
+ * hashes, and its value. A 413 when it is larger, a 400 when it is not JSON.
+ * `POST /v1/feedback` and `POST /v1/feedback/batch` read their bodies with it.
+ */
+export async function readJsonBody(request: Request, max: number): Promise<{ ok: true; text: string; body: unknown } | BodyRefused> {
+  const read = await readBody(request, max);
+  if (!read.ok) return read;
+  try {
+    return { ok: true, text: read.text, body: JSON.parse(read.text) as unknown };
+  } catch {
+    return { ok: false, status: 400, body: { error: "invalid", details: ["body must be JSON"] } };
+  }
 }
 
 export function parseAppKeys(raw: string): Map<string, AppEntry> {
@@ -1306,11 +1340,9 @@ export function createHandler(deps: Deps) {
 
   /**
    * What the items of one request share: the app key, the client network, the
-   * time, the daily counters and the decisions made so far. `text` is a single
-   * item's body, whose attestation is checked once the item is read; a batch
-   * has `proof`, its attestation checked already over the whole body.
+   * time, the daily counters and the decisions made so far.
    */
-  interface Intake {
+  interface IntakeShared {
     request: Request;
     env: Env;
     app: AppEntry;
@@ -1321,17 +1353,17 @@ export function createHandler(deps: Deps) {
     counts: CountSession;
     decided: DecidedInRequest;
     nextId: () => string;
-    text?: string;
-    batch?: { proof: Proof | undefined };
   }
 
-  async function newIntake(
-    request: Request,
-    env: Env,
-    app: AppEntry,
-    nowMs: number,
-    how: { text: string; nextId: () => string } | { batch: { proof: Proof | undefined }; nextId: () => string },
-  ): Promise<Intake> {
+  /**
+   * One request's items. A single item has `text`, its body, whose
+   * attestation is checked once the item is read. A batch has `batch.proof`,
+   * its attestation already checked over the whole body.
+   */
+  type IntakeHow = { text: string } | { batch: { proof: Proof | undefined } };
+  type Intake = IntakeShared & IntakeHow;
+
+  async function newIntake(request: Request, env: Env, app: AppEntry, nowMs: number, how: IntakeHow & { nextId: () => string }): Promise<Intake> {
     const received = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, "Z");
     const day = received.slice(0, 10);
     // Cloudflare sets CF-Connecting-IP to the client address. Only a salted hash of its network is kept.
@@ -1352,7 +1384,7 @@ export function createHandler(deps: Deps) {
     const checked = validateSubmission(body, new Date(nowMs));
     if (!checked.ok) return { status: 400, body: { error: "invalid", details: checked.errors } };
     const submission = checked.value;
-    if (intake.batch && (submission.type === "photo" || isOwnerSubmission(submission))) {
+    if ("batch" in intake && (submission.type === "photo" || isOwnerSubmission(submission))) {
       return { status: 400, body: { error: "type_not_allowed_in_batch" } };
     }
     if (submission.type === "photo") return { status: 400, body: { error: "invalid", details: ["photos are sent to /v1/photos"] } };
@@ -1372,9 +1404,9 @@ export function createHandler(deps: Deps) {
     const extra: { prefix: string; id: string; limit: number }[] = [];
     if (!isOwner) {
       const feedback = submission as FeedbackSubmission;
-      if (intake.batch) proof = intake.batch.proof;
+      if ("batch" in intake) proof = intake.batch.proof;
       else if (app.requires_attestation) {
-        const result = await attest(request, env, app, intake.text ?? "");
+        const result = await attest(request, env, app, intake.text);
         if ("error" in result) {
           return result.error === "unavailable"
             ? { status: 503, body: { error: "unavailable" }, headers: { "retry-after": "60" } }
@@ -1552,16 +1584,9 @@ export function createHandler(deps: Deps) {
    */
   async function feedbackBatch(request: Request, env: Env, app: AppEntry, cors: Record<string, string>): Promise<Response> {
     if (!env.RECENT_LIST) return json(404, { error: "not_found" }, cors);
-    const declared = Number(request.headers.get("content-length") ?? 0);
-    if (declared > MAX_BATCH_BODY_BYTES) return json(413, { error: "too_large" }, cors);
-    const text = await request.text();
-    if (new TextEncoder().encode(text).length > MAX_BATCH_BODY_BYTES) return json(413, { error: "too_large" }, cors);
-    let body: unknown;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      return json(400, { error: "invalid", details: ["body must be JSON"] }, cors);
-    }
+    const read = await readJsonBody(request, MAX_BATCH_BODY_BYTES);
+    if (!read.ok) return json(read.status, read.body, cors);
+    const { text, body } = read;
     const items = (body as { items?: unknown } | null)?.items;
     if (typeof body !== "object" || body === null || !Array.isArray(items) || items.length === 0 || items.length > MAX_BATCH_ITEMS) {
       return json(400, { error: "invalid", details: [`items must be 1 to ${MAX_BATCH_ITEMS} submissions`] }, cors);
@@ -1580,9 +1605,13 @@ export function createHandler(deps: Deps) {
       const refused = rateLimited(secondsToMidnightUtc(nowMs));
       return json(429, refused.body, { ...cors, ...refused.headers });
     }
+    // Each item is measured as sent, as POST /v1/feedback measures its body, so an item is too
+    // large in a batch exactly when it would be alone.
+    const sent = arrayElementTexts(text, "items");
     const answers: (Admitted | ItemAnswer)[] = [];
-    for (const item of items) {
-      if (new TextEncoder().encode(JSON.stringify(item) ?? "").length > MAX_BODY_BYTES) answers.push({ status: 413, body: { error: "too_large" } });
+    for (const [i, item] of items.entries()) {
+      const itemText = sent?.length === items.length ? sent[i]! : (JSON.stringify(item) ?? "");
+      if (utf8Length(itemText) > MAX_BODY_BYTES) answers.push({ status: 413, body: { error: "too_large" } });
       else answers.push(await admit(intake, item));
     }
     const admitted = answers.filter((a): a is Admitted => "file" in a);
@@ -1695,20 +1724,17 @@ export function createHandler(deps: Deps) {
 
     if (route === "/v1/photos") return photo(request, env, app, cors);
     if (route === "/v1/feedback/batch") return feedbackBatch(request, env, app, cors);
-    const declared = Number(request.headers.get("content-length") ?? 0);
-    if (declared > MAX_BODY_BYTES) return json(413, { error: "too_large" }, cors);
+    if (declaredTooLarge(request, MAX_BODY_BYTES)) return json(413, { error: "too_large" }, cors);
     if (route === "/v1/attest/challenge") return challenge(env, app, cors);
-    const text = await request.text();
-    if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) return json(413, { error: "too_large" }, cors);
-    if (route === "/v1/attest/register") return register(request, env, app, text, cors);
-    if (route === "/v1/photos/pass") return photoPass(request, env, app, text, cors);
-
-    let body: unknown;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      return json(400, { error: "invalid", details: ["body must be JSON"] }, cors);
+    if (route === "/v1/attest/register" || route === "/v1/photos/pass") {
+      const read = await readBody(request, MAX_BODY_BYTES);
+      if (!read.ok) return json(read.status, read.body, cors);
+      return route === "/v1/attest/register" ? register(request, env, app, read.text, cors) : photoPass(request, env, app, read.text, cors);
     }
+
+    const read = await readJsonBody(request, MAX_BODY_BYTES);
+    if (!read.ok) return json(read.status, read.body, cors);
+    const { text, body } = read;
     const nowMs = deps.now();
     const intake = await newIntake(request, env, app, nowMs, { text, nextId: () => ulid(nowMs, deps.randomBytes) });
     const item = await admit(intake, body);
