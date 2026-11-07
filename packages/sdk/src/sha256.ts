@@ -21,18 +21,15 @@ export function sha256Hex(text: string): string {
   return sha256HexBytes(new TextEncoder().encode(text));
 }
 
+/**
+ * Hashes `data` in place: whole 64-byte blocks are read from it directly,
+ * and only the last one or two blocks, with the padding, are copied. A
+ * release database download of several megabytes is never copied whole.
+ */
 export function sha256HexBytes(data: Uint8Array): string {
-  const bitLength = data.length * 8;
-  const padded = new Uint8Array(Math.ceil((data.length + 9) / 64) * 64);
-  padded.set(data);
-  padded[data.length] = 0x80;
-  const view = new DataView(padded.buffer);
-  view.setUint32(padded.length - 8, Math.floor(bitLength / 2 ** 32));
-  view.setUint32(padded.length - 4, bitLength >>> 0);
-
   const h = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
   const w = new Uint32Array(64);
-  for (let offset = 0; offset < padded.length; offset += 64) {
+  const compress = (view: DataView, offset: number) => {
     for (let i = 0; i < 16; i++) w[i] = view.getUint32(offset + i * 4);
     for (let i = 16; i < 64; i++) {
       const s0 = rotr(w[i - 15]!, 7) ^ rotr(w[i - 15]!, 18) ^ (w[i - 15]! >>> 3);
@@ -60,6 +57,20 @@ export function sha256HexBytes(data: Uint8Array): string {
     h[5] = (h[5]! + f!) >>> 0;
     h[6] = (h[6]! + g!) >>> 0;
     h[7] = (h[7]! + hh!) >>> 0;
-  }
+  };
+
+  const whole = data.length - (data.length % 64);
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  for (let offset = 0; offset < whole; offset += 64) compress(view, offset);
+
+  // The bytes after the last whole block, the 0x80 marker and the length in bits.
+  const tail = new Uint8Array(data.length - whole + 9 > 64 ? 128 : 64);
+  tail.set(data.subarray(whole));
+  tail[data.length - whole] = 0x80;
+  const tailView = new DataView(tail.buffer);
+  const bitLength = data.length * 8;
+  tailView.setUint32(tail.length - 8, Math.floor(bitLength / 2 ** 32));
+  tailView.setUint32(tail.length - 4, bitLength >>> 0);
+  for (let offset = 0; offset < tail.length; offset += 64) compress(tailView, offset);
   return [...h].map((x) => x.toString(16).padStart(8, "0")).join("");
 }
