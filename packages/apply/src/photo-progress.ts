@@ -7,11 +7,10 @@ import {
   idsOnPrs,
   lastCommitTimes,
   mondayOf,
-  PROGRESS_BATCH,
   readSent,
   REVIEWER_DECLINED,
+  sendChanged,
   turnedDown,
-  writeSent,
   type DecidedItem,
 } from "./progress.js";
 import { photoIdOf, WINDOW_DAYS } from "./rules.js";
@@ -184,25 +183,17 @@ export async function sendPhotoProgress(options: SendPhotoProgressOptions): Prom
     if (update) updates.set(id, update);
   }
 
-  const due = [...updates.values()].filter((u) => reconcile || record.items[u.id] !== signature(u)).sort((a, b) => (a.id < b.id ? -1 : 1));
   // The record keeps only photos still in the window.
-  const items = Object.fromEntries(Object.entries(record.items).filter(([id]) => updates.has(id)));
-  let sent = 0;
-  let failed = 0;
-  for (let start = 0; start < due.length; start += PROGRESS_BATCH) {
-    const part = due.slice(start, start + PROGRESS_BATCH);
-    try {
-      await options.store.photoProgress(part);
-      sent += part.length;
-      for (const u of part) items[u.id] = signature(u);
-    } catch (error) {
-      failed += part.length;
-      console.warn(`sending the progress of ${part.length} photo(s) to the photo intake failed, trying again next run: ${String(error)}`);
-    }
-  }
-  const next = {
-    ...(reconcile && failed === 0 ? { reconciled_at: runAt } : record.reconciled_at !== undefined ? { reconciled_at: record.reconciled_at } : {}),
-    items,
-  };
-  return { sent, failed, recorded: await writeSent(options.inbox, PHOTO_SENT_FILE, next) };
+  return sendChanged({
+    inbox: options.inbox,
+    file: PHOTO_SENT_FILE,
+    record,
+    reconcile,
+    runAt,
+    updates: updates.values(),
+    value: signature,
+    keep: (id) => updates.has(id),
+    send: (part) => options.store.photoProgress(part),
+    what: "photo(s) to the photo intake",
+  });
 }

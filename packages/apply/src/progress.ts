@@ -398,28 +398,75 @@ export async function sendProgress(options: SendProgressOptions): Promise<{ sent
     updates.set(d.id, decisionProgress(base, d.outcome, () => undefined));
   }
 
-  const due = [...updates.values()].filter((u) => reconcile || record.items[u.id] !== u.state).sort((a, b) => (a.id < b.id ? -1 : 1));
   // The record keeps only items still in the window.
   const inWindow = new Set([...window.map((i) => i.id), ...options.decisions.map((d) => d.id)]);
-  const items: SentRecord["items"] = Object.fromEntries(Object.entries(record.items).filter(([id]) => inWindow.has(id)));
+  return sendChanged({
+    inbox: options.inbox,
+    file: SENT_FILE,
+    record,
+    reconcile,
+    runAt,
+    updates: updates.values(),
+    value: (u) => u.state,
+    keep: (id) => inWindow.has(id),
+    send: (part) => options.store.progress(part),
+    what: "item(s) to the intake",
+  });
+}
+
+export interface SendChangedOptions<Update extends { id: string }, Value extends string> {
+  inbox: string;
+  /** The record of what was last sent, in the inbox. */
+  file: string;
+  record: SentRecord<Value>;
+  /** Send every update, whatever the record says (the first run each Monday). */
+  reconcile: boolean;
+  runAt: string;
+  updates: Iterable<Update>;
+  /** What the record keeps for an update: an update is sent when this differs from the record's. */
+  value: (update: Update) => Value;
+  /** What the record holds for an id. Defaults to the record's own entry. */
+  last?: (id: string) => Value | undefined;
+  /** Whether the record keeps an id it holds, with the value it holds for it. */
+  keep: (id: string, value: Value) => boolean;
+  send: (part: readonly Update[]) => Promise<void>;
+  /** What a failed call is logged as sending, such as "item(s) to the intake". */
+  what: string;
+}
+
+/**
+ * The send both progress runs share: sends the updates whose value differs
+ * from the record's (every one when reconciling), in id order, in calls of
+ * up to PROGRESS_BATCH. A call that fails is logged, the rest are still
+ * sent, and its updates are sent again next run, so the intake failing never
+ * fails the run. Then writes the record: what each sent update was, the
+ * entries `keep` keeps, and when the last reconcile that sent everything ran.
+ */
+export async function sendChanged<Update extends { id: string }, Value extends string>(
+  options: SendChangedOptions<Update, Value>,
+): Promise<{ sent: number; failed: number; recorded: boolean }> {
+  const { record, reconcile, runAt, value } = options;
+  const last = options.last ?? ((id: string) => record.items[id]);
+  const due = [...options.updates].filter((u) => reconcile || last(u.id) !== value(u)).sort((a, b) => (a.id < b.id ? -1 : 1));
+  const items = Object.fromEntries(Object.entries(record.items).filter(([id, v]) => options.keep(id, v))) as Record<string, Value>;
   let sent = 0;
   let failed = 0;
   for (let start = 0; start < due.length; start += PROGRESS_BATCH) {
     const part = due.slice(start, start + PROGRESS_BATCH);
     try {
-      await options.store.progress(part);
+      await options.send(part);
       sent += part.length;
-      for (const u of part) items[u.id] = u.state;
+      for (const u of part) items[u.id] = value(u);
     } catch (error) {
       failed += part.length;
-      console.warn(`sending the progress of ${part.length} item(s) to the intake failed, trying again next run: ${String(error)}`);
+      console.warn(`sending the progress of ${part.length} ${options.what} failed, trying again next run: ${String(error)}`);
     }
   }
-  const next: SentRecord = {
+  const next: SentRecord<Value> = {
     ...(reconcile && failed === 0 ? { reconciled_at: runAt } : record.reconciled_at !== undefined ? { reconciled_at: record.reconciled_at } : {}),
     items,
   };
-  return { sent, failed, recorded: await writeSent(options.inbox, SENT_FILE, next) };
+  return { sent, failed, recorded: await writeSent(options.inbox, options.file, next) };
 }
 
 /** Writes the record of what was sent to `file` in the inbox, items sorted by id. Returns whether the file changed. */
