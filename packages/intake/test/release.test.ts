@@ -1,7 +1,7 @@
 import type { RecentList } from "@opencampingdb/feedback";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { createHandler, type Env } from "../src/index.js";
-import type { LatestRelease } from "../src/release.js";
+import { latestRelease } from "../src/release.js";
 import { fakeD1 } from "./fake-d1.js";
 
 const NOW = Date.parse("2026-11-07T12:00:00Z");
@@ -58,7 +58,7 @@ describe("the newest release", () => {
   });
 
   it("serves the release as the SDK's recent list types it", () => {
-    expectTypeOf<LatestRelease>().toEqualTypeOf<NonNullable<RecentList["release"]>>();
+    expectTypeOf<NonNullable<Awaited<ReturnType<typeof latestRelease>>>>().toEqualTypeOf<NonNullable<RecentList["release"]>>();
   });
 
   it("refuses an announcement without the places token, or one it cannot read", async () => {

@@ -1,9 +1,6 @@
 import { dataVersionTime, type RecentRelease } from "@opencampingdb/feedback";
 import type { D1Like } from "./recent.js";
 
-/** The newest data release, as the recent list serves it: the SDK's type, so apps read what the intake writes. */
-export type LatestRelease = RecentRelease;
-
 /** The body of `POST /v1/release`, or the problems with it. */
 export function parseRelease(body: Record<string, unknown>): { data_version: string; layout_version?: number } | { problems: string[] } {
   const { data_version: version, layout_version: layout } = body;
@@ -23,7 +20,7 @@ export function parseRelease(body: Record<string, unknown>): { data_version: str
  * has a newer one or this one already. Data versions start with their commit
  * time, so they sort by it as text. Returns the newest release it has.
  */
-export async function recordRelease(db: D1Like, release: { data_version: string; layout_version?: number }, published: string): Promise<LatestRelease> {
+export async function recordRelease(db: D1Like, release: { data_version: string; layout_version?: number }, published: string): Promise<RecentRelease> {
   await db
     .prepare(
       `INSERT INTO latest_release (id, data_version, published, layout_version) VALUES (1, ?, ?, ?)
@@ -36,7 +33,7 @@ export async function recordRelease(db: D1Like, release: { data_version: string;
 }
 
 /** The newest release the intake was told of, or undefined before the first. */
-export async function latestRelease(db: D1Like): Promise<LatestRelease | undefined> {
+export async function latestRelease(db: D1Like): Promise<RecentRelease | undefined> {
   const row = await db.prepare("SELECT data_version, published, layout_version FROM latest_release WHERE id = 1").first<{ data_version: string; published: string; layout_version: number | null }>();
   if (!row) return undefined;
   return { data_version: row.data_version, published: row.published, ...(row.layout_version !== null ? { layout_version: row.layout_version } : {}) };

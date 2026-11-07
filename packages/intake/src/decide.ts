@@ -80,7 +80,7 @@ export type ItemState = { state: "live" } | { state: "held"; held_reason: HeldRe
  * is stored, so each later item is decided as if those were stored already,
  * as it would be had each item been sent alone (`decideAtSendTime`).
  */
-export interface PendingDecisions {
+export interface DecidedInRequest {
   /** Recent changes, in the order they were decided. */
   changes: { place: string; fact: string; value: string | null; accepted: string }[];
   /** Report evidence, in the order it was decided. */
@@ -92,7 +92,7 @@ export interface PendingDecisions {
 }
 
 /** Nothing decided yet: for a single item, or the start of a batch. */
-export function noPending(): PendingDecisions {
+export function noneDecided(): DecidedInRequest {
   return { changes: [], evidence: [], cases: new Map(), accepted: new Map() };
 }
 
@@ -102,8 +102,8 @@ const caseKey = (place: string, fact: string) => `${place}\u0000${fact}`;
 export interface SendTimeDecision {
   answer: ItemState;
   writes: (db: D1Like) => D1Statement[];
-  /** Adds what `writes` will store to the batch's pending decisions, once the item is accepted into the batch. */
-  pending?: (pending: PendingDecisions) => void;
+  /** Adds what `writes` will store to what was decided in the request, once the item is accepted into the batch. */
+  addToDecided?: (decided: DecidedInRequest) => void;
   /** The live change the checks took from the daily caps, to give back with `releaseLive` when the item is not recorded. */
   slot?: LiveSlot;
 }
@@ -128,7 +128,7 @@ export function decidedHere(item: StoredFeedback): item is ReportItem {
 export async function contributorRecord(
   db: D1Like,
   contributor: string,
-  pending: PendingDecisions = noPending(),
+  decided: DecidedInRequest = noneDecided(),
 ): Promise<CheckContributor & { blocked: boolean }> {
   const row = await db
     .prepare(
@@ -138,7 +138,7 @@ export async function contributorRecord(
     )
     .bind(contributor)
     .first<{ accepted: number; taken_down: number; blocked: number }>();
-  const accepted = (row?.accepted ?? 0) + (pending.accepted.get(contributor) ?? 0);
+  const accepted = (row?.accepted ?? 0) + (decided.accepted.get(contributor) ?? 0);
   return { id: contributor, accepted, taken_down: row?.taken_down ?? 0, blocked: row?.blocked === 1 };
 }
 
@@ -156,7 +156,7 @@ function acceptedStatement(db: D1Like, contributor: string): D1Statement {
  * a change the data already held when the release last loaded the place's
  * cell: the index has it, or whatever has replaced it since.
  */
-export async function placeNow(db: D1Like, id: string, pending: PendingDecisions = noPending()): Promise<(PlaceState & { cell: Cell }) | undefined> {
+export async function placeNow(db: D1Like, id: string, decided: DecidedInRequest = noneDecided()): Promise<(PlaceState & { cell: Cell }) | undefined> {
   const indexed = await getIndexedPlace(db, id);
   if (indexed === undefined) return undefined;
   const [cellLon, cellLat] = indexed.cell;
@@ -175,7 +175,7 @@ export async function placeNow(db: D1Like, id: string, pending: PendingDecisions
   const facts: Record<string, unknown> = { ...indexed.facts };
   const sources: Record<string, string> = { ...indexed.fact_sources };
   const dates: Record<string, string> = { ...indexed.fact_dates };
-  for (const change of [...results, ...pending.changes.filter((c) => c.place === id)]) {
+  for (const change of [...results, ...decided.changes.filter((c) => c.place === id)]) {
     if (change.value === null) delete facts[change.fact];
     else facts[change.fact] = JSON.parse(change.value) as unknown;
     sources[change.fact] = "feedback";
@@ -203,13 +203,13 @@ export async function earlierReports(
   place: string,
   fact: string,
   at: number,
-  pending: PendingDecisions = noPending(),
+  decided: DecidedInRequest = noneDecided(),
 ): Promise<StoredFeedback[]> {
   const { results: stored } = await db
     .prepare("SELECT * FROM report_evidence WHERE place = ? AND fact = ? AND received >= ? ORDER BY received, feedback_id")
     .bind(place, fact, isoSeconds(at - WINDOW_DAYS * DAY_MS))
     .all<EvidenceRow>();
-  const results = [...stored, ...pending.evidence.filter((row) => row.place === place && row.fact === fact)];
+  const results = [...stored, ...decided.evidence.filter((row) => row.place === place && row.fact === fact)];
   return results.map(
     (row) =>
       ({
@@ -269,8 +269,8 @@ function evidenceStatement(db: D1Like, item: ReportItem, state: "live" | "held")
 }
 
 /** The open case for a fact doubts took down on a place, as `decideFact` reads it, or undefined when there is none. */
-export async function openDoubt(db: D1Like, place: string, fact: string, pending: PendingDecisions = noPending()): Promise<OpenDoubt | undefined> {
-  const batched = pending.cases.get(caseKey(place, fact));
+export async function openDoubt(db: D1Like, place: string, fact: string, decided: DecidedInRequest = noneDecided()): Promise<OpenDoubt | undefined> {
+  const batched = decided.cases.get(caseKey(place, fact));
   if (batched !== undefined) return batched === null ? undefined : { value: JSON.parse(batched.value) as OpenDoubt["value"], at: batched.taken_down_at };
   const row = await db
     .prepare("SELECT value, taken_down_at FROM doubt_cases WHERE place = ? AND fact = ? AND closed_by IS NULL")
@@ -320,15 +320,15 @@ export async function openDoubtCases(db: D1Like, cases: readonly DoubtCase[]): P
  * place and fact (replacing a closed one), with the value the place had and
  * the takedown's time, and a restore or replacement closes it.
  */
-/** What `caseStatements` writes, added to the batch's pending decisions. */
-function pendingCase(pending: PendingDecisions, item: ReportItem, decision: Extract<ItemDecision, { verdict: "live" }>): void {
+/** What `caseStatements` writes, added to the batch's decisions so far. */
+function decidedCase(decided: DecidedInRequest, item: ReportItem, decision: Extract<ItemDecision, { verdict: "live" }>): void {
   if (decision.doubtTakedown !== undefined) {
     const value = { value: JSON.stringify(decision.doubtTakedown.value), taken_down_at: item.received };
-    pending.cases.set(caseKey(item.place as string, decision.doubtTakedown.fact), value);
+    decided.cases.set(caseKey(item.place as string, decision.doubtTakedown.fact), value);
   } else if (decision.settles !== undefined) {
     const key = caseKey(item.place as string, item.report.fact as string);
     // Closing changes only an open case, as the UPDATE does. Whether one is open in D1 is not known here, and a closed one reads as none.
-    pending.cases.set(key, null);
+    decided.cases.set(key, null);
   }
 }
 
@@ -363,40 +363,40 @@ export interface DecideInput {
   /** The hashed contributor id, or the hashed install standing in for one. */
   contributor: string;
   /** What items earlier in the same batch decided. None for an item sent alone. */
-  pending?: PendingDecisions;
+  decided?: DecidedInRequest;
 }
 
-const held = (reason: HeldReason, writes: SendTimeDecision["writes"] = () => [], pending?: SendTimeDecision["pending"]): SendTimeDecision => ({
+const held = (reason: HeldReason, writes: SendTimeDecision["writes"] = () => [], addToDecided?: SendTimeDecision["addToDecided"]): SendTimeDecision => ({
   answer: { state: "held", held_reason: reason },
   writes,
-  ...(pending ? { pending } : {}),
+  ...(addToDecided ? { addToDecided } : {}),
 });
-const live = (writes: SendTimeDecision["writes"], pending: (p: PendingDecisions) => void, slot?: LiveSlot): SendTimeDecision => ({
+const live = (writes: SendTimeDecision["writes"], addToDecided: (decided: DecidedInRequest) => void, slot?: LiveSlot): SendTimeDecision => ({
   answer: { state: "live" },
   writes,
-  pending,
+  addToDecided,
   ...(slot ? { slot } : {}),
 });
-/** A held item's evidence: written, and pending for the rest of the batch. */
+/** A held item's evidence: written, and known to the items after it in the batch. */
 const heldWithEvidence = (reason: HeldReason, item: ReportItem): SendTimeDecision =>
   held(reason, (d) => [evidenceStatement(d, item, "held")], (p) => void p.evidence.push(evidenceRow(item)));
-const countAccepted = (pending: PendingDecisions, contributor: string) => pending.accepted.set(contributor, (pending.accepted.get(contributor) ?? 0) + 1);
+const countAccepted = (decided: DecidedInRequest, contributor: string) => decided.accepted.set(contributor, (decided.accepted.get(contributor) ?? 0) + 1);
 
 /** Decides one item that `decidedHere` says the intake decides. Reads D1 and runs the checks, and writes nothing. */
 export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDecision> {
-  const { db, checks, item, submission, contributor, pending = noPending() } = input;
-  const record = await contributorRecord(db, contributor, pending);
+  const { db, checks, item, submission, contributor, decided = noneDecided() } = input;
+  const record = await contributorRecord(db, contributor, decided);
   if (record.blocked) return held("blocked");
   if (item.report.kind === "new_place") return decideNewPlace(input, record);
   // The app hides the photo for this traveller. Everyone else waits for the apply: two sources, or a reviewer.
   if (item.report.kind === "commons_mismatch") return held("commons_report");
 
   const placeId = item.place as string;
-  const place = await placeNow(db, placeId, pending);
+  const place = await placeNow(db, placeId, decided);
   if (place === undefined) return held("unknown_place");
-  const earlier = await earlierReports(db, placeId, item.report.fact as string, Date.parse(item.received), pending);
+  const earlier = await earlierReports(db, placeId, item.report.fact as string, Date.parse(item.received), decided);
   const kind = item.report.kind;
-  const openCase = kind === "fact" ? await openDoubt(db, placeId, item.report.fact as string, pending) : undefined;
+  const openCase = kind === "fact" ? await openDoubt(db, placeId, item.report.fact as string, decided) : undefined;
   const decision =
     kind === "fact"
       ? decideFact({ item, place, earlier, ...(openCase === undefined ? {} : { openCase }) })
@@ -424,7 +424,7 @@ export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDeci
     acceptedStatement(d, contributor),
   ], (p) => {
     p.evidence.push(evidenceRow(item));
-    pendingCase(p, item, decision);
+    decidedCase(p, item, decision);
     for (const change of decision.changes) {
       p.changes.push({ place: change.place, fact: change.fact, value: change.value === null ? null : JSON.stringify(change.value), accepted: item.received });
     }

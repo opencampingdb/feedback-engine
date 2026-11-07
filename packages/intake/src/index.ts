@@ -76,9 +76,9 @@ import {
   pruneDecisions,
   UNAVAILABLE,
   type DoubtCase,
-  noPending,
+  noneDecided,
   type ItemState,
-  type PendingDecisions,
+  type DecidedInRequest,
   type SendTimeDecision,
 } from "./decide.js";
 import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult, type QueuedFile } from "./inbox-queue.js";
@@ -1319,7 +1319,7 @@ export function createHandler(deps: Deps) {
     day: string;
     origin: string | undefined;
     counts: CountSession;
-    pending: PendingDecisions;
+    decided: DecidedInRequest;
     nextId: () => string;
     text?: string;
     batch?: { proof: Proof | undefined };
@@ -1337,7 +1337,7 @@ export function createHandler(deps: Deps) {
     // Cloudflare sets CF-Connecting-IP to the client address. Only a salted hash of its network is kept.
     const network = networkPrefix(request.headers.get("cf-connecting-ip") ?? "");
     const origin = network === undefined ? undefined : await hashDevice(env.DEVICE_SALT, `ip:${network}`);
-    return { request, env, app, nowMs, received, day, origin, counts: countSession(countStore(env), day, nowMs), pending: noPending(), ...how };
+    return { request, env, app, nowMs, received, day, origin, counts: countSession(countStore(env), day, nowMs), decided: noneDecided(), ...how };
   }
 
   /**
@@ -1471,7 +1471,7 @@ export function createHandler(deps: Deps) {
         item: stored,
         submission: submission as FeedbackSubmission,
         contributor: who,
-        pending: intake.pending,
+        decided: intake.decided,
       }).catch((error: unknown) => {
         console.warn(`deciding ${id} failed: ${String(error)}`);
         return { answer: UNAVAILABLE, writes: () => [] };
@@ -1479,7 +1479,7 @@ export function createHandler(deps: Deps) {
       // The apply reads it: an item held for a check goes to a person, never into the data on its own.
       stored.intake = decision.answer;
       // The items after it in a batch are decided as if it were stored already.
-      decision.pending?.(intake.pending);
+      decision.addToDecided?.(intake.decided);
     }
 
     const writes = env.RECENT_LIST
