@@ -4,5 +4,6 @@
     "lib": ["ES2022", "DOM"],
     "types": []
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  "exclude": ["test/release-updater-sqlite.test.ts"]
 }

@@ -108,6 +108,17 @@ export { dataVersionTime, withRecentChanges } from "./recent.js";
 export type { RecentChange, RecentList, RecentPlace, RecentRelease, ReleasePlace } from "./recent.js";
 export { PHOTO_HELD_REASONS, PROGRESS_STATES, isFeedbackId, progressInRelease } from "./progress.js";
 export type { PhotoHeldReason, Progress, ProgressState, RefusedBy } from "./progress.js";
+export { DEFAULT_MANIFEST_URL, MAX_CHANGESET_CHAIN, createReleaseUpdater } from "./release.js";
+export type {
+  Gunzip,
+  ReleaseDatabaseAdapter,
+  ReleaseFetchLike,
+  ReleaseUpdateReason,
+  ReleaseUpdateResult,
+  ReleaseUpdateStatus,
+  ReleaseUpdater,
+  ReleaseUpdaterOptions,
+} from "./release.js";
 export { sha256Hex, sha256HexBytes } from "./sha256.js";
 export { REMOVED_MARKER, findContactDetails, findContactDetailsInHours, stripContactDetails } from "./text.js";
 export type { ContactDetailKind } from "./text.js";
