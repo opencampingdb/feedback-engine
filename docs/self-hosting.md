@@ -25,7 +25,7 @@ npx wrangler kv namespace create RATE_LIMIT
 
 Note the `id` it prints. It replaces `REPLACE_ME_KV_NAMESPACE_ID` in your deploy configuration (step 6). Never commit your ids to this repository.
 
-The `RATE_LIMIT` binding is still required, so create the namespace either way. Without `RECENT_LIST`, mind KV's limits: on the free plan it allows 1,000 writes a day, and each accepted submission makes three (one device counter, one network counter, one app counter), plus one per contributor and one per attested key, so the free plan carries about 200 to 330 submissions a day. On any plan KV takes one write a second to one key, and every submission writes the app's counter, so an intake without `RECENT_LIST` takes about one submission a second. Bind `RECENT_LIST` for more.
+The `RATE_LIMIT` binding is still required, so create the namespace either way. Without `RECENT_LIST`, mind KV's limits: on the free plan it allows 1,000 writes a day, and each accepted submission makes three (one device counter, one network counter, one app counter), plus one per contributor and one per attested key, so the free plan carries about 200 to 330 submissions a day. On any plan KV takes one write a second to one key, and every submission writes the app's counter, so an intake without `RECENT_LIST` keeps that limit: about one submission a second, across every user of every app it serves. The KV counters are kept for small and test intakes. Any intake that serves a public app needs `RECENT_LIST` (D1).
 
 If an app key uses App Attest, create a second namespace for registered keys and challenges, and note its `id` for the `ATTEST` binding:
 

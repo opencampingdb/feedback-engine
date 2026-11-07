@@ -49,7 +49,10 @@ export interface Counter {
  * (RECENT_LIST) they are rows in `rate_counts`: D1 is strongly consistent and
  * has no per-key write limit, while Workers KV allows one write a second to a
  * key, which the app's counter would reach at one item a second. An intake
- * without D1 keeps them in KV, as it writes each item to the inbox at once anyway.
+ * without D1 keeps them in KV, as it writes each item to the inbox at once
+ * anyway. That fallback keeps KV's limit: every item writes the app's
+ * counter, so such an intake takes about one item a second across all its
+ * apps' users. D1 is needed at scale.
  */
 export type CountStore = { d1: D1Like } | { kv: KVLike };
 
