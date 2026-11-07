@@ -852,7 +852,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
   /**
    * What one item's answer means: `sent`, `drop`, or `stop` (kept, and the
    * flush stops). Network errors, 408, 429, 5xx and a refused assertion keep
-   * it; any other refusal drops it. A 429 with a retry-after waits that long.
+   * it. Any other refusal drops it. A 429 with a retry-after waits that long.
    * The outcome is given back to be recorded, in order, by the caller.
    */
   async function settle(item: QueueItem, status: number, answer: unknown, retryAfter: number): Promise<{ result: Sent; outcome?: Outcome }> {

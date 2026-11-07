@@ -32,12 +32,6 @@ export const PLACE_EDIT_DAILY_LIMIT = 100;
 /** How long a counter lives in KV, on an intake without D1. */
 const TTL_SECONDS = 2 * 24 * 60 * 60;
 
-export interface RateLimitResult {
-  allowed: boolean;
-  /** Seconds until the counters reset at midnight UTC. */
-  retryAfter: number;
-}
-
 export function secondsToMidnightUtc(nowMs: number): number {
   const d = new Date(nowMs);
   const midnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);

@@ -278,7 +278,6 @@ export function photoHeldReason(reason: string | undefined): PhotoHeldReason | u
 }
 
 /** Whether a stored item was applied by the rules (not held for a person, not refused). */
-
 function wasApplied(item: StoredFeedback): boolean {
   return (item as { outcome?: { result?: string } }).outcome?.result === "applied";
 }

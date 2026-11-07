@@ -22,7 +22,7 @@ interface Call {
 }
 
 /**
- * An intake. `reply` answers each call; by default a batch is answered 202
+ * An intake. `reply` answers each call. By default a batch is answered 202
  * for every item, with ids fb_1, fb_2 and so on, and a single POST 202.
  */
 function fakeIntake(reply?: (call: Call, n: number) => Reply | undefined) {
