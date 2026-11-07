@@ -50,22 +50,28 @@ describe("validateSubmission", () => {
     if (!r.ok) expect(r.errors.join(" | ")).toContain(message);
   });
 
-  it("refuses opening hours that hold contact details, and accepts plain opening hours", () => {
+  it("accepts OSM opening hours, and refuses contact details in their comments", () => {
     const hours = (value: string) =>
       validateSubmission({ ...base, type: "report", place: PLACE, report: { kind: "fact", fact: "opening_hours", value } });
-    for (const value of ["Ring 0412 345 678", "see camp.example.com.au", "jo@example.com"]) {
-      expect(hours(value)).toMatchObject({ ok: false, errors: ["report.value is not a valid value for opening_hours"] });
-    }
     expect(hours("Mo-Fr 08:00-17:00; Sa 09:00-12:00").ok).toBe(true);
     expect(hours("24/7").ok).toBe(true);
+    expect(hours('Mo-Su 08:00-17:00 "gate locked at night"').ok).toBe(true);
+    for (const value of ['Mo-Fr "ring 0412 345 678"', 'Mo-Fr "see camp.example.com.au"', 'Mo-Fr "jo@example.com"']) {
+      expect(hours(value)).toMatchObject({ ok: false, errors: ["report.value is not a valid value for opening_hours"] });
+    }
   });
 
-  it("accepts opening hours written with dots or as HHMM ranges, and still refuses phone numbers and links", () => {
+  it("refuses opening hours that are not OSM syntax, and says why", () => {
     const hours = (value: string) =>
       validateSubmission({ ...base, type: "report", place: PLACE, report: { kind: "fact", fact: "opening_hours", value } });
-    for (const value of ["08.00-17.00", "08.00 - 17.00", "0800-1700", "Mo-Fr 0800-1700"]) expect(hours(value).ok).toBe(true);
-    for (const value of ["0412 345 678", "0412-345-678", "1300 123 456", "https://camp.example.org/hours"]) {
-      expect(hours(value).ok).toBe(false);
+    expect(hours("Mon-Sun  06:00 - 22:00")).toMatchObject({
+      ok: false,
+      errors: ['report.value is not OSM opening_hours syntax at character 3 ("n-Sun  06:00"): write weekdays as two letters: Mo Tu We Th Fr Sa Su'],
+    });
+    for (const value of ["08.00-17.00", "0800-1700", "Mo-Fr 0800-1700", "0412 345 678", "https://camp.example.org/hours", "Ring 0412 345 678"]) {
+      const r = hours(value);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.errors[0]).toMatch(/^report\.value is not OSM opening_hours syntax/);
     }
   });
 

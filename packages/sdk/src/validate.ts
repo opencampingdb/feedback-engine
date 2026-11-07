@@ -1,3 +1,4 @@
+import { openingHoursProblem } from "./hours.js";
 import { findContactDetails, findContactDetailsInHours } from "./text.js";
 import { textProblem, tidyName } from "./tidy.js";
 import type {
@@ -293,8 +294,8 @@ export const FACTS: Readonly<Record<ReportFactName, (value: unknown) => boolean>
   entry: (v) => v === "public" || v === "customers" || v === "permit" || v === "private",
   vehicle_access: (v) => typeof v === "string" && (VEHICLE_ACCESS_VALUES as readonly string[]).includes(v),
   max_stay: (v) => typeof v === "string" && /^[1-9]\d{0,2}[hdw]$/.test(v),
-  // Free text, so it must hold no email address, phone number or link.
-  opening_hours: (v) => typeof v === "string" && v.trim().length > 0 && v.length <= 100 && findContactDetailsInHours(v).length === 0,
+  // OSM opening_hours syntax, whose comments must hold no email address, phone number or link.
+  opening_hours: (v) => typeof v === "string" && v.length <= 100 && openingHoursProblem(v) === null && findContactDetailsInHours(v).length === 0,
   website: isHttpsPage(300),
   phone: isPhone,
   water_type: (v) => v === "tank_fill" || v === "fountain",
@@ -403,6 +404,13 @@ export function isFactName(value: unknown): value is ReportFactName {
   return typeof value === "string" && Object.hasOwn(FACTS, value);
 }
 
+/** For opening hours that aren't OSM syntax, `is ` and the reason; otherwise null. */
+function hoursReason(fact: string, value: unknown): string | null {
+  if (fact !== "opening_hours" || typeof value !== "string" || value.length > 100) return null;
+  const problem = openingHoursProblem(value);
+  return problem === null ? null : `is ${problem}`;
+}
+
 export function isValidFactValue(fact: ReportFactName, value: unknown): value is FactValue {
   return FACTS[fact](value);
 }
@@ -464,7 +472,7 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
         out.value = trimmedAddress(value.value as PlaceAddress);
       }
     } else if (!isValidFactValue(value.fact, value.value)) {
-      errors.push(`report.value is not a valid value for ${value.fact}`);
+      errors.push(`report.value ${hoursReason(value.fact, value.value) ?? `is not a valid value for ${value.fact}`}`);
     } else {
       out.fact = value.fact;
       out.value = value.value as FactValue;
@@ -905,7 +913,7 @@ function checkOwnerFacts(value: unknown, field: string, errors: string[]): Owner
   for (const [name, v] of Object.entries(value)) {
     const valid = Object.hasOwn(OWNER_FACTS, name) ? OWNER_FACTS[name as OwnerFactName] : undefined;
     if (!valid) errors.push(`${field}.${name} is not a fact an owner can set`);
-    else if (!valid(v)) errors.push(`${field}.${name} is not a valid value`);
+    else if (!valid(v)) errors.push(`${field}.${name} ${hoursReason(name, v) ?? "is not a valid value"}`);
     else out[name] = v as FactValue;
   }
   return out as OwnerFacts;

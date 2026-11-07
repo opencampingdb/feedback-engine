@@ -104,6 +104,7 @@ export {
   validateSubmission,
 } from "./validate.js";
 export type { ValidationResult } from "./validate.js";
+export { isOpeningHours, openingHoursProblem } from "./hours.js";
 export { dataVersionTime, withRecentChanges } from "./recent.js";
 export type { RecentChange, RecentList, RecentPlace, RecentRelease, ReleasePlace } from "./recent.js";
 export { PHOTO_HELD_REASONS, PROGRESS_STATES, isFeedbackId, progressInRelease } from "./progress.js";
