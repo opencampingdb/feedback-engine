@@ -261,6 +261,8 @@ describe("the AI reviewer", () => {
 
     const token = gh.calls.find((c) => c.url.endsWith("/access_tokens"))!.body!;
     expect(token).toEqual({ repositories: ["data"], permissions: { contents: "write", pull_requests: "write" } });
+    // One installation token serves the whole run: the PR, the files, the commit and the comment.
+    expect(gh.calls.filter((c) => c.url.endsWith("/access_tokens"))).toHaveLength(1);
   });
 
   it("is off without REVIEW_BOT_LOGINS", async () => {
