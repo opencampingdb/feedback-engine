@@ -85,19 +85,8 @@ export function photoProgressOf(item: DecidedItem, main: PhotoMain, context: Pho
   const reason = item.outcome?.reason;
   const base = { id, place: item.place, ...(item.outcome?.run ? { decided_at: item.outcome.run } : {}), run_at: context.runAt };
   const refused = (by: "rules" | "reviewer", why: string | undefined): PhotoProgressUpdate => ({ ...base, state: "refused", by, ...(why ? { reason: why } : {}) });
-
-  const removed = main.removed.get(id);
-  if (removed === "erased") return refused("rules", PHOTO_REASONS.erased);
-  if (removed === "refused") return refused("rules", reason);
-  if (removed === "moderator") return refused("reviewer", PHOTO_REASONS.removed);
-
-  const line = main.lines.get(id);
-  if (line !== undefined) {
-    if (main.blocked.has(line.contributor)) return refused("reviewer", PHOTO_REASONS.blocked);
-    if (line.hidden === "moderator") return refused("reviewer", PHOTO_REASONS.hidden);
-    if (line.hidden === "reported") return { ...base, state: "held", held_reason: "reported", reason: PHOTO_REASONS.reported };
-    return { ...base, state: "in_data", ...(reason ? { reason } : {}), in_data_at: context.inDataAt(photoPath(line.place)), place: line.place };
-  }
+  const onMain = photoOnMain(id, main, context, base, reason);
+  if (onMain) return onMain;
 
   const withReason = reason ? { reason } : {};
   if (result === "refused") return refused("rules", reason);
@@ -110,6 +99,36 @@ export function photoProgressOf(item: DecidedItem, main: PhotoMain, context: Pho
   if (context.declined.auto.has(item.id)) return refused("reviewer", AUTO_PR_CLOSED);
   if (context.autoMerged.has(item.id)) return refused("reviewer", PHOTO_REASONS.takenOut);
   return { ...base, state: "accepted", ...withReason };
+}
+
+/**
+ * Where main has a photo: `refused` on the removed list (by the rules when
+ * they refused it or the contributor asked, otherwise by the reviewer), and
+ * for a line, `refused` by the reviewer when a person hid it or blocked the
+ * contributor, `held` (`reported`) while hidden after reports, or
+ * `in_data`. Undefined when main names it nowhere. `reason` is the
+ * decision's, when the photo has one in the window.
+ */
+function photoOnMain(
+  id: string,
+  main: PhotoMain,
+  context: PhotoProgressContext,
+  base: Omit<PhotoProgressUpdate, "state">,
+  reason: string | undefined,
+): PhotoProgressUpdate | undefined {
+  const refused = (by: "rules" | "reviewer", why: string | undefined): PhotoProgressUpdate => ({ ...base, state: "refused", by, ...(why ? { reason: why } : {}) });
+  const removed = main.removed.get(id);
+  if (removed === "erased") return refused("rules", PHOTO_REASONS.erased);
+  if (removed === "refused") return refused("rules", reason);
+  if (removed === "moderator") return refused("reviewer", PHOTO_REASONS.removed);
+
+  const line = main.lines.get(id);
+  if (line === undefined) return undefined;
+  const at = { ...base, place: line.place };
+  if (main.blocked.has(line.contributor)) return { ...at, state: "refused", by: "reviewer", reason: PHOTO_REASONS.blocked };
+  if (line.hidden === "moderator") return { ...at, state: "refused", by: "reviewer", reason: PHOTO_REASONS.hidden };
+  if (line.hidden === "reported") return { ...at, state: "held", held_reason: "reported", reason: PHOTO_REASONS.reported };
+  return { ...at, state: "in_data", ...(reason ? { reason } : {}), in_data_at: context.inDataAt(photoPath(line.place)) };
 }
 
 /** Where main keeps the photos taken out of the records, which dates a removal. */
@@ -230,12 +249,22 @@ export async function sendPhotoProgress(options: SendPhotoProgressOptions): Prom
     if (update) updates.set(id, update);
   }
 
-  const due = [...updates.values()].filter((u) => reconcile || record.items[u.id] !== signature(u));
+  // Photos decided before the window that main still names are followed only for changes: once they
+  // leave the data, and when they come back to it. A photo with no record stayed in the data.
+  const inWindow = new Set(updates.keys());
+  for (const id of new Set([...main.lines.keys(), ...main.removed.keys()])) {
+    if (inWindow.has(id)) continue;
+    const update = photoOnMain(id, main, context, { id, run_at: runAt }, undefined);
+    const last = record.items[id] ?? "in_data";
+    if (update && (signature(update) !== "in_data" || last !== "in_data")) updates.set(id, update);
+  }
+  // The Monday run sends the window's photos again, and the older ones only when they change.
+  const due = [...updates.values()].filter((u) => (reconcile && inWindow.has(u.id)) || (record.items[u.id] ?? (inWindow.has(u.id) ? undefined : "in_data")) !== signature(u));
   const undated = due.flatMap((u) => (u.in_data_at?.startsWith(UNDATED) ? [u.in_data_at.slice(UNDATED.length)] : []));
   const times = await lastCommitTimes(options.main, undated, runAt);
   for (const u of due) if (u.in_data_at?.startsWith(UNDATED)) u.in_data_at = times.get(u.in_data_at.slice(UNDATED.length)) ?? runAt;
 
-  // The record keeps only items still in the window.
+  // The record keeps the window's items, and the older photos not in the data.
   return sendChanged({
     inbox: options.inbox,
     file: PHOTO_SENT_FILE,

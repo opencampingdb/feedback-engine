@@ -182,6 +182,39 @@ describe("sendPhotoProgress", () => {
     expect(s.photoProgress).not.toHaveBeenCalled();
   });
 
+  describe("photos decided more than 90 days ago", () => {
+    const at = (iso: string) => new Date(iso);
+
+    it("sends a photo main now hides or removes, and again when it comes back, but never one that stays in the data", async () => {
+      // Decided in July, so the inbox's 90-day window no longer has them.
+      await commitIn(mainDir, `photos/${PLACE}.ndjson`, `${line(1)}\n${line(2, { hidden: "reported" })}\n`, "2026-11-02T06:00:00Z");
+      await commitIn(mainDir, "moderation/removed_photos.json", JSON.stringify({ photos: [{ photo: pho(3), removed: "2026-11-02T00:00:00Z", reason: "moderator" }] }), "2026-11-02T07:00:00Z");
+      const first = store();
+      await send(first, { now: at("2026-11-03T00:00:00Z") });
+      expect(byId(first)).toEqual({
+        [pho(2)]: { id: pho(2), state: "held", held_reason: "reported", reason: "hidden after reports, until a person decides", place: PLACE, run_at: "2026-11-03T00:00:00Z" },
+        [pho(3)]: { id: pho(3), state: "refused", by: "reviewer", reason: "removed by a reviewer", run_at: "2026-11-03T00:00:00Z" },
+      });
+
+      const again = store();
+      await send(again, { now: at("2026-11-03T01:00:00Z") });
+      expect(again.photoProgress).not.toHaveBeenCalled();
+
+      // A person shows it again.
+      await commitIn(mainDir, `photos/${PLACE}.ndjson`, `${line(1)}\n${line(2)}\n`, "2026-11-03T01:30:00Z");
+      const back = store();
+      await send(back, { now: at("2026-11-03T02:00:00Z") });
+      expect(sentOf(back)).toEqual([{ id: pho(2), state: "in_data", place: PLACE, in_data_at: "2026-11-03T01:30:00Z", run_at: "2026-11-03T02:00:00Z" }]);
+
+      // The Monday run sends the window's photos again, never every photo on main. The record keeps
+      // the older photos that are out of the data, to see them change.
+      const monday = store();
+      await send(monday, { now: at("2026-11-09T00:30:00Z") });
+      expect(monday.photoProgress).not.toHaveBeenCalled();
+      expect(JSON.parse(await readFile(join(inbox, PHOTO_SENT_FILE), "utf8")).items).toEqual({ [pho(3)]: "refused:reviewer" });
+    });
+  });
+
   describe("photo reports and erasures", () => {
     const OTHER = "ctr_fedcba9876543210";
     /** A report of photo `photoN`, as the inbox keeps it once a run decided it. */
