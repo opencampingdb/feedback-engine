@@ -26,7 +26,7 @@ These never do:
 - the owner's description
 - location moves
 - `booking_url` and `booking_required`
-- facts with no OSM tag, such as scenery, shade, crocodiles or mobile signal, and values OSM cannot say (`caravans: offroad`, `pets: seasonal`)
+- facts with no OSM tag, such as scenery, shade, crocodiles, sharks, dangerous jellyfish or mobile signal, and values OSM cannot say (`caravans: offroad`, `pets: seasonal`)
 - kind changes and descriptions
 - temporary closures (`temporarily_closed`) and `reopens` dates, which OSM does not map
 - photos, merges and tombstones (`status: merged`)

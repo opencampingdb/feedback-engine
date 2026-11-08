@@ -156,6 +156,8 @@ export const SITE_FEATURES = [
   "vehicle_storage",
   "self_contained_only",
   "crocodiles",
+  "sharks",
+  "marine_stingers",
   "seasonal_closure",
   "dangerous_when_wet",
   "over_50s",
