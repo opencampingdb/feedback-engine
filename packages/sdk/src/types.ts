@@ -201,6 +201,9 @@ export interface PlaceFacts {
   // Warnings.
   self_contained_only?: boolean;
   crocodiles?: boolean;
+  sharks?: boolean;
+  /** Box jellyfish, Irukandji or other dangerous jellyfish, at least in season. */
+  marine_stingers?: boolean;
   seasonal_closure?: boolean;
   dangerous_when_wet?: boolean;
   over_50s?: boolean;

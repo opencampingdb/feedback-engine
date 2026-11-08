@@ -130,6 +130,8 @@ const YES_NO_WORDS: Readonly<Record<string, readonly [string, string]>> = {
   mobile_signal: ["there is mobile signal on other networks", "there is no mobile signal on other networks"],
   self_contained_only: ["only self-contained vehicles may stay", "vehicles need not be self-contained"],
   crocodiles: ["there are crocodiles in the water nearby", "there are no crocodiles nearby"],
+  sharks: ["there are sharks in the water nearby", "there are no sharks nearby"],
+  marine_stingers: ["there are dangerous jellyfish in the water nearby", "there are no dangerous jellyfish nearby"],
   dangerous_when_wet: ["the way in is dangerous when wet", "the way in is fine when wet"],
   over_50s: ["only guests 50 and older may stay", "guests of any age may stay"],
   nudist: ["it is a nudist place", "it is not a nudist place"],

@@ -130,6 +130,8 @@ describe("site features and the name, description and kind reports", () => {
     ["pets", "seasonal"],
     ["campfires", true],
     ["crocodiles", false],
+    ["sharks", true],
+    ["marine_stingers", true],
     ["booking_required", true],
     ["brand", "big4"],
     ["email", "stay@example.com.au"],
@@ -147,6 +149,9 @@ describe("site features and the name, description and kind reports", () => {
     ["email", "not an email"],
     ["instagram", "http://instagram.com/lakebend"],
     ["booking_url", "https://book.example.com"],
+    ["marine_stingers", "in season"],
+    // Worked out from OSM at each sync, so no report sets it.
+    ["nearest_beach", { distance_m: 100 }],
   ])("refuses %s = %j", (fact, value) => {
     expect(report({ kind: "fact", fact, value }).ok).toBe(false);
   });
@@ -177,7 +182,8 @@ describe("site features and the name, description and kind reports", () => {
 
 describe("exports for apps", () => {
   it("exports the site features, brands and name length from the package index", () => {
-    expect(SITE_FEATURES).toHaveLength(44);
+    expect(SITE_FEATURES).toHaveLength(46);
+    expect(SITE_FEATURES).toContain("marine_stingers");
     expect(SITE_FEATURES).toContain("campfires");
     expect(BRANDS).toContain("big4");
     expect(MAX_NAME_LENGTH).toBe(300);
