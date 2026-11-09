@@ -469,6 +469,8 @@ export interface PhotoReportSubmission extends SubmissionBase {
 export interface PhotoErasureSubmission extends SubmissionBase {
   type: "photo_erasure";
   place: null;
+  /** A proof from the app's server (`signContributorProof`), needed when the app key has `contributor_proof_key`. Never stored. */
+  contributor_proof?: string;
 }
 
 /**
@@ -479,6 +481,8 @@ export interface PhotoRemovalSubmission extends SubmissionBase {
   type: "photo_removal";
   place: string;
   photo_removal: PhotoRemovalBody;
+  /** A proof from the app's server (`signContributorProof`), needed when the app key has `contributor_proof_key`. Never stored. */
+  contributor_proof?: string;
 }
 
 /**

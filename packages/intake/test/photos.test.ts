@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { jpegSize } from "../src/jpeg.js";
 import { createHandler, hashContributor, withheldKey, type BucketLike, type Env } from "../src/index.js";
+import { signContributorProof } from "@opencampingdb/feedback";
 import type { KVLike } from "../src/ratelimit.js";
 
 const { privateKey } = generateKeyPairSync("rsa", {
@@ -585,5 +586,100 @@ describe("SafeSearch on uploads", () => {
     expect((await handle(upload(jpeg(1600, 1200), jpeg(400, 300, 10)), { ...env(), GOOGLE_SERVICE_ACCOUNT: ACCOUNT })).status).toBe(202);
     expect(vision).toHaveLength(0);
     expect((gh.puts[0]!.content as { photo: Record<string, unknown> }).photo.safesearch).toBeUndefined();
+  });
+});
+
+describe("a contributor proof for removal and erasure (audit run-2 OCDB-NV-06)", () => {
+  const PHOTO = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB";
+  const SECONDS = NOW / 1000;
+
+  async function setup() {
+    const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
+    const publicKey = Buffer.from(new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey))).toString("base64");
+    const gh = fakeGitHub();
+    const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
+    const state = fakeKv();
+    const mine = await hashContributor("pepper", "example-app", CONTRIBUTOR);
+    const records = `${JSON.stringify({ id: PHOTO, place: PLACE, contributor: mine })}\n`;
+    const served = { get: async (key: string) => (key === `records/${PLACE}.ndjson` ? { text: async () => records } : null) };
+    const e: Env = {
+      ...env(),
+      APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 100, contributor_proof_key: publicKey } }),
+      PHOTO_STATE: state,
+      PHOTOS_SERVED: served,
+    };
+    const post = (path: string, body: unknown) =>
+      handle(new Request(`https://intake.example${path}`, { method: "POST", headers: { "x-app-key": APP_KEY }, body: JSON.stringify(body) }), e);
+    const base = { device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true };
+    const removal = (extra: Record<string, unknown> = {}) => ({ ...base, type: "photo_removal", place: PLACE, photo_removal: { photo: PHOTO }, ...extra });
+    const erasure = (extra: Record<string, unknown> = {}) => ({ ...base, type: "photo_erasure", place: null, ...extra });
+    const sign = (claims: Record<string, unknown>) =>
+      signContributorProof(pair.privateKey, {
+        app: "example-app",
+        contributor: CONTRIBUTOR,
+        action: "photo_removal",
+        photo: PHOTO,
+        issued: SECONDS,
+        expires: SECONDS + 600,
+        ...claims,
+      } as Parameters<typeof signContributorProof>[1]);
+    return { gh, state, post, removal, erasure, sign, mine };
+  }
+
+  it("refuses a removal or erasure without a proof and withholds nothing", async () => {
+    const t = await setup();
+    const res = await t.post("/v1/feedback", t.removal());
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "proof_required" });
+    const erase = await t.post("/v1/feedback", t.erasure());
+    expect(erase.status).toBe(401);
+    expect(await t.state.get(withheldKey(PHOTO))).toBeNull();
+    expect(await t.state.get(`withheld-contributor:${t.mine}`)).toBeNull();
+    expect(t.gh.puts).toHaveLength(0);
+  });
+
+  it("refuses a proof for another contributor, another photo, or one that has expired", async () => {
+    const t = await setup();
+    for (const claims of [
+      { contributor: "acct_someone_else_000" },
+      { photo: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZC" },
+      { issued: SECONDS - 1200, expires: SECONDS - 600 },
+      { action: "photo_erasure", photo: "*" },
+    ]) {
+      const res = await t.post("/v1/feedback", t.removal({ contributor_proof: await t.sign(claims) }));
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "proof_invalid" });
+    }
+    const erase = await t.post("/v1/feedback", t.erasure({ contributor_proof: await t.sign({}) }));
+    expect(erase.status).toBe(401);
+    expect(await t.state.get(withheldKey(PHOTO))).toBeNull();
+    expect(await t.state.get(`withheld-contributor:${t.mine}`)).toBeNull();
+    expect(t.gh.puts).toHaveLength(0);
+  });
+
+  it("accepts a valid proof, withholds as before and never stores the proof", async () => {
+    const t = await setup();
+    const proof = await t.sign({});
+    expect((await t.post("/v1/feedback", t.removal({ contributor_proof: proof }))).status).toBe(202);
+    expect(await t.state.get(withheldKey(PHOTO))).not.toBeNull();
+    const eraseProof = await t.sign({ action: "photo_erasure", photo: "*" });
+    expect((await t.post("/v1/feedback", t.erasure({ contributor_proof: eraseProof }))).status).toBe(202);
+    expect(await t.state.get(`withheld-contributor:${t.mine}`)).not.toBeNull();
+    for (const put of t.gh.puts) expect(JSON.stringify(put.content)).not.toContain(proof.split(".")[1]!);
+    expect(t.gh.puts.map((p) => p.content.contributor_proof)).toEqual([undefined, undefined]);
+  });
+
+  it("leaves an app key without a proof key as it was", async () => {
+    const gh = fakeGitHub();
+    const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
+    const res = await handle(
+      new Request("https://intake.example/v1/feedback", {
+        method: "POST",
+        headers: { "x-app-key": APP_KEY },
+        body: JSON.stringify({ device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true, type: "photo_erasure", place: null }),
+      }),
+      env(),
+    );
+    expect(res.status).toBe(202);
   });
 });

@@ -331,6 +331,14 @@ export interface PhotoRemovalInput {
   photo: string;
   /** The signed-in traveller's account id: the one that sent the photo. */
   contributor: string;
+  /**
+   * A proof from your app's server that the signed-in account is this
+   * contributor (`signContributorProof`). Needed when the app key has
+   * `contributor_proof_key`; the intake answers 401 `proof_required` or
+   * `proof_invalid` without it. Make it right before the call: it lives at
+   * most an hour, and a queued item sent later than that is refused.
+   */
+  contributorProof?: string;
   consent: boolean;
   /**
    * The caller's own id for this submission, 1 to 100 characters. Kept with
@@ -342,6 +350,14 @@ export interface PhotoRemovalInput {
 export interface PhotoErasureInput {
   /** The account id whose photos are removed. */
   contributor: string;
+  /**
+   * A proof from your app's server that the signed-in account is this
+   * contributor (`signContributorProof`). Needed when the app key has
+   * `contributor_proof_key`; the intake answers 401 `proof_required` or
+   * `proof_invalid` without it. Make it right before the call: it lives at
+   * most an hour, and a queued item sent later than that is refused.
+   */
+  contributorProof?: string;
   consent: boolean;
   /**
    * The caller's own id for this submission, 1 to 100 characters. Kept with
@@ -1571,8 +1587,10 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
         { place, photo_report: { photo, reason }, ...(contributor !== undefined ? { contributor } : {}), consent, ref },
         "photo_report",
       ),
-    removePhoto: ({ place, photo, contributor, consent, ref }) => submit({ place, photo_removal: { photo }, contributor, consent, ref }, "photo_removal"),
-    erasePhotos: ({ contributor, consent, ref }) => submit({ place: null, contributor, consent, ref }, "photo_erasure"),
+    removePhoto: ({ place, photo, contributor, contributorProof, consent, ref }) =>
+      submit({ place, photo_removal: { photo }, contributor, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}), consent, ref }, "photo_removal"),
+    erasePhotos: ({ contributor, contributorProof, consent, ref }) =>
+      submit({ place: null, contributor, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}), consent, ref }, "photo_erasure"),
     flush: async () => {
       const result = await flushNow();
       await flushWaitingPhotos();

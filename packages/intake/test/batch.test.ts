@@ -4,6 +4,7 @@ import { createHandler, MAX_BATCH_BODY_BYTES, MAX_BATCH_ITEMS, type Env } from "
 import { NEW_PLACE_DAILY_LIMIT, type D1Like } from "../src/recent.js";
 import { fakeD1 } from "./fake-d1.js";
 import { listableKv } from "./fake-kv.js";
+import { signContributorProof } from "@opencampingdb/feedback";
 
 const NOW = Date.parse("2026-11-07T09:00:00Z");
 const DAY = "2026-11-07";
@@ -310,5 +311,30 @@ describe("POST /v1/feedback/batch", () => {
     const res = await handle(batch([review(PLACE)]), env(undefined));
     expect(res.status).toBe(404);
     expect(services.counted.commits).toBe(0);
+  });
+});
+
+describe("a contributor proof on batch items (audit run-2 OCDB-NV-06)", () => {
+  it("checks the proof of each photo removal or erasure in a batch", async () => {
+    const services = fakeServices();
+    const handle = createHandler({ fetch: services.fetch, now: () => NOW, randomBytes: () => crypto.getRandomValues(new Uint8Array(16)) });
+    const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
+    const publicKey = Buffer.from(new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey))).toString("base64");
+    const bucket = { put: async () => undefined, delete: async () => undefined };
+    const e: Env = { ...env(fakeD1(), { contributor_proof_key: publicKey }), PHOTOS_PENDING: bucket };
+    const proof = await signContributorProof(pair.privateKey, {
+      app: "example-app",
+      contributor: CONTRIBUTOR,
+      action: "photo_erasure",
+      photo: "*",
+      issued: NOW / 1000,
+      expires: NOW / 1000 + 600,
+    });
+    const erasure = (extra: Record<string, unknown> = {}) => ({ type: "photo_erasure", place: null, device: DEVICE, contributor: CONTRIBUTOR, app_version: "1.0.0", consent: true, ...extra });
+    const res = await handle(batch([erasure(), erasure({ contributor_proof: proof })]), e);
+    expect(res.status).toBe(200);
+    const answers = ((await res.json()) as { items: { status: number; error?: string }[] }).items;
+    expect(answers.map((a) => a.status)).toEqual([401, 202]);
+    expect(answers[0]).toMatchObject({ status: 401, error: "proof_required" });
   });
 });

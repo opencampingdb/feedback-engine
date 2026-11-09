@@ -206,6 +206,14 @@ describe("photo client", () => {
     expect(JSON.parse(posts[2]!.body)).toEqual({ ...base, app_version: "1.2.3", device: expect.any(String), type: "photo_removal", place: PLACE, contributor: CONTRIBUTOR, photo_removal: { photo: PHOTO } });
   });
 
+  it("sends the app server's contributor proof with a removal and an erasure", async () => {
+    const { client, posts } = setup();
+    await client.erasePhotos({ contributor: CONTRIBUTOR, consent: true, contributorProof: "cGF5bG9hZA.c2ln" });
+    await client.removePhoto({ place: PLACE, photo: PHOTO, contributor: CONTRIBUTOR, consent: true, contributorProof: "cGF5bG9hZA.c2lnMg" });
+    expect(JSON.parse(posts[0]!.body)).toMatchObject({ type: "photo_erasure", contributor_proof: "cGF5bG9hZA.c2ln" });
+    expect(JSON.parse(posts[1]!.body)).toMatchObject({ type: "photo_removal", contributor_proof: "cGF5bG9hZA.c2lnMg" });
+  });
+
   it("answers a photo report and an erasure by their refs, which it never sends", async () => {
     const answers: unknown[] = [];
     const posts: string[] = [];
