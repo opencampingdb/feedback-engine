@@ -139,7 +139,7 @@ Do not store the token in your app unless the owner asks you to, and never send 
 
 ## For the people who approve claims
 
-- Claims and listings arrive in the `feedback/review` PR under "Owner claims", each with the proof check result. Owner names and emails are not in the PR; they are in `inbox/owner-claims/<claim id>.json`.
+- Claims and listings arrive in the `feedback/review` PR under "Owner claims", each with the proof check result. Owner names and emails are not in the PR; they are in `inbox/owner-claims/<claim id>.json`. The PR is public and nobody has approved a listing yet, so a listing's line shows only its id, where it is to 1 decimal place (about 11 km), the names of the facts it sent and whether it has a description. Read its name, description, fact values and exact location in the same inbox file before ticking. They are published only after you approve.
 - Open the proof page and check that it is the place's own site, then tick the box. Leave it unticked to refuse. Merge when done.
 - A claim that says "Replaces the current owner" will retire the earlier owner's token once approved.
 - The inbox keeps approved owners in `owners/<place id>.json` (token hash, claim id, approval date, email and name). To remove an owner, delete that file. The place keeps `owner_verified` until someone edits the record.

@@ -78,3 +78,47 @@ describe("PR body size", () => {
     expect(review.match(/^- /gm)).toHaveLength(2);
   });
 });
+
+describe("owner listings in the review PR (audit run-2 OCDB-NV-03)", () => {
+  const listing = {
+    claim: "fb_01JC0000000000000000000009",
+    type: "owner_listing" as const,
+    place: "ocdb_01JC0000000000000000000009",
+    proof: { found: false, checked: "2026-11-04T00:00:00Z", detail: "the page did not load" },
+    proofUrl: "https://riverbend.example.org/stay",
+    code: "OCDB-7K3Q",
+    replaces: undefined,
+    listing: {
+      name: "Riverbend Farm Stay",
+      description: "Quiet paddock by the river.",
+      facts: { phone: "+61 400 000 000", booking_url: "https://book.example.net/riverbend", fee: true },
+      location: { lat: -33.123456, lon: 151.654321 },
+    },
+  };
+
+  const body = () => reviewPrBody("2026-11-04T00:00:00Z", [], new Map(), [listing]);
+  const line = () => body().split("\n").find((l) => l.startsWith("- [ ] Approve owner listing "))!;
+
+  it("keeps the listing's name, description, fact values and exact location out of the public PR", () => {
+    for (const secret of ["+61 400 000 000", "book.example.net", "Riverbend Farm Stay", "Quiet paddock", "-33.123456", "151.654321", "-33.12", "151.65"]) {
+      expect(body()).not.toContain(secret);
+    }
+  });
+
+  it("gives the reviewer the claim, a coarse location, the fact names, the proof result and where the full listing is", () => {
+    expect(line()).toContain(listing.claim);
+    expect(line()).toContain("-33.1, 151.7");
+    expect(line()).toContain("booking_url, fee, phone");
+    expect(line()).toContain("description sent");
+    expect(line()).toContain(`code ${listing.code} NOT found at ${listing.proofUrl}`);
+    expect(line()).toContain(`owner-claims/${listing.claim}.json`);
+  });
+
+  it("says the same when the proof code was found", () => {
+    const found = { ...listing, proof: { found: true, checked: "2026-11-04T00:00:00Z", detail: "found" } };
+    const text = reviewPrBody("2026-11-04T00:00:00Z", [], new Map(), [found]);
+    expect(text).not.toContain("+61 400 000 000");
+    expect(text).not.toContain("-33.123456");
+    expect(text).toContain(`code ${listing.code} found at ${listing.proofUrl}`);
+  });
+});
