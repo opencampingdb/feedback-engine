@@ -133,6 +133,24 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 const isFile = (value: unknown): value is ReleaseFile =>
   isRecord(value) && typeof value.url === "string" && typeof value.sha256 === "string" && Number.isInteger(value.bytes);
 
+/**
+ * The release downloads a database url sits in: the url without its last two
+ * path parts (the release tag and the file), ending in "/". A shorter path,
+ * as a mirror serving every file from one folder has, gives its origin.
+ * Undefined for a url that is not https.
+ */
+function downloadsOf(url: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== "https:") return undefined;
+  const parts = parsed.pathname.split("/").slice(1, -2);
+  return `${parsed.origin}/${parts.map((part) => `${part}/`).join("")}`;
+}
+
 function readManifest(value: unknown): Manifest {
   if (
     !isRecord(value) ||
@@ -143,8 +161,20 @@ function readManifest(value: unknown): Manifest {
   ) {
     throw new UpdateStopped("manifest");
   }
+  // A changeset is downloaded only from where the database is: the same release downloads
+  // (for GitHub, https://github.com/<owner>/<repo>/releases/download/), so a bad entry
+  // cannot send the app to another host or repository.
+  const home = downloadsOf(value.database.url);
   const changesets = Array.isArray(value.changesets)
-    ? value.changesets.filter((entry: unknown): entry is ChangesetEntry => isFile(entry) && typeof (entry as unknown as Record<string, unknown>).from === "string" && typeof (entry as unknown as Record<string, unknown>).to === "string")
+    ? value.changesets.filter(
+        (entry: unknown): entry is ChangesetEntry =>
+          isFile(entry) &&
+          typeof (entry as unknown as Record<string, unknown>).from === "string" &&
+          typeof (entry as unknown as Record<string, unknown>).to === "string" &&
+          home !== undefined &&
+          entry.url.startsWith(home) &&
+          !/\.\.|%2e/i.test(entry.url.slice(home.length)),
+      )
     : [];
   return {
     data_version: value.data_version,

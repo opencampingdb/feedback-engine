@@ -174,6 +174,25 @@ describe("createReleaseUpdater", () => {
   });
 });
 
+describe("createReleaseUpdater: changesets from elsewhere (audit run-2 OCDB-NV-02)", () => {
+  for (const foreign of ["https://evil.example/releases/download/data-3/x.bin.gz", "https://example.org/someone-else/download/data-3/x.bin.gz"]) {
+    it(`never downloads a changeset from outside the database's own release downloads: ${foreign}`, async () => {
+      const served = await release(3, chain(0, 3));
+      // A forged entry with a valid checksum that makes the path one file long.
+      const bytes = served.files.get(served.manifest.changesets[0]!.url)!;
+      served.files.set(foreign, await gzip(encode({ from: v(0), to: v(3) })));
+      const forged = { ...served.manifest.changesets[0]!, url: foreign, to: v(3), sha256: sha256HexBytes(served.files.get(foreign)!), bytes: served.files.get(foreign)!.length };
+      served.manifest.changesets.push(forged);
+      expect(bytes).toBeDefined();
+      const { fetch, requests } = fakeFetch(served);
+      const { adapter, state } = fakeDatabase({ dataVersion: v(0), layout: 1 });
+      expect(await updaterFor(adapter, fetch).update()).toEqual({ status: "updated", dataVersion: v(3) });
+      expect(requests).not.toContain(foreign);
+      expect(state.applied).toEqual([`${v(0)}>${v(1)}`, `${v(1)}>${v(2)}`, `${v(2)}>${v(3)}`]);
+    });
+  }
+});
+
 describe("createReleaseUpdater: when to ask", () => {
   it("makes no request when the recent list's release is the one the app has", async () => {
     const served = await release(3, chain(0, 3));

@@ -117,6 +117,11 @@ function siteOf(address: string): string {
   }
 }
 
+/** A coordinate to 1 decimal place (about 11 km), enough to say roughly where a listing is. */
+function coarse(degrees: number): string {
+  return (Math.round(degrees * 10) / 10).toFixed(1);
+}
+
 function claimSummary(c: ClaimForReview, places: ReadonlyMap<string, Place>): string {
   // The code may have been found after a redirect. Show where, and flag another site.
   const foundAt = c.proof.url ?? c.proofUrl;
@@ -127,13 +132,13 @@ function claimSummary(c: ClaimForReview, places: ReadonlyMap<string, Place>): st
       : `code ${c.code} found at ${foundAt}, ON A DIFFERENT SITE from the submitted ${c.proofUrl}: check both belong to the place`;
   const replaces = c.replaces ? ` Replaces the current owner (claim ${c.replaces.claim}, approved ${c.replaces.approved}).` : "";
   if (c.type === "owner_listing" && c.listing) {
-    const facts = Object.entries(c.listing.facts)
-      .map(([k, v]) => `${k} ${JSON.stringify(v)}`)
-      .join(", ");
-    const description = c.listing.description ? ` Description: "${safeSummary(c.listing.description)}".` : "";
+    // Nobody has approved the listing yet, and this PR is public: its name, description,
+    // fact values and exact location stay in the inbox until a person approves it.
+    const facts = Object.keys(c.listing.facts).sort().join(", ");
+    const description = c.listing.description ? ", description sent" : "";
     return safeSummary(
-      `new private farm stay \`${c.place}\` "${c.listing.name}" at ${c.listing.location.lat}, ${c.listing.location.lon}. ` +
-        `Facts: ${facts || "none"}.${description} Proof: ${proof}.`,
+      `new private farm stay \`${c.place}\` near ${coarse(c.listing.location.lat)}, ${coarse(c.listing.location.lon)}. ` +
+        `Facts sent: ${facts || "none"}${description}. Read the listing in inbox/owner-claims/${c.claim}.json before ticking. Proof: ${proof}.`,
     );
   }
   return `${label(c.place, places)}. Proof: ${safeSummary(proof)}.${replaces}`;

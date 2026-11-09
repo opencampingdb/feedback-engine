@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StoredFeedback } from "@opencampingdb/feedback";
-import { applyEdit, applyHeldReview, applyRules, ratingOf, REPORTS_TO_HIDE, type RulesInput } from "../src/rules.js";
+import { applyEdit, applyHeldReview, applyRules, ratingOf, REPORTS_TO_HIDE, reviewIdOf, type RulesInput } from "../src/rules.js";
 import type { Fee, Place, Review } from "../src/types.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
@@ -1029,6 +1029,17 @@ describe("reviews", () => {
     expect(out.outcome(r)).toBe("refused");
     expect(out.outcome(c)).toBe("refused");
     expect(out.decisions[0]?.reason).toBe("the contributor is blocked");
+  });
+
+  it("refuses a review a person removed, so it is never written back (audit run-2 OCDB-07)", () => {
+    const r = review(0, "sam", 5, "Ring Jo on the number at the gate");
+    const removed = new Set([reviewIdOf(r)]);
+    const out = run([r], { reviewers: [ctr("sam")], extra: { removedReviews: removed } });
+    expect(out.outcome(r)).toBe("refused");
+    expect(out.decisions[0]?.reason).toBe("the review was removed by a moderator");
+    expect(out.reviews.get(PLACE) ?? []).toEqual([]);
+    const other = review(0, "kim", 4, "Fine");
+    expect(run([other], { reviewers: [ctr("kim")], extra: { removedReviews: removed } }).outcome(other)).toBe("applied");
   });
 
   it("leaves hidden and blocked reviews out of the rating", () => {

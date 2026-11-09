@@ -190,6 +190,39 @@ await photos.erasePhotos({ contributor, consent: true });
 
 With `PHOTO_STATE` bound, the intake puts `withheld-contributor:<contributor>` in the photo server's state for 30 days, and within about two minutes the photo server stops every photo from that contributor, cached or not, and leaves their lines out of each place's records. It knows a photo's contributor from the `contributor` metadata its files carry from the upload, which the Photo sync keeps when it copies them. The next apply run takes every photo from that contributor out of the records, and the Photo sync workflow deletes their files from both buckets. Photos they send later in the same run are refused.
 
+### Prove the account for removal and erasure
+
+A removal or erasure says only which contributor it is for. Without more, anyone who learns a traveller's contributor value can take their photos down for good, so treat that value as a secret: form it as an HMAC of the account id with a key only your server knows, and never show it to other users, in share links, profiles, logs or API responses.
+
+From SDK 0.23.0, to make that unnecessary, give the app key `contributor_proof_key`, your server's Ed25519 public key (self-hosting.md). The intake then accepts `photo_removal` and `photo_erasure` only with a `contributor_proof` your server signed for the signed-in account, the action and the photo. Without one it answers `401 proof_required`, with a wrong, expired or tampered one `401 proof_invalid`, and in both cases it withholds and stores nothing.
+
+On your server, for the signed-in account only, right before the app removes a photo or erases its photos:
+
+```ts
+import { signContributorProof } from "@opencampingdb/feedback";
+
+// privateKey: a WebCrypto Ed25519 key, made once with
+// crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]) and kept on the server.
+const now = Math.floor(Date.now() / 1000);
+const proof = await signContributorProof(privateKey, {
+  app: "example-app",       // the app key's app name
+  contributor,              // the same value the app sends as contributor
+  action: "photo_removal",  // or "photo_erasure"
+  photo: "pho_01JC...",     // "*" for an erasure
+  issued: now,
+  expires: now + 600,       // at most an hour after issued
+});
+```
+
+In the app:
+
+```ts
+await photos.removePhoto({ place, photo: "pho_01JC...", contributor, contributorProof: proof, consent: true });
+await photos.erasePhotos({ contributor, contributorProof: proof, consent: true });
+```
+
+A proof lives at most an hour. A queued removal sent after its proof expired is refused and reported to `onAnswered` as dropped with `httpStatus` 401: ask your server for a new proof and send it again. The proof is checked and never stored. The operator route below needs no proof: its bearer token already proves it is your backend.
+
 ### Erase from your own backend
 
 When an account is deleted somewhere the app can't send an attested erasure, for example on your website, your backend erases the photos with the photo intake's operator route:

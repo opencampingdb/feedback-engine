@@ -1,3 +1,4 @@
+import { MAX_PROOF_LENGTH } from "./contributor-proof.js";
 import { openingHoursProblem } from "./hours.js";
 import { findContactDetails, findContactDetailsInHours } from "./text.js";
 import { textProblem, tidyName } from "./tidy.js";
@@ -348,6 +349,7 @@ const TOP_LEVEL_KEYS = new Set([
   "photo",
   "photo_report",
   "photo_removal",
+  "contributor_proof",
   "terms_accepted",
   "token",
   "owner",
@@ -815,10 +817,18 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
   if ((type === "photo" || type === "photo_erasure" || type === "photo_removal") && contributor === undefined) {
     errors.push(`contributor is required for a ${type}`);
   }
+  const contributorProof = input.contributor_proof;
+  if (contributorProof !== undefined) {
+    if (type !== "photo_erasure" && type !== "photo_removal") errors.push(`contributor_proof is not allowed when type is ${type}`);
+    else if (typeof contributorProof !== "string" || contributorProof.length > MAX_PROOF_LENGTH || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(contributorProof)) {
+      errors.push("contributor_proof must be a proof token from the app's server (<payload>.<signature>, base64url)");
+    }
+  }
+  const proofField = typeof contributorProof === "string" ? { contributor_proof: contributorProof } : {};
   if (type === "photo_erasure") {
     if (place !== null) errors.push("place must be null for a photo_erasure");
     if (input.location !== undefined) errors.push("location is not allowed on a photo_erasure");
-    value = { ...base, place: null, type: "photo_erasure" };
+    value = { ...base, place: null, type: "photo_erasure", ...proofField };
   } else if (type === "report") {
     const report = checkReport(input.report, errors);
     if (report) {
@@ -848,7 +858,7 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
       if (photoReport) value = { ...base, place: place as string, type: "photo_report", photo_report: photoReport };
     } else if (type === "photo_removal") {
       const removal = checkPhotoRemoval(input.photo_removal, errors);
-      if (removal) value = { ...base, place: place as string, type: "photo_removal", photo_removal: removal };
+      if (removal) value = { ...base, place: place as string, type: "photo_removal", photo_removal: removal, ...proofField };
     } else if (type === "withdraw") {
       value = { ...base, place: place as string, type: "withdraw" };
     } else if (type === "fee") {
@@ -1013,7 +1023,7 @@ const OWNER_FIELDS: Record<OwnerSubmission["type"], string[]> = {
 /** Validates the three owner submission types (SPEC "Owners"). */
 function validateOwner(input: Record<string, unknown>, type: OwnerSubmission["type"]): ValidationResult {
   const errors: string[] = [];
-  for (const key of ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "photo_removal", "contributor", "token", "owner", "claim", "listing", "update", "location"]) {
+  for (const key of ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "photo_removal", "contributor", "contributor_proof", "token", "owner", "claim", "listing", "update", "location"]) {
     if (input[key] !== undefined && !OWNER_FIELDS[type].includes(key)) errors.push(`${key} is not allowed when type is ${type}`);
   }
   if (input.terms_accepted !== true) errors.push("terms_accepted must be true");

@@ -20,6 +20,8 @@ import {
   isContributor,
   PHOTO_HELD_REASONS,
   MAX_PROGRESS_IDS,
+  isProofPublicKey,
+  verifyContributorProof,
 } from "@opencampingdb/feedback";
 import { placeOf, PROGRESS_UPDATE_STATES, type PhotoProgressUpdate, type ProgressUpdate } from "@opencampingdb/apply/progress-update";
 import { withRequestLog } from "./requestlog.js";
@@ -292,6 +294,12 @@ interface AppEntry {
    * ship it in a store build.
    */
   photo_pass_unattested?: boolean;
+  /**
+   * Base64 raw Ed25519 public key of the app's server. When set, photo
+   * removals and erasures need a `contributor_proof` the server signed for
+   * the same contributor, action and photo (`signContributorProof`).
+   */
+  contributor_proof_key?: string;
 }
 
 const isLimit = (v: unknown): v is number => typeof v === "number" && v > 0;
@@ -416,6 +424,7 @@ export function parseAppKeys(raw: string): Map<string, AppEntry> {
       (entry.contributor_daily_limit === undefined || isLimit(entry.contributor_daily_limit)) &&
       (entry.requires_visited_nearby === undefined || typeof entry.requires_visited_nearby === "boolean") &&
       (entry.photo_pass_unattested === undefined || typeof entry.photo_pass_unattested === "boolean") &&
+      (entry.contributor_proof_key === undefined || isProofPublicKey(entry.contributor_proof_key)) &&
       kindsValid &&
       iosValid &&
       androidValid &&
@@ -439,6 +448,7 @@ export function parseAppKeys(raw: string): Map<string, AppEntry> {
         ...(entry.requires_visited_nearby ? { requires_visited_nearby: true } : {}),
         ...(entry.contributor_daily_limit !== undefined ? { contributor_daily_limit: entry.contributor_daily_limit } : {}),
         ...(entry.photo_pass_unattested ? { photo_pass_unattested: true } : {}),
+        ...(entry.contributor_proof_key !== undefined ? { contributor_proof_key: entry.contributor_proof_key } : {}),
       });
     }
   }
@@ -1511,6 +1521,19 @@ export function createHandler(deps: Deps) {
       }
       if (contributor === undefined && ["review", "review_report", "fee", "photo_report", "photo_erasure", "photo_removal"].includes(feedback.type)) {
         return { status: 400, body: { error: "contributor_required" } };
+      }
+      // With a proof key, only the app's server can say the account is the contributor's: a removal or
+      // erasure without its signed proof is refused before anything is looked up or withheld.
+      if (app.contributor_proof_key && (feedback.type === "photo_removal" || feedback.type === "photo_erasure")) {
+        if (feedback.contributor_proof === undefined) return { status: 401, body: { error: "proof_required" } };
+        const verdict = await verifyContributorProof(app.contributor_proof_key, feedback.contributor_proof, {
+          app: app.app,
+          contributor: feedback.contributor!,
+          action: feedback.type,
+          photo: feedback.type === "photo_removal" ? feedback.photo_removal.photo : "*",
+          now: nowMs,
+        });
+        if (verdict !== "ok") return { status: 401, body: { error: "proof_invalid" } };
       }
       // Only the photo's own contributor may remove it. When the served records say whose it is, the
       // intake answers at once; otherwise the apply run checks it against the photo lines.

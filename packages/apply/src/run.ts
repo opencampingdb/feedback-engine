@@ -196,6 +196,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   for (const id of feeIds) fees.set(id, await auto.fees(id));
   const blocked = await auto.blocked();
   const reviewers = await auto.reviewers(blocked);
+  const removedReviews = crowd.some((p) => p.type === "review") ? await auto.removedReviews() : new Set<string>();
   // Every photo line, when anything in this run is about photos.
   const photos = crowd.some((p) => photoTypes.has(p.type)) ? await auto.allPhotos() : [];
 
@@ -233,6 +234,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     fees: (id) => fees.get(id) ?? [],
     ...(kinds ? { kinds } : {}),
     blocked,
+    removedReviews,
     reviewers,
     photos,
     ...(options.photoLicence ? { photoLicence: options.photoLicence } : {}),

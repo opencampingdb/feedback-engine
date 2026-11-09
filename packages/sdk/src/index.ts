@@ -1,6 +1,7 @@
 export * from "./types.js";
 export * from "./consent.js";
 export * from "./safesearch.js";
+export * from "./contributor-proof.js";
 export {
   createFeedbackClient,
   createPhotoClient,
