@@ -4,11 +4,11 @@ Open Camping DB holds no photos. This kit lets an app run its own photo service,
 
 | Part | What it does |
 |---|---|
-| `createPhotoClient` in the SDK | Uploads photos, gets photo passes, reports photos and erases a traveller's photos. Kept apart from the feedback client. |
+| `createPhotoClient` in the SDK | Uploads photos, gets photo passes, reports photos, removes one of a traveller's photos and erases all of them. Kept apart from the feedback client. |
 | The intake (`packages/intake`) with a photo bucket | `POST /v1/photos` takes uploads into a private pending bucket, and `POST /v1/photos/pass` gives attested installs an hour-long photo pass. Optional SafeSearch checks. |
 | The photo server (`packages/photos`) | Serves published photos and each place's photo records to installs with a pass and servers with a key, behind the edge cache, with daily caps and an off switch. |
 | The apply rules, photos only (`ocdb-apply --places`) | Turn the inbox into photo lines in the app's records repository. A contributor's first photo goes to a person on a review PR. |
-| `ocdb-photos` and the Photo sync workflow | Check the records repository's photo lines, and keep the two buckets and the per-place records in step with them. |
+| `ocdb-photos` and the Photo sync workflow | Check the records repository's photo lines, keep the two buckets and the per-place records in step with them, and replace a photo's files. |
 
 The app's photo service runs separately from the Open Camping DB intake. The app keeps using `createFeedbackClient` with Open Camping DB's intake for reports, reviews, checks and fees.
 
@@ -61,6 +61,7 @@ Make two JPEGs on the phone, with the EXIF data (location, camera, time) removed
 |---|---|
 | `{ status: "sent", id }` | The intake has it. `id` is the photo's id, `pho_<ulid>`. |
 | `{ status: "rejected", httpStatus, error }` | The intake refused it. `error` says why, for example `rate_limited`, `not_jpeg`, `sha256_mismatch`, `attestation_invalid` or `photo_not_allowed` (SafeSearch). |
+| `{ status: "update_required", minimum? }` | The photo service takes photos only from a newer version of the app (`403 app_update_required`). `minimum` is the lowest version it takes. Ask the traveller to update the app to add photos. |
 | `{ status: "offline" }` | The intake could not be reached, or the platform could not attest. Nothing was sent. |
 
 Photos are never queued, because the files are too big for the queue's storage. On `offline`, keep the files and call `photo` again later.
@@ -83,7 +84,7 @@ const result = await photos.photo({ place: { newPlace: "draft-7" }, key: "photo-
 
 - While the new place waits, `photo` answers `{ status: "waiting" }`. The client keeps only a small record (`key`, the ref, the contributor and the time) in storage. Your app keeps the files under `key`.
 - Each `photos.flush()` uploads the waiting photos whose new place has been sent, in the order they were taken, under its `ocdb_` id, and calls `onPhotoSettled` with `{ status: "sent", id, place }`. Call it when the app comes to the foreground and after the feedback client sends.
-- A photo that can't go now (offline, rate limited, the service busy, a refused assertion) stays for the next flush, without holding up the others.
+- A photo that can't go now (offline, rate limited, the service busy, a refused assertion, an app older than the service's minimum) stays for the next flush, without holding up the others.
 - A photo is dropped, with `onPhotoSettled` saying why:
   - `new_place_dropped`: the new place was dropped or refused;
   - `photo_missing`: `loadPhoto` gave `null`;
@@ -95,6 +96,10 @@ const result = await photos.photo({ place: { newPlace: "draft-7" }, key: "photo-
 On the wire, the SDK sends the photo's meta (place, contributor, device, app version, consent and the SHA-256 and size of each file) as base64url JSON in the `x-photo-meta` header, and the full size file followed by the thumbnail as the body. Attestation covers the meta text, so the intake can check the files against the hashes it carries.
 
 Each contributor may send 10 photos a day, as well as the usual limits per device, network and app key.
+
+### A minimum app version
+
+Set `PHOTO_MIN_APP_VERSION` on the photo intake, for example `"1.5.0"`, to take photos only from that version of the app or a later one: say a version that blurs faces before sending. The intake compares the leading numbers of the `app_version` each upload carries (`1.10.0` is above `1.9.2`, `1.5.0 (61)` reads as `1.5.0`, and a version with no leading number is below any minimum). An older upload is refused with `403 {"error": "app_update_required", "minimum": "1.5.0"}` before anything is counted or stored, and the SDK answers `{ status: "update_required", minimum }`. Photo reports, removals, erasures and passes are not affected. Unset, every version is taken.
 
 ### SafeSearch
 
@@ -138,7 +143,7 @@ Unlike feedback, a published photo can leave `in_data`: reports that hide it mak
 
 The records are kept in the photo intake's D1 database (the `item_progress` table, which feedback progress also uses), read from D1 only, and written by the photo apply run only when a photo's state changes, as recorded in `progress/photos-sent.json` in the inbox (every photo decided in the last 90 days is sent again on the first run after 00:00 UTC each Monday). Each update carries the time of the run that sent it, and the photo intake refuses one from a run older than the run that last wrote the record, so two runs that overlap can't move a photo back to where the older one saw it. A record carries only the state, the engine's reason, `held_reason`, `by`, the place and times, never the contributor or a device. The apply follows photos decided in the last 90 days. An older photo that is on `main`'s photo lines or the removed list is followed for changes only: it is sent when it leaves the data (hidden or removed), and again if it comes back, so a photo published long ago shows its new state, while the many that stay in the data cost nothing. A record is kept for 90 days after it last changes.
 
-Photo reports and erasures get records too, under the feedback id their send answered, which the app reads with `GET /v1/feedback/progress?ids=fb_...` on the photo intake. A report is `held` while a person reads it, `in_data` once the records repository's `main` no longer shows the photo (hidden, removed, or its contributor blocked), and `refused` by the reviewer when the person kept it. An erasure is `accepted` until `main` holds none of the contributor's photos, then `in_data`, and `refused` by the reviewer when its automatic PR was closed without merging. Either is `refused` by the rules with their reason, such as a report of a photo not in the records.
+Photo reports, removals and erasures get records too, under the feedback id their send answered, which the app reads with `GET /v1/feedback/progress?ids=fb_...` on the photo intake. A report is `held` while a person reads it, `in_data` once the records repository's `main` no longer shows the photo (hidden, removed, or its contributor blocked), and `refused` by the reviewer when the person kept it. An erasure is `accepted` until `main` holds none of the contributor's photos, then `in_data`, and `refused` by the reviewer when its automatic PR was closed without merging. A removal is the same for its one photo, and the removed photo itself becomes `refused` by the rules, "removed at the contributor's request". Either is `refused` by the rules with their reason, such as a report of a photo not in the records.
 
 ## Report and remove
 
@@ -153,13 +158,30 @@ await photos.reportPhoto({ place, photo: "pho_01JC...", reason: "personal_detail
 
 Every report goes to a person on the review PR. Reports from three different contributors hide the photo at the next apply run, until the person decides. Hide a photo the traveller reported on their own phone straight away.
 
-`illegal` is for child sexual abuse material, an intimate image shared without consent, or terrorist or violent extremist material. One such report is enough:
+### Reasons that withhold a photo at once
 
-- The intake puts `withheld:<photo id>` in the photo server's state namespace (bound to the intake as `PHOTO_STATE`). The photo server checks that list before its cache, so the photo stops being served within about two minutes, everywhere.
-- The next apply run hides the photo's line and marks the note on the review PR URGENT.
-- A person then follows your safety procedure. Deleting the `withheld:` key serves the photo again if the report was wrong.
+Some reasons can't wait for three reports. A report for a reason on the photo service's withhold list stops the photo on the first report:
 
-Before deleting a traveller's account, remove their photos:
+- The intake puts `withheld:<photo id>` in the photo server's state namespace (bound to the intake as `PHOTO_STATE`) and marks the stored report `"withheld": true`. The photo server checks that list before its cache, so the photo stops being served within about two minutes, everywhere.
+- The next apply run hides the photo's line (`"hidden": "reported"`) and puts the report on the review PR for a person.
+- The person either releases the photo, by taking `hidden` off its line and deleting the `withheld:` key, or removes it (below).
+
+`illegal` is always on the list. It is for child sexual abuse material, an intimate image shared without consent, or terrorist or violent extremist material, and its note on the review PR is marked URGENT: follow your safety procedure. Add other reasons with `PHOTO_WITHHOLD_REASONS` on the photo intake, comma separated, for example `"personal_details"` so a person who appears in a photo and asks for it to come down doesn't wait for two more reports. Names that are not report reasons are ignored. A report for a reason not on the list works as before.
+
+### A traveller removes one of their photos
+
+```ts
+await photos.removePhoto({ place, photo: "pho_01JC...", contributor, consent: true });
+```
+
+Give each of the traveller's own photos a Remove action, and hide the photo on their phone at once. The removal is queued and retried like a report. Only the photo's own contributor can remove it:
+
+- With the serving bucket bound to the photo intake as `PHOTOS_SERVED` (read only), the intake reads the place's records file. When the photo's line names the contributor, it puts `withheld:<photo id>` in `PHOTO_STATE` for 30 days and marks the stored removal `"withheld": true`, so the photo stops within about two minutes. When the line names someone else, it answers `403 not_your_photo` and stores nothing. A photo that isn't served yet (held for a person, or not synced) is left to the apply run.
+- The next apply run takes the photo's line out of the records, or a held photo out of the review branch, and adds its id to `moderation/removed_photos.json` with the reason `removed`. The Photo sync workflow then deletes its files from both buckets. A removal from anyone else is refused.
+
+Without `PHOTOS_SERVED` the photo stops when the apply run's PR merges and the sync runs.
+
+Before deleting a traveller's account, remove all their photos:
 
 ```ts
 await photos.erasePhotos({ contributor, consent: true });
@@ -174,6 +196,25 @@ npx wrangler kv key put --binding STATE "withheld:pho_01JC..." '{"by":"moderator
 ```
 
 Run it with your photo server's configuration. The photo stops within about two minutes, cache or not.
+
+### Replace a photo's files
+
+To change a published photo while it keeps its id, place, contributor, created date and licence, for example after blurring a face or a number plate in it, make the two new JPEGs as for an upload and run `ocdb-photos replace` from a checkout of the records repository:
+
+```bash
+export R2_ACCOUNT_ID=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... CLOUDFLARE_API_TOKEN=...
+node packages/apply/dist/photos-cli.js replace --root ../example-app-photos --photo pho_01JC... \
+  --full blurred-full.jpg --thumb blurred-thumb.jpg \
+  --serving example-app-photos-serving --pending example-app-photos-pending --state-namespace <photo server state namespace id>
+```
+
+It is an operator tool, run with the R2 token the Photo sync workflow uses and a Cloudflare API token with Workers KV Storage Write. The photo service has no public route for it. It:
+
+- writes the new files over every copy that exists: in the serving bucket, the pending upload, and the `kept/` copy of a hidden photo, so hiding and showing the photo later never brings the old files back;
+- sets the line's `sha256`, `width` and `height` in the checkout and writes the place's records file in the serving bucket again;
+- puts `replaced:<photo id>:<place id>:<time>` in the photo server's state namespace for two days. Within about a minute, the photo server moves the photo and its place's records to new edge cache entries, so no copy cached before the replacement is served.
+
+Commit the changed `photos/<place id>.ndjson` to the records repository's `main`, so the next sync keeps the new hash. A phone keeps a photo for up to a day: apps that ask for photos as `.../full.jpg?v=<first 12 characters of sha256>`, from the records, get the new file once the records update, within five minutes. The photo server ignores the query string. A photo on `moderation/removed_photos.json`, without a line, or without files is refused, and nothing is written.
 
 ## Show photos
 
@@ -219,11 +260,11 @@ You need a Cloudflare account with a zone for the photo hosts, a GitHub account 
 2. **GitHub App.** Create a GitHub App for the service with repository permissions Contents (read and write) and Pull requests (read and write), no webhook, installable only on your account. Install it on the two repositories only. Its key goes in the inbox repository's Actions secrets and in the intake's `GH_APP_PRIVATE_KEY` secret.
 3. **Buckets.** In R2, create a serving bucket and a pending bucket. Leave both private: neither gets public access or an r2.dev address. On the pending bucket, add a lifecycle rule that deletes objects with the prefix `pho_` 180 days after upload. Files under `kept/` are kept.
 4. **KV.** Create a namespace for the photo server's state (the off switch, read counters and withheld photos), and the intake's rate limit and attestation namespaces as in [self-hosting.md](self-hosting.md).
-5. **Intake.** Deploy `packages/intake` under its own Worker name with its own configuration, as [self-hosting.md](self-hosting.md) describes, plus: the pending bucket as `PHOTOS_PENDING`, the photo server's state namespace as `PHOTO_STATE`, `INBOX_REPO` set to your inbox repository, a custom domain for uploads, a D1 database as `RECENT_LIST` with the migrations applied, so the daily counters are in D1 and a minute's photos reach the inbox as one commit, and optionally `SAFESEARCH = "on"` with a `GOOGLE_SERVICE_ACCOUNT` that has the Cloud Vision API.
+5. **Intake.** Deploy `packages/intake` under its own Worker name with its own configuration, as [self-hosting.md](self-hosting.md) describes, plus: the pending bucket as `PHOTOS_PENDING`, the photo server's state namespace as `PHOTO_STATE`, the serving bucket as `PHOTOS_SERVED` (so a traveller's removal stops their photo at once), optionally `PHOTO_WITHHOLD_REASONS` and `PHOTO_MIN_APP_VERSION`, `INBOX_REPO` set to your inbox repository, a custom domain for uploads, a D1 database as `RECENT_LIST` with the migrations applied, so the daily counters are in D1 and a minute's photos reach the inbox as one commit, and optionally `SAFESEARCH = "on"` with a `GOOGLE_SERVICE_ACCOUNT` that has the Cloud Vision API.
 6. **Pass secret and photo keys.** Make one long random secret, for example with `openssl rand -base64 48`, and set it as `PHOTO_PASS_SECRET` on both Workers. Set `PHOTO_KEYS` on the photo server, with JSON such as `{"<random key, 32 characters>": {"app": "example-app", "daily_limit": 100000}}`. The entry gives the app's daily limit to its passes as well. `daily_limit` counts the reads that reach R2, not those served from the cache. `DAILY_READ_CAP` caps all apps together. Changing `PHOTO_PASS_SECRET` on both Workers ends every pass at once.
 7. **Photo server.** Set `routes` in `packages/photos/wrangler.toml` (or an untracked deploy copy) to your photo host on a custom domain, bind the serving bucket as `PHOTOS` and the state namespace as `STATE`, and deploy. Serving only on the custom domain puts the edge cache in front of R2.
 8. **Workflows.** In the inbox repository, call the Apply feedback workflow hourly with `data-repository-name` set to your records repository, `places-repository: opencampingdb/data`, your `photo-licence` and `recent-places-url` set to Open Camping DB's intake, passing the GitHub App's client id and key. For photo progress, also set `intake-url` to your photo intake and pass its `PLACES_TOKEN` (a long random secret you set on the photo intake) as the `places-token` secret: each run then sends the photo intake where each photo is, and nothing else. Turn on **Allow auto-merge** (`allow_auto_merge`) in the records repository's settings, under General, Pull Requests, and protect `main` with a required status check, so the automatic PR merges itself once CI passes. Without it, photos from trusted contributors are never published until someone merges the automatic PR: the run says on the PR that it needs merging by hand and shows an error annotation naming the repository and the setting, without failing, so the inbox moves are still recorded. In the records repository, call the Photo sync workflow on each push to `main` and once a day, with your bucket names and an R2 API token (Object Read and Write on both buckets) as `r2-account-id`, `r2-access-key-id` and `r2-secret-access-key`. Pin both to a feedback-engine commit.
-9. **Check it.** Upload a test photo from a development build, merge the review PR, wait for the sync, then load the place's records and the photo with a pass. Report it as `illegal` and see it withheld, then erase it and see it gone.
+9. **Check it.** Upload a test photo from a development build, merge the review PR, wait for the sync, then load the place's records and the photo with a pass. Report it as `illegal` and see it withheld, then remove it with `removePhoto` and see it gone.
 
 To stop serving at once, put the key `off` in the photo server's state namespace: the server answers `503 paused` within a minute. Delete the key to start again. Removing the custom domain also stops all serving.
 

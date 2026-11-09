@@ -95,6 +95,7 @@ import {
   recordProgress,
 } from "./progress.js";
 import { verifyPreview } from "@opencampingdb/apply/preview";
+import { appVersionAtLeast, minimumAppVersion, photoOwner, REMOVAL_WITHHOLD_TTL_SECONDS, withholdReasons, type ServedBucketLike } from "./photo-kit.js";
 
 /** `GET /v1/photos/review/<photo id>/<full|thumb>.jpg`: one held photo for a person checking the review PR. */
 const REVIEW_ROUTE = /^\/v1\/photos\/review\/(pho_[0-9A-Z]{26})\/(full|thumb)\.jpg$/;
@@ -144,10 +145,32 @@ export interface Env {
    */
   REVIEW_PREVIEW_SECRET?: string;
   /**
-   * The photo server's STATE namespace. A photo reported as `illegal` gets a
+   * The photo server's STATE namespace. A photo reported for a reason on the
+   * withhold list, or removed by its own contributor, gets a
    * `withheld:<photo id>` key there, and the photo server stops serving it.
    */
   PHOTO_STATE?: KVLike;
+  /**
+   * Comma separated photo report reasons that withhold the photo at once, on
+   * the first report, until a person decides, as `illegal` always does. For
+   * example `personal_details`. Other reasons hide a photo after reports from
+   * three contributors.
+   */
+  PHOTO_WITHHOLD_REASONS?: string;
+  /**
+   * The lowest app version (`1.5.0`) photo uploads are taken from. An upload
+   * from an older version is refused with `403 app_update_required`. Off when
+   * unset.
+   */
+  PHOTO_MIN_APP_VERSION?: string;
+  /**
+   * The photo server's serving bucket, read only. With it, a photo removal
+   * from the photo's own contributor withholds the photo at once (its
+   * `records/<place id>.ndjson` line names the contributor), and one from
+   * anyone else is refused with `403 not_your_photo`. Without it, the removal
+   * waits for the next apply run.
+   */
+  PHOTOS_SERVED?: ServedBucketLike;
   /**
    * `on` checks each uploaded photo with Google Cloud Vision SafeSearch, as the
    * GOOGLE_SERVICE_ACCOUNT (its project needs the Cloud Vision API). Very likely
@@ -830,6 +853,9 @@ export function createHandler(deps: Deps) {
     if (!checked.ok) return json(400, { error: "invalid", details: checked.errors }, cors);
     if (checked.value.type !== "photo") return json(400, { error: "invalid", details: ["type must be photo"] }, cors);
     const submission = checked.value as PhotoSubmission;
+    // Refused before anything is counted, so an old app's tries cost the traveller nothing.
+    const minimum = minimumAppVersion(env.PHOTO_MIN_APP_VERSION);
+    if (minimum && !appVersionAtLeast(submission.app_version, minimum)) return json(403, { error: "app_update_required", minimum }, cors);
 
     let proof: { attested: "app_attest" | "play_integrity"; keyId?: string } | undefined;
     if (app.requires_attestation) {
@@ -1392,8 +1418,8 @@ export function createHandler(deps: Deps) {
       return { status: 400, body: { error: "type_not_allowed_in_batch" } };
     }
     if (submission.type === "photo") return { status: 400, body: { error: "invalid", details: ["photos are sent to /v1/photos"] } };
-    // Photo reports and erasures belong to a photo service: an intake with a photo bucket.
-    if ((submission.type === "photo_report" || submission.type === "photo_erasure") && !env.PHOTOS_PENDING) {
+    // Photo reports, removals and erasures belong to a photo service: an intake with a photo bucket.
+    if ((submission.type === "photo_report" || submission.type === "photo_erasure" || submission.type === "photo_removal") && !env.PHOTOS_PENDING) {
       return { status: 404, body: { error: "photos_not_served_here" } };
     }
     const device = await hashDevice(env.DEVICE_SALT, submission.device);
@@ -1405,6 +1431,7 @@ export function createHandler(deps: Deps) {
     let contributor: string | undefined;
     let attestKey: string | undefined;
     let target: StoredPlace | undefined;
+    let owner: "mine" | "theirs" | "unknown" | undefined;
     const extra: { prefix: string; id: string; limit: number }[] = [];
     if (!isOwner) {
       const feedback = submission as FeedbackSubmission;
@@ -1426,8 +1453,14 @@ export function createHandler(deps: Deps) {
       if (contributor === undefined && proof && feedback.type === "report" && feedback.report.kind === "new_place") {
         contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
       }
-      if (contributor === undefined && ["review", "review_report", "fee", "photo_report", "photo_erasure"].includes(feedback.type)) {
+      if (contributor === undefined && ["review", "review_report", "fee", "photo_report", "photo_erasure", "photo_removal"].includes(feedback.type)) {
         return { status: 400, body: { error: "contributor_required" } };
+      }
+      // Only the photo's own contributor may remove it. When the served records say whose it is, the
+      // intake answers at once; otherwise the apply run checks it against the photo lines.
+      if (feedback.type === "photo_removal" && env.PHOTOS_SERVED) {
+        owner = await photoOwner(env.PHOTOS_SERVED, feedback.place, feedback.photo_removal.photo, contributor!);
+        if (owner === "theirs") return { status: 403, body: { error: "not_your_photo" } };
       }
       if (feedback.type === "review" && app.requires_visited_nearby && feedback.review.visited_nearby !== true) {
         return { status: 400, body: { error: "visited_nearby_required" } };
@@ -1492,7 +1525,15 @@ export function createHandler(deps: Deps) {
       ...("review_report" in rest ? { review_report: rest.review_report } : {}),
       ...("fee" in rest ? { fee: rest.fee } : {}),
       ...("photo_report" in rest ? { photo_report: rest.photo_report } : {}),
+      ...("photo_removal" in rest ? { photo_removal: rest.photo_removal } : {}),
     } as StoredFeedback;
+    // A report for a reason on the withhold list, or a removal by the photo's own contributor,
+    // stops the photo being served at once. The stored item says so, for the apply run.
+    const withhold =
+      env.PHOTO_STATE !== undefined &&
+      ((stored.type === "photo_report" && withholdReasons(env.PHOTO_WITHHOLD_REASONS).has(stored.photo_report.reason)) ||
+        (stored.type === "photo_removal" && owner === "mine"));
+    if (withhold) stored.withheld = true;
 
     // Decided before the item is stored, and recorded in the same D1 batch that queues it.
     let decision: SendTimeDecision | undefined;
@@ -1537,11 +1578,14 @@ export function createHandler(deps: Deps) {
         if (env.RECENT_LIST) {
           await updateRecent(env.RECENT_LIST, submission as FeedbackSubmission, { id, received, device, target }).catch(() => undefined);
         }
-        // An illegal-content report withholds the photo before a person sees it. The
-        // report is in the inbox already, so a failed write here still reaches a person.
-        if (stored.type === "photo_report" && stored.photo_report.reason === "illegal" && env.PHOTO_STATE) {
-          const value = JSON.stringify({ feedback: id, at: received });
-          await env.PHOTO_STATE.put(withheldKey(stored.photo_report.photo), value).catch(() => undefined);
+        // The photo is withheld before a person or the apply run sees the item. The item is
+        // in the inbox already, so a failed write here still reaches the apply run.
+        if (withhold && stored.type === "photo_report") {
+          const value = JSON.stringify({ feedback: id, at: received, reason: stored.photo_report.reason });
+          await env.PHOTO_STATE!.put(withheldKey(stored.photo_report.photo), value).catch(() => undefined);
+        } else if (withhold && stored.type === "photo_removal") {
+          const value = JSON.stringify({ feedback: id, at: received, reason: "removed_by_contributor" });
+          await env.PHOTO_STATE!.put(withheldKey(stored.photo_removal.photo), value, { expirationTtl: REMOVAL_WITHHOLD_TTL_SECONDS }).catch(() => undefined);
         }
       },
     };

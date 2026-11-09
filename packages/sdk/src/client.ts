@@ -324,6 +324,21 @@ export interface PhotoReportInput {
   ref?: string;
 }
 
+export interface PhotoRemovalInput {
+  /** The photo's place. */
+  place: string;
+  /** Id of the contributor's own photo, `pho_<ulid>`. */
+  photo: string;
+  /** The signed-in traveller's account id: the one that sent the photo. */
+  contributor: string;
+  consent: boolean;
+  /**
+   * The caller's own id for this submission, 1 to 100 characters. Kept with
+   * the queued item and passed back to `onAnswered`. Never sent to the intake.
+   */
+  ref?: string;
+}
+
 export interface PhotoErasureInput {
   /** The account id whose photos are removed. */
   contributor: string;
@@ -346,6 +361,13 @@ export type PhotoResult =
   /** The place is a new place still waiting for its id. The photo goes on a later `flush`; keep the files until `onPhotoSettled`. */
   | { status: "waiting" }
   | { status: "rejected"; httpStatus: number; error?: string }
+  /**
+   * The photo service takes photos only from a newer version of the app
+   * (`403 app_update_required`). `minimum` is the lowest version it takes,
+   * when it says. Ask the traveller to update the app to add photos. A photo
+   * waiting for a new place stays waiting, so it goes from the updated app.
+   */
+  | { status: "update_required"; minimum?: string }
   | { status: "offline" };
 
 /** Where a new place a ref names stands: still `waiting` to be sent, `sent` with its `ocdb_` id, `dropped`, or `unknown`. */
@@ -490,6 +512,13 @@ export interface PhotoClient {
   photoPass(options?: { renew?: boolean }): Promise<PhotoPassResult>;
   /** Reports a published photo. Queued and retried, like feedback. */
   reportPhoto(input: PhotoReportInput): Promise<SubmitResult>;
+  /**
+   * Asks for one of the contributor's own photos to be removed. The photo
+   * service stops serving it at once when it can confirm the photo is theirs,
+   * and the next apply run deletes its record and files. Queued and retried,
+   * like feedback.
+   */
+  removePhoto(input: PhotoRemovalInput): Promise<SubmitResult>;
   /**
    * Asks for every photo from the contributor to be removed. Call it before
    * deleting the account. Queued and retried, like feedback.
@@ -1226,13 +1255,16 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     } catch {
       return { status: "offline" };
     }
-    let answer: { id?: unknown; error?: unknown } = {};
+    let answer: { id?: unknown; error?: unknown; minimum?: unknown } = {};
     try {
       answer = ((await res.json()) ?? {}) as typeof answer;
     } catch {
       // Leave the answer empty.
     }
     if (res.status >= 200 && res.status < 300) return { status: "sent", id: typeof answer.id === "string" ? answer.id : "" };
+    if (res.status === 403 && answer.error === "app_update_required") {
+      return { status: "update_required", ...(typeof answer.minimum === "string" ? { minimum: answer.minimum } : {}) };
+    }
     const refused = attestationErrorIn(res.status, answer);
     if (refused) await callRefusalHook(options.onAttestationRejected, refused, answer);
     return { status: "rejected", httpStatus: res.status, ...(typeof answer.error === "string" ? { error: answer.error } : {}) };
@@ -1350,7 +1382,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
       } else if (result.status === "rejected" && !(result.httpStatus === 429 || result.httpStatus >= 500 || result.httpStatus === 408 || result.error?.startsWith("attestation"))) {
         await drop("rejected", { httpStatus: result.httpStatus, ...(result.error ? { error: result.error } : {}) });
       }
-      // offline, rate limited, busy or a refused assertion: it stays for the next flush
+      // offline, rate limited, busy, a refused assertion or an app too old for photos: it stays for the next flush
     }
     if (settledKeys.size === 0) return;
     await serial(async () => writeWaitingPhotos((await readWaitingPhotos()).filter((w) => !settledKeys.has(w.key))));
@@ -1514,6 +1546,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
         { place, photo_report: { photo, reason }, ...(contributor !== undefined ? { contributor } : {}), consent, ref },
         "photo_report",
       ),
+    removePhoto: ({ place, photo, contributor, consent, ref }) => submit({ place, photo_removal: { photo }, contributor, consent, ref }, "photo_removal"),
     erasePhotos: ({ contributor, consent, ref }) => submit({ place: null, contributor, consent, ref }, "photo_erasure"),
     flush: async () => {
       const result = await flushNow();
@@ -1529,7 +1562,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
 
 /** A client for Open Camping DB's feedback intake: reports, reviews, checks, fees and owner requests. */
 export function createFeedbackClient(options: FeedbackClientOptions): FeedbackClient {
-  const { photo: _photo, photoPass: _pass, reportPhoto: _report, erasePhotos: _erase, ...feedback } = createClient(options as PhotoClientOptions);
+  const { photo: _photo, photoPass: _pass, reportPhoto: _report, removePhoto: _remove, erasePhotos: _erase, ...feedback } = createClient(options as PhotoClientOptions);
   return feedback;
 }
 
@@ -1543,6 +1576,7 @@ export function createPhotoClient(options: PhotoClientOptions): PhotoClient {
     photo: client.photo,
     photoPass: client.photoPass,
     reportPhoto: client.reportPhoto,
+    removePhoto: client.removePhoto,
     erasePhotos: client.erasePhotos,
     flush: client.flush,
     pending: client.pending,

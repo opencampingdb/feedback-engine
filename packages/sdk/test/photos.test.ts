@@ -75,6 +75,25 @@ describe("photo validation", () => {
   });
 });
 
+describe("photo removal validation", () => {
+  it("takes a removal of one photo with a contributor and its place", () => {
+    const ok = validateSubmission({ ...base, contributor: CONTRIBUTOR, type: "photo_removal", place: PLACE, photo_removal: { photo: PHOTO } });
+    expect(ok).toMatchObject({ ok: true, value: { type: "photo_removal", place: PLACE, photo_removal: { photo: PHOTO } } });
+  });
+
+  it("needs a contributor, a place and a photo id, and nothing else in the body", () => {
+    const bad = validateSubmission({ ...base, type: "photo_removal", place: null, photo_removal: { photo: "rev_1", reason: "x" } });
+    expect((bad as { errors: string[] }).errors).toEqual([
+      "contributor is required for a photo_removal",
+      "place is required for a photo_removal",
+      "unknown field photo_removal.reason",
+      "photo_removal.photo must be a photo id (pho_<ulid>)",
+    ]);
+    const other = validateSubmission({ ...base, contributor: CONTRIBUTOR, type: "photo_report", place: PLACE, photo_report: { photo: PHOTO, reason: "offensive" }, photo_removal: { photo: PHOTO } });
+    expect((other as { errors: string[] }).errors).toEqual(["photo_removal is not allowed when type is photo_report"]);
+  });
+});
+
 describe("sha256HexBytes", () => {
   it("matches sha256Hex on the same bytes", () => {
     expect(sha256HexBytes(new TextEncoder().encode("abc"))).toBe(sha256Hex("abc"));
@@ -149,6 +168,20 @@ describe("photo client", () => {
     });
   });
 
+  it("answers update_required when the photo service needs a newer app", async () => {
+    const { client } = setup(403, { error: "app_update_required", minimum: "1.5.0" });
+    expect(await client.photo({ place: PLACE, contributor: CONTRIBUTOR, consent: true, full: jpeg(10), thumb: jpeg(10) })).toEqual({
+      status: "update_required",
+      minimum: "1.5.0",
+    });
+    const other = setup(403, { error: "type_not_allowed_for_app_key" });
+    expect(await other.client.photo({ place: PLACE, contributor: CONTRIBUTOR, consent: true, full: jpeg(10), thumb: jpeg(10) })).toEqual({
+      status: "rejected",
+      httpStatus: 403,
+      error: "type_not_allowed_for_app_key",
+    });
+  });
+
   it("answers offline when the intake cannot be reached, and queues nothing", async () => {
     const client = createPhotoClient({
       endpoint: "https://intake.example",
@@ -167,8 +200,10 @@ describe("photo client", () => {
     const { client, posts } = setup();
     await client.reportPhoto({ place: PLACE, photo: PHOTO, reason: "offensive", contributor: CONTRIBUTOR, consent: true });
     await client.erasePhotos({ contributor: CONTRIBUTOR, consent: true });
+    await client.removePhoto({ place: PLACE, photo: PHOTO, contributor: CONTRIBUTOR, consent: true });
     expect(JSON.parse(posts[0]!.body)).toMatchObject({ type: "photo_report", photo_report: { photo: PHOTO, reason: "offensive" } });
     expect(JSON.parse(posts[1]!.body)).toMatchObject({ type: "photo_erasure", place: null, contributor: CONTRIBUTOR });
+    expect(JSON.parse(posts[2]!.body)).toEqual({ ...base, app_version: "1.2.3", device: expect.any(String), type: "photo_removal", place: PLACE, contributor: CONTRIBUTOR, photo_removal: { photo: PHOTO } });
   });
 
   it("answers a photo report and an erasure by their refs, which it never sends", async () => {
@@ -187,10 +222,12 @@ describe("photo client", () => {
     });
     await client.reportPhoto({ place: PLACE, photo: PHOTO, reason: "offensive", contributor: CONTRIBUTOR, consent: true, ref: "pr" });
     await client.erasePhotos({ contributor: CONTRIBUTOR, consent: true, ref: "er" });
+    await client.removePhoto({ place: PLACE, photo: PHOTO, contributor: CONTRIBUTOR, consent: true, ref: "rm" });
     expect(posts.every((b) => !("ref" in JSON.parse(b)))).toBe(true);
     expect(answers).toEqual([
       { ref: "pr", type: "photo_report", outcome: { kind: "sent", id: "fb_1" } },
       { ref: "er", type: "photo_erasure", outcome: { kind: "sent", id: "fb_1" } },
+      { ref: "rm", type: "photo_removal", outcome: { kind: "sent", id: "fb_1" } },
     ]);
   });
 
@@ -201,7 +238,7 @@ describe("photo client", () => {
     };
     const options = { endpoint: "https://intake.example", appKey: "key-1", appVersion: "1.0.0", storage, fetch: offline };
     const feedback = createFeedbackClient(options) as unknown as Record<string, unknown>;
-    expect(["photo", "photoPass", "reportPhoto", "erasePhotos"].filter((m) => m in feedback)).toEqual([]);
+    expect(["photo", "photoPass", "reportPhoto", "removePhoto", "erasePhotos"].filter((m) => m in feedback)).toEqual([]);
     await createPhotoClient(options).reportPhoto({ place: PLACE, photo: PHOTO, reason: "illegal", contributor: CONTRIBUTOR, consent: true });
     expect(await storage.getItem("ocdb.photos.queue")).toContain("photo_report");
     expect(await storage.getItem("ocdb.feedback.queue")).toBeNull();
@@ -263,7 +300,7 @@ describe("photos of a new place waiting for its id", () => {
   const NEW_PLACE = "ocdb_01M6R45Y75GTXQBS5ETC16CYSZ";
   type Status = Awaited<ReturnType<NonNullable<Parameters<typeof createPhotoClient>[0]["resolveNewPlace"]>>>;
 
-  function setup(opts: { status?: () => Status; storage?: StorageAdapter; uploadStatus?: () => number; files?: Map<string, { full: Uint8Array; thumb: Uint8Array } | null> } = {}) {
+  function setup(opts: { status?: () => Status; storage?: StorageAdapter; uploadStatus?: () => number; uploadError?: () => string; files?: Map<string, { full: Uint8Array; thumb: Uint8Array } | null> } = {}) {
     let current: Status = { status: "waiting" };
     const files = opts.files ?? new Map([["a", { full: jpeg(20, 1), thumb: jpeg(10, 1) }], ["b", { full: jpeg(20, 2), thumb: jpeg(10, 2) }]]);
     const uploads: { place: string; bytes: number }[] = [];
@@ -277,7 +314,7 @@ describe("photos of a new place waiting for its id", () => {
       fetch: async () => ({ status: 202, json: async () => ({}), headers: { get: () => null } }),
       fetchPhoto: async (_url, init) => {
         uploads.push({ place: decodeMeta(init.headers["x-photo-meta"]!).place, bytes: init.body.length });
-        return { status: opts.uploadStatus?.() ?? 202, json: async () => ({ id: `pho_01JBXK3M8Q4R5S6T7V8W9X0YZ${uploads.length}`, error: "x" }), headers: { get: () => null } };
+        return { status: opts.uploadStatus?.() ?? 202, json: async () => ({ id: `pho_01JBXK3M8Q4R5S6T7V8W9X0YZ${uploads.length}`, error: opts.uploadError?.() ?? "x" }), headers: { get: () => null } };
       },
       resolveNewPlace: async () => (opts.status ? opts.status() : current),
       loadPhoto: async (key) => files.get(key) ?? null,
@@ -344,6 +381,18 @@ describe("photos of a new place waiting for its id", () => {
     expect(t.settled.map((s) => (s as { key: string }).key)).toEqual(["b"]);
     await t.client.flush();
     expect(t.settled.map((s) => (s as { key: string }).key)).toEqual(["b", "a"]);
+  });
+
+  it("keeps a waiting photo when the photo service needs a newer app, for the updated app to send", async () => {
+    let old = true;
+    const t = setup({ uploadStatus: () => (old ? 403 : 202), uploadError: () => "app_update_required" });
+    await t.photo("a");
+    t.set({ status: "sent", place: NEW_PLACE });
+    await t.client.flush();
+    expect(t.settled).toEqual([]);
+    old = false;
+    await t.client.flush();
+    expect(t.settled).toEqual([{ key: "a", newPlace: "np-1", outcome: { status: "sent", id: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZ2", place: NEW_PLACE } }]);
   });
 
   it("keeps waiting across a restart", async () => {

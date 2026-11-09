@@ -26,6 +26,7 @@ import type {
   PhotoFiles,
   PlaceAddress,
   PhotoReportBody,
+  PhotoRemovalBody,
   PhotoReportReason,
   ReportBody,
   ReportKind,
@@ -45,6 +46,7 @@ export const FEEDBACK_TYPES = [
   "photo",
   "photo_report",
   "photo_erasure",
+  "photo_removal",
   "withdraw",
 ] as const;
 export const OWNER_TYPES = ["owner_claim", "owner_listing", "owner_update"] as const;
@@ -345,6 +347,7 @@ const TOP_LEVEL_KEYS = new Set([
   "fee",
   "photo",
   "photo_report",
+  "photo_removal",
   "terms_accepted",
   "token",
   "owner",
@@ -659,6 +662,16 @@ function checkPhotoReport(value: unknown, errors: string[]): PhotoReportBody | u
   return { photo: value.photo as string, reason: value.reason as PhotoReportReason };
 }
 
+function checkPhotoRemoval(value: unknown, errors: string[]): PhotoRemovalBody | undefined {
+  if (!isObject(value)) {
+    errors.push("photo_removal must be an object");
+    return undefined;
+  }
+  for (const key of Object.keys(value)) if (key !== "photo") errors.push(`unknown field photo_removal.${key}`);
+  if (!isPhotoId(value.photo)) errors.push("photo_removal.photo must be a photo id (pho_<ulid>)");
+  return { photo: value.photo as string };
+}
+
 function checkPhotoFiles(value: unknown, errors: string[]): PhotoFiles | undefined {
   if (!isObject(value)) {
     errors.push("photo must be an object");
@@ -754,7 +767,7 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     return { ok: false, errors };
   }
   if ((OWNER_TYPES as readonly string[]).includes(type)) return validateOwner(input, type as OwnerSubmission["type"]);
-  for (const other of ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
+  for (const other of ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "photo_removal", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
     if (other !== type && input[other] !== undefined) errors.push(`${other} is not allowed when type is ${type}`);
   }
 
@@ -788,7 +801,7 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
   };
 
   let value: FeedbackSubmission | undefined;
-  if ((type === "photo" || type === "photo_erasure") && contributor === undefined) {
+  if ((type === "photo" || type === "photo_erasure" || type === "photo_removal") && contributor === undefined) {
     errors.push(`contributor is required for a ${type}`);
   }
   if (type === "photo_erasure") {
@@ -822,6 +835,9 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     } else if (type === "photo_report") {
       const photoReport = checkPhotoReport(input.photo_report, errors);
       if (photoReport) value = { ...base, place: place as string, type: "photo_report", photo_report: photoReport };
+    } else if (type === "photo_removal") {
+      const removal = checkPhotoRemoval(input.photo_removal, errors);
+      if (removal) value = { ...base, place: place as string, type: "photo_removal", photo_removal: removal };
     } else if (type === "withdraw") {
       value = { ...base, place: place as string, type: "withdraw" };
     } else if (type === "fee") {
@@ -986,7 +1002,7 @@ const OWNER_FIELDS: Record<OwnerSubmission["type"], string[]> = {
 /** Validates the three owner submission types (SPEC "Owners"). */
 function validateOwner(input: Record<string, unknown>, type: OwnerSubmission["type"]): ValidationResult {
   const errors: string[] = [];
-  for (const key of ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "contributor", "token", "owner", "claim", "listing", "update", "location"]) {
+  for (const key of ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "photo_removal", "contributor", "token", "owner", "claim", "listing", "update", "location"]) {
     if (input[key] !== undefined && !OWNER_FIELDS[type].includes(key)) errors.push(`${key} is not allowed when type is ${type}`);
   }
   if (input.terms_accepted !== true) errors.push("terms_accepted must be true");

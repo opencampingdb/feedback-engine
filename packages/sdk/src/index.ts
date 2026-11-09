@@ -41,6 +41,7 @@ export type {
   OwnerListingInput,
   OwnerUpdateInput,
   PhotoErasureInput,
+  PhotoRemovalInput,
   PhotoFetchLike,
   PhotoInput,
   PhotoClient,
@@ -120,6 +121,7 @@ export type {
   ReleaseUpdater,
   ReleaseUpdaterOptions,
 } from "./release.js";
+export { jpegSize } from "./jpeg.js";
 export { sha256Hex, sha256HexBytes } from "./sha256.js";
 export { REMOVED_MARKER, findContactDetails, findContactDetailsInHours, stripContactDetails } from "./text.js";
 export type { ContactDetailKind } from "./text.js";

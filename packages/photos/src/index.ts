@@ -7,7 +7,10 @@
  * Reads that reach R2 are counted per app per day, and above the app's
  * `daily_limit` or the server's `DAILY_READ_CAP` the server answers 503 until
  * midnight UTC. Putting `off` in STATE stops all serving within a minute, and
- * a `withheld:<photo id>` key stops one photo, cache or not.
+ * a `withheld:<photo id>` key stops one photo, cache or not. A
+ * `replaced:<photo id>:<place id>:<generation>` key, written when a photo's
+ * files are replaced, moves that photo and its place's records to new cache
+ * entries within a minute, so the edge serves the new files.
  */
 
 import { isPlaceId } from "@opencampingdb/feedback";
@@ -27,6 +30,12 @@ export interface KVLike {
 
 /** Prefix of the STATE keys that withhold one photo each (set by the intake or a person). */
 export const WITHHELD_PREFIX = "withheld:";
+/**
+ * Prefix of the STATE keys that name a photo whose files were replaced:
+ * `replaced:<photo id>:<place id>:<generation>`, written by
+ * `ocdb-photos replace` (packages/apply/src/photo-replace.ts).
+ */
+export const REPLACED_PREFIX = "replaced:";
 
 /** A Workers rate limiting binding. */
 export interface RateLimiterLike {
@@ -105,16 +114,30 @@ function answer(status: number, error: string, extra: Record<string, string> = {
   });
 }
 
-/** Photo ids with a `withheld:` key in STATE. */
-async function withheldPhotos(state: KVLike): Promise<Set<string>> {
-  const out = new Set<string>();
+/** The names after `prefix` of every STATE key that has it. */
+async function keysAfter(state: KVLike, prefix: string): Promise<string[]> {
+  const out: string[] = [];
   let cursor: string | undefined;
   do {
-    const page = await state.list({ prefix: WITHHELD_PREFIX, ...(cursor ? { cursor } : {}) });
-    for (const { name } of page.keys) out.add(name.slice(WITHHELD_PREFIX.length));
+    const page = await state.list({ prefix, ...(cursor ? { cursor } : {}) });
+    for (const { name } of page.keys) out.push(name.slice(prefix.length));
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
   return out;
+}
+
+/** The latest replacement of each photo and of each place's records, from the `replaced:` keys. */
+async function replacements(state: KVLike): Promise<{ photos: Map<string, number>; places: Map<string, number> }> {
+  const photos = new Map<string, number>();
+  const places = new Map<string, number>();
+  for (const name of await keysAfter(state, REPLACED_PREFIX)) {
+    const [photo, place, generation] = name.split(":");
+    const n = Number(generation);
+    if (!photo || !place || !Number.isSafeInteger(n)) continue;
+    photos.set(photo, Math.max(photos.get(photo) ?? 0, n));
+    places.set(place, Math.max(places.get(place) ?? 0, n));
+  }
+  return { photos, places };
 }
 
 function secondsToMidnightUtc(nowMs: number): number {
@@ -129,6 +152,7 @@ export function createHandler(deps: Deps) {
   let day = "";
   let off = false;
   let withheld = new Set<string>();
+  let replaced = { photos: new Map<string, number>(), places: new Map<string, number>() };
   let totals = new Map<string, number>();
   // Reads this isolate made that are not written to KV yet, per app.
   const unsent = new Map<string, number>();
@@ -154,7 +178,8 @@ export function createHandler(deps: Deps) {
     if (nowMs - checkedAt < STATE_TTL_MS) return;
     checkedAt = nowMs;
     off = (await env.STATE.get("off")) !== null;
-    withheld = await withheldPhotos(env.STATE);
+    withheld = new Set(await keysAfter(env.STATE, WITHHELD_PREFIX));
+    replaced = await replacements(env.STATE);
     const next = new Map<string, number>();
     for (const app of new Set(apps)) {
       const counts = await Promise.all(Array.from({ length: SHARDS }, (_, s) => env.STATE.get(counterKey(day, app, s))));
@@ -211,8 +236,10 @@ export function createHandler(deps: Deps) {
     // Checked before the cache, so a withheld photo stops at once, not when its cache entry ends.
     if (photo && withheld.has(photo[1]!)) return answer(404, "not_found");
 
-    // The cache key is the photo alone: no app key, no query string.
-    const cacheKey = new Request(`${url.origin}${url.pathname}`, { method: "GET" });
+    // The cache key is the photo alone: no app key, no query string. A replaced photo, and its
+    // place's records, get a cache key of their own, so nothing cached before the replacement is used.
+    const generation = photo ? replaced.photos.get(photo[1]!) : replaced.places.get(records![1]!);
+    const cacheKey = new Request(`${url.origin}${url.pathname}${generation ? `?replaced=${generation}` : ""}`, { method: "GET" });
     const cache = deps.cache();
     const hit = await cache.match(cacheKey);
     if (hit) return request.method === "HEAD" ? new Response(null, { status: hit.status, headers: hit.headers }) : hit;

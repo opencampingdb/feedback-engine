@@ -181,6 +181,8 @@ export type ReviewEdit =
   | { kind: "photo"; place: string; photo: Photo; feedback: string }
   /** Removes the contributor's held photos from the review checkout. */
   | { kind: "photo_erasure"; contributor: string; feedback: string }
+  /** Removes one held photo, at its contributor's request, from the review checkout. */
+  | { kind: "photo_removal"; place: string; photo: string; feedback: string }
   /** Nothing to write: the PR body carries it for a person to read. */
   | { kind: "note"; place: string; feedback: string };
 
@@ -232,6 +234,7 @@ type FeeItem = Extract<StoredFeedback, { type: "fee" }>;
 type PhotoItem = Extract<StoredFeedback, { type: "photo" }>;
 type PhotoReportItem = Extract<StoredFeedback, { type: "photo_report" }>;
 type ErasureItem = Extract<StoredFeedback, { type: "photo_erasure" }>;
+type RemovalItem = Extract<StoredFeedback, { type: "photo_removal" }>;
 
 /** Reports from this many different contributors hide a review or a photo until a person decides. */
 export const REPORTS_TO_HIDE = 3;
@@ -443,6 +446,8 @@ export function applyRules(input: RulesInput): RulesOutput {
   // Erasures first, so a photo sent in the same run by an erased contributor is refused.
   const erased = applyErasures(known.filter((i): i is ErasureItem => i.type === "photo_erasure"));
   applyPhotos(known.filter((i): i is PhotoItem => i.type === "photo"), erased);
+  // After photos, so a photo accepted or held in this run can be removed in it too.
+  applyPhotoRemovals(known.filter((i): i is RemovalItem => i.type === "photo_removal"));
   applyPhotoReports(known.filter((i): i is PhotoReportItem => i.type === "photo_report"));
   for (const lines of newPhotos.values()) lines.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   applyStatus(
@@ -646,6 +651,35 @@ export function applyRules(input: RulesInput): RulesOutput {
     return erased;
   }
 
+  /**
+   * Removes one photo at its own contributor's request: its line in the data,
+   * or the held photo on the review branch, and its files. A removal from
+   * anyone else is refused.
+   */
+  function applyPhotoRemovals(items: RemovalItem[]): void {
+    for (const item of items) {
+      const photoId = item.photo_removal.photo;
+      const lines = photoLinesOf(item.place);
+      const line = lines.find((p) => p.id === photoId);
+      // A photo not in the lines may be held for a person, or sent in this run.
+      const upload = [...input.history, ...pending].find((h): h is PhotoItem => h.type === "photo" && photoIdOf(h) === photoId);
+      const owner = line?.contributor ?? upload?.contributor;
+      if (owner === undefined || (line === undefined && upload?.place !== item.place)) {
+        decide(item, "refused", `photo ${photoId} is not in the data for this place`);
+        continue;
+      }
+      if (item.contributor === undefined || owner !== item.contributor) {
+        decide(item, "refused", "only the photo's contributor can remove it");
+        continue;
+      }
+      if (line) lines.splice(lines.indexOf(line), 1);
+      else edits.push({ kind: "photo_removal", place: item.place, photo: photoId, feedback: item.id });
+      removePhoto(photoId, "removed");
+      note(item.place, `photo ${photoId} removed at its contributor's request`, true, [item]);
+      decide(item, "applied", "photo removed at its contributor's request");
+    }
+  }
+
   function applyPhotos(items: PhotoItem[], erased: ReadonlySet<string>): void {
     const trusted = new Set(
       (input.photos ?? []).filter((p) => p.hidden === undefined && !blocked.has(p.contributor)).map((p) => p.contributor),
@@ -732,6 +766,19 @@ export function applyRules(input: RulesInput): RulesOutput {
           [item],
         );
         decide(item, "needs_review", "an illegal-content report hides the photo at once and is read by a person");
+        continue;
+      }
+      if (item.withheld === true) {
+        // A reason on the photo service's withhold list: the intake withheld the photo on this first report.
+        if (target.hidden === undefined) target.hidden = "reported";
+        note(
+          item.place,
+          `photo ${photoId} reported as ${reason}, hidden and withheld until a person decides ` +
+            "(release it: remove `hidden` and delete its withheld key; or remove it, or block the contributor)",
+          false,
+          [item],
+        );
+        decide(item, "needs_review", `a ${reason} report withholds the photo at once and is read by a person`);
         continue;
       }
       note(item.place, `photo ${photoId} reported as ${reason} (decide: keep, hide, remove or block the contributor)`, false, [item]);
@@ -1669,7 +1716,7 @@ export function applyHeldReview(
  */
 export function applyEdit(
   current: Place | undefined,
-  edit: Exclude<ReviewEdit, { kind: "review" | "photo" | "photo_erasure" }>,
+  edit: Exclude<ReviewEdit, { kind: "review" | "photo" | "photo_erasure" | "photo_removal" }>,
   nowIso: string,
 ): Place | undefined {
   if (edit.kind === "note") return undefined;
