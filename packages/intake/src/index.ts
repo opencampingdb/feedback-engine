@@ -250,6 +250,12 @@ function withKey<T extends Admitted | ItemAnswer>(db: D1Like | undefined, app: A
   return { ...item, writes: [...item.writes, keepAnswer(db, app.app, key, { status: 202, body: item.answer }, at)] };
 }
 
+/**
+ * How long a report's withhold lasts when the intake could not check the photo against the
+ * served records. The apply run puts every withheld report in front of a person well within it.
+ */
+export const UNCHECKED_REPORT_WITHHOLD_TTL_SECONDS = 7 * 24 * 60 * 60;
+
 /** Key in the photo server's STATE that stops one photo being served. */
 export const withheldKey = (photo: string) => `withheld:${photo}`;
 
@@ -1504,6 +1510,10 @@ export function createHandler(deps: Deps) {
         owner = await photoOwner(env.PHOTOS_SERVED, feedback.place, feedback.photo_removal.photo, contributor!);
         if (owner === "theirs") return { status: 403, body: { error: "not_your_photo" } };
       }
+      // A report withholds at once only a photo served for the place it names, and not the reporter's own.
+      if (feedback.type === "photo_report" && env.PHOTOS_SERVED) {
+        owner = await photoOwner(env.PHOTOS_SERVED, feedback.place, feedback.photo_report.photo, contributor!);
+      }
       if (feedback.type === "review" && app.requires_visited_nearby && feedback.review.visited_nearby !== true) {
         return { status: 400, body: { error: "visited_nearby_required" } };
       }
@@ -1575,10 +1585,14 @@ export function createHandler(deps: Deps) {
       ...("photo_removal" in rest ? { photo_removal: rest.photo_removal } : {}),
     } as StoredFeedback;
     // A report for a reason on the withhold list, or a removal by the photo's own contributor,
-    // stops the photo being served at once. The stored item says so, for the apply run.
+    // stops the photo being served at once. The stored item says so, for the apply run. A report
+    // withholds only someone else's photo served for the place it names; an intake that cannot read
+    // the served records withholds for a limited time and leaves the rest to the apply run.
     const withhold =
       env.PHOTO_STATE !== undefined &&
-      ((stored.type === "photo_report" && withholdReasons(env.PHOTO_WITHHOLD_REASONS).has(stored.photo_report.reason)) ||
+      ((stored.type === "photo_report" &&
+        withholdReasons(env.PHOTO_WITHHOLD_REASONS).has(stored.photo_report.reason) &&
+        (!env.PHOTOS_SERVED || owner === "theirs")) ||
         (stored.type === "photo_removal" && owner === "mine") ||
         stored.type === "photo_erasure");
     if (withhold) stored.withheld = true;
@@ -1630,7 +1644,9 @@ export function createHandler(deps: Deps) {
         // in the inbox already, so a failed write here still reaches the apply run.
         if (withhold && stored.type === "photo_report") {
           const value = JSON.stringify({ feedback: id, at: received, reason: stored.photo_report.reason });
-          await env.PHOTO_STATE!.put(withheldKey(stored.photo_report.photo), value).catch(() => undefined);
+          // Checked against the served records, the withhold lasts until a person decides. Unchecked, it expires.
+          const options = env.PHOTOS_SERVED ? undefined : { expirationTtl: UNCHECKED_REPORT_WITHHOLD_TTL_SECONDS };
+          await env.PHOTO_STATE!.put(withheldKey(stored.photo_report.photo), value, options).catch(() => undefined);
         } else if (withhold && stored.type === "photo_erasure") {
           await withholdContributor(env.PHOTO_STATE!, stored.contributor!, id, received);
         } else if (withhold && stored.type === "photo_removal") {

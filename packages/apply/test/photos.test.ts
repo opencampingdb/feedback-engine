@@ -207,6 +207,18 @@ describe("photo rules", () => {
     expect(rules(oneNetwork, { photos: [target] }).photos.get(PLACE)?.[0]?.hidden).toBeUndefined();
   });
 
+  it("puts a withheld report it cannot act on in front of a person, so the withhold can be released", () => {
+    const target = photoLine(1, "sam");
+    const misfiled = { ...report("a", target.id, "illegal"), place: OTHER, withheld: true } as StoredFeedback;
+    const own = { ...report("sam", target.id, "illegal"), withheld: true } as StoredFeedback;
+    const out = rules([misfiled, own], { photos: [target] });
+    expect(out.outcome(misfiled)).toBe("needs_review");
+    expect(out.outcome(own)).toBe("needs_review");
+    expect(out.needsReview).toBe(true);
+    expect(out.changes.filter((c) => /withheld key/.test(c.summary))).toHaveLength(2);
+    expect(out.photos.get(PLACE)?.[0]?.hidden).toBeUndefined();
+  });
+
   it("hides a photo at once after one illegal-content report, and flags it urgent", () => {
     const target = photoLine(1, "sam");
     const one = report("a", target.id, "illegal");

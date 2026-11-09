@@ -756,12 +756,22 @@ export function applyRules(input: RulesInput): RulesOutput {
         continue;
       }
       const target = photoLinesOf(item.place).find((p) => p.id === photoId);
-      if (!target) {
-        decide(item, "refused", `photo ${photoId} is not in the data for this place`);
-        continue;
-      }
-      if (target.contributor === item.contributor) {
-        decide(item, "refused", "a contributor cannot report their own photo");
+      const cannotAct = !target ? `photo ${photoId} is not in the data for this place` : target.contributor === item.contributor ? "a contributor cannot report their own photo" : undefined;
+      if (cannotAct !== undefined || !target) {
+        if (item.withheld === true) {
+          // The intake withheld the photo on this report, so a person decides rather than nobody.
+          edits.push({ kind: "note", place: item.place, feedback: item.id });
+          note(
+            item.place,
+            `photo ${photoId} was withheld at once by a ${reason} report the rules cannot act on (${cannotAct}): ` +
+              "delete its withheld key to release it, unless it should stay down",
+            false,
+            [item],
+          );
+          decide(item, "needs_review", `a withheld report the rules cannot act on: ${cannotAct}`);
+        } else {
+          decide(item, "refused", cannotAct ?? "");
+        }
         continue;
       }
       reportsSent.push(item);

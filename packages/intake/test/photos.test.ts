@@ -234,7 +234,9 @@ describe("photo reports and erasure", () => {
     const gh = fakeGitHub();
     const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
     const state = fakeKv();
-    const e = { ...env(), PHOTO_STATE: state };
+    const records = `${JSON.stringify({ id: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB", place: PLACE, contributor: "ctr_00000000000000aa" })}\n`;
+    const served = { get: async (key: string) => (key === `records/${PLACE}.ndjson` ? { text: async () => records } : null) };
+    const e = { ...env(), PHOTO_STATE: state, PHOTOS_SERVED: served };
     const send = (reason: string) =>
       handle(
         new Request("https://intake.example/v1/feedback", {
@@ -254,22 +256,55 @@ describe("photo reports and erasure", () => {
 
 describe("report reasons that withhold a photo at once", () => {
   const PHOTO = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB";
-  function setup(reasons?: string) {
+  const OTHER_PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZC";
+  /** The serving bucket's records: PHOTO is served for PLACE, sent by `lineContributor`. */
+  const servedBy = (lineContributor: string) => {
+    const records = `${JSON.stringify({ id: PHOTO, place: PLACE, contributor: lineContributor })}\n`;
+    return { get: async (key: string) => (key === `records/${PLACE}.ndjson` ? { text: async () => records } : null) };
+  };
+  function setup(reasons?: string, served: Env["PHOTOS_SERVED"] | null = servedBy("ctr_00000000000000aa")) {
     const gh = fakeGitHub();
     const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
     const state = fakeKv();
-    const e: Env = { ...env(), PHOTO_STATE: state, ...(reasons !== undefined ? { PHOTO_WITHHOLD_REASONS: reasons } : {}) };
-    const send = (reason: string) =>
+    const puts: { key: string; options?: unknown }[] = [];
+    const recordingState: KVLike = { ...state, put: async (k, v, o) => (puts.push({ key: k, options: o }), state.put(k, v, o)) };
+    const e: Env = {
+      ...env(),
+      PHOTO_STATE: recordingState,
+      ...(served ? { PHOTOS_SERVED: served } : {}),
+      ...(reasons !== undefined ? { PHOTO_WITHHOLD_REASONS: reasons } : {}),
+    };
+    const send = (reason: string, place = PLACE) =>
       handle(
         new Request("https://intake.example/v1/feedback", {
           method: "POST",
           headers: { "x-app-key": APP_KEY },
-          body: JSON.stringify({ device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true, type: "photo_report", place: PLACE, photo_report: { photo: PHOTO, reason } }),
+          body: JSON.stringify({ device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true, type: "photo_report", place, photo_report: { photo: PHOTO, reason } }),
         }),
         e,
       );
-    return { gh, state, send };
+    return { gh, state, puts, send };
   }
+
+  it("does not withhold a photo reported under a place it is not served for", async () => {
+    const t = setup();
+    expect((await t.send("illegal", OTHER_PLACE)).status).toBe(202);
+    expect(await t.state.get(withheldKey(PHOTO))).toBeNull();
+    expect(t.gh.puts[0]!.content.withheld).toBeUndefined();
+  });
+
+  it("does not withhold a contributor's report of their own photo", async () => {
+    const t = setup(undefined, servedBy(await hashContributor("pepper", "example-app", CONTRIBUTOR)));
+    expect((await t.send("illegal")).status).toBe(202);
+    expect(await t.state.get(withheldKey(PHOTO))).toBeNull();
+  });
+
+  it("withholds for a limited time when the intake cannot read the served records", async () => {
+    const t = setup(undefined, null);
+    expect((await t.send("illegal")).status).toBe(202);
+    expect(await t.state.get(withheldKey(PHOTO))).not.toBeNull();
+    expect(t.puts[0]!.options).toEqual({ expirationTtl: 7 * 24 * 60 * 60 });
+  });
 
   it("withholds on the first report for a configured reason, and says so on the stored item", async () => {
     const t = setup("personal_details, copyright, not_a_reason");
