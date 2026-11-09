@@ -388,7 +388,7 @@ import { REVIEW_REPORT_REASONS } from "@opencampingdb/feedback";
 await feedback.reportReview({ place, review: "rev_01JC...", reason: "offensive", contributor, consent: true });
 ```
 
-Every report goes to a person on the `feedback/review` PR, who looks at reported reviews within 24 hours. Reports from three different contributors, on three different client networks, hide the review at the next apply run, until the person decides. A person can hide a review, or block its contributor: everything a blocked contributor sends is refused (except a request to remove or erase their own photos), and their reviews are left out of the release and the rating.
+Every report goes to a person on the `feedback/review` PR, who looks at reported reviews within 24 hours. Reports from three different contributors, on three different client networks, hide the review at the next apply run, until the person decides. A person can hide a review, or block its contributor: everything a blocked contributor sends is refused (except a request to remove or erase their own photos), and their reviews are left out of the release and the rating. For personal details or a takedown, a person removes the review from the data (`python -m pipeline.moderate remove` in `data`), which lists its id in `moderation/removed_reviews.json`. The apply run refuses a review with a listed id, so a removed review is never written back.
 
 **Blocking on the phone.** Published reviews carry `contributor`, so let a traveller hide everything from one contributor on their own phone, straight away, without waiting for anyone. Keep that list on the device.
 

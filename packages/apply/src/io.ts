@@ -569,6 +569,14 @@ export class DataRepo {
     return new Set((list.contributors ?? []).map((entry) => entry.contributor));
   }
 
+  /** Review ids in `moderation/removed_reviews.json` (data's `pipeline.moderate remove`). Empty when the file is missing. */
+  async removedReviews(): Promise<Set<string>> {
+    const path = join(this.root, "moderation", "removed_reviews.json");
+    if (!(await exists(path))) return new Set();
+    const list = JSON.parse(await readFile(path, "utf8")) as { reviews?: { review: string }[] };
+    return new Set((list.reviews ?? []).map((entry) => entry.review));
+  }
+
   /**
    * Contributors with at least one visible review anywhere in the data, so
    * their next reviews are trusted. Reads every review file.

@@ -136,6 +136,8 @@ export interface RulesInput {
   kinds?: ReadonlyMap<string, string>;
   /** Contributors in `moderation/blocked_contributors.json`. */
   blocked?: ReadonlySet<string>;
+  /** Review ids in `moderation/removed_reviews.json`: a person removed them, so they are never written again. */
+  removedReviews?: ReadonlySet<string>;
   /** Contributors with a visible review in the data: their reviews are trusted. */
   reviewers?: ReadonlySet<string>;
   /** Every photo line in the data. None when left out. */
@@ -400,6 +402,10 @@ export function applyRules(input: RulesInput): RulesOutput {
     const deletion = item.type === "photo_erasure" || item.type === "photo_removal";
     if (item.contributor !== undefined && blocked.has(item.contributor) && !deletion) {
       decide(item, "refused", "the contributor is blocked");
+      continue;
+    }
+    if (item.type === "review" && input.removedReviews?.has(reviewIdOf(item))) {
+      decide(item, "refused", "the review was removed by a moderator");
       continue;
     }
     if (isNewPlaceEvidence(item) && item.place !== null && origins.has(item.place)) {

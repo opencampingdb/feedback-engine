@@ -446,6 +446,18 @@ describe("run", () => {
     expect(summary.review_pr_body).toContain("reported as fake");
   });
 
+  it("refuses a review listed in moderation/removed_reviews.json and writes nothing back (audit run-2 OCDB-07)", async () => {
+    const review = join(root, "data-review");
+    await put(join(review, "places", "za", `${PLACE}.json`), dumpPlace(place));
+    await put(join(data, "moderation", "removed_reviews.json"), {
+      reviews: [{ review: id(5).replace(/^fb_/, "rev_"), place: PLACE, removed: "2026-10-30", reason: "personal_details" }],
+    });
+    await pending(5, "2026-10-29T00:00:00Z", "aaaa", { type: "review", contributor: NEWCOMER, review: { stars: 4, text: "Quiet.", visited: "2026-10" } });
+    const summary = await run({ inbox, data, reviewData: review, now: NOW });
+    expect(summary.counts).toMatchObject({ refused: 1 });
+    expect([...summary.review_files, ...summary.auto_files]).toEqual([]);
+  });
+
   it("moves a record found at another path to the SPEC path", async () => {
     await rm(join(data, "places"), { recursive: true });
     await put(join(data, "places", "oc", `${PLACE}.json`), dumpPlace(place));
