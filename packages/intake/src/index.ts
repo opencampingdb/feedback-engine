@@ -96,6 +96,7 @@ import {
   recordProgress,
 } from "./progress.js";
 import { verifyPreview } from "@opencampingdb/apply/preview";
+import { IDEMPOTENCY_HEADER, isIdempotencyKey, keepAnswer, keptAnswers, pruneRequestKeys, requestKey } from "./idempotency.js";
 import {
   appVersionAtLeast,
   minimumAppVersion,
@@ -235,6 +236,18 @@ export interface Env {
   REVIEW_BOT_LOGINS?: string;
   /** `owner/name` of the data repository, for the AI reviewer. */
   DATA_REPO?: string;
+}
+
+const INVALID_KEY = `${IDEMPOTENCY_HEADER} must be 16 to 128 letters, digits, _ and -`;
+
+/**
+ * An admitted item with its idempotency key kept in the batch that stores it.
+ * Not for an owner claim or listing, whose answer holds a token that is
+ * never stored, and not without the D1 database.
+ */
+function withKey<T extends Admitted | ItemAnswer>(db: D1Like | undefined, app: AppEntry, key: string | undefined, at: string, item: T): T {
+  if (!("file" in item) || !db || key === undefined || "token" in item.answer) return item;
+  return { ...item, writes: [...item.writes, keepAnswer(db, app.app, key, { status: 202, body: item.answer }, at)] };
 }
 
 /** Key in the photo server's STATE that stops one photo being served. */
@@ -716,7 +729,7 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
     if (env.RECENT_LIST) {
       const db = env.RECENT_LIST;
       const nowMs = deps.now();
-      await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs), pruneProgress(db, nowMs), pruneRateCounts(db, nowMs)]).catch((error: unknown) => {
+      await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs), pruneProgress(db, nowMs), pruneRateCounts(db, nowMs), pruneRequestKeys(db, nowMs)]).catch((error: unknown) => {
         console.warn(`pruning the recent list failed: ${String(error)}`);
       });
     }
@@ -877,6 +890,13 @@ export function createHandler(deps: Deps) {
     // Refused before anything is counted, so an old app's tries cost the traveller nothing.
     const minimum = minimumAppVersion(env.PHOTO_MIN_APP_VERSION);
     if (minimum && !appVersionAtLeast(submission.app_version, minimum)) return json(403, { error: "app_update_required", minimum }, cors);
+    // An upload sent again after its answer was lost gets the first answer, and nothing is stored or counted.
+    const key = requestKey(request);
+    if (key === "invalid") return json(400, { error: "invalid", details: [INVALID_KEY] }, cors);
+    if (key && env.RECENT_LIST) {
+      const kept = (await keptAnswers(env.RECENT_LIST, app.app, [key])).get(key);
+      if (kept) return json(kept.status, kept.body, cors);
+    }
 
     let proof: { attested: "app_attest" | "play_integrity"; keyId?: string } | undefined;
     if (app.requires_attestation) {
@@ -962,6 +982,7 @@ export function createHandler(deps: Deps) {
         await env.RECENT_LIST.batch([
           queueStatement(env.RECENT_LIST, file, deps.now()),
           photoReceivedStatement(env.RECENT_LIST, { id: photoId, received, place: submission.place }, held),
+          ...(key ? [keepAnswer(env.RECENT_LIST, app.app, key, { status: 202, body: { id: photoId } }, received)] : []),
         ]);
       }
       else await github.createFile(inboxConfig(env), env.INBOX_BRANCH ?? "main", file.path, file.content, `Add ${id}`);
@@ -1712,6 +1733,14 @@ export function createHandler(deps: Deps) {
     if (typeof body !== "object" || body === null || !Array.isArray(items) || items.length === 0 || items.length > MAX_BATCH_ITEMS) {
       return json(400, { error: "invalid", details: [`items must be 1 to ${MAX_BATCH_ITEMS} submissions`] }, cors);
     }
+    // One idempotency key per item, in the same order, or none at all.
+    const keys = (body as { keys?: unknown }).keys;
+    if (
+      keys !== undefined &&
+      (!Array.isArray(keys) || keys.length !== items.length || !keys.every(isIdempotencyKey) || new Set(keys).size !== keys.length)
+    ) {
+      return json(400, { error: "invalid", details: ["keys must be one different idempotency key for each item, in order"] }, cors);
+    }
     let proof: Proof | undefined;
     if (app.requires_attestation) {
       const result = await attest(request, env, app, text);
@@ -1719,6 +1748,8 @@ export function createHandler(deps: Deps) {
       proof = result;
     }
     const nowMs = deps.now();
+    // Items sent before, whose answers were lost, are answered as they were the first time.
+    const kept = keys ? await keptAnswers(env.RECENT_LIST, app.app, keys as string[]) : new Map<string, never>();
     const intake = await newIntake(request, env, app, nowMs, { batch: { proof }, nextId: monotonicUlids(nowMs, deps.randomBytes) });
     // An app over its daily limit is refused as a whole, as one item would be.
     const [used = 0] = await intake.counts.counts([`a:${intake.day}:${app.app}`]);
@@ -1730,10 +1761,17 @@ export function createHandler(deps: Deps) {
     // large in a batch exactly when it would be alone.
     const sent = arrayElementTexts(text, "items");
     const answers: (Admitted | ItemAnswer)[] = [];
+    const at = new Date(nowMs).toISOString();
     for (const [i, item] of items.entries()) {
+      const key = (keys as string[] | undefined)?.[i];
+      const before = key === undefined ? undefined : kept.get(key);
+      if (before) {
+        answers.push({ status: before.status, body: before.body });
+        continue;
+      }
       const itemText = sent?.length === items.length ? sent[i]! : (JSON.stringify(item) ?? "");
       if (utf8Length(itemText) > MAX_BODY_BYTES) answers.push({ status: 413, body: { error: "too_large" } });
-      else answers.push(await admit(intake, item));
+      else answers.push(withKey(env.RECENT_LIST, app, key, at, await admit(intake, item)));
     }
     const admitted = answers.filter((a): a is Admitted => "file" in a);
     try {
@@ -1761,7 +1799,7 @@ export function createHandler(deps: Deps) {
         headers: {
           ...cors,
           "access-control-allow-methods": "GET, POST, OPTIONS",
-          "access-control-allow-headers": "content-type, x-app-key, x-attest-platform, x-attest-key-id, x-attest-assertion, x-attest-token, x-photo-meta",
+          "access-control-allow-headers": "content-type, x-app-key, x-attest-platform, x-attest-key-id, x-attest-assertion, x-attest-token, x-photo-meta, idempotency-key",
           "access-control-max-age": "86400",
         },
       });
@@ -1859,8 +1897,15 @@ export function createHandler(deps: Deps) {
     if (!read.ok) return json(read.status, read.body, cors);
     const { text, body } = read;
     const nowMs = deps.now();
+    // A submission sent again after its answer was lost gets the first answer, and nothing is stored or counted.
+    const key = requestKey(request);
+    if (key === "invalid") return json(400, { error: "invalid", details: [INVALID_KEY] }, cors);
+    if (key && env.RECENT_LIST) {
+      const kept = (await keptAnswers(env.RECENT_LIST, app.app, [key])).get(key);
+      if (kept) return json(kept.status, kept.body, cors);
+    }
     const intake = await newIntake(request, env, app, nowMs, { text, nextId: () => ulid(nowMs, deps.randomBytes) });
-    const item = await admit(intake, body);
+    const item = withKey(env.RECENT_LIST, app, key, new Date(nowMs).toISOString(), await admit(intake, body));
     if (!("file" in item)) return json(item.status, item.body, { ...cors, ...item.headers });
     try {
       await storeAdmitted(env, [item]);

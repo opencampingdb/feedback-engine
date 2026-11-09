@@ -401,6 +401,17 @@ export function isPhotoId(value: unknown): value is string {
 }
 
 /** A contributor id as an app sends it: 16 to 128 characters of `A-Z a-z 0-9 _ -`. */
+/**
+ * The header a request's idempotency key travels in. The intake answers a
+ * request it took before, with the same key, as it did the first time.
+ */
+export const IDEMPOTENCY_HEADER = "idempotency-key";
+
+/** An idempotency key: 16 to 128 letters, digits, `_` and `-`. A UUID fits. */
+export function isIdempotencyKey(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(value);
+}
+
 export function isContributor(value: unknown): value is string {
   return typeof value === "string" && CONTRIBUTOR.test(value);
 }

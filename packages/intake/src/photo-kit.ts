@@ -6,28 +6,36 @@
 
 import { PHOTO_REPORT_REASONS, type PhotoReportReason } from "@opencampingdb/feedback";
 
-/** A version's leading numbers: `1.4.0` and `1.4.0 (52)` read as [1, 4, 0]. */
-function versionParts(version: string): number[] | undefined {
-  const match = /^\s*v?(\d+(?:\.\d+)*)/.exec(version);
-  return match ? match[1]!.split(".").map(Number) : undefined;
+/**
+ * A version's leading numbers and its build number: `1.4.0` reads as [1, 4, 0]
+ * with no build, and `1.4.0 (52)` or `1.4.0+52` as [1, 4, 0] with build 52.
+ */
+function versionParts(version: string): { parts: number[]; build?: number } | undefined {
+  const match = /^\s*v?(\d+(?:\.\d+)*)(?:\s*\((\d+)\)|\+(\d+))?/.exec(version);
+  if (!match) return undefined;
+  const build = match[2] ?? match[3];
+  return { parts: match[1]!.split(".").map(Number), ...(build !== undefined ? { build: Number(build) } : {}) };
 }
 
 /**
- * Whether `version` is at least `minimum`, comparing the leading numbers part
- * by part (`1.10.0` is above `1.9.2`, and a missing part counts as 0). A
- * version with no leading number is below any minimum.
+ * Whether `version` is at least `minimum`. The leading numbers are compared
+ * part by part (`1.10.0` is above `1.9.2`, and a missing part counts as 0).
+ * When they are equal and the minimum has a build number (`1.0.0 (36)`), the
+ * build numbers decide, and a version without one is below it. A version
+ * with no leading number is below any minimum.
  */
 export function appVersionAtLeast(version: string, minimum: string): boolean {
   const have = versionParts(version);
   const need = versionParts(minimum);
   if (!need) return true;
   if (!have) return false;
-  for (let i = 0; i < Math.max(have.length, need.length); i++) {
-    const a = have[i] ?? 0;
-    const b = need[i] ?? 0;
+  for (let i = 0; i < Math.max(have.parts.length, need.parts.length); i++) {
+    const a = have.parts[i] ?? 0;
+    const b = need.parts[i] ?? 0;
     if (a !== b) return a > b;
   }
-  return true;
+  if (need.build === undefined) return true;
+  return have.build !== undefined && have.build >= need.build;
 }
 
 /** The minimum from `PHOTO_MIN_APP_VERSION`, or undefined when it is unset or has no leading number. */
