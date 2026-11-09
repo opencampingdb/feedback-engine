@@ -469,6 +469,19 @@ describe("minimum app version for photo uploads", () => {
     for (const version of ["1.5.0", "1.5", "1.5.0 (61)", "1.10.0", "2"]) expect((await send(version)).status).toBe(202);
   });
 
+  it("compares build numbers when the minimum has one and the versions are equal", async () => {
+    for (const version of ["1.0.0 (35)", "1.0.0", "1.0.0+35", "0.9.9 (99)"]) {
+      const res = await send(version, "1.0.0 (36)");
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: "app_update_required", minimum: "1.0.0 (36)" });
+    }
+    for (const version of ["1.0.0 (36)", "1.0.0 (40)", "1.0.0+36", "1.0.1", "1.0.1 (2)"]) expect((await send(version, "1.0.0 (36)")).status).toBe(202);
+  });
+
+  it("ignores build numbers when the minimum has none", async () => {
+    for (const version of ["1.5.0 (1)", "1.5.0"]) expect((await send(version, "1.5.0")).status).toBe(202);
+  });
+
   it("takes every version when the minimum is unset or not a version", async () => {
     expect((await handle(upload(jpeg(4, 3), jpeg(4, 3), (m) => (m.app_version = "0.1")), env())).status).toBe(202);
     expect((await send("0.1", "latest")).status).toBe(202);
