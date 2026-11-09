@@ -758,8 +758,8 @@ export function applyRules(input: RulesInput): RulesOutput {
         continue;
       }
       const target = photoLinesOf(item.place).find((p) => p.id === photoId);
-      const cannotAct = !target ? `photo ${photoId} is not in the data for this place` : target.contributor === item.contributor ? "a contributor cannot report their own photo" : undefined;
-      if (cannotAct !== undefined || !target) {
+      if (!target || target.contributor === item.contributor) {
+        const cannotAct = !target ? `photo ${photoId} is not in the data for this place` : "a contributor cannot report their own photo";
         if (item.withheld === true) {
           // The intake withheld the photo on this report, so a person decides rather than nobody.
           edits.push({ kind: "note", place: item.place, feedback: item.id });
@@ -772,7 +772,7 @@ export function applyRules(input: RulesInput): RulesOutput {
           );
           decide(item, "needs_review", `a withheld report the rules cannot act on: ${cannotAct}`);
         } else {
-          decide(item, "refused", cannotAct ?? "");
+          decide(item, "refused", cannotAct);
         }
         continue;
       }

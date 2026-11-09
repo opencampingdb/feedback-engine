@@ -26,9 +26,9 @@ export interface AttestedKey {
   public_key: string;
   /** Counter from the last accepted assertion. */
   counter: number;
-  /** The App Attest environment the key was attested in. Records from before it was stored are production. */
+  /** The App Attest environment the key was attested in. A record from before it was stored takes the first app key it is used with. */
   environment?: "production" | "development";
-  /** The App ID the key was attested for. Records from before it was stored take the reading app key's. */
+  /** The App ID the key was attested for, set the same way. */
   app_id?: string;
 }
 

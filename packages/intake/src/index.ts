@@ -779,11 +779,13 @@ export function createHandler(deps: Deps) {
         if (!key) return refuse(request, app.app, { reason: "unknown_key", details: ["stored key record cannot be read"] });
         if (key.app !== app.app) return refuse(request, app.app, { reason: "wrong_app", details: ["key is registered for another app key"] });
         // A key from a development build works only with an app key in the development environment, whatever the app names.
-        if ((key.environment ?? "production") !== (app.ios.environment ?? "production") || (key.app_id ?? app.ios.app_id) !== app.ios.app_id) {
+        // A record from before records named these takes the environment and App ID of the first app key it is used with.
+        const here = { environment: app.ios.environment ?? "production", app_id: app.ios.app_id };
+        if (key.environment !== undefined && (key.environment !== here.environment || (key.app_id ?? here.app_id) !== here.app_id)) {
           return refuse(request, app.app, { reason: "wrong_app", details: ["key is registered under another environment or app id"] });
         }
         const { counter } = await verifyAssertion({ assertion, clientData: new TextEncoder().encode(body), key, config: app.ios });
-        await inKeyStore(() => kv.put(`aa:${keyId}`, JSON.stringify({ ...key, counter })));
+        await inKeyStore(() => kv.put(`aa:${keyId}`, JSON.stringify({ ...key, ...(key.environment === undefined ? here : {}), counter })));
       } catch (error) {
         if (error instanceof StorageError) return { error: "unavailable" };
         if (error instanceof AttestError) return refuse(request, app.app, { reason: error.reason, details: [error.message] });
@@ -1485,7 +1487,7 @@ export function createHandler(deps: Deps) {
     let contributor: string | undefined;
     let attestKey: string | undefined;
     let target: StoredPlace | undefined;
-    let owner: "mine" | "theirs" | "unknown" | undefined;
+    let owner: "mine" | "theirs" | "unknown" | "unreadable" | undefined;
     const extra: { prefix: string; id: string; limit: number }[] = [];
     if (!isOwner) {
       const feedback = submission as FeedbackSubmission;
@@ -1592,13 +1594,13 @@ export function createHandler(deps: Deps) {
     } as StoredFeedback;
     // A report for a reason on the withhold list, or a removal by the photo's own contributor,
     // stops the photo being served at once. The stored item says so, for the apply run. A report
-    // withholds only someone else's photo served for the place it names; an intake that cannot read
-    // the served records withholds for a limited time and leaves the rest to the apply run.
+    // withholds only someone else's photo served for the place it names; an intake that has no served
+    // records, or cannot read them, withholds for a limited time and leaves the rest to the apply run.
     const withhold =
       env.PHOTO_STATE !== undefined &&
       ((stored.type === "photo_report" &&
         withholdReasons(env.PHOTO_WITHHOLD_REASONS).has(stored.photo_report.reason) &&
-        (!env.PHOTOS_SERVED || owner === "theirs")) ||
+        (!env.PHOTOS_SERVED || owner === "theirs" || owner === "unreadable")) ||
         (stored.type === "photo_removal" && owner === "mine") ||
         stored.type === "photo_erasure");
     if (withhold) stored.withheld = true;
@@ -1651,7 +1653,7 @@ export function createHandler(deps: Deps) {
         if (withhold && stored.type === "photo_report") {
           const value = JSON.stringify({ feedback: id, at: received, reason: stored.photo_report.reason });
           // Checked against the served records, the withhold lasts until a person decides. Unchecked, it expires.
-          const options = env.PHOTOS_SERVED ? undefined : { expirationTtl: UNCHECKED_REPORT_WITHHOLD_TTL_SECONDS };
+          const options = owner === "theirs" ? undefined : { expirationTtl: UNCHECKED_REPORT_WITHHOLD_TTL_SECONDS };
           await env.PHOTO_STATE!.put(withheldKey(stored.photo_report.photo), value, options).catch(() => undefined);
         } else if (withhold && stored.type === "photo_erasure") {
           await withholdContributor(env.PHOTO_STATE!, stored.contributor!, id, received);

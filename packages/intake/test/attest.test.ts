@@ -447,11 +447,13 @@ describe("App Attest", () => {
     expect((await registered()).status).toBe(201);
   });
 
-  it("accepts a key record stored before records named their environment, as production", async () => {
+  it("accepts a key record stored before records named their environment, and names it from the app key it is used with", async () => {
     await registered();
     const { app, public_key, counter } = JSON.parse(kv.data.get(`aa:${device.keyId}`)!) as Record<string, unknown>;
     kv.data.set(`aa:${device.keyId}`, JSON.stringify({ app, public_key, counter }));
     expect((await send(reviewBody(), 1)).status).toBe(202);
+    // The record now names the environment and App ID it was used under.
+    expect(JSON.parse(kv.data.get(`aa:${device.keyId}`)!)).toMatchObject({ environment: "production", app_id: APP_ID });
   });
 
   it("refuses an assertion whose stored key record cannot be read as an unknown key", async () => {

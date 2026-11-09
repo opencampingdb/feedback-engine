@@ -299,7 +299,14 @@ describe("report reasons that withhold a photo at once", () => {
     expect(await t.state.get(withheldKey(PHOTO))).toBeNull();
   });
 
-  it("withholds for a limited time when the intake cannot read the served records", async () => {
+  it("withholds for a limited time when reading the served records fails", async () => {
+    const t = setup(undefined, { get: async () => { throw new Error("R2 unavailable"); } });
+    expect((await t.send("illegal")).status).toBe(202);
+    expect(await t.state.get(withheldKey(PHOTO))).not.toBeNull();
+    expect(t.puts[0]!.options).toEqual({ expirationTtl: 7 * 24 * 60 * 60 });
+  });
+
+  it("withholds for a limited time when the intake has no served records", async () => {
     const t = setup(undefined, null);
     expect((await t.send("illegal")).status).toBe(202);
     expect(await t.state.get(withheldKey(PHOTO))).not.toBeNull();
