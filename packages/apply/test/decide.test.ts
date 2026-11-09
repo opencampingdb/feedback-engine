@@ -52,6 +52,13 @@ describe("decideFact", () => {
     });
   });
 
+  it("holds opening hours whose quoted comment fails the text checks", () => {
+    const spam = attested(fact(0, "dev-a", "opening_hours", 'Mo-Su 08:00-17:00 "click here for a promo code"'));
+    expect(decideFact({ item: spam, place: state(), earlier: [] })).toMatchObject({ verdict: "held", reason: "text_check" });
+    const fine = attested(fact(0, "dev-a", "opening_hours", 'Mo-Su 08:00-17:00 "office closes at noon"'));
+    expect(decideFact({ item: fine, place: state(), earlier: [] })).toMatchObject({ verdict: "live" });
+  });
+
   it("makes an attested contact that passes the link checks live", () => {
     const item = attested(fact(0, "dev-a", "phone", "03 5555 0100"));
     expect(decideFact({ item, place: state(), earlier: [] })).toMatchObject({ verdict: "live", changes: [{ place: PLACE, fact: "phone", value: "03 5555 0100" }] });

@@ -209,6 +209,11 @@ export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemD
   if (refusal !== null) return refusal;
   const fact = item.report.fact as FactName;
   const value = item.report.value as FactValue;
+  if (fact === "opening_hours" && typeof value === "string") {
+    // OSM opening_hours allows free text between double quotes: it gets the same text checks as a note.
+    const problem = firstProblem(...[...value.matchAll(/"([^"]*)"/g)].map((m) => tidyText(m[1]!)));
+    if (problem !== null) return { verdict: "held", reason: "text_check", why: `opening_hours comment fails the text checks (${problem})` };
+  }
   if (fact === "pets_months" && place.facts.pets !== "seasonal") {
     return { verdict: "held", reason: "not_seasonal", why: "pets_months applies only when pets is seasonal, so a person checks it" };
   }

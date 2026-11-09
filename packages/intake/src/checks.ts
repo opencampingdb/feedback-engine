@@ -106,6 +106,22 @@ export function freeText(item: FeedbackSubmission): string[] {
   return texts.filter((text) => text.length > 0);
 }
 
+/**
+ * The quoted comments in an opening_hours value an item would set (OSM
+ * opening_hours allows free text between double quotes). The cheap text rules
+ * read them; Llama Guard never reads fact values (ADR 0002).
+ */
+export function factComments(item: FeedbackSubmission): string[] {
+  if (item.type !== "report") return [];
+  const report = item.report;
+  const values: unknown[] = [];
+  if (report.kind === "fact" && report.fact === "opening_hours") values.push(report.value);
+  return values
+    .filter((v): v is string => typeof v === "string")
+    .flatMap((v) => [...v.matchAll(/"([^"]*)"/g)].map((m) => tidyText(m[1]!)))
+    .filter((text) => text.length > 0);
+}
+
 /** The contact facts and the address an item would set. */
 export function contactsOf(item: FeedbackSubmission): [ContactFactName, unknown][] {
   if (item.type !== "report") return [];
@@ -292,7 +308,7 @@ async function check(deps: CheckDeps, item: FeedbackSubmission, contributor: Che
 
   // 1. The intake's own rules.
   const texts = freeText(item);
-  if (firstProblem(...texts) !== null) return { held: "text_check" };
+  if (firstProblem(...texts, ...factComments(item)) !== null) return { held: "text_check" };
   const contacts = contactsOf(item);
   if (contacts.some(([fact, value]) => contactProblem(fact, value) !== null)) return { held: "link_check" };
   const day = dayOf(deps.now());
