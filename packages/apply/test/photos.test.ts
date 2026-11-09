@@ -201,6 +201,12 @@ describe("photo rules", () => {
     expect(rules(reports.slice(0, 2), { photos: [target] }).photos.get(PLACE)![0]!.hidden).toBeUndefined();
   });
 
+  it("counts photo reports from one network once, whatever contributor ids they carry", () => {
+    const target = photoLine(1, "sam");
+    const oneNetwork = ["a", "b", "c"].map((who) => ({ ...report(who, target.id), origin: "net-a" }) as StoredFeedback);
+    expect(rules(oneNetwork, { photos: [target] }).photos.get(PLACE)?.[0]?.hidden).toBeUndefined();
+  });
+
   it("hides a photo at once after one illegal-content report, and flags it urgent", () => {
     const target = photoLine(1, "sam");
     const one = report("a", target.id, "illegal");

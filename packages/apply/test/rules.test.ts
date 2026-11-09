@@ -1207,6 +1207,18 @@ describe("review reports", () => {
     expect(out2.changes.some((c) => c.automatic && /hidden after reports from 3/.test(c.summary))).toBe(true);
   });
 
+  it("counts reports from one network once, whatever contributor ids they carry", () => {
+    const fromOneNetwork = ["kim", "lee", "max"].map((who) => ({ ...reviewReport(0, who, target.id), origin: "net-a" }) as StoredFeedback);
+    const out = run(fromOneNetwork, { reviews: [target], places: [place({ rating: { count: 1, mean: 5 } })] });
+    expect(out.reviews.size).toBe(0);
+    expect(out.changes.some((c) => c.automatic)).toBe(false);
+
+    const fromThreeNetworks = ["kim", "lee", "max"].map((who, i) => ({ ...reviewReport(0, who, target.id), origin: `net-${i}` }) as StoredFeedback);
+    expect(run(fromThreeNetworks, { reviews: [target], places: [place({ rating: { count: 1, mean: 5 } })] }).reviews.get(PLACE)).toEqual([
+      { ...target, hidden: "reported" },
+    ]);
+  });
+
   it("refuses a report of a review that is not there, or of one's own review", () => {
     const missing = reviewReport(0, "kim", "rev_01JA0000000000000000000099");
     const own = reviewReport(0, "author", target.id);
@@ -1570,6 +1582,14 @@ describe("new places", () => {
         feedback: [first.id, second.id],
       },
     ]);
+  });
+
+  it("counts reports from one network once, whatever device ids they carry", () => {
+    const item = added(0);
+    const fromOneNetwork = [remove(1, "dev-b", item), remove(1, "dev-c", item)].map((r) => ({ ...r, origin: "net-x" }) as StoredFeedback);
+    const out = run(fromOneNetwork, { ...inData(item), now: 2 });
+    expect(out.places.size).toBe(0);
+    expect(out.held).toEqual([]);
   });
 
   it("one report leaves a published place shown and lists nothing", () => {

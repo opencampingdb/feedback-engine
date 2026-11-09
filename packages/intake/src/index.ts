@@ -1619,7 +1619,7 @@ export function createHandler(deps: Deps) {
       // The item is stored already, so a failed write here still reaches the apply run.
       after: async () => {
         if (env.RECENT_LIST) {
-          await updateRecent(env.RECENT_LIST, submission as FeedbackSubmission, { id, received, device, target }).catch(() => undefined);
+          await updateRecent(env.RECENT_LIST, submission as FeedbackSubmission, { id, received, device, origin: stored.origin, target }).catch(() => undefined);
         }
         // The photo is withheld before a person or the apply run sees the item. The item is
         // in the inbox already, so a failed write here still reaches the apply run.
@@ -1927,16 +1927,18 @@ export function createHandler(deps: Deps) {
 async function updateRecent(
   db: D1Like,
   submission: FeedbackSubmission,
-  item: { id: string; received: string; device: string; target: StoredPlace | undefined },
+  item: { id: string; received: string; device: string; origin: string | undefined; target: StoredPlace | undefined },
 ): Promise<void> {
-  const { id, received, device, target } = item;
+  const { id, received, device, origin, target } = item;
   if (!target) return;
+  // Evidence from one client network counts once in the standing, whatever device ids it carries.
+  const source = origin !== undefined ? { source: origin } : {};
   if (submission.type === "check") {
     // A check carries no location: only the app's word that the phone was near the place.
-    const check = { device, stillThere: submission.check.still_there, nearby: submission.check.nearby === true, day: received };
+    const check = { device, ...source, stillThere: submission.check.still_there, nearby: submission.check.nearby === true, day: received };
     await insertEvidence(db, target.id, id, { kind: "check", check });
   } else if (submission.type === "report" && submission.report.kind === "remove" && submission.report.reason) {
-    const report = { device, reason: submission.report.reason as NewPlaceReportReason, day: received };
+    const report = { device, ...source, reason: submission.report.reason as NewPlaceReportReason, day: received };
     await insertEvidence(db, target.id, id, { kind: "removal_report", report });
   } else if (submission.type === "withdraw") {
     await insertEvidence(db, target.id, id, { kind: "withdraw", at: received });

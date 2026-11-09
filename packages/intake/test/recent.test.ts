@@ -313,6 +313,16 @@ describe("recent places", () => {
     expect(await list()).toEqual([]);
   });
 
+  it("counts removal reports from one network once, whatever device ids they carry", async () => {
+    const id = await add();
+    const network = { "cf-connecting-ip": "203.0.113.9" };
+    const remove = (i: number) =>
+      feedback({ ...newPlace({ device: otherDevice(i), contributor: `acct_reporter_000000${i}` }), place: id, location: undefined, report: { kind: "remove", reason: "fake" } }, network);
+    expect((await handle(remove(1), e)).status).toBe(202);
+    expect((await handle(remove(2), e)).status).toBe(202);
+    expect((await list()).map((p) => p.standing)).toEqual(["shown"]);
+  });
+
   it("counts a not there check as a report", async () => {
     const id = await add();
     const check = (i: number, stillThere: boolean) =>

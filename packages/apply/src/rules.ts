@@ -26,6 +26,7 @@ import {
   REVIEWED_FACTS,
   takenDownWhy,
   sameValue,
+  sourceOf,
   weighFact,
   WINDOW_DAYS,
   type ItemDecision,
@@ -238,6 +239,16 @@ type RemovalItem = Extract<StoredFeedback, { type: "photo_removal" }>;
 
 /** Reports from this many different contributors hide a review or a photo until a person decides. */
 export const REPORTS_TO_HIDE = 3;
+
+/**
+ * How many independent reporters `reports` have: distinct contributors, but no
+ * more than the distinct sources (networks, else devices) they came from, so
+ * contributor ids made up on one network count once.
+ */
+function independentReporters(reports: readonly StoredFeedback[]): number {
+  const counted = reports.filter((r) => r.contributor !== undefined);
+  return Math.min(new Set(counted.map((r) => r.contributor)).size, new Set(counted.map(sourceOf)).size);
+}
 /** Review text this long or longer, sent word for word for two places, goes to a person. */
 const REPEATED_TEXT_LENGTH = 40;
 
@@ -783,14 +794,12 @@ export function applyRules(input: RulesInput): RulesOutput {
       }
       note(item.place, `photo ${photoId} reported as ${reason} (decide: keep, hide, remove or block the contributor)`, false, [item]);
       decide(item, "needs_review", "photo reports are read by a person");
-      const reporters = new Set(
-        reportsSent.filter((r) => r.photo_report.photo === photoId && r.contributor !== undefined).map((r) => r.contributor),
-      );
-      if (target.hidden === undefined && reporters.size >= REPORTS_TO_HIDE) {
+      const reporters = independentReporters(reportsSent.filter((r) => r.photo_report.photo === photoId));
+      if (target.hidden === undefined && reporters >= REPORTS_TO_HIDE) {
         target.hidden = "reported";
         note(
           item.place,
-          `photo ${photoId} hidden after reports from ${reporters.size} contributors, until a person decides`,
+          `photo ${photoId} hidden after reports from ${reporters} contributors, until a person decides`,
           true,
           reportsSent.filter((r) => r.photo_report.photo === photoId),
         );
@@ -820,15 +829,13 @@ export function applyRules(input: RulesInput): RulesOutput {
       note(item.place, `review ${reviewId} reported as ${reason} (decide: keep, hide or block the contributor)`, false, [item]);
       decide(item, "needs_review", "review reports are read by a person");
 
-      const reporters = new Set(
-        reportsSent.filter((r) => r.review_report.review === reviewId && r.contributor !== undefined).map((r) => r.contributor),
-      );
-      if (target.hidden === undefined && reporters.size >= REPORTS_TO_HIDE) {
+      const reporters = independentReporters(reportsSent.filter((r) => r.review_report.review === reviewId));
+      if (target.hidden === undefined && reporters >= REPORTS_TO_HIDE) {
         target.hidden = "reported";
         changedReviews.add(item.place);
         note(
           item.place,
-          `review ${reviewId} hidden after reports from ${reporters.size} contributors, until a person decides`,
+          `review ${reviewId} hidden after reports from ${reporters} contributors, until a person decides`,
           true,
           reportsSent.filter((r) => r.review_report.review === reviewId),
         );
@@ -1177,13 +1184,13 @@ export function applyRules(input: RulesInput): RulesOutput {
       const standingFrom = (items: readonly StoredFeedback[]) =>
         newPlaceStanding({
           added: origin.received,
-          contributor: { device: origin.device, blocked: isBlocked, firstPlace },
+          contributor: { device: origin.device, source: sourceOf(origin), blocked: isBlocked, firstPlace },
           checks: items
             .filter((i): i is CheckItem => i.type === "check")
-            .map((c) => ({ device: c.device, stillThere: c.check.still_there, nearby: c.check.nearby === true, day: c.received })),
+            .map((c) => ({ device: c.device, source: sourceOf(c), stillThere: c.check.still_there, nearby: c.check.nearby === true, day: c.received })),
           reports: items
             .filter((i): i is ReportItem => i.type === "report")
-            .map((r) => ({ device: r.device, reason: r.report.reason as NewPlaceReportReason, day: r.received })),
+            .map((r) => ({ device: r.device, source: sourceOf(r), reason: r.report.reason as NewPlaceReportReason, day: r.received })),
           withdrawnAt: items.filter((i) => i.type === "withdraw" && i.device === origin.device).map((i) => i.received).sort()[0] ?? null,
           duplicateOf: duplicate?.place ?? null,
           moderator: moderatorOf(existing),
