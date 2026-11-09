@@ -1,0 +1,14 @@
+# Files that change what runs, what is deployed, what is installed or who is
+# moderated need a review from the project lead (see GOVERNANCE.md).
+# The rule takes effect when the branch ruleset requires code owner review.
+
+/.github/                       @shanelord01
+/CODEOWNERS                     @shanelord01
+/AGENTS.md                      @shanelord01
+/SECURITY.md                    @shanelord01
+/LICENSE                        @shanelord01
+/NOTICE                         @shanelord01
+/.npmrc                         @shanelord01
+package.json                    @shanelord01
+package-lock.json               @shanelord01
+wrangler.toml                   @shanelord01
