@@ -612,9 +612,11 @@ function readKeyRecord(saved: string): AttestedKey | undefined {
     return undefined;
   }
   if (typeof record !== "object" || record === null) return undefined;
-  const { app, public_key, counter } = record as Record<string, unknown>;
+  const { app, public_key, counter, environment, app_id } = record as Record<string, unknown>;
   if (typeof app !== "string" || typeof public_key !== "string" || typeof counter !== "number") return undefined;
-  return { app, public_key, counter };
+  if (environment !== undefined && environment !== "production" && environment !== "development") return undefined;
+  if (app_id !== undefined && typeof app_id !== "string") return undefined;
+  return { app, public_key, counter, ...(environment !== undefined ? { environment } : {}), ...(app_id !== undefined ? { app_id } : {}) };
 }
 
 /** Where the daily counters are kept: D1 when the intake has it, KV otherwise (ratelimit.ts). */
@@ -776,6 +778,10 @@ export function createHandler(deps: Deps) {
         const key = readKeyRecord(saved);
         if (!key) return refuse(request, app.app, { reason: "unknown_key", details: ["stored key record cannot be read"] });
         if (key.app !== app.app) return refuse(request, app.app, { reason: "wrong_app", details: ["key is registered for another app key"] });
+        // A key from a development build works only with an app key in the development environment, whatever the app names.
+        if ((key.environment ?? "production") !== (app.ios.environment ?? "production") || (key.app_id ?? app.ios.app_id) !== app.ios.app_id) {
+          return refuse(request, app.app, { reason: "wrong_app", details: ["key is registered under another environment or app id"] });
+        }
         const { counter } = await verifyAssertion({ assertion, clientData: new TextEncoder().encode(body), key, config: app.ios });
         await inKeyStore(() => kv.put(`aa:${keyId}`, JSON.stringify({ ...key, counter })));
       } catch (error) {
@@ -855,7 +861,7 @@ export function createHandler(deps: Deps) {
         now: deps.now(),
         ...(deps.appAttestRoot ? { rootPem: deps.appAttestRoot } : {}),
       });
-      const key: AttestedKey = { app: app.app, public_key: publicKey, counter: 0 };
+      const key: AttestedKey = { app: app.app, public_key: publicKey, counter: 0, environment: app.ios.environment ?? "production", app_id: app.ios.app_id };
       await inKeyStore(() => kv.put(`aa:${keyId}`, JSON.stringify(key)));
     } catch (error) {
       if (error instanceof StorageError) return unavailable(cors);

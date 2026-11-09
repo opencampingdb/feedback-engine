@@ -349,6 +349,14 @@ describe("App Attest", () => {
       await refused(await send(reviewBody(), 1), "wrong_app");
     });
 
+    it("names a key registered under another environment or app id", async () => {
+      await registered();
+      const record = JSON.parse(kv.data.get(`aa:${device.keyId}`)!) as Record<string, unknown>;
+      expect(record).toMatchObject({ environment: "production", app_id: APP_ID });
+      kv.data.set(`aa:${device.keyId}`, JSON.stringify({ ...record, environment: "development" }));
+      await refused(await send(reviewBody(), 1), "wrong_app");
+    });
+
     it("names an assertion signed over another body", async () => {
       await registered();
       const res = await handle(
@@ -437,6 +445,13 @@ describe("App Attest", () => {
     expect(await failed.json()).toEqual({ error: "unavailable" });
     kv.failing = undefined;
     expect((await registered()).status).toBe(201);
+  });
+
+  it("accepts a key record stored before records named their environment, as production", async () => {
+    await registered();
+    const { app, public_key, counter } = JSON.parse(kv.data.get(`aa:${device.keyId}`)!) as Record<string, unknown>;
+    kv.data.set(`aa:${device.keyId}`, JSON.stringify({ app, public_key, counter }));
+    expect((await send(reviewBody(), 1)).status).toBe(202);
   });
 
   it("refuses an assertion whose stored key record cannot be read as an unknown key", async () => {
