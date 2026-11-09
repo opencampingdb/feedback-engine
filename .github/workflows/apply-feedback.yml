@@ -327,6 +327,7 @@ jobs:
           --bot-login "$APP_SLUG"
           --auto-pr-body "$RUNNER_TEMP/auto-pr-body.md"
           --review-pr-body "$RUNNER_TEMP/review-pr-body.md"
+          --job-summary "$GITHUB_STEP_SUMMARY"
           --summary "$RUNNER_TEMP/summary.json"
 
       - name: Publish automatic changes
@@ -363,7 +364,10 @@ jobs:
             # Asked again each run while it is not set, in case the setting was turned on since.
             set_already="$(gh pr view "$PR_NUMBER" --repo "$DATA_REPO" --json autoMergeRequest --jq '.autoMergeRequest != null' || echo false)"
             if [ "$set_already" != "true" ] && ! auto_merge "$PR_NUMBER"; then by_hand; fi
-            gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$body"
+            # The changes are on the branch already: a refused comment is said loudly, and the
+            # run still records its inbox moves, so the same items are not applied again.
+            gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$body" ||
+              echo "::error title=PR comment refused::could not comment on PR ${PR_NUMBER} on ${DATA_REPO}; the run's changes are on feedback/auto and listed in this run's job summary"
             echo "pr=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           else
             # No open PR uses the branch, so it can be replaced.
@@ -413,7 +417,10 @@ jobs:
               echo "::error::could not push to feedback/review after 5 attempts"
               exit 1
             fi
-            gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$RUNNER_TEMP/review-pr-body.md"
+            # The changes are pushed already: a refused comment is said loudly, and the run
+            # still records its inbox moves, so the same items are not decided again.
+            gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$RUNNER_TEMP/review-pr-body.md" ||
+              echo "::error title=PR comment refused::could not comment on PR ${PR_NUMBER} on ${DATA_REPO}; the run's items are on feedback/review and listed in this run's job summary"
             if [ "$OWNER_CLAIMS" = "true" ]; then
               gh pr edit "$PR_NUMBER" --repo "$DATA_REPO" --add-label owner-claim
             fi

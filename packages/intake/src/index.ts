@@ -65,7 +65,7 @@ import {
   type D1Statement,
   type StoredPlace,
 } from "./recent.js";
-import { cellHashes, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
+import { cellHashes, getIndexedPlace, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
 import { createChecks, pruneLiveCounts, releaseLive, type AiLike, type LiveSlot } from "./checks.js";
 import {
   decideAtSendTime,
@@ -83,7 +83,7 @@ import {
   type SendTimeDecision,
 } from "./decide.js";
 import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult, type QueuedFile } from "./inbox-queue.js";
-import { monotonicUlids, ulid } from "./ulid.js";
+import { orderedUlids, ulid } from "./ulid.js";
 import { arrayElementTexts } from "./json-text.js";
 import { latestRelease, parseRelease, recordRelease } from "./release.js";
 import {
@@ -249,6 +249,12 @@ function withKey<T extends Admitted | ItemAnswer>(db: D1Like | undefined, app: A
   if (!("file" in item) || !db || key === undefined || "token" in item.answer) return item;
   return { ...item, writes: [...item.writes, keepAnswer(db, app.app, key, { status: 202, body: item.answer }, at)] };
 }
+
+/**
+ * How long a report's withhold lasts when the intake could not check the photo against the
+ * served records. The apply run puts every withheld report in front of a person well within it.
+ */
+export const UNCHECKED_REPORT_WITHHOLD_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /** Key in the photo server's STATE that stops one photo being served. */
 export const withheldKey = (photo: string) => `withheld:${photo}`;
@@ -606,9 +612,11 @@ function readKeyRecord(saved: string): AttestedKey | undefined {
     return undefined;
   }
   if (typeof record !== "object" || record === null) return undefined;
-  const { app, public_key, counter } = record as Record<string, unknown>;
+  const { app, public_key, counter, environment, app_id } = record as Record<string, unknown>;
   if (typeof app !== "string" || typeof public_key !== "string" || typeof counter !== "number") return undefined;
-  return { app, public_key, counter };
+  if (environment !== undefined && environment !== "production" && environment !== "development") return undefined;
+  if (app_id !== undefined && typeof app_id !== "string") return undefined;
+  return { app, public_key, counter, ...(environment !== undefined ? { environment } : {}), ...(app_id !== undefined ? { app_id } : {}) };
 }
 
 /** Where the daily counters are kept: D1 when the intake has it, KV otherwise (ratelimit.ts). */
@@ -770,8 +778,14 @@ export function createHandler(deps: Deps) {
         const key = readKeyRecord(saved);
         if (!key) return refuse(request, app.app, { reason: "unknown_key", details: ["stored key record cannot be read"] });
         if (key.app !== app.app) return refuse(request, app.app, { reason: "wrong_app", details: ["key is registered for another app key"] });
+        // A key from a development build works only with an app key in the development environment, whatever the app names.
+        // A record from before records named these takes the environment and App ID of the first app key it is used with.
+        const here = { environment: app.ios.environment ?? "production", app_id: app.ios.app_id };
+        if (key.environment !== undefined && (key.environment !== here.environment || (key.app_id ?? here.app_id) !== here.app_id)) {
+          return refuse(request, app.app, { reason: "wrong_app", details: ["key is registered under another environment or app id"] });
+        }
         const { counter } = await verifyAssertion({ assertion, clientData: new TextEncoder().encode(body), key, config: app.ios });
-        await inKeyStore(() => kv.put(`aa:${keyId}`, JSON.stringify({ ...key, counter })));
+        await inKeyStore(() => kv.put(`aa:${keyId}`, JSON.stringify({ ...key, ...(key.environment === undefined ? here : {}), counter })));
       } catch (error) {
         if (error instanceof StorageError) return { error: "unavailable" };
         if (error instanceof AttestError) return refuse(request, app.app, { reason: error.reason, details: [error.message] });
@@ -849,7 +863,7 @@ export function createHandler(deps: Deps) {
         now: deps.now(),
         ...(deps.appAttestRoot ? { rootPem: deps.appAttestRoot } : {}),
       });
-      const key: AttestedKey = { app: app.app, public_key: publicKey, counter: 0 };
+      const key: AttestedKey = { app: app.app, public_key: publicKey, counter: 0, environment: app.ios.environment ?? "production", app_id: app.ios.app_id };
       await inKeyStore(() => kv.put(`aa:${keyId}`, JSON.stringify(key)));
     } catch (error) {
       if (error instanceof StorageError) return unavailable(cors);
@@ -1473,7 +1487,7 @@ export function createHandler(deps: Deps) {
     let contributor: string | undefined;
     let attestKey: string | undefined;
     let target: StoredPlace | undefined;
-    let owner: "mine" | "theirs" | "unknown" | undefined;
+    let owner: "mine" | "theirs" | "unknown" | "unreadable" | undefined;
     const extra: { prefix: string; id: string; limit: number }[] = [];
     if (!isOwner) {
       const feedback = submission as FeedbackSubmission;
@@ -1504,6 +1518,10 @@ export function createHandler(deps: Deps) {
         owner = await photoOwner(env.PHOTOS_SERVED, feedback.place, feedback.photo_removal.photo, contributor!);
         if (owner === "theirs") return { status: 403, body: { error: "not_your_photo" } };
       }
+      // A report withholds at once only a photo served for the place it names, and not the reporter's own.
+      if (feedback.type === "photo_report" && env.PHOTOS_SERVED) {
+        owner = await photoOwner(env.PHOTOS_SERVED, feedback.place, feedback.photo_report.photo, contributor!);
+      }
       if (feedback.type === "review" && app.requires_visited_nearby && feedback.review.visited_nearby !== true) {
         return { status: 400, body: { error: "visited_nearby_required" } };
       }
@@ -1523,12 +1541,17 @@ export function createHandler(deps: Deps) {
         if (nowMs - Date.parse(target.added) > WITHDRAW_WINDOW_MS) return { status: 409, body: { error: "withdraw_window_closed" } };
       }
     }
-    // A report about a released place is part of the device's edit of that
-    // place today: only the first counts against the daily limits.
-    const editedPlace =
+    // A report about a place the intake knows (in the place index or the recent list) is part of
+    // the device's edit of that place today: only the first counts against the device's and the
+    // contributor's day. An intake without D1 cannot tell which places exist and gives it to every place.
+    const reportPlace =
       !isOwner && (submission as FeedbackSubmission).type === "report" && typeof (submission as FeedbackSubmission).place === "string"
         ? ((submission as FeedbackSubmission).place as string)
         : undefined;
+    const known =
+      reportPlace !== undefined &&
+      (!env.RECENT_LIST || target !== undefined || (await getIndexedPlace(env.RECENT_LIST, reportPlace).catch(() => undefined)) !== undefined);
+    const editedPlace = known ? reportPlace : undefined;
     const limit = await intake.counts.check(
       itemCounters(day, device, app.app, isOwner ? (app.owner_daily_limit ?? app.daily_limit) : app.daily_limit, kind, origin, extra),
       editedPlace === undefined ? undefined : { deviceHash: device, place: editedPlace },
@@ -1570,10 +1593,14 @@ export function createHandler(deps: Deps) {
       ...("photo_removal" in rest ? { photo_removal: rest.photo_removal } : {}),
     } as StoredFeedback;
     // A report for a reason on the withhold list, or a removal by the photo's own contributor,
-    // stops the photo being served at once. The stored item says so, for the apply run.
+    // stops the photo being served at once. The stored item says so, for the apply run. A report
+    // withholds only someone else's photo served for the place it names; an intake that has no served
+    // records, or cannot read them, withholds for a limited time and leaves the rest to the apply run.
     const withhold =
       env.PHOTO_STATE !== undefined &&
-      ((stored.type === "photo_report" && withholdReasons(env.PHOTO_WITHHOLD_REASONS).has(stored.photo_report.reason)) ||
+      ((stored.type === "photo_report" &&
+        withholdReasons(env.PHOTO_WITHHOLD_REASONS).has(stored.photo_report.reason) &&
+        (!env.PHOTOS_SERVED || owner === "theirs" || owner === "unreadable")) ||
         (stored.type === "photo_removal" && owner === "mine") ||
         stored.type === "photo_erasure");
     if (withhold) stored.withheld = true;
@@ -1619,13 +1646,15 @@ export function createHandler(deps: Deps) {
       // The item is stored already, so a failed write here still reaches the apply run.
       after: async () => {
         if (env.RECENT_LIST) {
-          await updateRecent(env.RECENT_LIST, submission as FeedbackSubmission, { id, received, device, target }).catch(() => undefined);
+          await updateRecent(env.RECENT_LIST, submission as FeedbackSubmission, { id, received, device, origin: stored.origin, target }).catch(() => undefined);
         }
         // The photo is withheld before a person or the apply run sees the item. The item is
         // in the inbox already, so a failed write here still reaches the apply run.
         if (withhold && stored.type === "photo_report") {
           const value = JSON.stringify({ feedback: id, at: received, reason: stored.photo_report.reason });
-          await env.PHOTO_STATE!.put(withheldKey(stored.photo_report.photo), value).catch(() => undefined);
+          // Checked against the served records, the withhold lasts until a person decides. Unchecked, it expires.
+          const options = owner === "theirs" ? undefined : { expirationTtl: UNCHECKED_REPORT_WITHHOLD_TTL_SECONDS };
+          await env.PHOTO_STATE!.put(withheldKey(stored.photo_report.photo), value, options).catch(() => undefined);
         } else if (withhold && stored.type === "photo_erasure") {
           await withholdContributor(env.PHOTO_STATE!, stored.contributor!, id, received);
         } else if (withhold && stored.type === "photo_removal") {
@@ -1750,7 +1779,7 @@ export function createHandler(deps: Deps) {
     const nowMs = deps.now();
     // Items sent before, whose answers were lost, are answered as they were the first time.
     const kept = keys ? await keptAnswers(env.RECENT_LIST, app.app, keys as string[]) : new Map<string, never>();
-    const intake = await newIntake(request, env, app, nowMs, { batch: { proof }, nextId: monotonicUlids(nowMs, deps.randomBytes) });
+    const intake = await newIntake(request, env, app, nowMs, { batch: { proof }, nextId: orderedUlids(nowMs, deps.randomBytes) });
     // An app over its daily limit is refused as a whole, as one item would be.
     const [used = 0] = await intake.counts.counts([`a:${intake.day}:${app.app}`]);
     if (used >= app.daily_limit) {
@@ -1927,16 +1956,18 @@ export function createHandler(deps: Deps) {
 async function updateRecent(
   db: D1Like,
   submission: FeedbackSubmission,
-  item: { id: string; received: string; device: string; target: StoredPlace | undefined },
+  item: { id: string; received: string; device: string; origin: string | undefined; target: StoredPlace | undefined },
 ): Promise<void> {
-  const { id, received, device, target } = item;
+  const { id, received, device, origin, target } = item;
   if (!target) return;
+  // Evidence from one client network counts once in the standing, whatever device ids it carries.
+  const source = origin !== undefined ? { source: origin } : {};
   if (submission.type === "check") {
     // A check carries no location: only the app's word that the phone was near the place.
-    const check = { device, stillThere: submission.check.still_there, nearby: submission.check.nearby === true, day: received };
+    const check = { device, ...source, stillThere: submission.check.still_there, nearby: submission.check.nearby === true, day: received };
     await insertEvidence(db, target.id, id, { kind: "check", check });
   } else if (submission.type === "report" && submission.report.kind === "remove" && submission.report.reason) {
-    const report = { device, reason: submission.report.reason as NewPlaceReportReason, day: received };
+    const report = { device, ...source, reason: submission.report.reason as NewPlaceReportReason, day: received };
     await insertEvidence(db, target.id, id, { kind: "removal_report", report });
   } else if (submission.type === "withdraw") {
     await insertEvidence(db, target.id, id, { kind: "withdraw", at: received });

@@ -26,6 +26,10 @@ export interface AttestedKey {
   public_key: string;
   /** Counter from the last accepted assertion. */
   counter: number;
+  /** The App Attest environment the key was attested in. A record from before it was stored takes the first app key it is used with. */
+  environment?: "production" | "development";
+  /** The App ID the key was attested for, set the same way. */
+  app_id?: string;
 }
 
 /** A check that said no, with the reason code the intake answers with. */

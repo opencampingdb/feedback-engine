@@ -24,11 +24,15 @@ export const PHOTO_CONTRIBUTOR_DAILY_LIMIT = 10;
 /** Feedback per attested App Attest key per day. */
 export const ATTEST_KEY_DAILY_LIMIT = 200;
 /**
- * Reports about one place from one device in one day. The first counts
- * against the daily limits like any item; the rest of the edit (a traveller
- * filling in many facts) don't, up to this many.
+ * Reports about one known place from one device in one day. The first counts
+ * against every daily limit like any item; the rest of the edit (a traveller
+ * filling in many facts) don't count against the device's or the
+ * contributor's day, up to this many. They still count against the app's,
+ * the network's and the attested key's.
  */
 export const PLACE_EDIT_DAILY_LIMIT = 100;
+/** The counters the rest of an edit leaves alone: the device's and the contributor's. */
+const EDIT_RELIEVED = ["d:", "c:"];
 /** How long a counter lives in KV, on an intake without D1. */
 const TTL_SECONDS = 2 * 24 * 60 * 60;
 
@@ -149,9 +153,11 @@ export function countSession(store: CountStore, day: string, nowMs: number): Cou
       const editKey = `pe:${day}:${edit.deviceHash}:${edit.place}`;
       const [edited = 0, ...current] = await counts([editKey, ...keys]);
       if (edited >= PLACE_EDIT_DAILY_LIMIT) return { allowed: false, retryAfter, writes: [] };
-      if (edited > 0) return { allowed: true, retryAfter, writes: await count([editKey], [edited]) };
-      if (current.some((n, i) => n >= counters[i]!.limit)) return { allowed: false, retryAfter, writes: [] };
-      return { allowed: true, retryAfter, writes: await count([editKey, ...keys], [edited, ...current]) };
+      // The rest of an edit is free of the traveller's own device and contributor counters only.
+      // The app, network and attested-key counters bound every item.
+      const binding = counters.map((c, i) => ({ c, n: current[i]! })).filter(({ c }) => edited === 0 || !EDIT_RELIEVED.some((p) => c.key.startsWith(p)));
+      if (binding.some(({ c, n }) => n >= c.limit)) return { allowed: false, retryAfter, writes: [] };
+      return { allowed: true, retryAfter, writes: await count([editKey, ...binding.map(({ c }) => c.key)], [edited, ...binding.map(({ n }) => n)]) };
     },
   };
 }
@@ -186,10 +192,11 @@ export function itemCounters(
 
 /**
  * Checks and counts one item against `counters`. With `editedPlace`, the item
- * is a report about that place: the device's first report about it today
- * counts against the counters as usual, the rest of the same edit (a
- * traveller filling in many facts) don't, and past PLACE_EDIT_DAILY_LIMIT
- * reports about the place it is refused. One read for every counter.
+ * is a report about that known place: the device's first report about it
+ * today counts against the counters as usual, the rest of the same edit (a
+ * traveller filling in many facts) don't count against the device's and the
+ * contributor's counters, and past PLACE_EDIT_DAILY_LIMIT reports about the
+ * place it is refused. One read for every counter.
  */
 export async function checkAndCount(
   store: CountStore,

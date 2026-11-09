@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { reviewPrBody } from "../src/prbody.js";
+import { autoPrBody, reviewPrBody } from "../src/prbody.js";
 import type { HeldCase } from "../src/rules.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
@@ -52,5 +52,29 @@ describe("review PR photo previews", () => {
     const body = reviewPrBody("2026-11-04T00:00:00Z", [held], new Map());
     expect(body).not.toContain("View the photo");
     expect(body).not.toContain("30 days");
+  });
+});
+
+describe("PR body size", () => {
+  const note = (i: number) => ({
+    place: PLACE,
+    summary: `report ${i}: "${"The gate by the river is locked after dark and the track floods in rain. ".repeat(26)}"`,
+    automatic: false,
+    feedback: [`fb_01JC${String(i).padStart(22, "0")}`],
+  });
+
+  it("stays under GitHub's body limit however many changes a run has, and says how many it left out", () => {
+    const changes = Array.from({ length: 60 }, (_, i) => note(i));
+    const review = reviewPrBody("2026-11-04T00:00:00Z", changes, new Map());
+    expect(review.length).toBeLessThan(65_536);
+    expect(review).toMatch(/and \d+ more, listed in the run's job summary/);
+    const auto = autoPrBody("2026-11-04T00:00:00Z", changes.map((c) => ({ ...c, automatic: true })), [], new Map());
+    expect(auto.length).toBeLessThan(65_536);
+  });
+
+  it("lists every change when they fit", () => {
+    const review = reviewPrBody("2026-11-04T00:00:00Z", [note(1), note(2)], new Map());
+    expect(review).not.toContain("more, listed");
+    expect(review.match(/^- /gm)).toHaveLength(2);
   });
 });

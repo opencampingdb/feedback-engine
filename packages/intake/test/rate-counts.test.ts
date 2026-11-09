@@ -220,7 +220,28 @@ describe("daily counters in D1", () => {
     expect((await handle(post(newPlace(NEW_PLACE_DAILY_LIMIT)), e)).status).toBe(429);
   });
 
+  /** Puts PLACE in the place index, as a release would. */
+  const indexPlace = (id = PLACE) =>
+    store.db.prepare("INSERT INTO place_index (id, cell_lon, cell_lat, facts, fact_sources, fact_dates) VALUES (?, 146, -37, '{}', '{}', '{}')").run(id);
+
+  it("counts every report about a place against the app's daily budget", async () => {
+    indexPlace();
+    const e = env({ daily_limit: 3 });
+    const fact = review({ type: "report", review: undefined, report: { kind: "fact", fact: "toilets", value: true } });
+    for (let i = 0; i < 3; i++) expect((await handle(post(fact), e)).status).toBe(202);
+    expect((await handle(post(fact), e)).status).toBe(429);
+    expect(rows().find((r) => r.key.startsWith("a:"))?.count).toBe(3);
+  });
+
+  it("gives no editing allowance for a place the intake does not know", async () => {
+    const e = env();
+    const unknown = review({ type: "report", place: "ocdb_01JC0000000000000000000AAA", review: undefined, report: { kind: "fact", fact: "toilets", value: true } });
+    for (let i = 0; i < 3; i++) expect((await handle(post(unknown), e)).status).toBe(202);
+    expect(rows().find((r) => r.key.startsWith("d:"))?.count).toBe(3);
+  });
+
   it("counts a device's reports about one place in a day once, up to the place edit limit", async () => {
+    indexPlace();
     const e = env();
     const fact = review({ type: "report", review: undefined, report: { kind: "fact", fact: "toilets", value: true } });
     for (let i = 0; i < PLACE_EDIT_DAILY_LIMIT; i++) expect((await handle(post(fact), e)).status).toBe(202);

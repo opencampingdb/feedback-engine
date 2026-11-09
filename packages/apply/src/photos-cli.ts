@@ -83,12 +83,13 @@ class R2 {
     }
   }
 
-  async put(bucket: string, key: string, body: string | Uint8Array, contentType: string): Promise<void> {
+  async put(bucket: string, key: string, body: string | Uint8Array, contentType: string, metadata?: Record<string, string>): Promise<void> {
     const dir = await mkdtemp(join(tmpdir(), "photos-"));
     try {
       const file = join(dir, "body");
       await writeFile(file, body);
-      await this.#s3api("put-object", "--bucket", bucket, "--key", key, "--body", file, "--content-type", contentType);
+      const meta = metadata ? ["--metadata", JSON.stringify(metadata)] : [];
+      await this.#s3api("put-object", "--bucket", bucket, "--key", key, "--body", file, "--content-type", contentType, ...meta);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

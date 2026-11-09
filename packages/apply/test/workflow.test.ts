@@ -212,6 +212,17 @@ describe("the apply workflow's automatic publish step", () => {
     expect(bodies).not.toContain("merges itself");
   }, 30_000);
 
+  it("says loudly when GitHub refuses the comment on an open PR, without failing the run, so the inbox moves are still recorded", async () => {
+    const setup = await setUp(0, "true");
+    await writeFile(
+      join(setup.bin, "gh"),
+      ["#!/bin/sh", `echo "$@" >> "${join(root, "gh.log")}"`, 'if [ "$1 $2" = "pr comment" ]; then echo "Body is too long" >&2; exit 1; fi', 'if [ "$1 $2" = "pr view" ]; then echo true; fi', ""].join("\n"),
+    );
+    const result = await publish(setup, true);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("::error title=PR comment refused::");
+  }, 30_000);
+
   it("leaves an open PR that will merge itself alone", async () => {
     const setup = await setUp(1, "true");
     const result = await publish(setup, true);

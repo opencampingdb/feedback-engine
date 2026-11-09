@@ -13,7 +13,7 @@ import {
   writeOwners,
 } from "./io.js";
 import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
-import { autoPrBody, reviewPrBody } from "./prbody.js";
+import { autoPrBody, jobSummary, reviewPrBody } from "./prbody.js";
 import { previewUrl, PREVIEW_TTL_SECONDS } from "./preview.js";
 import { checkProof as realCheckProof, type ProofResult } from "./proof.js";
 import { applyEdit, applyHeldReview, applyRules, newPlaceIdOf, resolvePlace, WINDOW_DAYS, type Change, type Decision } from "./rules.js";
@@ -91,6 +91,8 @@ export interface RunSummary {
   auto_pr_body: string;
   /** Empty when `review_changed` is false. */
   review_pr_body: string;
+  /** Every change of the run, for the job summary the PR bodies point to when they are too long to list them all. */
+  job_summary: string;
   /** New places this run wrote into the automatic checkout for the first time. */
   new_places: string[];
   /**
@@ -399,6 +401,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     review_pr_body: reviewChanged
       ? reviewPrBody(runAt, reviewChanges, allPlaces, ownerResult.forReview, held, await previewLinks(reviewChanges, options.reviewPreview, now), closed)
       : "",
+    job_summary: autoChanged || reviewChanged ? jobSummary(runAt, autoChanged ? autoChanges : [], reviewChanged ? reviewChanges : [], allPlaces) : "",
     new_places: newPlaces,
     not_applied: [...new Set(decisions.filter((d) => d.outcome !== "applied" && d.outcome !== "waiting").map((d) => d.id))].sort(),
     refused: [...new Set(decisions.filter((d) => d.outcome === "refused").map((d) => d.id))].sort(),

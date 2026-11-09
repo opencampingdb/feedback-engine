@@ -119,6 +119,13 @@ describe("checks: the intake's own rules", () => {
     expect(counted(t.db)).toEqual([]);
   });
 
+  it("holds opening hours whose quoted comment fails the text checks, without calling the AI on a fact", async () => {
+    const t = setup();
+    expect(await t.check(fact("opening_hours", 'Mo-Su 08:00-17:00 "click here for a promo code"'), NEWCOMER)).toEqual({ held: "text_check" });
+    expect(await t.check(fact("opening_hours", 'Mo-Su 08:00-17:00 "office closes at noon"'), NEWCOMER)).toMatchObject({ pass: true });
+    expect(t.ai!.runs).toEqual([]);
+  });
+
   it("holds a description with a phone number in it, but not a note, which is stored without it", async () => {
     const t = setup();
     expect(await t.check(newPlace({ description: "Ring 0412 345 678 to book" }), NEWCOMER)).toEqual({ held: "text_check" });

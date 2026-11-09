@@ -66,17 +66,18 @@ export interface ServedBucketLike {
  * Who sent a served photo, from the place's records file in the serving
  * bucket (`records/<place id>.ndjson`, written by the photo sync):
  * `mine` when its line names this contributor, `theirs` when it names
- * another, and `unknown` when the photo is not served for that place or the
- * file can't be read. A photo that is not served needs no withholding.
+ * another, `unknown` when the photo is not served for that place, and
+ * `unreadable` when the file can't be read. A photo that is not served needs
+ * no withholding.
  */
-export async function photoOwner(bucket: ServedBucketLike, place: string, photo: string, contributor: string): Promise<"mine" | "theirs" | "unknown"> {
+export async function photoOwner(bucket: ServedBucketLike, place: string, photo: string, contributor: string): Promise<"mine" | "theirs" | "unknown" | "unreadable"> {
   let text: string;
   try {
     const object = await bucket.get(`records/${place}.ndjson`);
     if (!object) return "unknown";
     text = await object.text();
   } catch {
-    return "unknown";
+    return "unreadable";
   }
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;

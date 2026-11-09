@@ -151,6 +151,15 @@ describe("POST /v1/feedback/batch", () => {
     expect(queued().map((q) => q.id)).toEqual(answers.map((a) => a.id));
     expect(queued().every((q) => q.attested === "play_integrity")).toBe(true);
   });
+  it("gives each item an id of its own randomness, still in the order sent", async () => {
+    const answers = await send(Array.from({ length: 5 }, (_, i) => review(placeOf(i))));
+    const ids = answers.map((a) => a.id!);
+    expect([...ids].sort()).toEqual(ids);
+    // No id is its neighbour's random part plus one: one id published in a PR reveals no other.
+    const randomPart = (id: string) => id.slice(-16);
+    for (let i = 1; i < ids.length; i++) expect(randomPart(ids[i]!).slice(0, 15)).not.toBe(randomPart(ids[i - 1]!).slice(0, 15));
+  });
+
   it("answers each item in order, accepted or refused, as it would be answered alone", async () => {
     const answers = await send([
       fact(PLACE, "toilets", true),
@@ -179,12 +188,12 @@ describe("POST /v1/feedback/batch", () => {
     expect((await send([review(placeOf(9))], limited))[0]!.status).toBe(429);
   });
 
-  it("counts one place's reports in a batch once against the limits, as one edit", async () => {
+  it("counts one place's reports in a batch once against the device's day, as one edit, and each against the app's", async () => {
     const answers = await send([fact(PLACE, "toilets", true), fact(PLACE, "drinking_water", true), fact(PLACE, "showers", false)]);
     expect(answers.map((a) => a.status)).toEqual([202, 202, 202]);
     const counts = Object.fromEntries(rows("rate_counts").map((r) => [String(r.key).split(":")[0], r.count]));
     expect(counts.d).toBe(1);
-    expect(counts.a).toBe(1);
+    expect(counts.a).toBe(3);
     expect(counts.pe).toBe(3);
   });
 

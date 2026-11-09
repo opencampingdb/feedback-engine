@@ -114,6 +114,8 @@ const ROUTE = /^\/v1\/photos\/(pho_[0-9A-HJKMNP-TV-Z]{26})\/(full|thumb)\.jpg$/;
 const RECORDS_ROUTE = /^\/v1\/places\/([A-Za-z0-9_]{1,64})\/photos\.ndjson$/;
 /** How long the edge and the app may keep a place's records. */
 export const RECORDS_MAX_AGE_SECONDS = 5 * 60;
+/** How long the edge keeps the answer for a photo that is not there. A photo the sync adds later shows within this. */
+export const MISSING_MAX_AGE_SECONDS = 5 * 60;
 const APP_NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
 export function parsePhotoKeys(raw: string): Map<string, PhotoKey> {
@@ -258,7 +260,9 @@ export function createHandler(deps: Deps) {
     );
     const cacheKey = new Request(`${url.origin}${url.pathname}${generation ? `?replaced=${generation}` : ""}`, { method: "GET" });
     const cache = deps.cache();
-    const hit = await cache.match(cacheKey);
+    const cached = await cache.match(cacheKey);
+    // A cached photo without its contributor (kept from before the server required one) is read again from R2.
+    const hit = cached && photo && cached.status === 200 && !cached.headers.get(CONTRIBUTOR_HEADER) ? undefined : cached;
     if (hit) {
       if (photo && (await contributorWithheld(hit.headers.get(CONTRIBUTOR_HEADER)))) return answer(404, "not_found");
       return send(records ? await withoutWithheld(hit, contributorWithheld) : hit, request.method);
@@ -272,12 +276,23 @@ export function createHandler(deps: Deps) {
     }
 
     const object = await env.PHOTOS.get(photo ? `${photo[1]}/${photo[2]}.jpg` : `records/${records![1]}.ndjson`);
+    if (!object && photo) {
+      // A photo that is not there costs no read and is cached briefly, so asking for it again and
+      // again can't use up the app's daily reads or the cap other apps rely on.
+      const missing = new Response(JSON.stringify({ error: "not_found" }), {
+        status: 404,
+        headers: { "content-type": "application/json; charset=utf-8", "cache-control": `public, max-age=${MISSING_MAX_AGE_SECONDS}`, "x-content-type-options": "nosniff" },
+      });
+      ctx.waitUntil(cache.put(cacheKey, missing.clone()));
+      return send(missing, request.method);
+    }
     unsent.set(key.app, (unsent.get(key.app) ?? 0) + 1);
     since.set(key.app, (since.get(key.app) ?? 0) + 1);
     const pendingReads = [...unsent.values()].reduce((n, c) => n + c, 0);
     if (pendingReads >= FLUSH_EVERY || nowMs - lastFlush >= STATE_TTL_MS) ctx.waitUntil(flush(env, nowMs));
-    if (!object && photo) return answer(404, "not_found");
     const contributor = object?.customMetadata?.contributor;
+    // Without its contributor the server can't tell whether an erasure covers the photo: it is not served.
+    if (photo && !contributor) return answer(404, "not_found");
 
     // A place without a records file has no visible photos: an empty list, cached like any other.
     const response = new Response(object ? object.body : "", {

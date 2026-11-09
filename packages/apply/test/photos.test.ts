@@ -201,6 +201,24 @@ describe("photo rules", () => {
     expect(rules(reports.slice(0, 2), { photos: [target] }).photos.get(PLACE)![0]!.hidden).toBeUndefined();
   });
 
+  it("counts photo reports from one network once, whatever contributor ids they carry", () => {
+    const target = photoLine(1, "sam");
+    const oneNetwork = ["a", "b", "c"].map((who) => ({ ...report(who, target.id), origin: "net-a" }) as StoredFeedback);
+    expect(rules(oneNetwork, { photos: [target] }).photos.get(PLACE)?.[0]?.hidden).toBeUndefined();
+  });
+
+  it("puts a withheld report it cannot act on in front of a person, so the withhold can be released", () => {
+    const target = photoLine(1, "sam");
+    const misfiled = { ...report("a", target.id, "illegal"), place: OTHER, withheld: true } as StoredFeedback;
+    const own = { ...report("sam", target.id, "illegal"), withheld: true } as StoredFeedback;
+    const out = rules([misfiled, own], { photos: [target] });
+    expect(out.outcome(misfiled)).toBe("needs_review");
+    expect(out.outcome(own)).toBe("needs_review");
+    expect(out.needsReview).toBe(true);
+    expect(out.changes.filter((c) => /withheld key/.test(c.summary))).toHaveLength(2);
+    expect(out.photos.get(PLACE)?.[0]?.hidden).toBeUndefined();
+  });
+
   it("hides a photo at once after one illegal-content report, and flags it urgent", () => {
     const target = photoLine(1, "sam");
     const one = report("a", target.id, "illegal");
@@ -232,6 +250,19 @@ describe("photo rules", () => {
     const out = rules([own, missing], { photos: [photoLine(1, "sam")] });
     expect(out.outcome(own)).toBe("refused");
     expect(out.outcome(missing)).toBe("refused");
+  });
+
+  it("honours a blocked contributor's removal and erasure", () => {
+    const photos = [photoLine(1, "bad"), photoLine(2, "bad"), photoLine(3, "kim")];
+    const r = removal("bad", photoLine(1, "bad").id);
+    const removed = rules([r], { photos, blocked: [ctr("bad")] });
+    expect(removed.outcome(r)).toBe("applied");
+    expect(removed.removedPhotos.map((p) => p.photo)).toEqual([photoLine(1, "bad").id]);
+    const e = erasure("bad");
+    const erased = rules([e], { photos, blocked: [ctr("bad")] });
+    expect(erased.outcome(e)).toBe("applied");
+    expect(erased.photos.get(PLACE)!.map((p) => p.id)).toEqual([photoLine(3, "kim").id]);
+    expect(erased.removedPhotos.map((p) => p.photo).sort()).toEqual([photoLine(1, "bad").id, photoLine(2, "bad").id].sort());
   });
 
   it("removes one published photo at its contributor's request, and leaves their others", () => {

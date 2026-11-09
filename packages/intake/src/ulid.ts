@@ -26,27 +26,12 @@ export function ulidTime(id: string): number {
 }
 
 /**
- * ULIDs for the items of one batch, all in the same millisecond: the first is
- * random, and each after it is the one before plus one, so the items sort by
- * id in the order they were sent, as the recent list's newest change needs.
+ * ULIDs for the items of one batch: each item gets fresh random bits and a
+ * millisecond one after the item before, so the items sort by id in the order
+ * they were sent, as the recent list's newest change needs, and no id can be
+ * worked out from another.
  */
-export function monotonicUlids(nowMs: number, randomBytes: (n: number) => Uint8Array = defaultRandomBytes): () => string {
-  let last: string | undefined;
-  return () => {
-    if (last === undefined) {
-      last = ulid(nowMs, randomBytes);
-      return last;
-    }
-    const chars = last.split("");
-    for (let i = chars.length - 1; i >= 10; i--) {
-      const digit = CROCKFORD.indexOf(chars[i]!);
-      if (digit < 31) {
-        chars[i] = CROCKFORD[digit + 1]!;
-        break;
-      }
-      chars[i] = CROCKFORD[0]!;
-    }
-    last = chars.join("");
-    return last;
-  };
+export function orderedUlids(nowMs: number, randomBytes: (n: number) => Uint8Array = defaultRandomBytes): () => string {
+  let next = 0;
+  return () => ulid(nowMs + next++, randomBytes);
 }
