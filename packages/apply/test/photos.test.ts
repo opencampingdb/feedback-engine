@@ -252,6 +252,19 @@ describe("photo rules", () => {
     expect(out.outcome(missing)).toBe("refused");
   });
 
+  it("honours a blocked contributor's removal and erasure", () => {
+    const photos = [photoLine(1, "bad"), photoLine(2, "bad"), photoLine(3, "kim")];
+    const r = removal("bad", photoLine(1, "bad").id);
+    const removed = rules([r], { photos, blocked: [ctr("bad")] });
+    expect(removed.outcome(r)).toBe("applied");
+    expect(removed.removedPhotos.map((p) => p.photo)).toEqual([photoLine(1, "bad").id]);
+    const e = erasure("bad");
+    const erased = rules([e], { photos, blocked: [ctr("bad")] });
+    expect(erased.outcome(e)).toBe("applied");
+    expect(erased.photos.get(PLACE)!.map((p) => p.id)).toEqual([photoLine(3, "kim").id]);
+    expect(erased.removedPhotos.map((p) => p.photo).sort()).toEqual([photoLine(1, "bad").id, photoLine(2, "bad").id].sort());
+  });
+
   it("removes one published photo at its contributor's request, and leaves their others", () => {
     const mine = photoLine(1, "sam");
     const r = removal("sam", mine.id);

@@ -396,7 +396,9 @@ export function applyRules(input: RulesInput): RulesOutput {
   // Items about a place that is not in the data yet, left waiting for it.
   const waitingForData = new Set<string>();
   for (const item of pending) {
-    if (item.contributor !== undefined && blocked.has(item.contributor)) {
+    // A deletion request about the contributor's own photos is honoured even when they are blocked.
+    const deletion = item.type === "photo_erasure" || item.type === "photo_removal";
+    if (item.contributor !== undefined && blocked.has(item.contributor) && !deletion) {
       decide(item, "refused", "the contributor is blocked");
       continue;
     }

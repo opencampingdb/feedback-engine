@@ -260,7 +260,9 @@ export function createHandler(deps: Deps) {
     );
     const cacheKey = new Request(`${url.origin}${url.pathname}${generation ? `?replaced=${generation}` : ""}`, { method: "GET" });
     const cache = deps.cache();
-    const hit = await cache.match(cacheKey);
+    const cached = await cache.match(cacheKey);
+    // A cached photo without its contributor (kept from before the server required one) is read again from R2.
+    const hit = cached && photo && cached.status === 200 && !cached.headers.get(CONTRIBUTOR_HEADER) ? undefined : cached;
     if (hit) {
       if (photo && (await contributorWithheld(hit.headers.get(CONTRIBUTOR_HEADER)))) return answer(404, "not_found");
       return send(records ? await withoutWithheld(hit, contributorWithheld) : hit, request.method);
@@ -289,6 +291,8 @@ export function createHandler(deps: Deps) {
     const pendingReads = [...unsent.values()].reduce((n, c) => n + c, 0);
     if (pendingReads >= FLUSH_EVERY || nowMs - lastFlush >= STATE_TTL_MS) ctx.waitUntil(flush(env, nowMs));
     const contributor = object?.customMetadata?.contributor;
+    // Without its contributor the server can't tell whether an erasure covers the photo: it is not served.
+    if (photo && !contributor) return answer(404, "not_found");
 
     // A place without a records file has no visible photos: an empty list, cached like any other.
     const response = new Response(object ? object.body : "", {

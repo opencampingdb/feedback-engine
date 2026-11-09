@@ -24,18 +24,32 @@ const sha = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
 /** R2, as a map of bucket to key to bytes, behind both the replace tool and the photo server. */
 function fakeR2() {
   const objects = new Map<string, Map<string, Uint8Array>>();
+  // Like R2's PutObject, a put replaces the object's metadata: without any, the object has none.
+  const metadata = new Map<string, Record<string, string>>();
   const of = (bucket: string) => objects.get(bucket) ?? objects.set(bucket, new Map()).get(bucket)!;
   const stores: PhotoStores = {
     exists: async (bucket, key) => of(bucket).has(key),
-    put: async (bucket, key, body) => void of(bucket).set(key, typeof body === "string" ? new TextEncoder().encode(body) : body),
+    put: async (bucket, key, body, _type, meta) => {
+      of(bucket).set(key, typeof body === "string" ? new TextEncoder().encode(body) : body);
+      if (meta) metadata.set(`${bucket}/${key}`, meta);
+      else metadata.delete(`${bucket}/${key}`);
+    },
   };
   const serving = {
     get: async (key: string) => {
       const bytes = of(buckets.serving).get(key);
-      return bytes ? { body: new Response(new Uint8Array(bytes)).body!, httpEtag: `"${sha(bytes).slice(0, 8)}"`, size: bytes.length } : null;
+      const customMetadata = metadata.get(`${buckets.serving}/${key}`);
+      return bytes
+        ? { body: new Response(new Uint8Array(bytes)).body!, httpEtag: `"${sha(bytes).slice(0, 8)}"`, size: bytes.length, ...(customMetadata ? { customMetadata } : {}) }
+        : null;
     },
   };
-  return { of, stores, serving };
+  /** Seeds an object as the intake and the photo sync write it, with its place and contributor. */
+  const seed = (bucket: string, key: string, bytes: Uint8Array, meta: Record<string, string>) => {
+    of(bucket).set(key, bytes);
+    metadata.set(`${bucket}/${key}`, meta);
+  };
+  return { of, stores, serving, metadata, seed };
 }
 
 function fakeKv(): KVLike & { ttl: Map<string, number> } {
@@ -91,11 +105,28 @@ describe("replacing a photo's files", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("keeps the photo's place and contributor on every file it writes, so a later erasure still stops it", async () => {
+    const r2 = fakeR2();
+    for (const [key, bytes] of [[`${PHOTO}/full.jpg`, oldFull], [`${PHOTO}/thumb.jpg`, oldThumb]] as const) {
+      r2.seed(buckets.serving, key, bytes, { place: PLACE, contributor: line.contributor });
+      r2.seed(buckets.pending, key, bytes, { place: PLACE, contributor: line.contributor });
+    }
+    const state = fakeKv();
+    await replacePhoto({ root, photo: PHOTO, full: jpeg(1600, 900, 9), thumb: jpeg(400, 225, 9), buckets, stores: r2.stores, state: async () => undefined, now: new Date(NOW) });
+    for (const bucket of [buckets.serving, buckets.pending]) {
+      expect(r2.metadata.get(`${bucket}/${PHOTO}/full.jpg`)).toEqual({ place: PLACE, contributor: line.contributor });
+    }
+    await state.put(`withheld-contributor:${line.contributor}`, "{}");
+    const env: Env = { PHOTOS: r2.serving, PHOTO_KEYS: JSON.stringify({ [KEY]: { app: "example-app", daily_limit: 1000 } }), STATE: state };
+    const handle = createHandler({ now: () => NOW, cache: fakeCache, shard: 1 });
+    expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(404);
+  });
+
   it("serves the new files under the same id, cache or not, and keeps every field but the hash and size", async () => {
     const r2 = fakeR2();
     for (const [key, bytes] of [[`${PHOTO}/full.jpg`, oldFull], [`${PHOTO}/thumb.jpg`, oldThumb]] as const) {
-      r2.of(buckets.serving).set(key, bytes);
-      r2.of(buckets.pending).set(key, bytes);
+      r2.seed(buckets.serving, key, bytes, { place: PLACE, contributor: line.contributor });
+      r2.seed(buckets.pending, key, bytes, { place: PLACE, contributor: line.contributor });
     }
     const state = fakeKv();
     let clock = NOW;

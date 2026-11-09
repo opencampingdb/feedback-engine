@@ -30,7 +30,8 @@ export const REPLACED_TTL_SECONDS = 2 * 24 * 60 * 60;
 /** The bucket operations the replacement needs. */
 export interface PhotoStores {
   exists(bucket: string, key: string): Promise<boolean>;
-  put(bucket: string, key: string, body: Uint8Array | string, contentType: string): Promise<void>;
+  /** Writes an object. `metadata` becomes its custom metadata; without it the object has none. */
+  put(bucket: string, key: string, body: Uint8Array | string, contentType: string, metadata?: Record<string, string>): Promise<void>;
 }
 
 /** Writes one key to the photo server's state namespace, expiring after `ttlSeconds`. */
@@ -89,8 +90,10 @@ export async function replacePhoto(input: ReplaceInput): Promise<ReplaceResult> 
 
   const after: Photo = { ...before, sha256: sha256HexBytes(full), width: size!.width, height: size!.height };
   const wrote: string[] = [];
+  // The photo server reads the contributor from each file to withhold an erased contributor's photos.
+  const metadata = { place: before.place, contributor: before.contributor };
   for (const [bucket, key, bytes] of targets) {
-    await stores.put(bucket, key, bytes, "image/jpeg");
+    await stores.put(bucket, key, bytes, "image/jpeg", metadata);
     wrote.push(`${bucket}/${key}`);
   }
   const lines = (await repo.photos(before.place)).map((p) => (p.id === photo ? after : p));

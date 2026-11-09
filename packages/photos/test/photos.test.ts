@@ -17,13 +17,15 @@ function fakeKv(): KVLike & { data: Map<string, string> } {
   };
 }
 
-function fakeBucket(keys: string[]): BucketLike & { reads: number } {
+/** A serving bucket holding `keys`, each with the place and contributor the intake and sync write, unless `bare`. */
+function fakeBucket(keys: string[], bare: string[] = []): BucketLike & { reads: number } {
   const bucket = {
     reads: 0,
     get: async (key: string) => {
       bucket.reads += 1;
       if (!keys.includes(key)) return null;
-      return { body: new Response(new Uint8Array([0xff, 0xd8, 0xff])).body!, httpEtag: '"e1"', size: 3 };
+      const customMetadata = bare.includes(key) ? undefined : { place: "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA", contributor: "ctr_0123456789abcdef" };
+      return { body: new Response(new Uint8Array([0xff, 0xd8, 0xff])).body!, httpEtag: '"e1"', size: 3, ...(customMetadata ? { customMetadata } : {}) };
     },
   };
   return bucket;
@@ -200,6 +202,14 @@ describe("photo server", () => {
     expect(res.headers.get("retry-after")).toBe(String(23 * 3600));
     // The other app is not held up.
     expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(200);
+  });
+
+  it("does not serve or cache a photo whose contributor it cannot tell, so an erasure can never miss it", async () => {
+    env.PHOTOS = fakeBucket([`${PHOTO}/full.jpg`], [`${PHOTO}/full.jpg`]);
+    const res = await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx());
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(cache.store.size).toBe(0);
   });
 
   it("answers a photo that does not exist without counting it, and caches the answer briefly", async () => {
