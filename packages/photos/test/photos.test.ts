@@ -202,6 +202,18 @@ describe("photo server", () => {
     expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(200);
   });
 
+  it("answers a photo that does not exist without counting it, and caches the answer briefly", async () => {
+    const MISSING = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZZ";
+    for (let i = 0; i < 5; i++) {
+      const res = await handle(get(`/v1/photos/${MISSING}/full.jpg`, OTHER_KEY), env, ctx());
+      expect(res.status).toBe(404);
+    }
+    expect(env.PHOTOS.reads).toBe(1);
+    expect(cache.store.get(`https://photos.example/v1/photos/${MISSING}/full.jpg`)?.headers.get("cache-control")).toBe("public, max-age=300");
+    // The other app's limit of 2 reads is untouched: both real photos still come from R2.
+    for (const size of ["full", "thumb"]) expect((await handle(get(`/v1/photos/${PHOTO}/${size}.jpg`, OTHER_KEY), env, ctx())).status).toBe(200);
+  });
+
   it("writes its count to its own shard and reads every shard's count", async () => {
     env.STATE.data.set("reads:2026-11-03:example-app:0", "99");
     clock += 1;
