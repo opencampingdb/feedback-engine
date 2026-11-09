@@ -156,6 +156,15 @@ describe("createReleaseUpdater", () => {
     expect(state.replaced).toEqual([]);
   });
 
+  it("never replaces the database with an older release than the one it has", async () => {
+    const served = await release(1, []);
+    const { fetch, requests } = fakeFetch(served);
+    const { adapter, state } = fakeDatabase({ dataVersion: v(5), layout: 1 });
+    expect(await updaterFor(adapter, fetch).update()).toEqual({ status: "older_release", dataVersion: v(5) });
+    expect(state.replaced).toEqual([]);
+    expect(requests).toEqual([MANIFEST_URL]);
+  });
+
   it("refuses options without a readable layout or format", () => {
     const { adapter } = fakeDatabase({ dataVersion: null, layout: null });
     const fetch: ReleaseFetchLike = async () => ({ status: 503, json: async () => ({}), arrayBuffer: async () => new ArrayBuffer(0) });

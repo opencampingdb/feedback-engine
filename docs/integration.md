@@ -541,13 +541,13 @@ const updater = createReleaseUpdater({
 });
 
 const result = await updater.update({ knownDataVersion: recent.release?.data_version });
-// { status: "up_to_date" | "updated" | "replaced" | "layout_unsupported" | "format_unsupported" | "failed", dataVersion, reason? }
+// { status: "up_to_date" | "updated" | "replaced" | "older_release" | "layout_unsupported" | "format_unsupported" | "failed", dataVersion, reason? }
 ```
 
 `update()` does this:
 
 1. When `knownDataVersion`, the recent list's `release.data_version`, is the database's own, it answers `up_to_date` with no request.
-2. Otherwise it fetches the manifest, one request. When its `format_version` is higher than every one in `readableFormats`, it stops, keeps the database and answers `format_unsupported`: the records have changed in a way this build can't read. A lower format is read, as CONNECTING.md says. When its `layout_version` is not in `readableLayouts` it stops the same way and answers `layout_unsupported`. When its `data_version` is the database's own, it answers `up_to_date`.
+2. Otherwise it fetches the manifest, one request. When its `format_version` is higher than every one in `readableFormats`, it stops, keeps the database and answers `format_unsupported`: the records have changed in a way this build can't read. A lower format is read, as CONNECTING.md says. When its `layout_version` is not in `readableLayouts` it stops the same way and answers `layout_unsupported`. When its `data_version` is the database's own, it answers `up_to_date`. When its `data_version` is older than the database's own (an older release marked latest), it changes nothing and answers `older_release`.
 3. It downloads the whole database when the app has none, when the layout differs from the database's, when no chain of changesets in the manifest leads from the database's `data_version` to the newest, when the chain is more than 50 files (`MAX_CHANGESET_CHAIN`), or when the chain's files add up to at least the database's own `bytes`. It answers `replaced`.
 4. Otherwise it takes the chain with the fewest files, and of two as short, the one with more daily changesets. It downloads every file on it and checks each one's `bytes` and `sha256` before applying any, undoes gzip, then hands the whole chain to one `applyChangesets` call, which applies it in order in one exclusive transaction, and answers `updated`.
 5. After the chain it reads `data_version` back from the adapter. When that is not the manifest's, it downloads the whole database and replaces the one the chain left, and answers `replaced`. After a replace, it answers `failed` with `mismatch` when the database still names another release.

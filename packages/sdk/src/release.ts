@@ -1,4 +1,5 @@
 import { sha256HexBytes } from "./sha256.js";
+import { dataVersionTime } from "./recent.js";
 
 /** Where the data repository publishes the newest release's manifest. */
 export const DEFAULT_MANIFEST_URL = "https://github.com/opencampingdb/data/releases/latest/download/manifest.json";
@@ -66,7 +67,11 @@ export interface ReleaseUpdaterOptions {
   gunzip?: Gunzip;
 }
 
-export type ReleaseUpdateStatus = "up_to_date" | "updated" | "replaced" | "layout_unsupported" | "format_unsupported" | "failed";
+/**
+ * What an update did. `older_release`: the latest manifest names an older
+ * release than the database holds, so nothing was downloaded or changed.
+ */
+export type ReleaseUpdateStatus = "up_to_date" | "updated" | "replaced" | "older_release" | "layout_unsupported" | "format_unsupported" | "failed";
 
 /**
  * Why an update stopped. `network`: a request failed or answered other than
@@ -287,6 +292,11 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
         if (!readableLayouts.includes(manifest.layout_version)) return { status: "layout_unsupported", dataVersion };
         const layout = dataVersion === null ? null : await orStop("read", () => adapter.currentLayoutVersion());
         if (manifest.data_version === dataVersion && manifest.layout_version === layout) return { status: "up_to_date", dataVersion };
+        // A manifest older than the database the app has (an older release marked latest) is never applied:
+        // rolling back would bring back everything later releases took out.
+        const manifestTime = dataVersionTime(manifest.data_version);
+        const localTime = dataVersion === null ? undefined : dataVersionTime(dataVersion);
+        if (manifestTime !== undefined && localTime !== undefined && manifestTime < localTime) return { status: "older_release", dataVersion };
 
         const path = dataVersion !== null && layout === manifest.layout_version ? changesetPath(manifest.changesets, dataVersion, manifest.data_version) : null;
         const chainBytes = path?.reduce((sum, entry) => sum + entry.bytes, 0) ?? 0;
