@@ -84,8 +84,16 @@ export async function photoOwner(bucket: ServedBucketLike, place: string, photo:
 }
 
 /**
- * How long a removal's `withheld:` key lasts. The apply run takes the photo
- * out within hours, and the photo sync deletes its files, so the key only has
- * to outlast that and the edge cache's day.
+ * How long a removal's or an erasure's withhold key lasts. The apply run takes
+ * the photos out within hours, and the photo sync deletes their files, so the
+ * key only has to outlast that and the edge cache's day.
  */
 export const REMOVAL_WITHHOLD_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+/**
+ * The photo server's state key that stops every photo from one contributor
+ * (the stored, hashed id): set by an erasure. The photo server knows a
+ * photo's contributor from the `contributor` metadata its files carry from
+ * the upload.
+ */
+export const withheldContributorKey = (contributor: string) => `withheld-contributor:${contributor}`;

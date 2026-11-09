@@ -372,6 +372,80 @@ describe("an owner removing one photo", () => {
   });
 });
 
+describe("erasing a contributor's photos", () => {
+  const TOKEN = "operator-token-0123456789abcdef";
+  function setup(extra: { [K in keyof Env]?: Env[K] | undefined } = {}) {
+    const gh = fakeGitHub();
+    const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
+    const state = fakeKv();
+    const ttls = new Map<string, number | undefined>();
+    const recording: KVLike = { ...state, put: async (k, v, o) => (ttls.set(k, o?.expirationTtl), state.put(k, v, o)) };
+    const e = { ...env(), PHOTO_STATE: recording, PHOTO_OPERATOR_TOKEN: TOKEN, ...extra } as Env;
+    const erase = (body: unknown, token: string | null = TOKEN) =>
+      handle(
+        new Request("https://intake.example/v1/photos/erase", {
+          method: "POST",
+          headers: { "x-app-key": APP_KEY, ...(token !== null ? { authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify(body),
+        }),
+        e,
+      );
+    return { gh, state, ttls, erase, handle, e };
+  }
+
+  it("stores an operator erasure and withholds every photo from the contributor at once", async () => {
+    const t = setup();
+    const res = await t.erase({ contributor: CONTRIBUTOR });
+    expect(res.status).toBe(202);
+    const { id } = (await res.json()) as { id: string };
+    const hashed = await hashContributor("pepper", "example-app", CONTRIBUTOR);
+    expect(t.gh.puts[0]!.content).toMatchObject({ id, type: "photo_erasure", place: null, contributor: hashed, operator: true, withheld: true, app: "example-app" });
+    expect(JSON.stringify(t.gh.puts[0]!.content)).not.toContain(CONTRIBUTOR);
+    expect(JSON.parse((await t.state.get(`withheld-contributor:${hashed}`))!)).toMatchObject({ feedback: id, reason: "erased" });
+    expect(t.ttls.get(`withheld-contributor:${hashed}`)).toBe(30 * 24 * 60 * 60);
+    // Erasing again, or a contributor with no photos, succeeds too.
+    expect((await t.erase({ contributor: CONTRIBUTOR })).status).toBe(202);
+  });
+
+  it("refuses a request without the operator token, with a wrong one, or with a bad body", async () => {
+    const t = setup();
+    expect((await t.erase({ contributor: CONTRIBUTOR }, null)).status).toBe(401);
+    expect((await t.erase({ contributor: CONTRIBUTOR }, "wrong-token")).status).toBe(401);
+    expect((await t.erase({ contributor: "short" })).status).toBe(400);
+    expect((await t.erase({ contributor: CONTRIBUTOR, extra: 1 })).status).toBe(400);
+    expect(t.gh.puts).toHaveLength(0);
+    expect(await t.state.get(`withheld-contributor:${await hashContributor("pepper", "example-app", CONTRIBUTOR)}`)).toBeNull();
+  });
+
+  it("is not there without an operator token or a photo bucket, and needs an app key", async () => {
+    expect((await setup({ PHOTO_OPERATOR_TOKEN: undefined }).erase({ contributor: CONTRIBUTOR })).status).toBe(404);
+    expect((await setup({ PHOTOS_PENDING: undefined }).erase({ contributor: CONTRIBUTOR })).status).toBe(404);
+    const t = setup();
+    const res = await t.handle(
+      new Request("https://intake.example/v1/photos/erase", { method: "POST", headers: { authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ contributor: CONTRIBUTOR }) }),
+      t.e,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("withholds every photo from the contributor on an erasure an install sends too", async () => {
+    const t = setup();
+    const res = await t.handle(
+      new Request("https://intake.example/v1/feedback", {
+        method: "POST",
+        headers: { "x-app-key": APP_KEY },
+        body: JSON.stringify({ device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true, type: "photo_erasure", place: null }),
+      }),
+      t.e,
+    );
+    expect(res.status).toBe(202);
+    const hashed = await hashContributor("pepper", "example-app", CONTRIBUTOR);
+    expect(await t.state.get(`withheld-contributor:${hashed}`)).not.toBeNull();
+    expect(t.gh.puts[0]!.content).toMatchObject({ type: "photo_erasure", withheld: true });
+    expect(t.gh.puts[0]!.content.operator).toBeUndefined();
+  });
+});
+
 describe("minimum app version for photo uploads", () => {
   let gh: ReturnType<typeof fakeGitHub>;
   let handle: ReturnType<typeof createHandler>;

@@ -17,6 +17,7 @@ import {
   isValidFactValue,
   isFeedbackId,
   isPhotoId,
+  isContributor,
   PHOTO_HELD_REASONS,
   MAX_PROGRESS_IDS,
 } from "@opencampingdb/feedback";
@@ -95,7 +96,15 @@ import {
   recordProgress,
 } from "./progress.js";
 import { verifyPreview } from "@opencampingdb/apply/preview";
-import { appVersionAtLeast, minimumAppVersion, photoOwner, REMOVAL_WITHHOLD_TTL_SECONDS, withholdReasons, type ServedBucketLike } from "./photo-kit.js";
+import {
+  appVersionAtLeast,
+  minimumAppVersion,
+  photoOwner,
+  REMOVAL_WITHHOLD_TTL_SECONDS,
+  withheldContributorKey,
+  withholdReasons,
+  type ServedBucketLike,
+} from "./photo-kit.js";
 
 /** `GET /v1/photos/review/<photo id>/<full|thumb>.jpg`: one held photo for a person checking the review PR. */
 const REVIEW_ROUTE = /^\/v1\/photos\/review\/(pho_[0-9A-Z]{26})\/(full|thumb)\.jpg$/;
@@ -172,6 +181,12 @@ export interface Env {
    */
   PHOTOS_SERVED?: ServedBucketLike;
   /**
+   * Secret. Lets the photo service's own backend erase every photo from a
+   * contributor (`POST /v1/photos/erase`), for an account deleted outside the
+   * app. The route answers 404 without it.
+   */
+  PHOTO_OPERATOR_TOKEN?: string;
+  /**
    * `on` checks each uploaded photo with Google Cloud Vision SafeSearch, as the
    * GOOGLE_SERVICE_ACCOUNT (its project needs the Cloud Vision API). Very likely
    * adult or violent photos are refused; likely ones wait for a person.
@@ -224,6 +239,12 @@ export interface Env {
 
 /** Key in the photo server's STATE that stops one photo being served. */
 export const withheldKey = (photo: string) => `withheld:${photo}`;
+
+/** Stops every photo from the contributor at the photo server, for as long as the apply run and sync take. A failed write is left to them. */
+async function withholdContributor(state: KVLike, contributor: string, feedback: string, at: string): Promise<void> {
+  const value = JSON.stringify({ feedback, at, reason: "erased" });
+  await state.put(withheldContributorKey(contributor), value, { expirationTtl: REMOVAL_WITHHOLD_TTL_SECONDS }).catch(() => undefined);
+}
 
 type SubmissionKind = "feedback" | "owner";
 
@@ -1532,7 +1553,8 @@ export function createHandler(deps: Deps) {
     const withhold =
       env.PHOTO_STATE !== undefined &&
       ((stored.type === "photo_report" && withholdReasons(env.PHOTO_WITHHOLD_REASONS).has(stored.photo_report.reason)) ||
-        (stored.type === "photo_removal" && owner === "mine"));
+        (stored.type === "photo_removal" && owner === "mine") ||
+        stored.type === "photo_erasure");
     if (withhold) stored.withheld = true;
 
     // Decided before the item is stored, and recorded in the same D1 batch that queues it.
@@ -1583,12 +1605,63 @@ export function createHandler(deps: Deps) {
         if (withhold && stored.type === "photo_report") {
           const value = JSON.stringify({ feedback: id, at: received, reason: stored.photo_report.reason });
           await env.PHOTO_STATE!.put(withheldKey(stored.photo_report.photo), value).catch(() => undefined);
+        } else if (withhold && stored.type === "photo_erasure") {
+          await withholdContributor(env.PHOTO_STATE!, stored.contributor!, id, received);
         } else if (withhold && stored.type === "photo_removal") {
           const value = JSON.stringify({ feedback: id, at: received, reason: "removed_by_contributor" });
           await env.PHOTO_STATE!.put(withheldKey(stored.photo_removal.photo), value, { expirationTtl: REMOVAL_WITHHOLD_TTL_SECONDS }).catch(() => undefined);
         }
       },
     };
+  }
+
+  /**
+   * `POST /v1/photos/erase`, with `x-app-key` and `authorization: Bearer
+   * <PHOTO_OPERATOR_TOKEN>`: `{ "contributor": "<the app's account id>" }`.
+   * The photo service's own backend erases every photo from a contributor
+   * whose account was deleted outside the app, where no install can send an
+   * attested `photo_erasure`. It stores the same erasure an install sends,
+   * marked `operator`, withholds the contributor's photos at once, and answers
+   * `202 { "id" }`. Not counted against any limit. Erasing a contributor with
+   * no photos succeeds too.
+   */
+  async function operatorErase(request: Request, env: Env, app: AppEntry, cors: Record<string, string>): Promise<Response> {
+    if (!env.PHOTOS_PENDING || !env.PHOTO_OPERATOR_TOKEN) return json(404, { error: "not_found" }, cors);
+    const given = (request.headers.get("authorization") ?? "").replace(/^Bearer /, "");
+    if (!given || hex(await sha256(given)) !== hex(await sha256(env.PHOTO_OPERATOR_TOKEN))) return json(401, { error: "unauthorised" }, cors);
+    const read = await readJsonBody(request, MAX_BODY_BYTES);
+    if (!read.ok) return json(read.status, read.body, cors);
+    const body = read.body as { contributor?: unknown } | null;
+    if (typeof body !== "object" || body === null || Object.keys(body).some((k) => k !== "contributor") || !isContributor(body.contributor)) {
+      return json(400, { error: "invalid", details: ["the body must be { contributor }, 16 to 128 characters of letters, digits, _ and -"] }, cors);
+    }
+    const nowMs = deps.now();
+    const received = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const id = `fb_${ulid(nowMs, deps.randomBytes)}`;
+    const contributor = await hashContributor(env.DEVICE_SALT, app.app, body.contributor);
+    const stored = {
+      id,
+      received,
+      app: app.app,
+      type: "photo_erasure",
+      place: null,
+      device: await hashDevice(env.DEVICE_SALT, "operator"),
+      contributor,
+      app_version: "operator",
+      consent: true,
+      operator: true,
+      ...(env.PHOTO_STATE ? { withheld: true } : {}),
+    } as StoredFeedback;
+    const file = { id, path: `pending/${received.slice(0, 10)}/${id}.json`, content: `${JSON.stringify(stored, null, 2)}\n` };
+    const writes = env.RECENT_LIST ? [receivedStatement(env.RECENT_LIST, { id, received, place: placeOf(stored) }, undefined)] : [];
+    try {
+      await storeAdmitted(env, [{ file, writes, answer: { id }, after: async () => undefined }]);
+    } catch {
+      return json(503, { error: "storage_unavailable" }, { ...cors, "retry-after": "60" });
+    }
+    // Stored first, so a failed write here still reaches the apply run.
+    if (env.PHOTO_STATE) await withholdContributor(env.PHOTO_STATE, contributor, id, received);
+    return json(202, { id }, cors);
   }
 
   /**
@@ -1754,6 +1827,7 @@ export function createHandler(deps: Deps) {
       route !== "/v1/feedback/batch" &&
       route !== "/v1/photos" &&
       route !== "/v1/photos/pass" &&
+      route !== "/v1/photos/erase" &&
       route !== "/v1/attest/challenge" &&
       route !== "/v1/attest/register"
     ) {
@@ -1771,6 +1845,7 @@ export function createHandler(deps: Deps) {
     if (!app) return json(401, { error: "invalid_app_key" }, cors);
 
     if (route === "/v1/photos") return photo(request, env, app, cors);
+    if (route === "/v1/photos/erase") return operatorErase(request, env, app, cors);
     if (route === "/v1/feedback/batch") return feedbackBatch(request, env, app, cors);
     if (declaredTooLarge(request, MAX_BODY_BYTES)) return json(413, { error: "too_large" }, cors);
     if (route === "/v1/attest/challenge") return challenge(env, app, cors);

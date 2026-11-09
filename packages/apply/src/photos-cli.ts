@@ -68,7 +68,8 @@ class R2 {
   }
 
   async copy(fromBucket: string, fromKey: string, toBucket: string, toKey: string): Promise<void> {
-    await this.#s3api("copy-object", "--copy-source", `${fromBucket}/${fromKey}`, "--bucket", toBucket, "--key", toKey);
+    // COPY keeps the upload's metadata (its contributor), which the photo server reads to withhold an erased contributor's photos.
+    await this.#s3api("copy-object", "--copy-source", `${fromBucket}/${fromKey}`, "--bucket", toBucket, "--key", toKey, "--metadata-directive", "COPY");
   }
 
   async exists(bucket: string, key: string): Promise<boolean> {

@@ -266,6 +266,17 @@ describe("photo rules", () => {
     expect(out.removedPhotos.map((p) => p.photo).sort()).toEqual([held.id.replace("fb_", "pho_"), fresh.id.replace("fb_", "pho_")].sort());
   });
 
+  it("takes an operator's erasure the same as an install's, and one for a contributor with no photos", () => {
+    const op = { ...erasure("sam"), device: "operator", app_version: "operator", operator: true, withheld: true } as StoredFeedback;
+    const none = { ...erasure("lee"), operator: true } as StoredFeedback;
+    const out = rules([op, none], { photos: [photoLine(1, "sam"), photoLine(2, "kim"), photoLine(3, "sam", { place: OTHER })] });
+    expect([op, none].map((i) => out.outcome(i))).toEqual(["applied", "applied"]);
+    expect(out.photos.get(PLACE)!.map((p) => p.id)).toEqual([photoLine(2, "kim").id]);
+    expect(out.photos.get(OTHER)).toEqual([]);
+    expect(out.removedPhotos.map((r) => r.photo)).toEqual([photoLine(1, "sam").id, photoLine(3, "sam").id]);
+    expect(out.decisions.find((d) => d.id === none.id)?.reason).toBe("photos removed at the contributor's request, 0 published");
+  });
+
   it("erases every photo from a contributor, and refuses their uploads in the same run", () => {
     const sent = applied(upload("sam", 7));
     const late = upload("sam", 8);

@@ -638,10 +638,17 @@ interface StoredFields {
   intake?: StoredIntakeDecision;
   /**
    * The intake withheld the photo at the photo server when it took this item:
-   * a photo report whose reason is on the photo service's withhold list, or a
-   * photo removal from the photo's own contributor. Absent otherwise.
+   * a photo report whose reason is on the photo service's withhold list, a
+   * photo removal from the photo's own contributor, or an erasure (every photo
+   * from the contributor). Absent otherwise.
    */
   withheld?: true;
+  /**
+   * Sent by the photo service's own backend with its operator token
+   * (`POST /v1/photos/erase`), not by an install: an erasure for an account
+   * deleted outside the app. Its `device` stands for the operator.
+   */
+  operator?: true;
 }
 
 /** The intake's send-time decision, as the inbox stores it. */

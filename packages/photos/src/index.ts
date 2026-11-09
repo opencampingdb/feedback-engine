@@ -7,7 +7,9 @@
  * Reads that reach R2 are counted per app per day, and above the app's
  * `daily_limit` or the server's `DAILY_READ_CAP` the server answers 503 until
  * midnight UTC. Putting `off` in STATE stops all serving within a minute, and
- * a `withheld:<photo id>` key stops one photo, cache or not. A
+ * a `withheld:<photo id>` key stops one photo, cache or not, and a
+ * `withheld-contributor:<contributor>` key (an erasure) stops every photo
+ * from that contributor and leaves their lines out of the records. A
  * `replaced:<photo id>:<place id>:<generation>` key, written when a photo's
  * files are replaced, moves that photo and its place's records to new cache
  * entries within a minute, so the edge serves the new files.
@@ -18,7 +20,7 @@ import { verifyPass } from "../../intake/src/pass.js";
 
 /** The parts of an R2 bucket binding the server uses. */
 export interface BucketLike {
-  get(key: string): Promise<{ body: ReadableStream; httpEtag: string; size: number } | null>;
+  get(key: string): Promise<{ body: ReadableStream; httpEtag: string; size: number; customMetadata?: Record<string, string> } | null>;
 }
 
 /** The parts of a Workers KV namespace the server uses. */
@@ -30,6 +32,14 @@ export interface KVLike {
 
 /** Prefix of the STATE keys that withhold one photo each (set by the intake or a person). */
 export const WITHHELD_PREFIX = "withheld:";
+/**
+ * Prefix of the STATE keys that withhold every photo from one contributor,
+ * set by the intake on an erasure. A photo's contributor is the `contributor`
+ * metadata its files carry from the upload.
+ */
+export const WITHHELD_CONTRIBUTOR_PREFIX = "withheld-contributor:";
+/** Header the cached copy of a photo keeps its contributor in. Never sent to the app. */
+const CONTRIBUTOR_HEADER = "x-photo-contributor";
 /**
  * Prefix of the STATE keys that name a photo whose files were replaced:
  * `replaced:<photo id>:<place id>:<generation>`, written by
@@ -153,6 +163,7 @@ export function createHandler(deps: Deps) {
   let off = false;
   let withheld = new Set<string>();
   let replaced = { photos: new Map<string, number>(), places: new Map<string, number>() };
+  let withheldContributors = new Set<string>();
   let totals = new Map<string, number>();
   // Reads this isolate made that are not written to KV yet, per app.
   const unsent = new Map<string, number>();
@@ -180,6 +191,7 @@ export function createHandler(deps: Deps) {
     off = (await env.STATE.get("off")) !== null;
     withheld = new Set(await keysAfter(env.STATE, WITHHELD_PREFIX));
     replaced = await replacements(env.STATE);
+    withheldContributors = new Set(await keysAfter(env.STATE, WITHHELD_CONTRIBUTOR_PREFIX));
     const next = new Map<string, number>();
     for (const app of new Set(apps)) {
       const counts = await Promise.all(Array.from({ length: SHARDS }, (_, s) => env.STATE.get(counterKey(day, app, s))));
@@ -242,7 +254,10 @@ export function createHandler(deps: Deps) {
     const cacheKey = new Request(`${url.origin}${url.pathname}${generation ? `?replaced=${generation}` : ""}`, { method: "GET" });
     const cache = deps.cache();
     const hit = await cache.match(cacheKey);
-    if (hit) return request.method === "HEAD" ? new Response(null, { status: hit.status, headers: hit.headers }) : hit;
+    if (hit) {
+      if (photo && withheldContributors.has(hit.headers.get(CONTRIBUTOR_HEADER) ?? "")) return answer(404, "not_found");
+      return send(records ? await withoutWithheld(hit) : hit, request.method);
+    }
 
     const cap = Number(env.DAILY_READ_CAP ?? "0");
     const all = [...totals.values()].reduce((n, c) => n + c, 0) + [...since.values()].reduce((n, c) => n + c, 0);
@@ -257,6 +272,7 @@ export function createHandler(deps: Deps) {
     const pendingReads = [...unsent.values()].reduce((n, c) => n + c, 0);
     if (pendingReads >= FLUSH_EVERY || nowMs - lastFlush >= STATE_TTL_MS) ctx.waitUntil(flush(env, nowMs));
     if (!object && photo) return answer(404, "not_found");
+    const contributor = object?.customMetadata?.contributor;
 
     // A place without a records file has no visible photos: an empty list, cached like any other.
     const response = new Response(object ? object.body : "", {
@@ -267,11 +283,42 @@ export function createHandler(deps: Deps) {
         ...(object ? { etag: object.httpEtag } : {}),
         "cache-control": `public, max-age=${photo ? MAX_AGE_SECONDS : RECORDS_MAX_AGE_SECONDS}`,
         "x-content-type-options": "nosniff",
+        ...(photo && contributor ? { [CONTRIBUTOR_HEADER]: contributor } : {}),
       },
     });
     ctx.waitUntil(cache.put(cacheKey, response.clone()));
-    return request.method === "HEAD" ? new Response(null, { status: 200, headers: response.headers }) : response;
+    if (photo && contributor && withheldContributors.has(contributor)) return answer(404, "not_found");
+    return send(records ? await withoutWithheld(response) : response, request.method);
   };
+
+  /** The answer as the app gets it: without the cached copy's contributor, and with no body for HEAD. */
+  function send(response: Response, method: string): Response {
+    const headers = new Headers(response.headers);
+    headers.delete(CONTRIBUTOR_HEADER);
+    return new Response(method === "HEAD" ? null : response.body, { status: response.status, headers });
+  }
+
+  /** A place's records without the lines of withheld contributors. Unchanged while none are. */
+  async function withoutWithheld(response: Response): Promise<Response> {
+    if (withheldContributors.size === 0) return response;
+    const text = await response.text();
+    const kept = text
+      .split("\n")
+      .filter((line) => {
+        if (!line.trim()) return false;
+        try {
+          return !withheldContributors.has(String((JSON.parse(line) as { contributor?: unknown }).contributor));
+        } catch {
+          return true;
+        }
+      })
+      .map((line) => `${line}\n`)
+      .join("");
+    const headers = new Headers(response.headers);
+    headers.set("content-length", String(new TextEncoder().encode(kept).length));
+    headers.delete("etag");
+    return new Response(kept, { status: response.status, headers });
+  }
 }
 
 const handle = createHandler({

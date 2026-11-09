@@ -97,6 +97,38 @@ describe("photo server", () => {
     expect((await handle(get(`/v1/places/${PLACE}/photos.ndjson`, "nope"), env, ctx())).status).toBe(401);
   });
 
+  it("stops every photo from an erased contributor within a minute, cached or not, and leaves their lines out of the records", async () => {
+    const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
+    const MINE = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZC";
+    const lines = `{"id":"${PHOTO}","place":"${PLACE}","contributor":"ctr_aaaaaaaaaaaaaaaa"}\n{"id":"${MINE}","place":"${PLACE}","contributor":"ctr_bbbbbbbbbbbbbbbb"}\n`;
+    const files: Record<string, { bytes: string; contributor: string }> = {
+      [`${PHOTO}/full.jpg`]: { bytes: "\xff\xd8\xff", contributor: "ctr_aaaaaaaaaaaaaaaa" },
+      [`${MINE}/full.jpg`]: { bytes: "\xff\xd8\xff", contributor: "ctr_bbbbbbbbbbbbbbbb" },
+    };
+    env.PHOTOS = Object.assign(fakeBucket([]), {
+      get: async (key: string) => {
+        if (key === `records/${PLACE}.ndjson`) return { body: new Response(lines).body!, httpEtag: '"r1"', size: lines.length };
+        const f = files[key];
+        return f ? { body: new Response(f.bytes).body!, httpEtag: '"p1"', size: 3, customMetadata: { place: PLACE, contributor: f.contributor } } : null;
+      },
+    }) as typeof env.PHOTOS;
+    // Served and cached before the erasure.
+    const c = ctx();
+    const before = await handle(get(`/v1/photos/${MINE}/full.jpg`), env, c);
+    await c.done();
+    expect(before.status).toBe(200);
+    expect(before.headers.get("x-photo-contributor")).toBeNull();
+    await handle(get(`/v1/places/${PLACE}/photos.ndjson`), env, c);
+    await c.done();
+
+    await env.STATE.put("withheld-contributor:ctr_bbbbbbbbbbbbbbbb", "{}");
+    clock += STATE_TTL_MS;
+    const cached = await handle(get(`/v1/photos/${MINE}/full.jpg`), env, ctx());
+    expect(cached.status).toBe(404);
+    expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(200);
+    expect(await (await handle(get(`/v1/places/${PLACE}/photos.ndjson`), env, ctx())).text()).toBe(lines.split("\n")[0] + "\n");
+  });
+
   it("needs a known app key", async () => {
     expect((await handle(get(`/v1/photos/${PHOTO}/thumb.jpg`, "nope"), env, ctx())).status).toBe(401);
   });
