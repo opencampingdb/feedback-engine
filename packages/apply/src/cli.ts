@@ -8,7 +8,7 @@ import { sendProgress } from "./progress.js";
 import { run } from "./run.js";
 
 const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>]
-                  [--auto-pr-body <file>] [--review-pr-body <file>]
+                  [--auto-pr-body <file>] [--review-pr-body <file>] [--job-summary <file>]
                   [--review-prs <file>] [--auto-prs <file>] [--bot-login <login>]
                   [--summary <file>] [--now <ISO time>] [--places <dir>]
                   [--photo-licence <id>] [--main <dir> --intake <url>]
@@ -72,6 +72,7 @@ async function main(): Promise<number> {
       "review-data": { type: "string" },
       "auto-pr-body": { type: "string" },
       "review-pr-body": { type: "string" },
+      "job-summary": { type: "string" },
       "review-prs": { type: "string" },
       "auto-prs": { type: "string" },
       "bot-login": { type: "string", multiple: true },
@@ -133,6 +134,8 @@ async function main(): Promise<number> {
 
   if (values["auto-pr-body"]) await writeFile(values["auto-pr-body"], summary.auto_pr_body, "utf8");
   if (values["review-pr-body"]) await writeFile(values["review-pr-body"], summary.review_pr_body, "utf8");
+  // Appended: GitHub's job summary file may hold other steps' summaries.
+  if (values["job-summary"] && summary.job_summary) await appendFile(values["job-summary"], summary.job_summary, "utf8");
   if (values.summary) await writeFile(values.summary, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
   // The progress sent is recorded in the inbox, so the inbox commit carries it too.
   let progressRecorded = false;
