@@ -95,7 +95,7 @@ const result = await photos.photo({ place: { newPlace: "draft-7" }, key: "photo-
 
 On the wire, the SDK sends the photo's meta (place, contributor, device, app version, consent and the SHA-256 and size of each file) as base64url JSON in the `x-photo-meta` header, and the full size file followed by the thumbnail as the body. Attestation covers the meta text, so the intake can check the files against the hashes it carries.
 
-Each contributor may send 10 photos a day, as well as the usual limits per device, network and app key.
+Each contributor may send 10 photos a day, as well as the usual limits per device, network and app key. An upload sent again after its answer was lost (the same place, contributor, install and files) carries the same idempotency key, and the photo intake answers it with the first photo id, keeping one copy of the files and counting it once. Photo reports, removals and erasures are keyed the same way as feedback. See [self-hosting.md](self-hosting.md), "Idempotency keys".
 
 ### A minimum app version
 

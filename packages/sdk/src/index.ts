@@ -91,6 +91,8 @@ export {
   isContactFact,
   isDoubtFact,
   isContributor,
+  isIdempotencyKey,
+  IDEMPOTENCY_HEADER,
   isFactName,
   isMonthRange,
   isOwnerSubmission,

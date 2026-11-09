@@ -18,7 +18,7 @@ import type {
 } from "./types.js";
 import { isFeedbackId, readProgress, type Progress } from "./progress.js";
 import { sha256Hex, sha256HexBytes } from "./sha256.js";
-import { MAX_PHOTO_BYTES, MAX_THUMB_BYTES, isPhotoId, isPlaceId, newPlaceId, validateSubmission } from "./validate.js";
+import { IDEMPOTENCY_HEADER, MAX_PHOTO_BYTES, MAX_THUMB_BYTES, isIdempotencyKey, isPhotoId, isPlaceId, newPlaceId, validateSubmission } from "./validate.js";
 
 /** Storage the client keeps its queue and device id in. AsyncStorage matches this shape. */
 export interface StorageAdapter {
@@ -610,6 +610,7 @@ export class FeedbackValidationError extends Error {
 }
 
 interface QueueItem {
+  /** The item's own id, kept across restarts. Sent as its idempotency key, so a send the intake already took is not stored again. */
   localId: string;
   /** The caller's own ref, kept here and never sent. Items queued before 0.8.0 have none. */
   ref?: string;
@@ -840,7 +841,18 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     if (!raw) return [];
     try {
       const parsed: unknown = JSON.parse(raw);
-      return Array.isArray(parsed) ? (parsed as QueueItem[]) : [];
+      if (!Array.isArray(parsed)) return [];
+      const queue = parsed as QueueItem[];
+      // Every item needs a key the intake takes. One queued without (or with one it would refuse) gets a new one, kept from now on.
+      let changed = false;
+      for (const item of queue) {
+        if (!isIdempotencyKey(item.localId)) {
+          item.localId = newKey();
+          changed = true;
+        }
+      }
+      if (changed) await writeQueue(queue);
+      return queue;
     } catch {
       return [];
     }
@@ -908,8 +920,15 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     return { result: "drop", outcome: { kind: "dropped", httpStatus: status } };
   }
 
+  /** A new idempotency key: a UUID, or 32 random hex characters when `randomUUID` gives something the intake would refuse. */
+  function newKey(): string {
+    const id = randomUUID();
+    if (isIdempotencyKey(id)) return id;
+    return sha256Hex(`${id}:${now()}:${Math.random()}`).slice(0, 32);
+  }
+
   /** Posts `body` with its attestation. Undefined when it could not be attested or sent: try again later. */
-  async function post(to: string, body: string): Promise<{ status: number; answer: unknown; retryAfter: number } | undefined> {
+  async function post(to: string, body: string, key?: string): Promise<{ status: number; answer: unknown; retryAfter: number } | undefined> {
     let attestation: Record<string, string> = {};
     if (options.attest) {
       try {
@@ -920,7 +939,11 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     }
     let res: Awaited<ReturnType<FetchLike>>;
     try {
-      res = await doFetch(to, { method: "POST", headers: { ...attestation, "content-type": "application/json", "x-app-key": appKey }, body });
+      res = await doFetch(to, {
+        method: "POST",
+        headers: { ...attestation, "content-type": "application/json", "x-app-key": appKey, ...(key ? { [IDEMPOTENCY_HEADER]: key } : {}) },
+        body,
+      });
     } catch {
       return undefined; // offline or the host is unreachable
     }
@@ -935,7 +958,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
 
   /** Sends one item to `POST /v1/feedback`. */
   async function sendOne(item: QueueItem): Promise<{ result: Sent; outcome?: Outcome }> {
-    const res = await post(url, JSON.stringify(item.body));
+    const res = await post(url, JSON.stringify(item.body), item.localId);
     if (!res) return { result: "stop" };
     return settle(item, res.status, res.answer, res.retryAfter);
   }
@@ -951,7 +974,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
    * are sent one at a time so each gets its own answer.
    */
   async function sendBatch(items: readonly QueueItem[]): Promise<{ result: Sent; outcome?: Outcome }[] | "fallback" | "singly"> {
-    const res = await post(batchUrl, JSON.stringify({ items: items.map((item) => item.body) }));
+    const res = await post(batchUrl, JSON.stringify({ items: items.map((item) => item.body), keys: items.map((item) => item.localId) }));
     if (!res) return items.map(() => ({ result: "stop" as const }));
     if (res.status === 404 || res.status === 405) return "fallback";
     if (res.status === 400 || res.status === 403 || res.status === 413) return "singly";
@@ -1141,7 +1164,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
       if (!checked.ok) throw new FeedbackValidationError(checked.errors);
       const queue = await readQueue();
       const item: QueueItem = {
-        localId: randomUUID(),
+        localId: newKey(),
         ...(ref !== undefined ? { ref } : {}),
         body: checked.value as FeedbackSubmission,
         queuedAt: now(),
@@ -1249,6 +1272,8 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
           "content-type": "application/octet-stream",
           "x-app-key": appKey,
           "x-photo-meta": base64Url(new TextEncoder().encode(text)),
+          // The same photo of the same place from this install has the same key, so a resend after a lost answer is not stored again.
+          [IDEMPOTENCY_HEADER]: sha256Hex(`photo:${input.place}:${input.contributor}:${meta.device}:${meta.photo.full_sha256}:${meta.photo.thumb_sha256}`),
         },
         body,
       });
