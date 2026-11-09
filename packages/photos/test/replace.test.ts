@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { replacePhoto, ReplaceError, REPLACED_TTL_SECONDS, type PhotoStores } from "../../apply/src/photo-replace.js";
 import { dumpPhotoLine } from "../../apply/src/serialise.js";
 import type { Photo } from "../../apply/src/types.js";
-import { createHandler, STATE_TTL_MS, type CacheLike, type Ctx, type Env, type KVLike } from "../src/index.js";
+import { createHandler, KEY_TTL_MS, type CacheLike, type Ctx, type Env, type KVLike } from "../src/index.js";
 
 const KEY = "example-app-photo-key-0001";
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
@@ -131,10 +131,13 @@ describe("replacing a photo's files", () => {
     const lines = (await readFile(join(root, "photos", `${PLACE}.ndjson`), "utf8")).trim().split("\n").map((l) => JSON.parse(l) as Photo);
     expect(lines[0]).toEqual({ ...line, sha256: sha(full), width: 1600, height: 900 });
     expect(lines[1]!.sha256).toBe("c".repeat(64));
-    expect([...state.ttl].filter(([k]) => k.startsWith("replaced:"))).toEqual([[`replaced:${PHOTO}:${PLACE}:${NOW / 1000}`, REPLACED_TTL_SECONDS]]);
+    expect([...state.ttl].filter(([k]) => k.startsWith("replaced"))).toEqual([
+      [`replaced:${PHOTO}`, REPLACED_TTL_SECONDS],
+      [`replaced-place:${PLACE}`, REPLACED_TTL_SECONDS],
+    ]);
 
-    // Within a minute the server reads the replacement, and the old cache entry is no longer used.
-    clock += STATE_TTL_MS;
+    // Within KEY_TTL_MS the server reads the replacement, and the old cache entry is no longer used.
+    clock += KEY_TTL_MS;
     expect(new Uint8Array(await (await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).arrayBuffer())).toEqual(full);
     expect(new Uint8Array(await (await handle(get(`/v1/photos/${PHOTO}/thumb.jpg`), env, ctx())).arrayBuffer())).toEqual(thumb);
     const records = await (await handle(get(`/v1/places/${PLACE}/photos.ndjson`), env, ctx())).text();

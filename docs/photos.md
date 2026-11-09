@@ -162,7 +162,7 @@ Every report goes to a person on the review PR. Reports from three different con
 
 Some reasons can't wait for three reports. A report for a reason on the photo service's withhold list stops the photo on the first report:
 
-- The intake puts `withheld:<photo id>` in the photo server's state namespace (bound to the intake as `PHOTO_STATE`) and marks the stored report `"withheld": true`. The photo server checks that list before its cache, so the photo stops being served within about two minutes, everywhere.
+- The intake puts `withheld:<photo id>` in the photo server's state namespace (bound to the intake as `PHOTO_STATE`) and marks the stored report `"withheld": true`. The photo server reads that key by name before its cache, so the photo stops being served within about two minutes, everywhere.
 - The next apply run hides the photo's line (`"hidden": "reported"`) and puts the report on the review PR for a person.
 - The person either releases the photo, by taking `hidden` off its line and deleting the `withheld:` key, or removes it (below).
 
@@ -226,7 +226,7 @@ It is an operator tool, run with the R2 token the Photo sync workflow uses and a
 
 - writes the new files over every copy that exists: in the serving bucket, the pending upload, and the `kept/` copy of a hidden photo, so hiding and showing the photo later never brings the old files back;
 - sets the line's `sha256`, `width` and `height` in the checkout and writes the place's records file in the serving bucket again;
-- puts `replaced:<photo id>:<place id>:<time>` in the photo server's state namespace for two days. Within about a minute, the photo server moves the photo and its place's records to new edge cache entries, so no copy cached before the replacement is served.
+- puts `replaced:<photo id>` and `replaced-place:<place id>` in the photo server's state namespace for two days. Within about two minutes, the photo server moves the photo and its place's records to new edge cache entries, so no copy cached before the replacement is served.
 
 Commit the changed `photos/<place id>.ndjson` to the records repository's `main`, so the next sync keeps the new hash. A phone keeps a photo for up to a day: apps that ask for photos as `.../full.jpg?v=<first 12 characters of sha256>`, from the records, get the new file once the records update, within five minutes. The photo server ignores the query string. A photo on `moderation/removed_photos.json`, without a line, or without files is refused, and nothing is written.
 
@@ -279,6 +279,8 @@ You need a Cloudflare account with a zone for the photo hosts, a GitHub account 
 7. **Photo server.** Set `routes` in `packages/photos/wrangler.toml` (or an untracked deploy copy) to your photo host on a custom domain, bind the serving bucket as `PHOTOS` and the state namespace as `STATE`, and deploy. Serving only on the custom domain puts the edge cache in front of R2.
 8. **Workflows.** In the inbox repository, call the Apply feedback workflow hourly with `data-repository-name` set to your records repository, `places-repository: opencampingdb/data`, your `photo-licence` and `recent-places-url` set to Open Camping DB's intake, passing the GitHub App's client id and key. For photo progress, also set `intake-url` to your photo intake and pass its `PLACES_TOKEN` (a long random secret you set on the photo intake) as the `places-token` secret: each run then sends the photo intake where each photo is, and nothing else. Turn on **Allow auto-merge** (`allow_auto_merge`) in the records repository's settings, under General, Pull Requests, and protect `main` with a required status check, so the automatic PR merges itself once CI passes. Without it, photos from trusted contributors are never published until someone merges the automatic PR: the run says on the PR that it needs merging by hand and shows an error annotation naming the repository and the setting, without failing, so the inbox moves are still recorded. In the records repository, call the Photo sync workflow on each push to `main` and once a day, with your bucket names and an R2 API token (Object Read and Write on both buckets) as `r2-account-id`, `r2-access-key-id` and `r2-secret-access-key`. Pin both to a feedback-engine commit.
 9. **Check it.** Upload a test photo from a development build, merge the review PR, wait for the sync, then load the place's records and the photo with a pass. Report it as `illegal` and see it withheld, then remove it with `removePhoto` and see it gone.
+
+The photo server reads each `withheld:`, `withheld-contributor:`, `replaced:` and `replaced-place:` key by its name, for the photo or place a request asks for, and trusts each read for 30 seconds. It never lists a prefix to find them: in Workers KV a new key can be left out of a list for far longer than a read of its own name takes to see it. So a busy photo costs one KV read per key every 30 seconds, and a new key takes effect within KV's own propagation plus 30 seconds.
 
 To stop serving at once, put the key `off` in the photo server's state namespace: the server answers `503 paused` within a minute. Delete the key to start again. Removing the custom domain also stops all serving.
 
