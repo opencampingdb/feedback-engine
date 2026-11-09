@@ -83,7 +83,7 @@ import {
   type SendTimeDecision,
 } from "./decide.js";
 import { flushInbox, queueBacklog, queueStatement, STALE_QUEUE_MS, timedFetch, type FlushResult, type QueuedFile } from "./inbox-queue.js";
-import { monotonicUlids, ulid } from "./ulid.js";
+import { orderedUlids, ulid } from "./ulid.js";
 import { arrayElementTexts } from "./json-text.js";
 import { latestRelease, parseRelease, recordRelease } from "./release.js";
 import {
@@ -1771,7 +1771,7 @@ export function createHandler(deps: Deps) {
     const nowMs = deps.now();
     // Items sent before, whose answers were lost, are answered as they were the first time.
     const kept = keys ? await keptAnswers(env.RECENT_LIST, app.app, keys as string[]) : new Map<string, never>();
-    const intake = await newIntake(request, env, app, nowMs, { batch: { proof }, nextId: monotonicUlids(nowMs, deps.randomBytes) });
+    const intake = await newIntake(request, env, app, nowMs, { batch: { proof }, nextId: orderedUlids(nowMs, deps.randomBytes) });
     // An app over its daily limit is refused as a whole, as one item would be.
     const [used = 0] = await intake.counts.counts([`a:${intake.day}:${app.app}`]);
     if (used >= app.daily_limit) {
