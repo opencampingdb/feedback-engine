@@ -156,14 +156,15 @@ import { PHOTO_REPORT_REASONS } from "@opencampingdb/feedback";
 await photos.reportPhoto({ place, photo: "pho_01JC...", reason: "personal_details", contributor, consent: true });
 ```
 
-Every report goes to a person on the review PR. Reports from three different contributors hide the photo at the next apply run, until the person decides. Hide a photo the traveller reported on their own phone straight away.
+Every report goes to a person on the review PR. Reports from three different contributors, sent from three different client networks, hide the photo at the next apply run, until the person decides. Hide a photo the traveller reported on their own phone straight away.
 
 ### Reasons that withhold a photo at once
 
 Some reasons can't wait for three reports. A report for a reason on the photo service's withhold list stops the photo on the first report:
 
 - The intake puts `withheld:<photo id>` in the photo server's state namespace (bound to the intake as `PHOTO_STATE`) and marks the stored report `"withheld": true`. The photo server reads that key by name before its cache, so the photo stops being served within about two minutes, everywhere.
-- The next apply run hides the photo's line (`"hidden": "reported"`) and puts the report on the review PR for a person.
+- With the serving bucket bound to the intake (`PHOTOS_SERVED`), a report withholds only a photo the place's records list for the place the report names, and not the reporter's own. Without it the intake can't check, so the withhold expires after 7 days unless a person keeps the photo down.
+- The next apply run hides the photo's line (`"hidden": "reported"`) and puts the report on the review PR for a person. A withheld report the rules can't act on (the photo is not at that place, or it is the reporter's own) also goes on the review PR, with a note to delete the `withheld:` key unless the photo should stay down.
 - The person either releases the photo, by taking `hidden` off its line and deleting the `withheld:` key, or removes it (below).
 
 `illegal` is always on the list. It is for child sexual abuse material, an intimate image shared without consent, or terrorist or violent extremist material, and its note on the review PR is marked URGENT: follow your safety procedure. Add other reasons with `PHOTO_WITHHOLD_REASONS` on the photo intake, comma separated, for example `"personal_details"` so a person who appears in a photo and asks for it to come down doesn't wait for two more reports. Names that are not report reasons are ignored. A report for a reason not on the list works as before.
@@ -201,7 +202,7 @@ curl -X POST https://photos-upload.example.com/v1/photos/erase \
   -d '{"contributor": "<the account id the app sends as contributor>"}'
 ```
 
-It answers `202 {"id": "fb_..."}` and has the same effect as `erasePhotos`: the photos are withheld at once and the next apply run removes them. The stored erasure is marked `"operator": true`. It is not counted against any limit, and erasing a contributor with no photos, or one already erased, succeeds too. A request without the right token answers `401 unauthorised`, and a body other than `{ "contributor" }` answers `400`. Set `PHOTO_OPERATOR_TOKEN` on the photo intake to a long random secret, for example from `openssl rand -base64 48`, and keep it on your backend only: it must never be in an app. The route answers `404` while it is unset. Its progress is read like any erasure's, by the returned id.
+It answers `202 {"id": "fb_..."}` and has the same effect as `erasePhotos`: the photos are withheld at once and the next apply run removes them, also when the contributor is blocked. The stored erasure is marked `"operator": true`. It is not counted against any limit, and erasing a contributor with no photos, or one already erased, succeeds too. A request without the right token answers `401 unauthorised`, and a body other than `{ "contributor" }` answers `400`. Set `PHOTO_OPERATOR_TOKEN` on the photo intake to a long random secret, for example from `openssl rand -base64 48`, and keep it on your backend only: it must never be in an app. The route answers `404` while it is unset. Its progress is read like any erasure's, by the returned id.
 
 A person can hide a photo by setting `"hidden": "moderator"` on its line, or delete it for good by taking the line out and adding its id to `moderation/removed_photos.json` with the reason `moderator`. Use this for a copyright complaint or a photo showing a person who did not agree to it. A photo leaves the edge cache within 24 hours of leaving the bucket, so withhold it first when it must stop sooner, for example on a regulator's removal notice:
 
@@ -224,7 +225,7 @@ node packages/apply/dist/photos-cli.js replace --root ../example-app-photos --ph
 
 It is an operator tool, run with the R2 token the Photo sync workflow uses and a Cloudflare API token with Workers KV Storage Write. The photo service has no public route for it. It:
 
-- writes the new files over every copy that exists: in the serving bucket, the pending upload, and the `kept/` copy of a hidden photo, so hiding and showing the photo later never brings the old files back;
+- writes the new files over every copy that exists: in the serving bucket, the pending upload, and the `kept/` copy of a hidden photo, so hiding and showing the photo later never brings the old files back. Each keeps the photo's place and contributor, which the photo server needs: it never serves a photo whose files don't say whose it is, so a contributor's erasure always reaches it;
 - sets the line's `sha256`, `width` and `height` in the checkout and writes the place's records file in the serving bucket again;
 - puts `replaced:<photo id>` and `replaced-place:<place id>` in the photo server's state namespace for two days. Within about two minutes, the photo server moves the photo and its place's records to new edge cache entries, so no copy cached before the replacement is served.
 
@@ -263,7 +264,7 @@ A server that shows photos can use a photo key in `X-App-Key` instead, since it 
 | `401 invalid_app_key` | no pass, and a missing or unknown photo key |
 | `404 not_found` | no such photo, it is no longer published, or it is withheld |
 | `429 rate_limited` | too many requests from one address: 300 a minute |
-| `503 daily_read_cap` | the app's daily read limit, or the server's, is reached. `retry-after` says when it resets, at midnight UTC |
+| `503 daily_read_cap` | the app's daily read limit, or the server's, is reached. `retry-after` says when it resets, at midnight UTC. A photo that is not there answers `404` without counting, and is cached for 5 minutes |
 | `503 paused` | serving is switched off |
 
 ## Set it up
