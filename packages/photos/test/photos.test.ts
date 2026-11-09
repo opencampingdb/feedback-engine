@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { signPass } from "../../intake/src/pass.js";
-import { createHandler, FLUSH_EVERY, STATE_TTL_MS, type BucketLike, type CacheLike, type Ctx, type Env, type KVLike, WITHHELD_PREFIX } from "../src/index.js";
+import { createHandler, FLUSH_EVERY, KEY_TTL_MS, STATE_TTL_MS, type BucketLike, type CacheLike, type Ctx, type Env, type KVLike, WITHHELD_PREFIX } from "../src/index.js";
 
 const KEY = "example-app-photo-key-0001";
 const OTHER_KEY = "other-app-photo-key-0002";
@@ -127,6 +127,31 @@ describe("photo server", () => {
     expect(cached.status).toBe(404);
     expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(200);
     expect(await (await handle(get(`/v1/places/${PLACE}/photos.ndjson`), env, ctx())).text()).toBe(lines.split("\n")[0] + "\n");
+  });
+
+  it("withholds a photo by reading its own key, even while a list of the namespace leaves the key out", async () => {
+    // KV as seen on 9 Nov 2026: a new key read by its name, while listing the prefix still lacks it.
+    const reads: string[] = [];
+    env.STATE = { ...env.STATE, list: async () => ({ keys: [], list_complete: true }), get: async (k: string) => (reads.push(k), env.STATE.data.get(k) ?? null) } as typeof env.STATE;
+    const c = ctx();
+    expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, c)).status).toBe(200);
+    await c.done();
+    env.STATE.data.set(`withheld:${PHOTO}`, '{"reason":"illegal"}');
+    clock += KEY_TTL_MS;
+    const withheld = await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx());
+    expect(withheld.status).toBe(404);
+    expect(reads).toContain(`withheld:${PHOTO}`);
+  });
+
+  it("reads each photo's keys once per KEY_TTL_MS, however many requests come", async () => {
+    const reads: string[] = [];
+    const inner = env.STATE.get;
+    env.STATE = { ...env.STATE, get: async (k: string) => (reads.push(k), inner(k)) } as typeof env.STATE;
+    for (let i = 0; i < 20; i++) await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx());
+    expect(reads.filter((k) => k === `withheld:${PHOTO}`)).toHaveLength(1);
+    clock += KEY_TTL_MS;
+    await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx());
+    expect(reads.filter((k) => k === `withheld:${PHOTO}`)).toHaveLength(2);
   });
 
   it("needs a known app key", async () => {

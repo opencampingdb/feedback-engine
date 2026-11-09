@@ -7,9 +7,9 @@
  * pending upload, the `kept/` copy of a hidden photo), so hiding and showing
  * it later never brings the old files back. Its line in the records
  * repository checkout gets the new `sha256`, `width` and `height`, the
- * place's records file in the serving bucket is written again, and a
- * `replaced:` key in the photo server's state moves the photo and its records
- * to new edge cache entries.
+ * place's records file in the serving bucket is written again, and
+ * `replaced:<photo id>` and `replaced-place:<place id>` keys in the photo
+ * server's state move the photo and its records to new edge cache entries.
  */
 
 import { isJpeg, jpegSize, MAX_PHOTO_BYTES, MAX_THUMB_BYTES, sha256HexBytes } from "@opencampingdb/feedback";
@@ -17,16 +17,15 @@ import { DataRepo } from "./io.js";
 import { KEPT, RECORDS, recordFiles, type Buckets } from "./photorepo.js";
 import type { Photo } from "./types.js";
 
-/** Prefix of the photo server's state keys that name a replaced photo: `replaced:<photo id>:<place id>:<generation>`. */
-export const REPLACED_PREFIX = "replaced:";
+/** The photo server's state keys for a replaced photo and its place: `replaced:<photo id>` and `replaced-place:<place id>`, each `{ "generation" }`. */
+export const replacedKey = (photo: string) => `replaced:${photo}`;
+export const replacedPlaceKey = (place: string) => `replaced-place:${place}`;
 /**
  * How long a `replaced:` key lasts. Longer than a cached photo's day, so by
  * the time the key goes, no cache entry from before the replacement is left.
  */
 export const REPLACED_TTL_SECONDS = 2 * 24 * 60 * 60;
 
-/** The state key that marks a photo's files as replaced at `generation` (whole seconds since 1970). */
-export const replacedKey = (photo: string, place: string, generation: number) => `${REPLACED_PREFIX}${photo}:${place}:${generation}`;
 
 /** The bucket operations the replacement needs. */
 export interface PhotoStores {
@@ -102,7 +101,9 @@ export async function replacePhoto(input: ReplaceInput): Promise<ReplaceResult> 
     await stores.put(buckets.serving, `${RECORDS}${before.place}.ndjson`, records, "application/x-ndjson; charset=utf-8");
     wrote.push(`${buckets.serving}/${RECORDS}${before.place}.ndjson`);
   }
-  const generation = Math.floor(input.now.getTime() / 1000);
-  await input.state(replacedKey(photo, before.place, generation), JSON.stringify({ at: input.now.toISOString() }), REPLACED_TTL_SECONDS);
+  // The generation, in whole seconds, becomes part of the photo server's cache keys.
+  const value = JSON.stringify({ generation: Math.floor(input.now.getTime() / 1000), at: input.now.toISOString() });
+  await input.state(replacedKey(photo), value, REPLACED_TTL_SECONDS);
+  await input.state(replacedPlaceKey(before.place), value, REPLACED_TTL_SECONDS);
   return { place: before.place, file, wrote, before, after };
 }

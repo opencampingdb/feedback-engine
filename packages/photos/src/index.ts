@@ -10,9 +10,16 @@
  * a `withheld:<photo id>` key stops one photo, cache or not, and a
  * `withheld-contributor:<contributor>` key (an erasure) stops every photo
  * from that contributor and leaves their lines out of the records. A
- * `replaced:<photo id>:<place id>:<generation>` key, written when a photo's
- * files are replaced, moves that photo and its place's records to new cache
- * entries within a minute, so the edge serves the new files.
+ * `replaced:<photo id>` key and a `replaced-place:<place id>` key, written
+ * when a photo's files are replaced, move that photo and its place's records
+ * to new cache entries, so the edge serves the new files.
+ *
+ * These keys are read one by one, by name, for the photo or place a request
+ * asks for (`get`), never by listing a prefix: a new key can be missing from
+ * a list for far longer than from a read of its own name. Each answer is
+ * trusted for KEY_TTL_MS in the isolate, so a busy photo costs one KV read
+ * per key every KEY_TTL_MS, and a new key takes effect within KV's own
+ * propagation (60 seconds, Cloudflare says) plus KEY_TTL_MS.
  */
 
 import { isPlaceId } from "@opencampingdb/feedback";
@@ -41,11 +48,16 @@ export const WITHHELD_CONTRIBUTOR_PREFIX = "withheld-contributor:";
 /** Header the cached copy of a photo keeps its contributor in. Never sent to the app. */
 const CONTRIBUTOR_HEADER = "x-photo-contributor";
 /**
- * Prefix of the STATE keys that name a photo whose files were replaced:
- * `replaced:<photo id>:<place id>:<generation>`, written by
- * `ocdb-photos replace` (packages/apply/src/photo-replace.ts).
+ * The STATE keys that say a photo's files, and its place's records, were
+ * replaced: `{ "generation": <seconds> }`, written by `ocdb-photos replace`
+ * (packages/apply/src/photo-replace.ts).
  */
 export const REPLACED_PREFIX = "replaced:";
+export const REPLACED_PLACE_PREFIX = "replaced-place:";
+/** How long an isolate trusts its read of one withheld or replaced key. */
+export const KEY_TTL_MS = 30_000;
+/** Most keys an isolate remembers before it starts again, so memory stays bounded. */
+const KEY_MEMO_MAX = 20_000;
 
 /** A Workers rate limiting binding. */
 export interface RateLimiterLike {
@@ -124,30 +136,15 @@ function answer(status: number, error: string, extra: Record<string, string> = {
   });
 }
 
-/** The names after `prefix` of every STATE key that has it. */
-async function keysAfter(state: KVLike, prefix: string): Promise<string[]> {
-  const out: string[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await state.list({ prefix, ...(cursor ? { cursor } : {}) });
-    for (const { name } of page.keys) out.push(name.slice(prefix.length));
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
-  return out;
-}
-
-/** The latest replacement of each photo and of each place's records, from the `replaced:` keys. */
-async function replacements(state: KVLike): Promise<{ photos: Map<string, number>; places: Map<string, number> }> {
-  const photos = new Map<string, number>();
-  const places = new Map<string, number>();
-  for (const name of await keysAfter(state, REPLACED_PREFIX)) {
-    const [photo, place, generation] = name.split(":");
-    const n = Number(generation);
-    if (!photo || !place || !Number.isSafeInteger(n)) continue;
-    photos.set(photo, Math.max(photos.get(photo) ?? 0, n));
-    places.set(place, Math.max(places.get(place) ?? 0, n));
+/** The generation in a `replaced:` or `replaced-place:` value, or undefined. */
+function generationOf(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  try {
+    const n = (JSON.parse(value) as { generation?: unknown }).generation;
+    return typeof n === "number" && Number.isSafeInteger(n) ? n : undefined;
+  } catch {
+    return undefined;
   }
-  return { photos, places };
 }
 
 function secondsToMidnightUtc(nowMs: number): number {
@@ -161,9 +158,16 @@ export function createHandler(deps: Deps) {
   let checkedAt = -Infinity;
   let day = "";
   let off = false;
-  let withheld = new Set<string>();
-  let replaced = { photos: new Map<string, number>(), places: new Map<string, number>() };
-  let withheldContributors = new Set<string>();
+  // This isolate's reads of single STATE keys, each trusted for KEY_TTL_MS.
+  const keyMemo = new Map<string, { value: string | null; at: number }>();
+  async function readKey(env: Env, name: string, nowMs: number): Promise<string | null> {
+    const kept = keyMemo.get(name);
+    if (kept && nowMs - kept.at < KEY_TTL_MS) return kept.value;
+    const value = await env.STATE.get(name);
+    if (keyMemo.size >= KEY_MEMO_MAX) keyMemo.clear();
+    keyMemo.set(name, { value, at: nowMs });
+    return value;
+  }
   let totals = new Map<string, number>();
   // Reads this isolate made that are not written to KV yet, per app.
   const unsent = new Map<string, number>();
@@ -189,9 +193,6 @@ export function createHandler(deps: Deps) {
     if (nowMs - checkedAt < STATE_TTL_MS) return;
     checkedAt = nowMs;
     off = (await env.STATE.get("off")) !== null;
-    withheld = new Set(await keysAfter(env.STATE, WITHHELD_PREFIX));
-    replaced = await replacements(env.STATE);
-    withheldContributors = new Set(await keysAfter(env.STATE, WITHHELD_CONTRIBUTOR_PREFIX));
     const next = new Map<string, number>();
     for (const app of new Set(apps)) {
       const counts = await Promise.all(Array.from({ length: SHARDS }, (_, s) => env.STATE.get(counterKey(day, app, s))));
@@ -246,17 +247,21 @@ export function createHandler(deps: Deps) {
     await refresh(env, apps, nowMs);
     if (off) return answer(503, "paused", { "retry-after": "3600" });
     // Checked before the cache, so a withheld photo stops at once, not when its cache entry ends.
-    if (photo && withheld.has(photo[1]!)) return answer(404, "not_found");
+    if (photo && (await readKey(env, `${WITHHELD_PREFIX}${photo[1]}`, nowMs)) !== null) return answer(404, "not_found");
+    const contributorWithheld = async (contributor: string | null | undefined) =>
+      !!contributor && (await readKey(env, `${WITHHELD_CONTRIBUTOR_PREFIX}${contributor}`, nowMs)) !== null;
 
     // The cache key is the photo alone: no app key, no query string. A replaced photo, and its
     // place's records, get a cache key of their own, so nothing cached before the replacement is used.
-    const generation = photo ? replaced.photos.get(photo[1]!) : replaced.places.get(records![1]!);
+    const generation = generationOf(
+      await readKey(env, photo ? `${REPLACED_PREFIX}${photo[1]}` : `${REPLACED_PLACE_PREFIX}${records![1]}`, nowMs),
+    );
     const cacheKey = new Request(`${url.origin}${url.pathname}${generation ? `?replaced=${generation}` : ""}`, { method: "GET" });
     const cache = deps.cache();
     const hit = await cache.match(cacheKey);
     if (hit) {
-      if (photo && withheldContributors.has(hit.headers.get(CONTRIBUTOR_HEADER) ?? "")) return answer(404, "not_found");
-      return send(records ? await withoutWithheld(hit) : hit, request.method);
+      if (photo && (await contributorWithheld(hit.headers.get(CONTRIBUTOR_HEADER)))) return answer(404, "not_found");
+      return send(records ? await withoutWithheld(hit, contributorWithheld) : hit, request.method);
     }
 
     const cap = Number(env.DAILY_READ_CAP ?? "0");
@@ -287,8 +292,8 @@ export function createHandler(deps: Deps) {
       },
     });
     ctx.waitUntil(cache.put(cacheKey, response.clone()));
-    if (photo && contributor && withheldContributors.has(contributor)) return answer(404, "not_found");
-    return send(records ? await withoutWithheld(response) : response, request.method);
+    if (photo && (await contributorWithheld(contributor))) return answer(404, "not_found");
+    return send(records ? await withoutWithheld(response, contributorWithheld) : response, request.method);
   };
 
   /** The answer as the app gets it: without the cached copy's contributor, and with no body for HEAD. */
@@ -298,22 +303,23 @@ export function createHandler(deps: Deps) {
     return new Response(method === "HEAD" ? null : response.body, { status: response.status, headers });
   }
 
-  /** A place's records without the lines of withheld contributors. Unchanged while none are. */
-  async function withoutWithheld(response: Response): Promise<Response> {
-    if (withheldContributors.size === 0) return response;
+  /** A place's records without the lines of withheld contributors, or of photos withheld one by one. Unchanged while none are. */
+  async function withoutWithheld(response: Response, contributorWithheld: (c: string) => Promise<boolean>): Promise<Response> {
     const text = await response.text();
-    const kept = text
-      .split("\n")
-      .filter((line) => {
-        if (!line.trim()) return false;
-        try {
-          return !withheldContributors.has(String((JSON.parse(line) as { contributor?: unknown }).contributor));
-        } catch {
-          return true;
-        }
-      })
-      .map((line) => `${line}\n`)
-      .join("");
+    const lines = text.split("\n").filter((line) => line.trim());
+    const shown: string[] = [];
+    for (const line of lines) {
+      let record: { id?: unknown; contributor?: unknown } = {};
+      try {
+        record = JSON.parse(line) as typeof record;
+      } catch {
+        // Kept as written.
+      }
+      if (typeof record.contributor === "string" && (await contributorWithheld(record.contributor))) continue;
+      shown.push(line);
+    }
+    if (shown.length === lines.length) return new Response(text, { status: response.status, headers: response.headers });
+    const kept = shown.map((line) => `${line}\n`).join("");
     const headers = new Headers(response.headers);
     headers.set("content-length", String(new TextEncoder().encode(kept).length));
     headers.delete("etag");
