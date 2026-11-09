@@ -14,6 +14,7 @@ export type FeedbackType =
   | "photo"
   | "photo_report"
   | "photo_erasure"
+  | "photo_removal"
   | "withdraw";
 export type OwnerType = "owner_claim" | "owner_listing" | "owner_update";
 
@@ -328,6 +329,11 @@ export interface PhotoReportBody {
   reason: PhotoReportReason;
 }
 
+export interface PhotoRemovalBody {
+  /** Id of the contributor's own photo, `pho_<ulid>`. */
+  photo: string;
+}
+
 /**
  * The files of a photo upload, as the meta part of `POST /v1/photos` names
  * them. The intake checks the bytes it receives against these.
@@ -466,6 +472,16 @@ export interface PhotoErasureSubmission extends SubmissionBase {
 }
 
 /**
+ * Asks for one of the contributor's own photos to be removed. `place` is the
+ * photo's place. Needs a contributor, the one who sent the photo.
+ */
+export interface PhotoRemovalSubmission extends SubmissionBase {
+  type: "photo_removal";
+  place: string;
+  photo_removal: PhotoRemovalBody;
+}
+
+/**
  * Takes back a new place the same install sent. `place` is the new place's id
  * (`newPlaceId`). Within 24 hours of the report the place is withdrawn. After
  * that it counts as one more report.
@@ -555,6 +571,7 @@ export type FeedbackSubmission =
   | PhotoSubmission
   | PhotoReportSubmission
   | PhotoErasureSubmission
+  | PhotoRemovalSubmission
   | WithdrawSubmission;
 
 /** Every body the intake accepts. */
@@ -619,6 +636,19 @@ interface StoredFields {
    * Absent on other items and on items stored before the intake decided any.
    */
   intake?: StoredIntakeDecision;
+  /**
+   * The intake withheld the photo at the photo server when it took this item:
+   * a photo report whose reason is on the photo service's withhold list, a
+   * photo removal from the photo's own contributor, or an erasure (every photo
+   * from the contributor). Absent otherwise.
+   */
+  withheld?: true;
+  /**
+   * Sent by the photo service's own backend with its operator token
+   * (`POST /v1/photos/erase`), not by an install: an erasure for an account
+   * deleted outside the app. Its `device` stands for the operator.
+   */
+  operator?: true;
 }
 
 /** The intake's send-time decision, as the inbox stores it. */

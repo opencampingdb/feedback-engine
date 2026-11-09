@@ -4,10 +4,16 @@
  *
  *   ocdb-photos sync --root <dir> --serving <bucket> --pending <bucket> [--dry-run]
  *   ocdb-photos check --root <dir> --places <Open Camping DB data dir> --licence <id>
+ *   ocdb-photos replace --root <dir> --photo <pho_id> --full <file> --thumb <file>
+ *                       --serving <bucket> --pending <bucket> --state-namespace <KV namespace id>
  *
- * sync talks to R2 through its S3 API with the AWS CLI, using R2_ACCOUNT_ID,
- * R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY from the environment. It exits 1
- * when a visible photo has no file to copy. check exits 1 on any problem.
+ * sync and replace talk to R2 through its S3 API with the AWS CLI, using
+ * R2_ACCOUNT_ID, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY from the
+ * environment. replace also writes the photo server's state namespace through
+ * the Cloudflare API, with CLOUDFLARE_API_TOKEN (Workers KV Storage Write) in
+ * the environment, and changes the photo's line in the checkout: commit it to
+ * the records repository's main. sync exits 1 when a visible photo has no file
+ * to copy. check exits 1 on any problem.
  */
 
 import { execFile } from "node:child_process";
@@ -16,6 +22,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs, promisify } from "node:util";
 import { DataRepo } from "./io.js";
+import { readFile as readBytes } from "node:fs/promises";
+import { replacePhoto, ReplaceError } from "./photo-replace.js";
 import { checkPhotos, photoStates, planSync, recordFiles, RECORDS } from "./photorepo.js";
 
 const run = promisify(execFile);
@@ -60,14 +68,26 @@ class R2 {
   }
 
   async copy(fromBucket: string, fromKey: string, toBucket: string, toKey: string): Promise<void> {
-    await this.#s3api("copy-object", "--copy-source", `${fromBucket}/${fromKey}`, "--bucket", toBucket, "--key", toKey);
+    // COPY keeps the upload's metadata (its contributor), which the photo server reads to withhold an erased contributor's photos.
+    await this.#s3api("copy-object", "--copy-source", `${fromBucket}/${fromKey}`, "--bucket", toBucket, "--key", toKey, "--metadata-directive", "COPY");
   }
 
-  async put(bucket: string, key: string, body: string, contentType: string): Promise<void> {
+  async exists(bucket: string, key: string): Promise<boolean> {
+    try {
+      await this.#s3api("head-object", "--bucket", bucket, "--key", key);
+      return true;
+    } catch (error) {
+      // head-object exits non-zero with "Not Found" (404) for a missing key. Anything else is a real failure.
+      if (/\(404\)|Not Found/.test(String((error as { stderr?: unknown }).stderr ?? error))) return false;
+      throw error;
+    }
+  }
+
+  async put(bucket: string, key: string, body: string | Uint8Array, contentType: string): Promise<void> {
     const dir = await mkdtemp(join(tmpdir(), "photos-"));
     try {
       const file = join(dir, "body");
-      await writeFile(file, body, "utf8");
+      await writeFile(file, body);
       await this.#s3api("put-object", "--bucket", bucket, "--key", key, "--body", file, "--content-type", contentType);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -126,6 +146,43 @@ async function check(root: string, placesRoot: string, licence: string): Promise
   return errors.length > 0 ? 1 : 0;
 }
 
+async function replace(values: Record<string, string | boolean | undefined>): Promise<number> {
+  const account = process.env.R2_ACCOUNT_ID;
+  const token = process.env.CLOUDFLARE_API_TOKEN;
+  if (!account || !token) {
+    console.error("replace needs R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and CLOUDFLARE_API_TOKEN");
+    return 2;
+  }
+  const namespace = String(values["state-namespace"]);
+  const state = async (key: string, value: string, ttlSeconds: number) => {
+    const url = `https://api.cloudflare.com/client/v4/accounts/${account}/storage/kv/namespaces/${namespace}/values/${encodeURIComponent(key)}?expiration_ttl=${ttlSeconds}`;
+    const res = await fetch(url, { method: "PUT", headers: { authorization: `Bearer ${token}`, "content-type": "application/octet-stream" }, body: value });
+    if (!res.ok) throw new Error(`writing ${key} to the photo server's state answered ${res.status}: ${await res.text()}`);
+  };
+  try {
+    const result = await replacePhoto({
+      root: String(values.root),
+      photo: String(values.photo),
+      full: new Uint8Array(await readBytes(String(values.full))),
+      thumb: new Uint8Array(await readBytes(String(values.thumb))),
+      buckets: { serving: String(values.serving), pending: String(values.pending) },
+      stores: new R2(account),
+      state,
+      now: new Date(),
+    });
+    for (const key of result.wrote) console.log(`wrote ${key}`);
+    console.log(`${result.before.id}: sha256 ${result.before.sha256} -> ${result.after.sha256}, ${result.before.width} x ${result.before.height} -> ${result.after.width} x ${result.after.height}`);
+    console.log(`Commit ${result.file} to the records repository's main, so the photo sync keeps the new hash.`);
+    return 0;
+  } catch (error) {
+    if (error instanceof ReplaceError) {
+      console.error(error.message);
+      return 1;
+    }
+    throw error;
+  }
+}
+
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
   const { values } = parseArgs({
@@ -136,12 +193,21 @@ async function main(): Promise<number> {
       pending: { type: "string" },
       places: { type: "string" },
       licence: { type: "string" },
+      photo: { type: "string" },
+      full: { type: "string" },
+      thumb: { type: "string" },
+      "state-namespace": { type: "string" },
       "dry-run": { type: "boolean", default: false },
     },
   });
   if (command === "sync" && values.serving && values.pending) return sync(values.root!, values.serving, values.pending, values["dry-run"]!);
   if (command === "check" && values.places && values.licence) return check(values.root!, values.places, values.licence);
-  console.log("Usage: ocdb-photos sync --root <dir> --serving <bucket> --pending <bucket> [--dry-run]\n       ocdb-photos check --root <dir> --places <dir> --licence <id>");
+  if (command === "replace" && values.photo && values.full && values.thumb && values.serving && values.pending && values["state-namespace"]) return replace(values);
+  console.log(
+    "Usage: ocdb-photos sync --root <dir> --serving <bucket> --pending <bucket> [--dry-run]\n" +
+      "       ocdb-photos check --root <dir> --places <dir> --licence <id>\n" +
+      "       ocdb-photos replace --root <dir> --photo <pho_id> --full <file> --thumb <file> --serving <bucket> --pending <bucket> --state-namespace <id>",
+  );
   return 2;
 }
 

@@ -132,7 +132,8 @@ export interface Photo {
  * are deleted from both buckets. A removed id never comes back.
  */
 export interface RemovedPhotos {
-  photos: { photo: string; removed: string; reason: "refused" | "erased" | "moderator" }[];
+  /** `removed`: the photo's own contributor asked for this one photo to be removed. */
+  photos: { photo: string; removed: string; reason: "refused" | "erased" | "removed" | "moderator" }[];
 }
 
 /** `moderation/blocked_contributors.json` in the data repository. */

@@ -77,3 +77,7 @@ _Avoid_: dedupe, delete (for a merge)
 **Do-not-match list**:
 The place and Commons file pairs travellers or a reviewer found are not of the place, which are never matched again.
 _Avoid_: blocklist, hidden photos
+
+**Withheld**:
+A photo the photo server has stopped serving at once, before the next apply run: after a report for a reason that can't wait, or its own contributor removing it. A person releases or removes a reported one.
+_Avoid_: hidden (a photo line left out of the records), blocked

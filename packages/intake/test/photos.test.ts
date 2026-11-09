@@ -252,6 +252,229 @@ describe("photo reports and erasure", () => {
   });
 });
 
+describe("report reasons that withhold a photo at once", () => {
+  const PHOTO = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB";
+  function setup(reasons?: string) {
+    const gh = fakeGitHub();
+    const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
+    const state = fakeKv();
+    const e: Env = { ...env(), PHOTO_STATE: state, ...(reasons !== undefined ? { PHOTO_WITHHOLD_REASONS: reasons } : {}) };
+    const send = (reason: string) =>
+      handle(
+        new Request("https://intake.example/v1/feedback", {
+          method: "POST",
+          headers: { "x-app-key": APP_KEY },
+          body: JSON.stringify({ device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true, type: "photo_report", place: PLACE, photo_report: { photo: PHOTO, reason } }),
+        }),
+        e,
+      );
+    return { gh, state, send };
+  }
+
+  it("withholds on the first report for a configured reason, and says so on the stored item", async () => {
+    const t = setup("personal_details, copyright, not_a_reason");
+    expect((await t.send("personal_details")).status).toBe(202);
+    expect(JSON.parse((await t.state.get(withheldKey(PHOTO)))!)).toMatchObject({ feedback: expect.stringMatching(/^fb_/), reason: "personal_details" });
+    expect(t.gh.puts[0]!.content).toMatchObject({ type: "photo_report", withheld: true, photo_report: { reason: "personal_details" } });
+  });
+
+  it("keeps illegal on the list whatever is configured, and leaves other reasons to the reports threshold", async () => {
+    const t = setup("personal_details");
+    expect((await t.send("offensive")).status).toBe(202);
+    expect(await t.state.get(withheldKey(PHOTO))).toBeNull();
+    expect(t.gh.puts[0]!.content.withheld).toBeUndefined();
+    expect((await t.send("illegal")).status).toBe(202);
+    expect(await t.state.get(withheldKey(PHOTO))).not.toBeNull();
+    expect(t.gh.puts[1]!.content).toMatchObject({ withheld: true });
+  });
+
+  it("withholds nothing for personal_details when the list leaves it out", async () => {
+    const t = setup();
+    expect((await t.send("personal_details")).status).toBe(202);
+    expect(await t.state.get(withheldKey(PHOTO))).toBeNull();
+  });
+});
+
+describe("an owner removing one photo", () => {
+  const PHOTO = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB";
+  async function setup(lineContributor?: string) {
+    const gh = fakeGitHub();
+    const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
+    const state = fakeKv();
+    const puts: { key: string; options?: unknown }[] = [];
+    const recordingState: KVLike = { ...state, put: async (k, v, o) => (puts.push({ key: k, options: o }), state.put(k, v, o)) };
+    const records = lineContributor === undefined ? "" : `${JSON.stringify({ id: PHOTO, place: PLACE, contributor: lineContributor })}\n`;
+    const served = { get: async (key: string) => (key === `records/${PLACE}.ndjson` && records ? { text: async () => records } : null) };
+    const e: Env = { ...env(), PHOTO_STATE: recordingState, PHOTOS_SERVED: served };
+    const send = (body: Record<string, unknown> = {}) =>
+      handle(
+        new Request("https://intake.example/v1/feedback", {
+          method: "POST",
+          headers: { "x-app-key": APP_KEY },
+          body: JSON.stringify({ device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true, type: "photo_removal", place: PLACE, photo_removal: { photo: PHOTO }, ...body }),
+        }),
+        e,
+      );
+    return { gh, state, puts, send, e, handle };
+  }
+
+  it("withholds the contributor's own served photo at once, for a limited time, and stores the removal", async () => {
+    const t = await setup(await hashContributor("pepper", "example-app", CONTRIBUTOR));
+    expect((await t.send()).status).toBe(202);
+    expect(JSON.parse((await t.state.get(withheldKey(PHOTO)))!)).toMatchObject({ reason: "removed_by_contributor" });
+    expect(t.puts[0]!.options).toEqual({ expirationTtl: 30 * 24 * 60 * 60 });
+    expect(t.gh.puts[0]!.content).toMatchObject({
+      type: "photo_removal",
+      place: PLACE,
+      withheld: true,
+      photo_removal: { photo: PHOTO },
+      contributor: await hashContributor("pepper", "example-app", CONTRIBUTOR),
+    });
+  });
+
+  it("refuses another contributor's photo and withholds nothing", async () => {
+    const t = await setup("ctr_0123456789abcdef");
+    const res = await t.send();
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "not_your_photo" });
+    expect(await t.state.get(withheldKey(PHOTO))).toBeNull();
+    expect(t.gh.puts).toHaveLength(0);
+  });
+
+  it("stores a removal it can't confirm for the apply run, withholding nothing", async () => {
+    const t = await setup();
+    expect((await t.send()).status).toBe(202);
+    expect(await t.state.get(withheldKey(PHOTO))).toBeNull();
+    expect(t.gh.puts[0]!.content.withheld).toBeUndefined();
+  });
+
+  it("needs a contributor and a photo service", async () => {
+    const t = await setup();
+    const res = await t.handle(
+      new Request("https://intake.example/v1/feedback", {
+        method: "POST",
+        headers: { "x-app-key": APP_KEY },
+        body: JSON.stringify({ device: DEVICE, app_version: "1", consent: true, type: "photo_removal", place: PLACE, photo_removal: { photo: PHOTO } }),
+      }),
+      t.e,
+    );
+    expect(res.status).toBe(400);
+    const { PHOTOS_PENDING: _p, ...noPhotos } = t.e;
+    const elsewhere = await t.handle(
+      new Request("https://intake.example/v1/feedback", {
+        method: "POST",
+        headers: { "x-app-key": APP_KEY },
+        body: JSON.stringify({ device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true, type: "photo_removal", place: PLACE, photo_removal: { photo: PHOTO } }),
+      }),
+      noPhotos as Env,
+    );
+    expect(await elsewhere.json()).toEqual({ error: "photos_not_served_here" });
+  });
+});
+
+describe("erasing a contributor's photos", () => {
+  const TOKEN = "operator-token-0123456789abcdef";
+  function setup(extra: { [K in keyof Env]?: Env[K] | undefined } = {}) {
+    const gh = fakeGitHub();
+    const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
+    const state = fakeKv();
+    const ttls = new Map<string, number | undefined>();
+    const recording: KVLike = { ...state, put: async (k, v, o) => (ttls.set(k, o?.expirationTtl), state.put(k, v, o)) };
+    const e = { ...env(), PHOTO_STATE: recording, PHOTO_OPERATOR_TOKEN: TOKEN, ...extra } as Env;
+    const erase = (body: unknown, token: string | null = TOKEN) =>
+      handle(
+        new Request("https://intake.example/v1/photos/erase", {
+          method: "POST",
+          headers: { "x-app-key": APP_KEY, ...(token !== null ? { authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify(body),
+        }),
+        e,
+      );
+    return { gh, state, ttls, erase, handle, e };
+  }
+
+  it("stores an operator erasure and withholds every photo from the contributor at once", async () => {
+    const t = setup();
+    const res = await t.erase({ contributor: CONTRIBUTOR });
+    expect(res.status).toBe(202);
+    const { id } = (await res.json()) as { id: string };
+    const hashed = await hashContributor("pepper", "example-app", CONTRIBUTOR);
+    expect(t.gh.puts[0]!.content).toMatchObject({ id, type: "photo_erasure", place: null, contributor: hashed, operator: true, withheld: true, app: "example-app" });
+    expect(JSON.stringify(t.gh.puts[0]!.content)).not.toContain(CONTRIBUTOR);
+    expect(JSON.parse((await t.state.get(`withheld-contributor:${hashed}`))!)).toMatchObject({ feedback: id, reason: "erased" });
+    expect(t.ttls.get(`withheld-contributor:${hashed}`)).toBe(30 * 24 * 60 * 60);
+    // Erasing again, or a contributor with no photos, succeeds too.
+    expect((await t.erase({ contributor: CONTRIBUTOR })).status).toBe(202);
+  });
+
+  it("refuses a request without the operator token, with a wrong one, or with a bad body", async () => {
+    const t = setup();
+    expect((await t.erase({ contributor: CONTRIBUTOR }, null)).status).toBe(401);
+    expect((await t.erase({ contributor: CONTRIBUTOR }, "wrong-token")).status).toBe(401);
+    expect((await t.erase({ contributor: "short" })).status).toBe(400);
+    expect((await t.erase({ contributor: CONTRIBUTOR, extra: 1 })).status).toBe(400);
+    expect(t.gh.puts).toHaveLength(0);
+    expect(await t.state.get(`withheld-contributor:${await hashContributor("pepper", "example-app", CONTRIBUTOR)}`)).toBeNull();
+  });
+
+  it("is not there without an operator token or a photo bucket, and needs an app key", async () => {
+    expect((await setup({ PHOTO_OPERATOR_TOKEN: undefined }).erase({ contributor: CONTRIBUTOR })).status).toBe(404);
+    expect((await setup({ PHOTOS_PENDING: undefined }).erase({ contributor: CONTRIBUTOR })).status).toBe(404);
+    const t = setup();
+    const res = await t.handle(
+      new Request("https://intake.example/v1/photos/erase", { method: "POST", headers: { authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ contributor: CONTRIBUTOR }) }),
+      t.e,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("withholds every photo from the contributor on an erasure an install sends too", async () => {
+    const t = setup();
+    const res = await t.handle(
+      new Request("https://intake.example/v1/feedback", {
+        method: "POST",
+        headers: { "x-app-key": APP_KEY },
+        body: JSON.stringify({ device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true, type: "photo_erasure", place: null }),
+      }),
+      t.e,
+    );
+    expect(res.status).toBe(202);
+    const hashed = await hashContributor("pepper", "example-app", CONTRIBUTOR);
+    expect(await t.state.get(`withheld-contributor:${hashed}`)).not.toBeNull();
+    expect(t.gh.puts[0]!.content).toMatchObject({ type: "photo_erasure", withheld: true });
+    expect(t.gh.puts[0]!.content.operator).toBeUndefined();
+  });
+});
+
+describe("minimum app version for photo uploads", () => {
+  let gh: ReturnType<typeof fakeGitHub>;
+  let handle: ReturnType<typeof createHandler>;
+  beforeEach(() => {
+    gh = fakeGitHub();
+    handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
+  });
+  const send = (version: string, minimum = "1.5.0") =>
+    handle(upload(jpeg(4, 3), jpeg(4, 3), (m) => (m.app_version = version)), { ...env(), PHOTO_MIN_APP_VERSION: minimum });
+
+  it("refuses an upload from below the minimum with its own reason, storing and counting nothing", async () => {
+    for (const version of ["1.4.9", "1.4", "0.9.0 (12)", "dev"]) {
+      const res = await send(version);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: "app_update_required", minimum: "1.5.0" });
+    }
+    expect(gh.puts).toHaveLength(0);
+  });
+
+  it("takes an upload at or above the minimum", async () => {
+    for (const version of ["1.5.0", "1.5", "1.5.0 (61)", "1.10.0", "2"]) expect((await send(version)).status).toBe(202);
+  });
+
+  it("takes every version when the minimum is unset or not a version", async () => {
+    expect((await handle(upload(jpeg(4, 3), jpeg(4, 3), (m) => (m.app_version = "0.1")), env())).status).toBe(202);
+    expect((await send("0.1", "latest")).status).toBe(202);
+  });
+});
+
 describe("SafeSearch on uploads", () => {
   const ACCOUNT = JSON.stringify({ client_email: "intake@example.iam.gserviceaccount.com", private_key: privateKey });
 

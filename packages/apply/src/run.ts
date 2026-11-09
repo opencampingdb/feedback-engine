@@ -132,7 +132,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const checkProof = options.checkProof ?? ((url: string, code: string) => realCheckProof(url, code));
 
   const { files: pendingFiles, malformed } = await readPending(options.inbox);
-  const photoTypes = new Set(["photo", "photo_report", "photo_erasure"]);
+  const photoTypes = new Set(["photo", "photo_report", "photo_erasure", "photo_removal"]);
   const photosOnly = options.places !== undefined;
   // A photo repository takes photos only: everything else is refused here.
   const notPhotos: Decision[] = photosOnly
@@ -333,6 +333,15 @@ export async function run(options: RunOptions): Promise<RunSummary> {
         const written = await review.writePhotos(placeId, lines.filter((p) => p.contributor !== edit.contributor));
         if (written) reviewFiles.push(written);
       }
+      continue;
+    }
+    if (edit.kind === "photo_removal") {
+      // A held photo its contributor removed leaves the review checkout.
+      if (sameTree) continue;
+      const lines = await review.photos(edit.place);
+      if (!lines.some((p) => p.id === edit.photo)) continue;
+      const written = await review.writePhotos(edit.place, lines.filter((p) => p.id !== edit.photo));
+      if (written) reviewFiles.push(written);
       continue;
     }
     if (edit.kind === "review") {

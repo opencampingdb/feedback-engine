@@ -119,7 +119,7 @@ function photoOnMain(
 ): PhotoProgressUpdate | undefined {
   const refused = (by: "rules" | "reviewer", why: string | undefined): PhotoProgressUpdate => ({ ...base, state: "refused", by, ...(why ? { reason: why } : {}) });
   const removed = main.removed.get(id);
-  if (removed === "erased") return refused("rules", PHOTO_REASONS.erased);
+  if (removed === "erased" || removed === "removed") return refused("rules", PHOTO_REASONS.erased);
   if (removed === "refused") return refused("rules", reason);
   if (removed === "moderator") return refused("reviewer", PHOTO_REASONS.removed);
 
@@ -138,19 +138,20 @@ export const REMOVED_PHOTOS_FILE = "moderation/removed_photos.json";
 export const BLOCKED_FILE = "moderation/blocked_contributors.json";
 
 /**
- * A photo report's or erasure's progress, by its feedback id, from its
+ * A photo report's, removal's or erasure's progress, by its feedback id, from its
  * decision and main. The rules hold a report for a person and accept an
  * erasure. A report is `in_data` once main no longer shows the photo
  * (hidden, removed, or its contributor blocked), and `refused` by the
  * reviewer when a person merged or closed the review PR and kept it. An
  * erasure is `in_data` once main holds no photo line from the contributor,
  * and `refused` by the reviewer when its automatic PR closed without
- * merging. `in_data_at` is the commit time of the file that took the photo
+ * merging. A removal of one photo is the same, for that photo's line.
+ * `in_data_at` is the commit time of the file that took the photo
  * out: its photo file, the removed list or the block list.
  */
 export function photoFeedbackProgressOf(item: DecidedItem, main: PhotoMain, context: PhotoProgressContext): PhotoProgressUpdate | undefined {
   const result = item.outcome?.result;
-  if (result === undefined || (item.type !== "photo_report" && item.type !== "photo_erasure")) return undefined;
+  if (result === undefined || (item.type !== "photo_report" && item.type !== "photo_erasure" && item.type !== "photo_removal")) return undefined;
   const reason = item.outcome?.reason;
   const base = {
     id: item.id,
@@ -171,6 +172,11 @@ export function photoFeedbackProgressOf(item: DecidedItem, main: PhotoMain, cont
     if (line !== undefined && main.blocked.has(line.contributor)) return inData(BLOCKED_FILE);
     if (context.declined.review.has(item.id)) return { ...base, state: "refused", by: "reviewer", reason: REVIEWER_DECLINED };
     return { ...base, state: result === "applied" ? "accepted" : "held" };
+  }
+  if (item.type === "photo_removal") {
+    if (!main.lines.has(item.photo_removal.photo)) return inData(REMOVED_PHOTOS_FILE);
+    if (context.declined.auto.has(item.id)) return { ...base, state: "refused", by: "reviewer", reason: AUTO_PR_CLOSED };
+    return { ...base, state: "accepted" };
   }
   const contributor = item.contributor;
   const left = [...main.lines.values()].some((line) => line.contributor === contributor);
@@ -218,7 +224,8 @@ export async function sendPhotoProgress(options: SendPhotoProgressOptions): Prom
   const now = options.now ?? new Date();
   const runAt = now.toISOString().replace(/\.\d{3}Z$/, "Z");
   const sinceDay = new Date(now.getTime() - (WINDOW_DAYS + 1) * DAY_MS).toISOString().slice(0, 10);
-  const isPhotoItem = (item: StoredFeedback) => item.type === "photo" || item.type === "photo_report" || item.type === "photo_erasure";
+  const isPhotoItem = (item: StoredFeedback) =>
+    item.type === "photo" || item.type === "photo_report" || item.type === "photo_erasure" || item.type === "photo_removal";
   const history = [...(await readHistory(options.inbox, sinceDay)), ...(await readHistory(options.inbox, sinceDay, "refused"))].filter(isPhotoItem) as DecidedItem[];
   const record = await readSent<string>(options.inbox, PHOTO_SENT_FILE);
   const reconcile = (record.reconciled_at ?? "") < mondayOf(now);

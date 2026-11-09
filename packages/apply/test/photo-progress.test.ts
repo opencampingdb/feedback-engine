@@ -286,6 +286,28 @@ ${line(4)}
       expect(byId(done)[fb(21)]).toMatchObject({ state: "in_data", in_data_at: "2026-11-02T08:00:00Z" });
     });
 
+    it("sends a removal accepted until main drops the photo, then in_data, and the photo refused at the contributor's request", async () => {
+      const removal: StoredFeedback = {
+        ...erasure(31, "applied", "photo removed at its contributor's request"),
+        type: "photo_removal",
+        place: PLACE,
+        photo_removal: { photo: pho(1) },
+      } as unknown as StoredFeedback;
+      await inInbox(removal);
+      await inInbox(photo(1, "applied", "photo accepted"));
+      await commitIn(mainDir, `photos/${PLACE}.ndjson`, `${line(1)}\n${line(2)}\n`, "2026-11-02T06:00:00Z");
+      const waiting = store();
+      await send(waiting);
+      expect(byId(waiting)[fb(31)]).toMatchObject({ state: "accepted", place: PLACE });
+
+      await commitIn(mainDir, `photos/${PLACE}.ndjson`, `${line(2)}\n`, "2026-11-02T08:00:00Z");
+      await commitIn(mainDir, "moderation/removed_photos.json", JSON.stringify({ photos: [{ photo: pho(1), removed: "2026-11-02T08:00:00Z", reason: "removed" }] }), "2026-11-02T08:00:00Z");
+      const done = store();
+      await send(done, { now: new Date("2026-11-03T01:00:00Z") });
+      expect(byId(done)[fb(31)]).toMatchObject({ state: "in_data", in_data_at: "2026-11-02T08:00:00Z" });
+      expect(byId(done)[pho(1)]).toMatchObject({ state: "refused", by: "rules", reason: "removed at the contributor's request" });
+    });
+
     it("sends an erasure refused by the reviewer when its automatic PR closed without merging", async () => {
       await inInbox(erasure(21, "applied", "photos removed at the contributor's request, 1 published"));
       await commitIn(mainDir, `photos/${PLACE}.ndjson`, `${line(1)}

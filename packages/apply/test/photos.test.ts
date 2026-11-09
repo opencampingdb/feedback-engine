@@ -48,6 +48,8 @@ const upload = (who: string, n = 1, placeId = PLACE): StoredFeedback =>
   }) as StoredFeedback;
 const report = (who: string, photo: string, reason = "offensive"): StoredFeedback =>
   ({ ...base(who), type: "photo_report", photo_report: { photo, reason } }) as StoredFeedback;
+const removal = (who: string, photo: string, placeId = PLACE): StoredFeedback =>
+  ({ ...base(who, placeId), type: "photo_removal", photo_removal: { photo } }) as StoredFeedback;
 const erasure = (who: string): StoredFeedback => ({ ...base(who, null), type: "photo_erasure" }) as StoredFeedback;
 const photoLine = (n: number, who: string, extra: Partial<Photo> = {}): Photo => ({
   id: `pho_01JA00000000000000000000${String(n).padStart(2, "0")}`,
@@ -208,12 +210,71 @@ describe("photo rules", () => {
     expect(out.needsReview).toBe(true);
   });
 
+  it("hides a photo at once after one report the intake withheld, without calling it illegal", () => {
+    const target = photoLine(1, "sam");
+    const one = { ...report("a", target.id, "personal_details"), withheld: true } as StoredFeedback;
+    const out = rules([one], { photos: [target] });
+    expect(out.outcome(one)).toBe("needs_review");
+    expect(out.photos.get(PLACE)![0]!.hidden).toBe("reported");
+    expect(out.needsReview).toBe(true);
+    expect(out.decisions.find((d) => d.id === one.id)?.reason).toBe("a personal_details report withholds the photo at once and is read by a person");
+  });
+
+  it("leaves a report the intake did not withhold to the reports threshold", () => {
+    const target = photoLine(1, "sam");
+    const one = report("a", target.id, "personal_details");
+    expect(rules([one], { photos: [target] }).photos.get(PLACE)![0]!.hidden).toBeUndefined();
+  });
+
   it("refuses a report of a photo not in the data, or of the reporter's own photo", () => {
     const own = report("sam", photoLine(1, "sam").id);
     const missing = report("kim", "pho_01JA0000000000000000000099");
     const out = rules([own, missing], { photos: [photoLine(1, "sam")] });
     expect(out.outcome(own)).toBe("refused");
     expect(out.outcome(missing)).toBe("refused");
+  });
+
+  it("removes one published photo at its contributor's request, and leaves their others", () => {
+    const mine = photoLine(1, "sam");
+    const r = removal("sam", mine.id);
+    const out = rules([r], { photos: [mine, photoLine(2, "sam"), photoLine(3, "kim")] });
+    expect(out.outcome(r)).toBe("applied");
+    expect(out.photos.get(PLACE)!.map((p) => p.id)).toEqual([photoLine(2, "sam").id, photoLine(3, "kim").id]);
+    expect(out.removedPhotos.map((p) => [p.photo, p.reason])).toEqual([[mine.id, "removed"]]);
+  });
+
+  it("refuses a removal from anyone but the photo's contributor, or of a photo not at that place", () => {
+    const theirs = photoLine(1, "kim");
+    const other = removal("sam", theirs.id);
+    const wrongPlace = removal("kim", theirs.id, OTHER);
+    const missing = removal("sam", "pho_01JA0000000000000000000099");
+    const out = rules([other, wrongPlace, missing], { photos: [theirs] });
+    expect([other, wrongPlace, missing].map((i) => out.outcome(i))).toEqual(["refused", "refused", "refused"]);
+    expect(out.decisions.find((d) => d.id === other.id)?.reason).toBe("only the photo's contributor can remove it");
+    expect(out.photos.get(PLACE)?.map((p) => p.id) ?? [theirs.id]).toEqual([theirs.id]);
+    expect(out.removedPhotos).toEqual([]);
+  });
+
+  it("removes a held photo from the review branch, and one sent in the same run", () => {
+    const held = { ...upload("sam", 7), outcome: { result: "needs_review", reason: "", run: NOW } } as unknown as StoredFeedback;
+    const fresh = upload("sam", 8);
+    const r1 = removal("sam", held.id.replace("fb_", "pho_"));
+    const r2 = removal("sam", fresh.id.replace("fb_", "pho_"));
+    const out = rules([fresh, r1, r2], { history: [held] });
+    expect([r1, r2].map((i) => out.outcome(i))).toEqual(["applied", "applied"]);
+    expect(out.edits).toContainEqual({ kind: "photo_removal", place: PLACE, photo: held.id.replace("fb_", "pho_"), feedback: r1.id });
+    expect(out.removedPhotos.map((p) => p.photo).sort()).toEqual([held.id.replace("fb_", "pho_"), fresh.id.replace("fb_", "pho_")].sort());
+  });
+
+  it("takes an operator's erasure the same as an install's, and one for a contributor with no photos", () => {
+    const op = { ...erasure("sam"), device: "operator", app_version: "operator", operator: true, withheld: true } as StoredFeedback;
+    const none = { ...erasure("lee"), operator: true } as StoredFeedback;
+    const out = rules([op, none], { photos: [photoLine(1, "sam"), photoLine(2, "kim"), photoLine(3, "sam", { place: OTHER })] });
+    expect([op, none].map((i) => out.outcome(i))).toEqual(["applied", "applied"]);
+    expect(out.photos.get(PLACE)!.map((p) => p.id)).toEqual([photoLine(2, "kim").id]);
+    expect(out.photos.get(OTHER)).toEqual([]);
+    expect(out.removedPhotos.map((r) => r.photo)).toEqual([photoLine(1, "sam").id, photoLine(3, "sam").id]);
+    expect(out.decisions.find((d) => d.id === none.id)?.reason).toBe("photos removed at the contributor's request, 0 published");
   });
 
   it("erases every photo from a contributor, and refuses their uploads in the same run", () => {
@@ -283,6 +344,26 @@ describe("photo run", () => {
     // The inbox keeps the code with the outcome, for later runs.
     const moved = JSON.parse(await readFile(join(inbox, "applied", "2026-11-02", `${photo.id}.json`), "utf8")) as { outcome: Record<string, unknown> };
     expect(moved.outcome).toMatchObject({ result: "needs_review", held_reason: "first_photo" });
+  });
+
+  it("removes one photo at its contributor's request, from the data or the review checkout", async () => {
+    await put(join(data, "photos", `${PLACE}.ndjson`), `${dumpPhotoLine(photoLine(1, "sam"))}\n${dumpPhotoLine(photoLine(3, "sam"))}\n`);
+    const held = { ...upload("sam", 7), outcome: { result: "needs_review", reason: "", run: NOW } } as unknown as StoredFeedback;
+    const heldId = held.id.replace("fb_", "pho_");
+    await put(join(review, "photos", `${PLACE}.ndjson`), `${dumpPhotoLine({ ...photoLine(2, "sam"), id: heldId })}\n`);
+    await put(join(inbox, "applied", "2026-11-01", `${held.id}.json`), JSON.stringify(held));
+    const r1 = removal("sam", photoLine(1, "sam").id);
+    const r2 = removal("sam", heldId);
+    for (const item of [r1, r2]) await put(join(inbox, "pending", "2026-11-02", `${item.id}.json`), JSON.stringify(item));
+    const summary = await run({ inbox, data, reviewData: review, now: new Date(NOW) });
+    expect(summary.auto_files.sort()).toEqual(["moderation/removed_photos.json", `photos/${PLACE}.ndjson`]);
+    expect(summary.review_files).toEqual([`photos/${PLACE}.ndjson`]);
+    const auto = (await readFile(join(data, "photos", `${PLACE}.ndjson`), "utf8")).trim().split("\n");
+    expect(auto.map((l) => JSON.parse(l).id)).toEqual([photoLine(3, "sam").id]);
+    // The place has no held photos left, so its review file goes.
+    await expect(readFile(join(review, "photos", `${PLACE}.ndjson`), "utf8")).rejects.toThrow();
+    const removed = JSON.parse(await readFile(join(data, "moderation", "removed_photos.json"), "utf8")) as { photos: { photo: string; reason: string }[] };
+    expect(removed.photos.map((p) => [p.photo, p.reason]).sort()).toEqual([[heldId, "removed"], [photoLine(1, "sam").id, "removed"]].sort());
   });
 
   it("removes an erased contributor's photos and lists them in removed_photos.json", async () => {

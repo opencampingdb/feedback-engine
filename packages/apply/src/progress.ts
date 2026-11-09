@@ -54,7 +54,7 @@ export const AUTO_PR_CLOSED = "the automatic PR with this change was closed with
 
 /** Whether an item can change the data. Review reports, photo reports and erasures, photos and `other` reports never change a place. */
 export function changesData(item: StoredFeedback): boolean {
-  if (item.type === "review_report" || item.type === "photo_report" || item.type === "photo_erasure" || item.type === "photo") return false;
+  if (item.type === "review_report" || item.type === "photo_report" || item.type === "photo_erasure" || item.type === "photo_removal" || item.type === "photo") return false;
   return !(item.type === "report" && item.report.kind === "other");
 }
 
