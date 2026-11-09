@@ -65,7 +65,7 @@ import {
   type D1Statement,
   type StoredPlace,
 } from "./recent.js";
-import { cellHashes, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
+import { cellHashes, getIndexedPlace, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
 import { createChecks, pruneLiveCounts, releaseLive, type AiLike, type LiveSlot } from "./checks.js";
 import {
   decideAtSendTime,
@@ -1523,12 +1523,17 @@ export function createHandler(deps: Deps) {
         if (nowMs - Date.parse(target.added) > WITHDRAW_WINDOW_MS) return { status: 409, body: { error: "withdraw_window_closed" } };
       }
     }
-    // A report about a released place is part of the device's edit of that
-    // place today: only the first counts against the daily limits.
-    const editedPlace =
+    // A report about a place the intake knows (in the place index or the recent list) is part of
+    // the device's edit of that place today: only the first counts against the device's and the
+    // contributor's day. An intake without D1 cannot tell which places exist and gives it to every place.
+    const reportPlace =
       !isOwner && (submission as FeedbackSubmission).type === "report" && typeof (submission as FeedbackSubmission).place === "string"
         ? ((submission as FeedbackSubmission).place as string)
         : undefined;
+    const known =
+      reportPlace !== undefined &&
+      (!env.RECENT_LIST || target !== undefined || (await getIndexedPlace(env.RECENT_LIST, reportPlace).catch(() => undefined)) !== undefined);
+    const editedPlace = known ? reportPlace : undefined;
     const limit = await intake.counts.check(
       itemCounters(day, device, app.app, isOwner ? (app.owner_daily_limit ?? app.daily_limit) : app.daily_limit, kind, origin, extra),
       editedPlace === undefined ? undefined : { deviceHash: device, place: editedPlace },

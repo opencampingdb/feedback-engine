@@ -179,12 +179,12 @@ describe("POST /v1/feedback/batch", () => {
     expect((await send([review(placeOf(9))], limited))[0]!.status).toBe(429);
   });
 
-  it("counts one place's reports in a batch once against the limits, as one edit", async () => {
+  it("counts one place's reports in a batch once against the device's day, as one edit, and each against the app's", async () => {
     const answers = await send([fact(PLACE, "toilets", true), fact(PLACE, "drinking_water", true), fact(PLACE, "showers", false)]);
     expect(answers.map((a) => a.status)).toEqual([202, 202, 202]);
     const counts = Object.fromEntries(rows("rate_counts").map((r) => [String(r.key).split(":")[0], r.count]));
     expect(counts.d).toBe(1);
-    expect(counts.a).toBe(1);
+    expect(counts.a).toBe(3);
     expect(counts.pe).toBe(3);
   });
 
