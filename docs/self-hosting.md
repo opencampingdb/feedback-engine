@@ -152,7 +152,7 @@ npx wrangler secret put GH_INSTALLATION_ID
     "ios": {"app_id": "ABCDE12345.com.example.app"}, "android": {"package": "com.example.app"}}}
   ```
 
-  For a photo app, `contributor_proof_key` is your app server's Ed25519 public key, the raw 32 bytes in base64. With it, the intake accepts photo removals and erasures only with a proof your server signed for the account (docs/photos.md, "Prove the account for removal and erasure"). Export it with `Buffer.from(await crypto.subtle.exportKey("raw", publicKey)).toString("base64")`. An app key without it accepts them on the contributor value alone.
+  `contributor_proof_key` is your app server's Ed25519 public key, the raw 32 bytes in base64. With it, the intake accepts review erasures, photo removals and photo erasures only with a proof your server signed for the account (docs/photos.md, "Prove the account for removal and erasure", and docs/integration.md section 6). Export it with `Buffer.from(await crypto.subtle.exportKey("raw", publicKey)).toString("base64")`. An app key without it accepts them on the contributor value alone.
 
   Make keys with `openssl rand -hex 16`. To revoke a key, remove it and set the secret again.
 - `DEVICE_SALT` is a long random string, for example from `openssl rand -hex 32`. Changing it makes every device look new, which resets the two-device rule for pending items, so set it once.

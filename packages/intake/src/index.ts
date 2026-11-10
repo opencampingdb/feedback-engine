@@ -1519,12 +1519,12 @@ export function createHandler(deps: Deps) {
       if (contributor === undefined && proof && feedback.type === "report" && feedback.report.kind === "new_place") {
         contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
       }
-      if (contributor === undefined && ["review", "review_report", "fee", "photo_report", "photo_erasure", "photo_removal"].includes(feedback.type)) {
+      if (contributor === undefined && ["review", "review_report", "fee", "photo_report", "photo_erasure", "photo_removal", "review_erasure"].includes(feedback.type)) {
         return { status: 400, body: { error: "contributor_required" } };
       }
       // With a proof key, only the app's server can say the account is the contributor's: a removal or
       // erasure without its signed proof is refused before anything is looked up or withheld.
-      if (app.contributor_proof_key && (feedback.type === "photo_removal" || feedback.type === "photo_erasure")) {
+      if (app.contributor_proof_key && (feedback.type === "photo_removal" || feedback.type === "photo_erasure" || feedback.type === "review_erasure")) {
         if (feedback.contributor_proof === undefined) return { status: 401, body: { error: "proof_required" } };
         const verdict = await verifyContributorProof(app.contributor_proof_key, feedback.contributor_proof, {
           app: app.app,

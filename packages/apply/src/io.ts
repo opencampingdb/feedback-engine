@@ -583,14 +583,21 @@ export class DataRepo {
    */
   async reviewers(blocked: ReadonlySet<string>): Promise<Set<string>> {
     const out = new Set<string>();
+    for (const review of await this.allReviews()) {
+      if (review.hidden === undefined && review.contributor && !blocked.has(review.contributor)) out.add(review.contributor);
+    }
+    return out;
+  }
+
+  /** Every review line in the data. Reads every review file. */
+  async allReviews(): Promise<Review[]> {
     const folder = join(this.root, "reviews");
-    if (!(await exists(folder))) return out;
-    for (const name of await readdir(folder)) {
+    if (!(await exists(folder))) return [];
+    const out: Review[] = [];
+    for (const name of (await readdir(folder)).sort()) {
       if (!name.endsWith(".ndjson")) continue;
       for (const line of (await readFile(join(folder, name), "utf8")).split("\n")) {
-        if (!line.trim()) continue;
-        const review = JSON.parse(line) as Review;
-        if (review.hidden === undefined && review.contributor && !blocked.has(review.contributor)) out.add(review.contributor);
+        if (line.trim()) out.push(JSON.parse(line) as Review);
       }
     }
     return out;

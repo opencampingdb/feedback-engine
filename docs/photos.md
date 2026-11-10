@@ -194,7 +194,7 @@ With `PHOTO_STATE` bound, the intake puts `withheld-contributor:<contributor>` i
 
 A removal or erasure says only which contributor it is for. Without more, anyone who learns a traveller's contributor value can take their photos down for good, so treat that value as a secret: form it as an HMAC of the account id with a key only your server knows, and never show it to other users, in share links, profiles, logs or API responses.
 
-From SDK 0.23.0, to make that unnecessary, give the app key `contributor_proof_key`, your server's Ed25519 public key (self-hosting.md). The intake then accepts `photo_removal` and `photo_erasure` only with a `contributor_proof` your server signed for the signed-in account, the action and the photo. Without one it answers `401 proof_required`, with a wrong, expired or tampered one `401 proof_invalid`, and in both cases it withholds and stores nothing.
+From SDK 0.23.0, to make that unnecessary, give the app key `contributor_proof_key`, your server's Ed25519 public key (self-hosting.md). The intake then accepts `photo_removal` and `photo_erasure` (and, from SDK 0.24.0, `review_erasure` on the feedback intake) only with a `contributor_proof` your server signed for the signed-in account, the action and the photo. Without one it answers `401 proof_required`, with a wrong, expired or tampered one `401 proof_invalid`, and in both cases it withholds and stores nothing.
 
 On your server, for the signed-in account only, right before the app removes a photo or erases its photos:
 

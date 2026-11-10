@@ -44,7 +44,7 @@ Show `ATTRIBUTION` wherever the data appears, and call `feedback.flush()` when t
 
 ## Reviews
 
-Reviews carry an opaque contributor id from the app's signed-in account. One review per contributor per place, a contributor's first review goes to a person, and advertising and offensive language are refused, also when disguised. Travellers can report a review; three reports hide it until a person decides, and a person can block a contributor. Apps can require App Attest or Play Integrity so that only a genuine copy of the app can post. [docs/integration.md](docs/integration.md) sections 6 and 7 cover the app side, and [SECURITY.md](SECURITY.md) the safeguards.
+Reviews carry an opaque contributor id from the app's signed-in account. One review per contributor per place, a contributor's first review goes to a person, and advertising and offensive language are refused, also when disguised. Travellers can report a review; three reports hide it until a person decides, and a person can block a contributor. When a traveller deletes their account, the app erases all of their reviews with one call. Apps can require App Attest or Play Integrity so that only a genuine copy of the app can post. [docs/integration.md](docs/integration.md) sections 6 and 7 cover the app side, and [SECURITY.md](SECURITY.md) the safeguards.
 
 ## Photos
 

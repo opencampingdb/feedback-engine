@@ -15,6 +15,7 @@ export type FeedbackType =
   | "photo_report"
   | "photo_erasure"
   | "photo_removal"
+  | "review_erasure"
   | "withdraw";
 export type OwnerType = "owner_claim" | "owner_listing" | "owner_update";
 
@@ -474,6 +475,18 @@ export interface PhotoErasureSubmission extends SubmissionBase {
 }
 
 /**
+ * Asks for every review from the contributor to be removed from the data, for
+ * example when they delete their account or their data in the app. `place` is
+ * null. Needs a contributor.
+ */
+export interface ReviewErasureSubmission extends SubmissionBase {
+  type: "review_erasure";
+  place: null;
+  /** A proof from the app's server (`signContributorProof`), needed when the app key has `contributor_proof_key`. Never stored. */
+  contributor_proof?: string;
+}
+
+/**
  * Asks for one of the contributor's own photos to be removed. `place` is the
  * photo's place. Needs a contributor, the one who sent the photo.
  */
@@ -576,6 +589,7 @@ export type FeedbackSubmission =
   | PhotoReportSubmission
   | PhotoErasureSubmission
   | PhotoRemovalSubmission
+  | ReviewErasureSubmission
   | WithdrawSubmission;
 
 /** Every body the intake accepts. */
