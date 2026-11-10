@@ -140,6 +140,11 @@ export interface RulesInput {
   removedReviews?: ReadonlySet<string>;
   /** Contributors with a visible review in the data: their reviews are trusted. */
   reviewers?: ReadonlySet<string>;
+  /**
+   * Every review line in the data, when the run has a review erasure. The
+   * places they are on must be in `places`, and `reviews` must answer for them.
+   */
+  allReviews?: readonly Review[];
   /** Every photo line in the data. None when left out. */
   photos?: readonly Photo[];
   /** Licence id written on new photo lines. Defaults to CC-BY-4.0. */
@@ -182,6 +187,8 @@ export type ReviewEdit =
   | { kind: "review"; place: string; review: Review; feedback: string }
   /** A photo held for a person: the first from its contributor, or a file also sent for another place. */
   | { kind: "photo"; place: string; photo: Photo; feedback: string }
+  /** Removes the contributor's held reviews from the review checkout. */
+  | { kind: "review_erasure"; contributor: string; feedback: string }
   /** Removes the contributor's held photos from the review checkout. */
   | { kind: "photo_erasure"; contributor: string; feedback: string }
   /** Removes one held photo, at its contributor's request, from the review checkout. */
@@ -238,6 +245,7 @@ type PhotoItem = Extract<StoredFeedback, { type: "photo" }>;
 type PhotoReportItem = Extract<StoredFeedback, { type: "photo_report" }>;
 type ErasureItem = Extract<StoredFeedback, { type: "photo_erasure" }>;
 type RemovalItem = Extract<StoredFeedback, { type: "photo_removal" }>;
+type ReviewErasureItem = Extract<StoredFeedback, { type: "review_erasure" }>;
 
 /** Reports from this many different contributors hide a review or a photo until a person decides. */
 export const REPORTS_TO_HIDE = 3;
@@ -398,8 +406,8 @@ export function applyRules(input: RulesInput): RulesOutput {
   // Items about a place that is not in the data yet, left waiting for it.
   const waitingForData = new Set<string>();
   for (const item of pending) {
-    // A deletion request about the contributor's own photos is honoured even when they are blocked.
-    const deletion = item.type === "photo_erasure" || item.type === "photo_removal";
+    // A deletion request about the contributor's own photos or reviews is honoured even when they are blocked.
+    const deletion = item.type === "photo_erasure" || item.type === "photo_removal" || item.type === "review_erasure";
     if (item.contributor !== undefined && blocked.has(item.contributor) && !deletion) {
       decide(item, "refused", "the contributor is blocked");
       continue;
@@ -416,7 +424,8 @@ export function applyRules(input: RulesInput): RulesOutput {
       decide(item, "refused", `no new place ${item.place} was added in the last ${WINDOW_DAYS} days`);
       continue;
     }
-    const isNewPlace = (item.type === "report" && item.report.kind === "new_place") || item.type === "photo_erasure";
+    // New places, and erasures, which name no place.
+    const isNewPlace = (item.type === "report" && item.report.kind === "new_place") || item.type === "photo_erasure" || item.type === "review_erasure";
     if (isNewPlace) {
       known.push(item);
       continue;
@@ -454,7 +463,17 @@ export function applyRules(input: RulesInput): RulesOutput {
   };
   const changedReviews = new Set<string>();
 
-  applyReviews(known.filter((i): i is ReviewItem => i.type === "review"));
+  // Erasures first, so a review the contributor sent before erasing is refused in this run too.
+  const reviewsErased = applyReviewErasures(known.filter((i): i is ReviewErasureItem => i.type === "review_erasure"));
+  applyReviews(
+    known.filter((i): i is ReviewItem => {
+      if (i.type !== "review") return false;
+      const erasedAt = i.contributor === undefined ? undefined : reviewsErased.get(i.contributor);
+      if (erasedAt === undefined || time(i) > erasedAt) return true;
+      decide(i, "refused", "the contributor's reviews were erased at their request");
+      return false;
+    }),
+  );
   applyReviewReports(known.filter((i): i is ReviewReportItem => i.type === "review_report"));
   for (const placeId of changedReviews) {
     const lines = linesOf(placeId).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -531,6 +550,38 @@ export function applyRules(input: RulesInput): RulesOutput {
     removed,
     needsReview: ordered.some((d) => d.outcome === "needs_review"),
   };
+
+  /**
+   * Removes every review line from each erasing contributor, on every place,
+   * and their held reviews from the review checkout. Answers, by contributor,
+   * the time of their latest erasure: reviews they sent before it are refused.
+   */
+  function applyReviewErasures(items: ReviewErasureItem[]): Map<string, number> {
+    const erasedAt = new Map<string, number>();
+    for (const item of items) {
+      const contributor = item.contributor;
+      if (contributor === undefined) {
+        decide(item, "refused", "erasure has no contributor");
+        continue;
+      }
+      erasedAt.set(contributor, Math.max(erasedAt.get(contributor) ?? 0, time(item)));
+      let count = 0;
+      const placesWith = new Set((input.allReviews ?? []).filter((r) => r.contributor === contributor).map((r) => r.place));
+      for (const placeId of placesWith) {
+        if (!input.places.has(placeId)) continue;
+        const lines = linesOf(placeId);
+        for (const r of lines.filter((l) => l.contributor === contributor)) {
+          lines.splice(lines.indexOf(r), 1);
+          count += 1;
+        }
+        changedReviews.add(placeId);
+      }
+      edits.push({ kind: "review_erasure", contributor, feedback: item.id });
+      note("(all places)", `reviews from ${contributor} removed at their request (${count} published)`, true, [item]);
+      decide(item, "applied", `reviews removed at the contributor's request, ${count} published`);
+    }
+    return erasedAt;
+  }
 
   function applyReviews(items: ReviewItem[]): void {
     const trusted = new Set(input.reviewers ?? []);
@@ -1741,7 +1792,7 @@ export function applyHeldReview(
  */
 export function applyEdit(
   current: Place | undefined,
-  edit: Exclude<ReviewEdit, { kind: "review" | "photo" | "photo_erasure" | "photo_removal" }>,
+  edit: Exclude<ReviewEdit, { kind: "review" | "review_erasure" | "photo" | "photo_erasure" | "photo_removal" }>,
   nowIso: string,
 ): Place | undefined {
   if (edit.kind === "note") return undefined;

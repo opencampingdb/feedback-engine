@@ -48,6 +48,7 @@ export const FEEDBACK_TYPES = [
   "photo_report",
   "photo_erasure",
   "photo_removal",
+  "review_erasure",
   "withdraw",
 ] as const;
 export const OWNER_TYPES = ["owner_claim", "owner_listing", "owner_update"] as const;
@@ -814,12 +815,12 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
   };
 
   let value: FeedbackSubmission | undefined;
-  if ((type === "photo" || type === "photo_erasure" || type === "photo_removal") && contributor === undefined) {
+  if ((type === "photo" || type === "photo_erasure" || type === "photo_removal" || type === "review_erasure") && contributor === undefined) {
     errors.push(`contributor is required for a ${type}`);
   }
   const contributorProof = input.contributor_proof;
   if (contributorProof !== undefined) {
-    if (type !== "photo_erasure" && type !== "photo_removal") errors.push(`contributor_proof is not allowed when type is ${type}`);
+    if (type !== "photo_erasure" && type !== "photo_removal" && type !== "review_erasure") errors.push(`contributor_proof is not allowed when type is ${type}`);
     else if (typeof contributorProof !== "string" || contributorProof.length > MAX_PROOF_LENGTH || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(contributorProof)) {
       errors.push("contributor_proof must be a proof token from the app's server (<payload>.<signature>, base64url)");
     }
@@ -829,6 +830,10 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     if (place !== null) errors.push("place must be null for a photo_erasure");
     if (input.location !== undefined) errors.push("location is not allowed on a photo_erasure");
     value = { ...base, place: null, type: "photo_erasure", ...proofField };
+  } else if (type === "review_erasure") {
+    if (place !== null) errors.push("place must be null for a review_erasure");
+    if (input.location !== undefined) errors.push("location is not allowed on a review_erasure");
+    value = { ...base, place: null, type: "review_erasure", ...proofField };
   } else if (type === "report") {
     const report = checkReport(input.report, errors);
     if (report) {

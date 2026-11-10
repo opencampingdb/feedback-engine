@@ -388,7 +388,26 @@ import { REVIEW_REPORT_REASONS } from "@opencampingdb/feedback";
 await feedback.reportReview({ place, review: "rev_01JC...", reason: "offensive", contributor, consent: true });
 ```
 
-Every report goes to a person on the `feedback/review` PR, who looks at reported reviews within 24 hours. Reports from three different contributors, on three different client networks, hide the review at the next apply run, until the person decides. A person can hide a review, or block its contributor: everything a blocked contributor sends is refused (except a request to remove or erase their own photos), and their reviews are left out of the release and the rating. For personal details or a takedown, a person removes the review from the data (`python -m pipeline.moderate remove` in `data`), which lists its id in `moderation/removed_reviews.json`. The apply run refuses a review with a listed id, so a removed review is never written back.
+Every report goes to a person on the `feedback/review` PR, who looks at reported reviews within 24 hours. Reports from three different contributors, on three different client networks, hide the review at the next apply run, until the person decides. A person can hide a review, or block its contributor: everything a blocked contributor sends is refused (except a request to erase their own reviews, or to remove or erase their own photos), and their reviews are left out of the release and the rating. For personal details or a takedown, a person removes the review from the data (`python -m pipeline.moderate remove` in `data`), which lists its id in `moderation/removed_reviews.json`. The apply run refuses a review with a listed id, so a removed review is never written back.
+
+**Erasing a traveller's reviews.** When a traveller deletes their account, or deletes their data in your app, remove every review they wrote:
+
+```ts
+await feedback.eraseReviews({ contributor, consent: true });
+```
+
+Send the same `contributor` value their reviews were sent with. The next apply run takes every one of their reviews out of the data, on every place, works out the ratings again, and drops any review still waiting for a person. Reviews they sent before the erasure and still in the queue are refused. The erasure is queued and retried like other feedback, its progress is `accepted` once a run has decided it, and the reviews leave the data when the automatic PR merges. It is honoured for a blocked contributor too. Erasing a contributor with no reviews succeeds. The data repository is a public git repository, so earlier commits still hold the removed lines: they leave the release, the ratings and the current files, not the history.
+
+The contributor value is all an erasure names, so anyone who learns it could erase that traveller's reviews. Keep it secret from other users, or give the app key `contributor_proof_key` (self-hosting.md): the intake then takes an erasure only with a proof your server signed for the signed-in account, with `action: "review_erasure"` and `photo: "*"`, the same as for photos (docs/photos.md, "Prove the account for removal and erasure"):
+
+```ts
+// On your server, for the signed-in account only:
+const proof = await signContributorProof(privateKey, { app: "example-app", contributor, action: "review_erasure", photo: "*", issued: now, expires: now + 600 });
+// In the app:
+await feedback.eraseReviews({ contributor, contributorProof: proof, consent: true });
+```
+
+Photos are erased separately, with the photo client's `erasePhotos`, on your own photo service.
 
 **Blocking on the phone.** Published reviews carry `contributor`, so let a traveller hide everything from one contributor on their own phone, straight away, without waiting for anyone. Keep that list on the device.
 

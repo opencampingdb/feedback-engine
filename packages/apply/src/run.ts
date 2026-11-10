@@ -16,7 +16,18 @@ import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
 import { autoPrBody, jobSummary, reviewPrBody } from "./prbody.js";
 import { previewUrl, PREVIEW_TTL_SECONDS } from "./preview.js";
 import { checkProof as realCheckProof, type ProofResult } from "./proof.js";
-import { applyEdit, applyHeldReview, applyRules, newPlaceIdOf, resolvePlace, WINDOW_DAYS, type Change, type Decision } from "./rules.js";
+import {
+  applyEdit,
+  applyHeldReview,
+  applyRules,
+  isVisible,
+  newPlaceIdOf,
+  ratingOf,
+  resolvePlace,
+  WINDOW_DAYS,
+  type Change,
+  type Decision,
+} from "./rules.js";
 import type { RecentList } from "./recent.js";
 import type { Fee, Place, Review } from "./types.js";
 
@@ -157,8 +168,14 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const placeSource = photosOnly ? new DataRepo(options.places!) : auto;
   const kinds = await placeSource.kinds();
 
+  // Every review line, when a contributor erases their reviews: the places they reviewed are read too.
+  const erasing = new Set(crowd.filter((p) => p.type === "review_erasure" && p.contributor !== undefined).map((p) => p.contributor as string));
+  const allReviews = erasing.size > 0 ? await auto.allReviews() : [];
+  const erasedPlaces = new Set(allReviews.filter((r) => erasing.has(r.contributor)).map((r) => r.place));
+
   // Every record the rules may read, following merged ids to their targets.
   const wanted = new Set<string>([
+    ...erasedPlaces,
     ...crowd.map((p) => p.place),
     // A new place's own record, when an earlier run already wrote it.
     ...crowd.filter((p) => p.type === "report" && p.report.kind === "new_place").map(newPlaceIdOf),
@@ -183,6 +200,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
       .map((p) => resolvePlace(p.place, places))
       .filter((p): p is string => p !== undefined),
   );
+  for (const id of erasedPlaces) reviewIds.add(id);
   const reviews = new Map<string, Review[]>();
   for (const id of reviewIds) reviews.set(id, await auto.reviews(id));
   // Fee lines of every place a fee is about, following merged ids.
@@ -236,6 +254,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     blocked,
     removedReviews,
     reviewers,
+    allReviews,
     photos,
     ...(options.photoLicence ? { photoLicence: options.photoLicence } : {}),
     ...(everyPlace ? { everyPlace } : {}),
@@ -327,6 +346,22 @@ export async function run(options: RunOptions): Promise<RunSummary> {
       const written = await review.writePhotos(edit.place, [...lines, edit.photo]);
       if (written) reviewFiles.push(written);
       effective.add(edit.feedback);
+      continue;
+    }
+    if (edit.kind === "review_erasure") {
+      // Held reviews from the contributor leave the review checkout, and the ratings there follow.
+      if (sameTree) continue;
+      const heldBlocked = await review.blocked();
+      for (const placeId of new Set((await review.allReviews()).filter((r) => r.contributor === edit.contributor).map((r) => r.place))) {
+        const lines = (await review.reviews(placeId)).filter((r) => r.contributor !== edit.contributor);
+        const written = await review.writeReviews(placeId, lines);
+        if (written) reviewFiles.push(written);
+        const current = (await review.places([placeId])).get(placeId);
+        const rating = ratingOf(lines.filter((r) => isVisible(r, heldBlocked)));
+        if (current && current.status !== "merged" && JSON.stringify(current.rating) !== JSON.stringify(rating)) {
+          reviewFiles.push(...(await review.writePlaces([{ ...current, rating, updated: runAt }])));
+        }
+      }
       continue;
     }
     if (edit.kind === "photo_erasure") {

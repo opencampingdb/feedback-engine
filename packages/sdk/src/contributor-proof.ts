@@ -1,10 +1,10 @@
 /**
  * Contributor proofs: a short-lived token the app's own server signs to say
  * that the signed-in account may remove one of its photos, or erase all of
- * them. An app key with `contributor_proof_key` (an Ed25519 public key) makes
- * the intake accept `photo_removal` and `photo_erasure` only with a valid
- * proof, so knowing a traveller's contributor value is not enough to delete
- * their photos.
+ * its photos or all of its reviews. An app key with `contributor_proof_key`
+ * (an Ed25519 public key) makes the intake accept `photo_removal`,
+ * `photo_erasure` and `review_erasure` only with a valid proof, so knowing a
+ * traveller's contributor value is not enough to delete what they sent.
  *
  * The token is `<payload>.<signature>`: the payload is base64url JSON of the
  * claims below, and the signature is Ed25519 over the payload's characters,
@@ -19,7 +19,7 @@ const CLOCK_SKEW_SECONDS = 60;
 /** Longest token the intake reads. */
 export const MAX_PROOF_LENGTH = 2048;
 
-export type ProofAction = "photo_removal" | "photo_erasure";
+export type ProofAction = "photo_removal" | "photo_erasure" | "review_erasure";
 
 /** The app server's Ed25519 private key, a WebCrypto CryptoKey (`crypto.subtle.generateKey({ name: "Ed25519" }, ...)` or `importKey`). */
 export type ProofSigningKey = Parameters<typeof crypto.subtle.sign>[1];
@@ -30,7 +30,7 @@ export interface ContributorProofClaims {
   /** The contributor value the app sends, before the intake hashes it. */
   contributor: string;
   action: ProofAction;
-  /** The photo id for a removal, `"*"` for an erasure. */
+  /** The photo id for a `photo_removal`, `"*"` for a `photo_erasure` or `review_erasure`. */
   photo: string;
   /** Unix seconds the proof was made. */
   issued: number;

@@ -52,6 +52,7 @@ export type {
   PhotoResult,
   RefusalReason,
   ReportInput,
+  ReviewErasureInput,
   ReviewInput,
   ReviewReportInput,
   StorageAdapter,

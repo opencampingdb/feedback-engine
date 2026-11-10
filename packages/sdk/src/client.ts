@@ -347,6 +347,27 @@ export interface PhotoRemovalInput {
   ref?: string;
 }
 
+/** What `eraseReviews` takes: the same as `erasePhotos`. */
+export interface ReviewErasureInput {
+  /** The account id whose reviews are removed: the `contributor` its reviews were sent with. */
+  contributor: string;
+  /**
+   * A proof from your app's server that the signed-in account is this
+   * contributor (`signContributorProof` with action `review_erasure` and
+   * photo `"*"`). Needed when the app key has `contributor_proof_key`; the
+   * intake answers 401 `proof_required` or `proof_invalid` without it. Make it
+   * right before the call: it lives at most an hour, and a queued item sent
+   * later than that is refused.
+   */
+  contributorProof?: string;
+  consent: boolean;
+  /**
+   * The caller's own id for this submission, 1 to 100 characters. Kept with
+   * the queued item and passed back to `onAnswered`. Never sent to the intake.
+   */
+  ref?: string;
+}
+
 export interface PhotoErasureInput {
   /** The account id whose photos are removed. */
   contributor: string;
@@ -468,6 +489,13 @@ export interface FeedbackClient {
   fee(input: FeeInput): Promise<SubmitResult>;
   /** Reports a published review. Queued and retried like the others. */
   reportReview(input: ReviewReportInput): Promise<SubmitResult>;
+  /**
+   * Asks for every review the contributor sent to be removed from the data,
+   * for example when the traveller deletes their account or their data. The
+   * next apply run takes their reviews out of the data and its ratings, and
+   * drops any still waiting for a person. Queued and retried, like feedback.
+   */
+  eraseReviews(input: ReviewErasureInput): Promise<SubmitResult>;
   /**
    * Takes back a new place this install sent. Within 24 hours of the report
    * the place comes down; after that the intake counts it as a report.
@@ -1589,6 +1617,8 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
       ),
     removePhoto: ({ place, photo, contributor, contributorProof, consent, ref }) =>
       submit({ place, photo_removal: { photo }, contributor, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}), consent, ref }, "photo_removal"),
+    eraseReviews: ({ contributor, contributorProof, consent, ref }) =>
+      submit({ place: null, contributor, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}), consent, ref }, "review_erasure"),
     erasePhotos: ({ contributor, contributorProof, consent, ref }) =>
       submit({ place: null, contributor, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}), consent, ref }, "photo_erasure"),
     flush: async () => {
