@@ -1,0 +1,13 @@
+# Files that change what runs, what is deployed, what is installed or who is
+# moderated need a review from the project lead (see GOVERNANCE.md).
+# The rule takes effect when the branch ruleset requires code owner review.
+
+/.github/                       @opencampingdb/project-lead
+/AGENTS.md                      @opencampingdb/project-lead
+/SECURITY.md                    @opencampingdb/project-lead
+/LICENSE                        @opencampingdb/project-lead
+/NOTICE                         @opencampingdb/project-lead
+/.npmrc                         @opencampingdb/project-lead
+package.json                    @opencampingdb/project-lead
+package-lock.json               @opencampingdb/project-lead
+wrangler.toml                   @opencampingdb/project-lead
