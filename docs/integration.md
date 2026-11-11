@@ -156,14 +156,16 @@ Facts a report may name:
 
 - `fee` (true, false or `donation`), `caravans` (true, false or `offroad`), `pets` (`yes`, `no`, `leashed`, `seasonal`)
 - `pets_months`, the months dogs are allowed at a place whose `pets` is `seasonal`: one OSM month range such as `May-Sep`, which may wrap the year end (`Dec-Feb`), as in OSM's `dog:conditional=yes @ (May-Sep)` (`isMonthRange`)
-- `power`, `tents`, `toilets`, `showers`, `drinking_water`, `dump_station` and `booking_required` (true or false)
+- `power`, `tents`, `toilets`, `showers`, `drinking_water`, `dump_station`, `booking_required`, `hot_water` (hot water in the showers or basins) and `air` (air for tyres) (true or false)
+- `toilet_type`, how the toilets work: one of `TOILET_TYPES` (`flush`, `pit`, `chemical`, `dry`, where `dry` is composting or bucket)
+- `operator`, who runs the place (a council, a parks agency, a company): 1 to 200 characters once trimmed (`MAX_OPERATOR_LENGTH`), with no email address, phone number or link. It is stored trimmed.
 - the site features in `SITE_FEATURES`, each true or false: who can get in (`wheelchair`, `generators`, `motorhomes`, `camper_trailers`, `motorbikes`, `big_rigs`), what is there (`non_drinking_water`, `laundry`, `kitchen`, `bbq`, `drive_through`, `ensuite_sites`, `bins`, `picnic_tables`, `campfires`, `cabins`, `pub`), what to do (`swimming`, `fishing`, `walking_tracks`, `scenery`, `wildlife`, `playground`, `games_room`, `shade`, `cycling_tracks`, `offroad_tracks`, `boat_ramp_nearby`, `near_road`), services (`telstra_signal`, `mobile_signal`, `wifi`, `tv_reception`, `pet_sitting`, `fuel`, `lpg`, `car_wash`, `vehicle_storage`) and warnings (`self_contained_only`, `crocodiles`, `sharks`, `marine_stingers`, `seasonal_closure`, `dangerous_when_wet`, `over_50s`, `nudist`)
 - `brand`, one of `BRANDS` (`big4`, `discovery`, `nrma` and the other chains and clubs)
 - `access` (`2wd`, `awd`, `4wd`, `unknown`), `entry` (`public`, `customers`, `permit`, `private`), `vehicle_access` (`heavy_vehicles_only`, from `VEHICLE_ACCESS_VALUES`, which may gain values such as cars only: show nothing for a value your app does not know), `max_stay` (such as `48h`, `2d`, `1w`), `opening_hours` (OSM opening_hours syntax, such as `Mo-Fr 08:00-17:00; Sa 09:00-12:00` or `24/7`, whose comments hold no email address, phone number or link; see "Opening hours" below)
 - contacts: `website`, `facebook`, `instagram`, `tiktok` and `x` (https only), `phone`, `phone_2` and `email`
 - `address`, an object (`PlaceAddress`) with a `street` or, for a rural address, a named `place`, and any of `unit`, `housenumber`, `suburb`, `state` (one of `ADDRESS_STATES`: `NSW`, `VIC`, `QLD`, `SA`, `WA`, `TAS`, `NT`, `ACT`) and `postcode` (four digits)
 
-A fact from an attested report is applied at once, unless another device reported a different value within 90 days or the owner set it: then a person decides. Without attestation, two devices must agree within 90 days. Contacts (website, phones, email and social pages) and addresses follow the same rule, but an attested one is applied at once only when it passes `contactProblem`; one that fails, and any without attestation, goes to a person. `booking_url` comes only from the owner.
+A fact from an attested report is applied at once, unless another device reported a different value within 90 days or the owner set it: then a person decides. Without attestation, two devices must agree within 90 days. Contacts (website, phones, email and social pages) and addresses follow the same rule, but an attested one is applied at once only when it passes `contactProblem`; one that fails, and any without attestation, goes to a person. `booking_url` comes only from the owner. `fuels` and the nearby facts `nearest_beach` and `nearest_boat_ramp` come only from OSM, so no report or owner names them.
 
 **Opening hours.** `opening_hours` must be OSM opening_hours syntax, as the [specification](https://wiki.openstreetmap.org/wiki/Key:opening_hours/specification) (version 0.7.4) writes it, so every app and the OSM editors can read it. `openingHoursProblem(value)` answers null for a good value, or why it isn't one, naming the first character that doesn't fit and, for common mistakes, how to write it: weekdays as two letters (`Mo` to `Su`), times as `HH:MM` in 24 hour form, no spaces around a dash, and single spaces. `isOpeningHours` answers true or false. A report that fails is refused with the same reason after `report.value`. The check takes the opening hours mode of the grammar, so a time on its own and `10:00-16:00/90` are refused, and where the specification allows more than opening_hours.js 3.15 parses, it follows opening_hours.js: dates take no `+Su` or `+1 day` offset (only `easter` takes a day offset) and no open end such as `Apr 01+`. Nothing is rewritten: show the reason and let the traveller fix the value, or build it from a form of weekdays and times.
 
@@ -172,6 +174,30 @@ import { openingHoursProblem } from "@opencampingdb/feedback";
 
 openingHoursProblem("Mo-Su 06:00-22:00"); // null
 openingHoursProblem("Mon-Sun 6am-10pm"); // 'not OSM opening_hours syntax at character 3 ("n-Sun 6am-10"): write weekdays as two letters: Mo Tu We Th Fr Sa Su'
+```
+
+**Open months.** `openMonths(value)` reads the months an `opening_hours` value says the place is open, so every app can show a season the same way, such as "Open Apr to Oct". It answers one month range of two different months, such as `Apr-Oct` or `Dec-Feb`, which `monthsInRange` reads, when the value is one rule made of that range alone or followed by weekdays and clock times that apply in it. It answers null for anything it can't read with certainty: times only, sunrise and sunset, week numbers, years, dates, holidays, more than one month range or rule, `off`, `closed` and `unknown`, comments, and values that aren't OSM syntax. Show no season for null.
+
+```ts
+import { openMonths } from "@opencampingdb/feedback";
+
+openMonths("Apr-Oct Mo-Su 08:00-18:00"); // "Apr-Oct"
+openMonths("Dec-Feb"); // "Dec-Feb"
+openMonths("Mo-Fr 08:00-17:00"); // null
+openMonths("Jan-Mar,Jun-Aug"); // null
+```
+
+Write open months with `withOpenMonths(value, range)`, from one From and To month pair, so `openMonths` always reads it back. It puts the range, such as `Apr-Oct` or `Dec-Feb`, in front of the weekly hours and replaces any month range already there. It throws a `RangeError` and writes nothing when the range isn't two different months, or when the value is anything other than empty, plain weekdays and clock times, or one month range followed by them: more than one rule, sunrise and sunset, holidays, open ends, `off`, comments and values that aren't OSM syntax. Leave such a value for the traveller to edit by hand. `withoutOpenMonths(value)` takes the open months off again and gives the weekly hours, or `""` for a month range on its own. A value `openMonths` answers null for comes back unchanged.
+
+```ts
+import { withOpenMonths, withoutOpenMonths } from "@opencampingdb/feedback";
+
+withOpenMonths("", "Apr-Oct"); // "Apr-Oct"
+withOpenMonths("Mo-Su 08:00-18:00", "Apr-Oct"); // "Apr-Oct Mo-Su 08:00-18:00"
+withOpenMonths("Apr-Oct Mo-Fr 09:00-17:00", "May-Sep"); // "May-Sep Mo-Fr 09:00-17:00"
+withOpenMonths("Mo-Fr 08:00-17:00; Sa 09:00-12:00", "Apr-Oct"); // throws RangeError
+withoutOpenMonths("Apr-Oct Mo-Su 08:00-18:00"); // "Mo-Su 08:00-18:00"
+withoutOpenMonths("Dec-Feb"); // ""
 ```
 
 **Dog months.** `pets_months` only means something while `pets` is `seasonal`. A report of it for a place whose `pets` is anything else is held for a person (`not_seasonal`). When `pets` is set to a value other than `seasonal`, the place's `pets_months` comes off with it: the intake lists both changes, the second with `value: null`. To clear the months alone, send a `doubt` about `pets_months`. `monthsInRange(range)` gives the months a range covers, 1 to 12 from its first month, so the app can tell whether dogs are allowed on the day a traveller is going:
