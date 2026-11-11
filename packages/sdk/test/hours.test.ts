@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isOpeningHours, openingHoursProblem, openMonths } from "../src/hours.js";
+import { isOpeningHours, openingHoursProblem, openMonths, withOpenMonths, withoutOpenMonths } from "../src/index.js";
 
 describe("openingHoursProblem", () => {
   // Examples from the OSM opening_hours specification and key pages.
@@ -146,5 +146,91 @@ describe("openMonths", () => {
     "",
   ])("answers null for %j", (value) => {
     expect(openMonths(value)).toBeNull();
+  });
+});
+
+describe("withOpenMonths", () => {
+  it("writes a month range on its own when there are no hours yet", () => {
+    expect(withOpenMonths("", "Apr-Oct")).toBe("Apr-Oct");
+  });
+
+  it("puts the month range in front of the weekly hours", () => {
+    expect(withOpenMonths("Mo-Su 08:00-18:00", "Apr-Oct")).toBe("Apr-Oct Mo-Su 08:00-18:00");
+    expect(withOpenMonths("Sa,Su", "Dec-Feb")).toBe("Dec-Feb Sa,Su");
+    expect(withOpenMonths("07:00-19:00", "May-Sep")).toBe("May-Sep 07:00-19:00");
+  });
+
+  it("replaces a month range already there", () => {
+    expect(withOpenMonths("Apr-Oct Mo-Fr 09:00-17:00", "May-Sep")).toBe("May-Sep Mo-Fr 09:00-17:00");
+    expect(withOpenMonths("Apr-Oct: Mo-Fr 09:00-17:00", "Nov-Mar")).toBe("Nov-Mar Mo-Fr 09:00-17:00");
+    expect(withOpenMonths("Apr-Oct", "Dec-Feb")).toBe("Dec-Feb");
+  });
+
+  it.each(["", "Apr", "Apr-Apr", "apr-oct", "Apr-Oct ", "Jan-Mar,Jun-Aug", "Apr 01-Oct 31"])(
+    "throws a RangeError for the range %j",
+    (range) => {
+      expect(() => withOpenMonths("Mo-Su 08:00-18:00", range)).toThrow(RangeError);
+    },
+  );
+
+  it.each([
+    "Mo-Fr 08:00-17:00; Sa 09:00-12:00",
+    "Apr-Oct Mo-Su 08:00-18:00; Nov-Mar Sa,Su 09:00-12:00",
+    "sunrise-sunset",
+    "Mo-Su sunrise-sunset",
+    "Apr-Oct sunrise-sunset",
+    '"ring ahead"',
+    'Mo-Fr 08:00-17:00 "ring ahead"',
+    "PH off",
+    "Mo-Fr,PH 08:00-17:00",
+    "Mo-Fr off",
+    "24/7",
+    "18:00+",
+    "Su[1] 10:00-12:00",
+    "Jan-Mar,Jun-Aug",
+    "2026 Apr-Oct",
+    "Mo-Su 25:00-26:00",
+    "Mon-Sun 08:00-18:00",
+    " Mo-Fr 08:00-17:00",
+  ])("throws a RangeError for the hours %j", (hours) => {
+    expect(() => withOpenMonths(hours, "Apr-Oct")).toThrow(RangeError);
+  });
+
+  const weekly = ["", "Mo-Su 08:00-18:00", "Mo-Fr 08:00-12:00,13:00-17:00", "Sa,Su", "Mo,We-Fr", "07:00-19:00"];
+  const ranges = ["Apr-Oct", "Dec-Feb", "Jan-Dec", "Nov-Mar"];
+  const pairs = weekly.flatMap((h) => ranges.map((r) => [h, r] as const));
+
+  it.each(pairs)("writes %j with %j as hours openMonths reads back", (hours, range) => {
+    const written = withOpenMonths(hours, range);
+    expect(openingHoursProblem(written)).toBeNull();
+    expect(openMonths(written)).toBe(range);
+    expect(withoutOpenMonths(written)).toBe(hours);
+    expect(withOpenMonths(written, range)).toBe(written);
+  });
+});
+
+describe("withoutOpenMonths", () => {
+  it("takes the month range off the front of the weekly hours", () => {
+    expect(withoutOpenMonths("Apr-Oct Mo-Su 08:00-18:00")).toBe("Mo-Su 08:00-18:00");
+    expect(withoutOpenMonths("Apr-Oct: Mo-Fr 08:00-12:00,13:00-17:00")).toBe("Mo-Fr 08:00-12:00,13:00-17:00");
+    expect(withoutOpenMonths("May-Sep 07:00-19:00")).toBe("07:00-19:00");
+  });
+
+  it("gives an empty value for a month range on its own", () => {
+    expect(withoutOpenMonths("Dec-Feb")).toBe("");
+  });
+
+  it.each([
+    "Mo-Fr 08:00-17:00",
+    "Apr-Oct sunrise-sunset",
+    "Apr-Oct Mo-Su 08:00-18:00; Nov-Mar Sa,Su 09:00-12:00",
+    "Apr-Oct; PH off",
+    'Apr-Oct "ring ahead"',
+    "Jan-Mar,Jun-Aug",
+    "Apr-Apr",
+    "apr-oct",
+    "",
+  ])("leaves %j unchanged", (hours) => {
+    expect(withoutOpenMonths(hours)).toBe(hours);
   });
 });

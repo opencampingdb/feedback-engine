@@ -16,6 +16,8 @@
  * `easter` takes a day offset) and no open end such as `Apr 01+`.
  */
 
+import { isMonthRange } from "./validate.js";
+
 const WDAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"] as const;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 const EVENTS = ["sunrise", "sunset", "dawn", "dusk"] as const;
@@ -355,4 +357,51 @@ export function openMonths(openingHours: string): string | null {
   const m = OPEN_MONTHS.exec(openingHours);
   if (!m || m[1] === m[2] || openingHoursProblem(openingHours) !== null) return null;
   return `${m[1]}-${m[2]}`;
+}
+
+/** Plain weekdays, plain clock times, or weekdays then clock times: the weekly part `openMonths` reads after a month range. */
+const WEEKLY = new RegExp(`^(?:${WEEKDAYS}(?: ${TIMES})?|${TIMES})$`);
+/** A month range at the start of a value, with its optional colon and the space after it. */
+const LEADING_MONTHS = new RegExp(`^${MONTH}-${MONTH}:? ?`);
+
+/**
+ * The opening hours value with one month range, such as `Apr-Oct` or
+ * `Dec-Feb`, in front of its weekly hours, replacing any month range already
+ * there, so `openMonths` reads the range back. Apps write a place's open
+ * months from a From and To month pair with it.
+ *
+ * `withOpenMonths("", "Apr-Oct")` is `Apr-Oct`,
+ * `withOpenMonths("Mo-Su 08:00-18:00", "Apr-Oct")` is `Apr-Oct Mo-Su 08:00-18:00`
+ * and `withOpenMonths("Apr-Oct Mo-Fr 09:00-17:00", "May-Sep")` is
+ * `May-Sep Mo-Fr 09:00-17:00`.
+ *
+ * It throws a RangeError, and changes nothing, when `range` is not one month
+ * range of two different months (`isMonthRange`), or when the value is not
+ * empty, plain weekdays and clock times, or one month range followed by them:
+ * more than one rule, sunrise and sunset, holidays, open ends, modifiers,
+ * comments and anything that is not OSM opening_hours syntax. Ask the
+ * traveller to edit such a value by hand.
+ */
+export function withOpenMonths(openingHours: string, range: string): string {
+  if (!isMonthRange(range)) throw new RangeError(`not a month range of two different months: ${JSON.stringify(range)}`);
+  const weekly = openMonths(openingHours) === null ? openingHours : withoutOpenMonths(openingHours);
+  if (weekly === "") return range;
+  if (!WEEKLY.test(weekly) || openingHoursProblem(weekly) !== null) {
+    throw new RangeError(`can't put a month range in front of these opening hours: ${JSON.stringify(openingHours)}`);
+  }
+  return `${range} ${weekly}`;
+}
+
+/**
+ * The opening hours value without the month range `openMonths` reads at its
+ * start, and its optional colon: the weekly hours, or "" when the value was
+ * the month range alone. A value `openMonths` answers null for comes back
+ * unchanged.
+ *
+ * `withoutOpenMonths("Apr-Oct Mo-Su 08:00-18:00")` is `Mo-Su 08:00-18:00`
+ * and `withoutOpenMonths("Dec-Feb")` is "".
+ */
+export function withoutOpenMonths(openingHours: string): string {
+  if (openMonths(openingHours) === null) return openingHours;
+  return openingHours.replace(LEADING_MONTHS, "");
 }
