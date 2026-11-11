@@ -2,6 +2,8 @@
 
 Client for sending reports, reviews, checks, fees and photos about places in Open Camping DB. Works in React Native, Expo and the browser, with no dependencies.
 
+It isn't published to npm: build and pack it from this repository, as [docs/integration.md](../../docs/integration.md#2-install) shows, and install the package file.
+
 ```ts
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createFeedbackClient, CONSENT_TEXT, ATTRIBUTION } from "@opencampingdb/feedback";
