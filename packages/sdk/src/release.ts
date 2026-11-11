@@ -90,7 +90,24 @@ export interface ReleaseUpdateResult {
   dataVersion: string | null;
   /** Set when `status` is `failed`. */
   reason?: ReleaseUpdateReason;
+  /** Set when `status` is `failed`: what went wrong behind `reason`, such as the error an adapter call threw. */
+  cause?: ReleaseUpdateCause;
 }
+
+/**
+ * What went wrong behind a failed update's `reason`. For a thrown error, its
+ * `name` and `message`. Otherwise the updater's own name for the problem
+ * (`HttpStatus`, `SizeMismatch`, `ChecksumMismatch`, `ManifestInvalid`,
+ * `ReleaseMismatch`) and what it found. `message` is cut to
+ * `MAX_CAUSE_MESSAGE` characters. It carries no stack.
+ */
+export interface ReleaseUpdateCause {
+  name: string;
+  message: string;
+}
+
+/** The longest `cause.message` an update answers. */
+export const MAX_CAUSE_MESSAGE = 500;
 
 export interface ReleaseUpdater {
   /**
@@ -123,10 +140,29 @@ interface Manifest {
 }
 
 class UpdateStopped extends Error {
-  constructor(readonly reason: ReleaseUpdateReason) {
+  constructor(
+    readonly reason: ReleaseUpdateReason,
+    readonly detail: ReleaseUpdateCause,
+  ) {
     super(reason);
   }
 }
+
+const shorten = (message: string) => (message.length > MAX_CAUSE_MESSAGE ? `${message.slice(0, MAX_CAUSE_MESSAGE - 1)}…` : message);
+
+/** The name and message of something thrown, without its stack. */
+function causeOf(error: unknown): ReleaseUpdateCause {
+  if (error instanceof Error) return { name: error.name || "Error", message: shorten(String(error.message)) };
+  let message: string;
+  try {
+    message = typeof error === "string" ? error : JSON.stringify(error) ?? String(error);
+  } catch {
+    message = String(error);
+  }
+  return { name: typeof error, message: shorten(message) };
+}
+
+const stopped = (reason: ReleaseUpdateReason, name: string, message: string) => new UpdateStopped(reason, { name, message: shorten(message) });
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -159,7 +195,7 @@ function readManifest(value: unknown): Manifest {
     !Number.isInteger(value.layout_version) ||
     !isFile(value.database)
   ) {
-    throw new UpdateStopped("manifest");
+    throw stopped("manifest", "ManifestInvalid", "the manifest lacks data_version, format_version, layout_version or database");
   }
   // A changeset is downloaded only from where the database is: the same release downloads
   // (for GitHub, https://github.com/<owner>/<repo>/releases/download/), so a bad entry
@@ -263,10 +299,10 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
     let res: Awaited<ReturnType<ReleaseFetchLike>>;
     try {
       res = await doFetch(url, { method: "GET", headers: { accept } });
-    } catch {
-      throw new UpdateStopped("network");
+    } catch (error) {
+      throw new UpdateStopped("network", causeOf(error));
     }
-    if (res.status < 200 || res.status >= 300) throw new UpdateStopped("network");
+    if (res.status < 200 || res.status >= 300) throw stopped("network", "HttpStatus", `${url} answered ${res.status}`);
     return res;
   }
 
@@ -281,14 +317,15 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
     let gz: Uint8Array;
     try {
       gz = new Uint8Array(await res.arrayBuffer());
-    } catch {
-      throw new UpdateStopped("network");
+    } catch (error) {
+      throw new UpdateStopped("network", causeOf(error));
     }
-    if (gz.length !== file.bytes || sha256HexBytes(gz) !== file.sha256.toLowerCase()) throw new UpdateStopped("checksum");
+    if (gz.length !== file.bytes) throw stopped("checksum", "SizeMismatch", `${file.url} is ${gz.length} bytes, the manifest says ${file.bytes}`);
+    if (sha256HexBytes(gz) !== file.sha256.toLowerCase()) throw stopped("checksum", "ChecksumMismatch", `${file.url} does not match the manifest's SHA-256`);
     try {
       return await gunzipFn(gz);
-    } catch {
-      throw new UpdateStopped("gunzip");
+    } catch (error) {
+      throw new UpdateStopped("gunzip", causeOf(error));
     }
   }
 
@@ -296,8 +333,8 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
   async function orStop<T>(reason: ReleaseUpdateReason, run: () => Promise<T>): Promise<T> {
     try {
       return await run();
-    } catch {
-      throw new UpdateStopped(reason);
+    } catch (error) {
+      throw new UpdateStopped(reason, causeOf(error));
     }
   }
 
@@ -317,7 +354,13 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
           return { status: "up_to_date", dataVersion };
         }
         const res = await get(manifestUrl, "application/json");
-        const manifest = readManifest(await res.json().catch(() => undefined));
+        let body: unknown;
+        try {
+          body = await res.json();
+        } catch (error) {
+          throw new UpdateStopped("manifest", causeOf(error));
+        }
+        const manifest = readManifest(body);
         if (manifest.format_version > newestFormat) return { status: "format_unsupported", dataVersion };
         if (!readableLayouts.includes(manifest.layout_version)) return { status: "layout_unsupported", dataVersion };
         const layout = dataVersion === null ? null : await orStop("read", () => adapter.currentLayoutVersion());
@@ -343,13 +386,17 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
           // whole database.
         }
         dataVersion = await replaceWhole(manifest);
-        if (dataVersion !== manifest.data_version) return { status: "failed", dataVersion, reason: "mismatch" };
+        if (dataVersion !== manifest.data_version) {
+          const cause = { name: "ReleaseMismatch", message: shorten(`the database holds ${dataVersion ?? "no release"} after the replace, the manifest names ${manifest.data_version}`) };
+          return { status: "failed", dataVersion, reason: "mismatch", cause };
+        }
         return { status: "replaced", dataVersion };
       } catch (error) {
         const reason = error instanceof UpdateStopped ? error.reason : "read";
+        const cause = error instanceof UpdateStopped ? error.detail : causeOf(error);
         // A failed chain or replace leaves the database on the release it had.
         const now = await adapter.currentDataVersion().catch(() => dataVersion);
-        return { status: "failed", dataVersion: now, reason };
+        return { status: "failed", dataVersion: now, reason, cause };
       }
     },
   };

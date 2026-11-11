@@ -114,11 +114,12 @@ export { dataVersionTime, withRecentChanges } from "./recent.js";
 export type { RecentChange, RecentList, RecentPlace, RecentRelease, ReleasePlace } from "./recent.js";
 export { PHOTO_HELD_REASONS, PROGRESS_STATES, isFeedbackId, progressInRelease } from "./progress.js";
 export type { PhotoHeldReason, Progress, ProgressState, RefusedBy } from "./progress.js";
-export { DEFAULT_MANIFEST_URL, MAX_CHANGESET_CHAIN, createReleaseUpdater } from "./release.js";
+export { DEFAULT_MANIFEST_URL, MAX_CAUSE_MESSAGE, MAX_CHANGESET_CHAIN, createReleaseUpdater } from "./release.js";
 export type {
   Gunzip,
   ReleaseDatabaseAdapter,
   ReleaseFetchLike,
+  ReleaseUpdateCause,
   ReleaseUpdateReason,
   ReleaseUpdateResult,
   ReleaseUpdateStatus,

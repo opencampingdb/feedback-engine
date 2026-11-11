@@ -560,7 +560,7 @@ const updater = createReleaseUpdater({
 });
 
 const result = await updater.update({ knownDataVersion: recent.release?.data_version });
-// { status: "up_to_date" | "updated" | "replaced" | "older_release" | "layout_unsupported" | "format_unsupported" | "failed", dataVersion, reason? }
+// { status: "up_to_date" | "updated" | "replaced" | "older_release" | "layout_unsupported" | "format_unsupported" | "failed", dataVersion, reason?, cause? }
 ```
 
 `update()` does this:
@@ -571,7 +571,7 @@ const result = await updater.update({ knownDataVersion: recent.release?.data_ver
 4. Otherwise it takes the chain with the fewest files, and of two as short, the one with more daily changesets. It downloads every file on it and checks each one's `bytes` and `sha256` before applying any, undoes gzip, then hands the whole chain to one `applyChangesets` call, which applies it in order in one exclusive transaction, and answers `updated`.
 5. After the chain it reads `data_version` back from the adapter. When that is not the manifest's, it downloads the whole database and replaces the one the chain left, and answers `replaced`. After a replace, it answers `failed` with `mismatch` when the database still names another release.
 
-`update()` never throws. On any failure it answers `failed` with a `reason`: `network` (a request failed or answered other than 2xx), `manifest`, `checksum`, `gunzip`, `read`, `apply` or `replace` (that adapter call threw), or `mismatch`. A failed download or checksum leaves the database as it was, because nothing is applied until every file has passed. The chain is one transaction, so when any changeset in it fails, the database stays on the release it started from and `dataVersion` names it. The next run tries the chain again. A failed replace leaves the old database in use. `dataVersion` is always the release the app's database holds after the run, so compare contribution progress against it (`progressInRelease`).
+`update()` never throws. On any failure it answers `failed` with a `reason`: `network` (a request failed or answered other than 2xx), `manifest`, `checksum`, `gunzip`, `read`, `apply` or `replace` (that adapter call threw), or `mismatch`, and a `cause`, `{ name, message }`, that says what went wrong behind it: the error a request, gunzip or adapter call threw (its name and message, no stack), or for the updater's own checks `HttpStatus`, `SizeMismatch`, `ChecksumMismatch`, `ManifestInvalid` or `ReleaseMismatch` with what it found. The message is cut to 500 characters (`MAX_CAUSE_MESSAGE`). Report both: `reason` groups failures, `cause` tells two of them apart. A failed download or checksum leaves the database as it was, because nothing is applied until every file has passed. The chain is one transaction, so when any changeset in it fails, the database stays on the release it started from and `dataVersion` names it. The next run tries the chain again. A failed replace leaves the old database in use. `dataVersion` is always the release the app's database holds after the run, so compare contribution progress against it (`progressInRelease`).
 
 When to ask is the app's decision, within these limits. Ask only when the recent list names a release other than the phone's, and at most once an hour: pass its `release.data_version` as `knownDataVersion`, and the updater makes no request while the two agree. Never run the updater on a timer.
 
@@ -777,7 +777,7 @@ export async function updateRelease(knownDataVersion: string | undefined) {
   if (Date.now() - lastAsked < HOUR) return;
   lastAsked = Date.now();
   const result = await releaseUpdater.update({ knownDataVersion });
-  if (result.status === "failed") console.warn("data update failed", result.reason); // try again next time
+  if (result.status === "failed") console.warn("data update failed", result.reason, result.cause); // try again next time
   return result;
 }
 ```

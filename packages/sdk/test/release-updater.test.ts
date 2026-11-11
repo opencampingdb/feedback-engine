@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_CAUSE_MESSAGE,
   createReleaseUpdater,
   sha256HexBytes,
   type ReleaseDatabaseAdapter,
@@ -221,7 +222,7 @@ describe("createReleaseUpdater: when to ask", () => {
       return { status: 503, json: async () => ({}), arrayBuffer: async () => new ArrayBuffer(0) };
     };
     const { adapter } = fakeDatabase({ dataVersion: v(0), layout: 1 });
-    expect(await createReleaseUpdater({ adapter, readableLayouts: [1], readableFormats: [12], fetch }).update()).toEqual({ status: "failed", dataVersion: v(0), reason: "network" });
+    expect(await createReleaseUpdater({ adapter, readableLayouts: [1], readableFormats: [12], fetch }).update()).toEqual({ status: "failed", dataVersion: v(0), reason: "network", cause: { name: "HttpStatus", message: "https://github.com/opencampingdb/data/releases/latest/download/manifest.json answered 503" } });
     expect(urls).toEqual(["https://github.com/opencampingdb/data/releases/latest/download/manifest.json"]);
   });
 });
@@ -298,7 +299,7 @@ describe("createReleaseUpdater: failures leave the release", () => {
     const { adapter, state } = fakeDatabase({ dataVersion: v(0), layout: 1 });
     const updater = updaterFor(adapter, fetch);
 
-    expect(await updater.update()).toEqual({ status: "failed", dataVersion: v(0), reason: "checksum" });
+    expect(await updater.update()).toEqual({ status: "failed", dataVersion: v(0), reason: "checksum", cause: { name: "ChecksumMismatch", message: `${served.manifest.changesets[2]!.url} does not match the manifest's SHA-256` } });
     expect(state.applied).toEqual([]);
   });
 
@@ -309,7 +310,7 @@ describe("createReleaseUpdater: failures leave the release", () => {
     const { adapter, state } = fakeDatabase({ dataVersion: v(0), layout: 1 });
     const updater = updaterFor(adapter, fetch);
 
-    expect(await updater.update()).toEqual({ status: "failed", dataVersion: v(0), reason: "checksum" });
+    expect(await updater.update()).toEqual({ status: "failed", dataVersion: v(0), reason: "checksum", cause: { name: "SizeMismatch", message: expect.stringMatching(/is \d+ bytes, the manifest says \d+$/) } });
     expect(state.replaced).toEqual([]);
   });
 
@@ -319,7 +320,7 @@ describe("createReleaseUpdater: failures leave the release", () => {
     const { adapter, state } = fakeDatabase({ dataVersion: v(0), layout: 1 });
     const updater = updaterFor(adapter, fetch);
 
-    expect(await updater.update()).toEqual({ status: "failed", dataVersion: v(0), reason: "network" });
+    expect(await updater.update()).toEqual({ status: "failed", dataVersion: v(0), reason: "network", cause: { name: "TypeError", message: "Network request failed" } });
     expect(state.applied).toEqual([]);
   });
 
@@ -329,7 +330,7 @@ describe("createReleaseUpdater: failures leave the release", () => {
     const { adapter, state } = fakeDatabase({ dataVersion: v(0), layout: 1 }, v(2));
     const updater = updaterFor(adapter, fetch);
 
-    expect(await updater.update()).toEqual({ status: "failed", dataVersion: v(0), reason: "apply" });
+    expect(await updater.update()).toEqual({ status: "failed", dataVersion: v(0), reason: "apply", cause: { name: "Error", message: "conflict" } });
     expect(state.applied).toEqual([]);
 
     // The next run tries the whole chain again.
@@ -346,7 +347,7 @@ describe("createReleaseUpdater: failures leave the release", () => {
     const failing = { ...adapter, replaceDatabase: async () => Promise.reject(new Error("disk full")) };
     const updater = updaterFor(failing, fetch);
 
-    expect(await updater.update()).toEqual({ status: "failed", dataVersion: v(0), reason: "replace" });
+    expect(await updater.update()).toEqual({ status: "failed", dataVersion: v(0), reason: "replace", cause: { name: "Error", message: "disk full" } });
   });
 
   it("fails on a manifest it can't read", async () => {
@@ -354,7 +355,43 @@ describe("createReleaseUpdater: failures leave the release", () => {
     const { adapter } = fakeDatabase({ dataVersion: v(0), layout: 1 });
     const updater = updaterFor(adapter, fetch);
 
-    expect(await updater.update()).toEqual({ status: "failed", dataVersion: v(0), reason: "manifest" });
+    expect(await updater.update()).toEqual({ status: "failed", dataVersion: v(0), reason: "manifest", cause: { name: "ManifestInvalid", message: expect.any(String) } });
+  });
+  it("says why the adapter's apply failed, with no stack", async () => {
+    const served = await release(1, chain(0, 1));
+    const { fetch } = fakeFetch(served);
+    const { adapter } = fakeDatabase({ dataVersion: v(0), layout: 1 });
+    const failing = { ...adapter, applyChangesets: async () => Promise.reject(new RangeError("database or disk is full (code 13)")) };
+
+    const result = await updaterFor(failing, fetch).update();
+    expect(result).toEqual({ status: "failed", dataVersion: v(0), reason: "apply", cause: { name: "RangeError", message: "database or disk is full (code 13)" } });
+    expect(JSON.stringify(result)).not.toContain("at ");
+  });
+
+  it("says why when the adapter throws something that isn't an Error, and cuts a long message", async () => {
+    const served = await release(1, chain(0, 1));
+    const { fetch } = fakeFetch(served);
+    const { adapter } = fakeDatabase({ dataVersion: v(0), layout: 1 });
+    const stringly = { ...adapter, applyChangesets: async () => Promise.reject("x".repeat(MAX_CAUSE_MESSAGE * 2)) };
+
+    const result = await updaterFor(stringly, fetch).update();
+    expect(result.cause?.name).toBe("string");
+    expect(result.cause?.message).toHaveLength(MAX_CAUSE_MESSAGE);
+  });
+
+  it("says why a manifest that isn't JSON failed", async () => {
+    const fetch: ReleaseFetchLike = async () => ({ status: 200, json: async () => JSON.parse("<html>"), arrayBuffer: async () => new ArrayBuffer(0) });
+    const { adapter } = fakeDatabase({ dataVersion: v(0), layout: 1 });
+
+    expect(await updaterFor(adapter, fetch).update()).toEqual({ status: "failed", dataVersion: v(0), reason: "manifest", cause: { name: "SyntaxError", message: expect.any(String) } });
+  });
+
+  it("says why reading the database failed", async () => {
+    const { fetch } = fakeFetch(await release(1, []));
+    const { adapter } = fakeDatabase({ dataVersion: v(0), layout: 1 });
+    const unreadable = { ...adapter, currentDataVersion: async () => Promise.reject(new Error("no such table: release")) };
+
+    expect(await updaterFor(unreadable, fetch).update()).toEqual({ status: "failed", dataVersion: null, reason: "read", cause: { name: "Error", message: "no such table: release" } });
   });
 });
 
@@ -405,7 +442,7 @@ describe("createReleaseUpdater: a format the app can't read", () => {
     const { fetch } = fakeFetch(served);
     const { adapter } = fakeDatabase({ dataVersion: v(0), layout: 1 });
 
-    expect(await updaterFor(adapter, fetch).update()).toEqual({ status: "failed", dataVersion: v(0), reason: "manifest" });
+    expect(await updaterFor(adapter, fetch).update()).toEqual({ status: "failed", dataVersion: v(0), reason: "manifest", cause: { name: "ManifestInvalid", message: expect.any(String) } });
   });
 });
 
@@ -456,7 +493,7 @@ describe("createReleaseUpdater: a release other than the manifest's", () => {
     const { adapter, state } = fakeDatabase({ dataVersion: v(0), layout: 1 });
     const drifting = { ...adapter, applyChangesets: async () => void (state.dataVersion = v(1)) };
 
-    expect(await updaterFor(drifting, fetch).update()).toEqual({ status: "failed", dataVersion: v(2), reason: "mismatch" });
+    expect(await updaterFor(drifting, fetch).update()).toEqual({ status: "failed", dataVersion: v(2), reason: "mismatch", cause: { name: "ReleaseMismatch", message: `the database holds ${v(2)} after the replace, the manifest names ${v(3)}` } });
     expect(requests.filter((url) => url === served.manifest.database.url)).toHaveLength(1);
   });
 
@@ -465,7 +502,7 @@ describe("createReleaseUpdater: a release other than the manifest's", () => {
     const { fetch, requests } = fakeFetch(served);
     const { adapter } = fakeDatabase({ dataVersion: null, layout: null });
 
-    expect(await updaterFor(adapter, fetch).update()).toEqual({ status: "failed", dataVersion: v(2), reason: "mismatch" });
+    expect(await updaterFor(adapter, fetch).update()).toEqual({ status: "failed", dataVersion: v(2), reason: "mismatch", cause: { name: "ReleaseMismatch", message: expect.stringContaining(v(2)) } });
     expect(requests).toEqual([MANIFEST_URL, served.manifest.database.url]);
   });
 
@@ -476,7 +513,7 @@ describe("createReleaseUpdater: a release other than the manifest's", () => {
     const { adapter, state } = fakeDatabase({ dataVersion: v(0), layout: 1 });
     const drifting = { ...adapter, applyChangesets: async () => void (state.dataVersion = v(2)) };
 
-    expect(await updaterFor(drifting, fetch).update()).toEqual({ status: "failed", dataVersion: v(2), reason: "checksum" });
+    expect(await updaterFor(drifting, fetch).update()).toEqual({ status: "failed", dataVersion: v(2), reason: "checksum", cause: { name: "SizeMismatch", message: expect.any(String) } });
   });
 });
 
@@ -535,6 +572,6 @@ describe("createReleaseUpdater: gzip", () => {
       throw new Error("incorrect header check");
     };
 
-    expect(await updaterFor(adapter, fetch, { gunzip }).update()).toEqual({ status: "failed", dataVersion: v(0), reason: "gunzip" });
+    expect(await updaterFor(adapter, fetch, { gunzip }).update()).toEqual({ status: "failed", dataVersion: v(0), reason: "gunzip", cause: { name: "Error", message: "incorrect header check" } });
   });
 });
