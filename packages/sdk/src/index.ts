@@ -87,6 +87,8 @@ export {
   SITE_FEATURES,
   SOCIAL_HOSTS,
   VEHICLE_ACCESS_VALUES,
+  TOILET_TYPES,
+  MAX_OPERATOR_LENGTH,
   addressProblems,
   contactProblem,
   isAddress,

@@ -104,6 +104,19 @@ export type AccessValue = "2wd" | "awd" | "4wd" | "unknown";
 export type VehicleAccessValue = "heavy_vehicles_only";
 export type EntryValue = "public" | "customers" | "permit" | "private";
 export type WaterType = "tank_fill" | "fountain";
+/** How the toilets work (OSM toilets:disposal). `dry` is composting or bucket. */
+export type ToiletType = "flush" | "pit" | "chemical" | "dry";
+/** A fuel sold at the pump (OSM fuel:*=yes). `lpg` is LPG at the pump. */
+export type FuelType = "diesel" | "unleaded_91" | "e10" | "unleaded_95" | "unleaded_98" | "e85" | "adblue" | "lpg";
+/**
+ * A nearby OSM object, worked out from the extract at each release: the
+ * distance in metres to its nearest point (0 inside it, at most 5000, rounded
+ * to 10 m) and its name when it has one.
+ */
+export interface NearbyFeature {
+  distance_m: number;
+  name?: string;
+}
 /** An Australian state or territory, as its abbreviation. */
 export type AddressState = "NSW" | "VIC" | "QLD" | "SA" | "WA" | "TAS" | "NT" | "ACT";
 
@@ -138,7 +151,11 @@ export interface PlaceFacts {
   tents?: boolean;
   caravans?: CaravansValue;
   toilets?: boolean;
+  /** How the toilets work. */
+  toilet_type?: ToiletType;
   showers?: boolean;
+  /** Hot water in the showers or basins. */
+  hot_water?: boolean;
   drinking_water?: boolean;
   dump_station?: boolean;
   max_stay?: string;
@@ -197,6 +214,10 @@ export interface PlaceFacts {
   tv_reception?: boolean;
   pet_sitting?: boolean;
   fuel?: boolean;
+  /** The fuels sold, in the order of `FuelType`. Read only: no report names it. */
+  fuels?: FuelType[];
+  /** Air for tyres. */
+  air?: boolean;
   lpg?: boolean;
   car_wash?: boolean;
   vehicle_storage?: boolean;
@@ -212,6 +233,8 @@ export interface PlaceFacts {
   nudist?: boolean;
   // Brand and contacts.
   brand?: BrandValue;
+  /** Who runs the place: a council, a parks agency, a company. 1 to 200 characters. */
+  operator?: string;
   /** A person checks it, as they check phones and links. */
   address?: PlaceAddress;
   email?: string;
@@ -224,11 +247,21 @@ export interface PlaceFacts {
   tiktok?: string;
   /** https only. */
   x?: string;
+  // Nearby facts, worked out from OSM at each release. No report names them.
+  /** The nearest beach within 5 km. */
+  nearest_beach?: NearbyFeature;
+  /** The nearest boat ramp within 5 km, other than the place itself. */
+  nearest_boat_ramp?: NearbyFeature;
 }
 
 export type FactName = keyof PlaceFacts;
-/** Facts an app report may name. booking_url comes only from owners. */
-export type ReportFactName = Exclude<FactName, "booking_url">;
+/** Facts worked out from OSM objects near a place at each release. No report or owner sets them. */
+export type NearbyFactName = Extract<FactName, "nearest_beach" | "nearest_boat_ramp">;
+/**
+ * Facts an app report may name. booking_url comes only from owners, the
+ * nearby facts only from OSM, and fuels only from OSM for now.
+ */
+export type ReportFactName = Exclude<FactName, "booking_url" | "fuels" | NearbyFactName>;
 /** The contact facts and the address: checked with `contactProblem`, and what a `contact` report may name. */
 export type ContactFactName = Extract<FactName, "website" | "phone" | "phone_2" | "email" | "facebook" | "instagram" | "tiktok" | "x" | "address">;
 /** Facts a `doubt` report may name: any reportable fact except the contact facts and the address, which use the `contact` kind. */
@@ -515,7 +548,7 @@ export interface OwnerContact {
 }
 
 /** Facts a verified owner may set directly: every fact except road access and water_type. */
-export type OwnerFactName = Exclude<FactName, "access" | "water_type">;
+export type OwnerFactName = Exclude<FactName, "access" | "water_type" | "fuels" | NearbyFactName>;
 
 export type OwnerFacts = Pick<PlaceFacts, OwnerFactName>;
 

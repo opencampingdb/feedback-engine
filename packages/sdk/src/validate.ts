@@ -35,6 +35,7 @@ import type {
   ReviewReportBody,
   ReviewReportReason,
   Submission,
+  ToiletType,
   VehicleAccessValue,
 } from "./types.js";
 
@@ -118,6 +119,10 @@ export const BRANDS: readonly BrandValue[] = [
 ];
 /** Values of `vehicle_access`. More may come; an app should show nothing for a value it does not know. */
 export const VEHICLE_ACCESS_VALUES: readonly VehicleAccessValue[] = ["heavy_vehicles_only"];
+/** Values of `toilet_type`: how the toilets work. `dry` is composting or bucket. */
+export const TOILET_TYPES: readonly ToiletType[] = ["flush", "pit", "chemical", "dry"];
+/** Longest `operator`, after trimming. */
+export const MAX_OPERATOR_LENGTH = 200;
 /** Site features: facts that are true or false. */
 export const SITE_FEATURES = [
   "wheelchair",
@@ -305,6 +310,11 @@ export const FACTS: Readonly<Record<ReportFactName, (value: unknown) => boolean>
   website: isHttpsPage(300),
   phone: isPhone,
   water_type: (v) => v === "tank_fill" || v === "fountain",
+  toilet_type: (v) => typeof v === "string" && (TOILET_TYPES as readonly string[]).includes(v),
+  hot_water: isBoolean,
+  air: isBoolean,
+  // Who runs the place: 1 to 200 characters once trimmed, with no email address, phone number or link.
+  operator: (v) => typeof v === "string" && v.trim().length > 0 && v.trim().length <= MAX_OPERATOR_LENGTH && findContactDetails(v).length === 0,
   booking_required: isBoolean,
   ...(Object.fromEntries(SITE_FEATURES.map((f) => [f, isBoolean])) as Record<(typeof SITE_FEATURES)[number], (v: unknown) => boolean>),
   brand: (v) => typeof v === "string" && (BRANDS as readonly string[]).includes(v),
@@ -434,6 +444,11 @@ export function isValidFactValue(fact: ReportFactName, value: unknown): value is
   return FACTS[fact](value);
 }
 
+/** A valid fact value as it is stored: the operator trimmed, every other value as it is. */
+function storedFactValue(fact: string, value: FactValue): FactValue {
+  return fact === "operator" && typeof value === "string" ? value.trim() : value;
+}
+
 function checkText(value: unknown, field: string, errors: string[], required: boolean): string | undefined {
   if (value === undefined && !required) return undefined;
   if (typeof value !== "string") {
@@ -494,7 +509,7 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
       errors.push(`report.value ${hoursReason(value.fact, value.value) ?? `is not a valid value for ${value.fact}`}`);
     } else {
       out.fact = value.fact;
-      out.value = value.value as FactValue;
+      out.value = storedFactValue(value.fact, value.value as FactValue);
     }
   } else if (kind === "contact") {
     if (!isContactFact(value.fact)) errors.push(`report.fact must be one of ${CONTACT_FACTS.join(", ")}`);
@@ -958,7 +973,7 @@ function checkOwnerFacts(value: unknown, field: string, errors: string[]): Owner
     const valid = Object.hasOwn(OWNER_FACTS, name) ? OWNER_FACTS[name as OwnerFactName] : undefined;
     if (!valid) errors.push(`${field}.${name} is not a fact an owner can set`);
     else if (!valid(v)) errors.push(`${field}.${name} ${hoursReason(name, v) ?? "is not a valid value"}`);
-    else out[name] = v as FactValue;
+    else out[name] = storedFactValue(name, v as FactValue);
   }
   return out as OwnerFacts;
 }
