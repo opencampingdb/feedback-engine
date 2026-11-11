@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isOpeningHours, openingHoursProblem } from "../src/hours.js";
+import { isOpeningHours, openingHoursProblem, openMonths } from "../src/hours.js";
 
 describe("openingHoursProblem", () => {
   // Examples from the OSM opening_hours specification and key pages.
@@ -94,5 +94,57 @@ describe("openingHoursProblem", () => {
   it("refuses an empty value and anything that is not text", () => {
     expect(openingHoursProblem("")).toBe("empty");
     expect(isOpeningHours(42)).toBe(false);
+  });
+});
+
+describe("openMonths", () => {
+  it("reads a month range on its own", () => {
+    expect(openMonths("Apr-Oct")).toBe("Apr-Oct");
+  });
+
+  it("reads a month range that runs across the year end", () => {
+    expect(openMonths("Dec-Feb")).toBe("Dec-Feb");
+  });
+
+  it("reads a month range followed by the days and times that apply in it", () => {
+    expect(openMonths("Apr-Oct Mo-Su 08:00-18:00")).toBe("Apr-Oct");
+    expect(openMonths("Apr-Oct: Mo-Fr 08:00-12:00,13:00-17:00")).toBe("Apr-Oct");
+    expect(openMonths("Nov-Mar Sa,Su")).toBe("Nov-Mar");
+    expect(openMonths("May-Sep 07:00-19:00")).toBe("May-Sep");
+  });
+
+  it.each([
+    // Times only, and sunrise or sunset, say nothing about the months.
+    "Mo-Fr 08:00-17:00",
+    "24/7",
+    "sunrise-sunset",
+    "Apr-Oct sunrise-sunset",
+    // More than one month range, or more than one rule.
+    "Jan-Mar,Jun-Aug",
+    "Apr-Oct Mo-Su 08:00-18:00; Nov-Mar Sa,Su 09:00-12:00",
+    "Apr-Oct; PH off",
+    "Apr-Oct, Dec 25 off",
+    // Closed or unknown, and comments.
+    "Apr-Oct off",
+    "Apr-Oct closed",
+    "Apr-Oct unknown",
+    'Apr-Oct "ring ahead"',
+    // Week numbers, years, dates and holidays.
+    "week 14-44",
+    "2026 Apr-Oct",
+    "Apr 01-Oct 31",
+    "Apr-Oct PH",
+    "Apr-Oct Su[1] 10:00-12:00",
+    "Apr-Oct 18:00+",
+    // A single month, the same month twice, and values that aren't OSM syntax.
+    "Jul",
+    "Apr-Apr",
+    "Apr-Oct:",
+    "Apr-Oct 25:00-26:00",
+    "apr-oct",
+    " Apr-Oct",
+    "",
+  ])("answers null for %j", (value) => {
+    expect(openMonths(value)).toBeNull();
   });
 });

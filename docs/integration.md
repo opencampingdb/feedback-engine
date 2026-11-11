@@ -174,6 +174,17 @@ openingHoursProblem("Mo-Su 06:00-22:00"); // null
 openingHoursProblem("Mon-Sun 6am-10pm"); // 'not OSM opening_hours syntax at character 3 ("n-Sun 6am-10"): write weekdays as two letters: Mo Tu We Th Fr Sa Su'
 ```
 
+**Open months.** `openMonths(value)` reads the months an `opening_hours` value says the place is open, so every app can show a season the same way, such as "Open Apr to Oct". It answers one month range of two different months, such as `Apr-Oct` or `Dec-Feb`, which `monthsInRange` reads, when the value is one rule made of that range alone or followed by weekdays and clock times that apply in it. It answers null for anything it can't read with certainty: times only, sunrise and sunset, week numbers, years, dates, holidays, more than one month range or rule, `off`, `closed` and `unknown`, comments, and values that aren't OSM syntax. Show no season for null.
+
+```ts
+import { openMonths } from "@opencampingdb/feedback";
+
+openMonths("Apr-Oct Mo-Su 08:00-18:00"); // "Apr-Oct"
+openMonths("Dec-Feb"); // "Dec-Feb"
+openMonths("Mo-Fr 08:00-17:00"); // null
+openMonths("Jan-Mar,Jun-Aug"); // null
+```
+
 **Dog months.** `pets_months` only means something while `pets` is `seasonal`. A report of it for a place whose `pets` is anything else is held for a person (`not_seasonal`). When `pets` is set to a value other than `seasonal`, the place's `pets_months` comes off with it: the intake lists both changes, the second with `value: null`. To clear the months alone, send a `doubt` about `pets_months`. `monthsInRange(range)` gives the months a range covers, 1 to 12 from its first month, so the app can tell whether dogs are allowed on the day a traveller is going:
 
 ```ts

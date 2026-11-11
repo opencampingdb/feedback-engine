@@ -326,3 +326,33 @@ export function openingHoursProblem(value: string): string | null {
 export function isOpeningHours(value: unknown): value is string {
   return typeof value === "string" && openingHoursProblem(value) === null;
 }
+
+const MONTH = `(${MONTHS.join("|")})`;
+const WDAY = `(?:${WDAYS.join("|")})`;
+const WEEKDAYS = `${WDAY}(?:-${WDAY})?(?:,${WDAY}(?:-${WDAY})?)*`;
+const TIMESPAN = "\\d{2}:\\d{2}-\\d{2}:\\d{2}";
+const TIMES = `${TIMESPAN}(?:,${TIMESPAN})*`;
+/**
+ * One month range, then optionally plain weekdays and plain clock times that
+ * apply in it. Anything else (holidays, nth weekdays, sunrise, open ends,
+ * modifiers, comments) does not match.
+ */
+const OPEN_MONTHS = new RegExp(`^${MONTH}-${MONTH}(?::? (?:${WEEKDAYS}(?: ${TIMES})?|${TIMES}))?$`);
+
+/**
+ * The months an opening hours value says the place is open, as one month
+ * range such as `Apr-Oct` or `Dec-Feb` (read it with `monthsInRange`), or
+ * null when the value does not say so with certainty.
+ *
+ * It reads one rule: a range of two different months, alone or followed by
+ * weekdays such as `Mo-Fr` or `Sa,Su` and clock times such as `08:00-17:00`
+ * that apply in it. Anything else answers null: times only, sunrise and
+ * sunset, week numbers, years, dates, holidays, more than one month range or
+ * rule, `off`, `closed` and `unknown`, comments, and values that are not OSM
+ * opening_hours syntax.
+ */
+export function openMonths(openingHours: string): string | null {
+  const m = OPEN_MONTHS.exec(openingHours);
+  if (!m || m[1] === m[2] || openingHoursProblem(openingHours) !== null) return null;
+  return `${m[1]}-${m[2]}`;
+}
