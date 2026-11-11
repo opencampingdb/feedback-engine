@@ -2,7 +2,7 @@ import { createReadStream } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { isFeedbackId, isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
+import { FIRST_HAND, isFeedbackId, isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
 import type { AwaitingClaim, OwnerRecord } from "./owners.js";
 import { pairKey, withDoNotMatch, type DoNotMatchEntry } from "./review.js";
 import { majorRoads, type MajorRoads } from "./roads.js";
@@ -25,7 +25,8 @@ const RECEIVED = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
 /**
  * Why `item` cannot be used, or undefined when it has a feedback id (equal to
- * `expectedId` when given) and an ISO 8601 UTC `received`.
+ * `expectedId` when given), an ISO 8601 UTC `received` and, on a report that
+ * has one, a `first_hand` the SDK allows, so applied items carry only those.
  */
 function storedProblem(item: StoredSubmission, expectedId?: string): string | undefined {
   if (typeof item !== "object" || item === null) return "the file is not a JSON object";
@@ -34,6 +35,13 @@ function storedProblem(item: StoredSubmission, expectedId?: string): string | un
   }
   if (typeof item.received !== "string" || !RECEIVED.test(item.received) || Number.isNaN(Date.parse(item.received))) {
     return "received is not an ISO 8601 UTC time";
+  }
+  const report = (item as { report?: unknown }).report;
+  if (typeof report === "object" && report !== null && "first_hand" in report) {
+    const { kind, first_hand } = report as { kind?: unknown; first_hand?: unknown };
+    if ((kind !== "fact" && kind !== "doubt") || !(FIRST_HAND as readonly unknown[]).includes(first_hand)) {
+      return "report.first_hand must be seen_nearby or says_so, on a fact or doubt report";
+    }
   }
   return undefined;
 }

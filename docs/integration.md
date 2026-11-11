@@ -235,6 +235,18 @@ await feedback.report({ place, report: { kind: "fact", fact: "toilets", value: t
 await feedback.report({ place, report: { kind: "doubt", fact: "toilets", note: "None I could find" }, consent: true }); // wrong, right value unknown
 ```
 
+**First-hand reports.** A `fact` report or a doubt may carry `first_hand`, to say the traveller was at the place in the last month (`FIRST_HAND`):
+
+- `seen_nearby` when your app saw the device within its set distance of the place in the last 30 days, for example from a check or a saved visit.
+- `says_so` when location is off and the traveller answered yes to "Are you at this place now, or were you here in the last month?". Ask that question in these words, and only when your app has no location to go on.
+
+Leave it out when neither is true, and never send the location itself. Any other value, or `first_hand` on another report kind, is refused. The intake keeps it on the report, reviewers see it, and the apply run writes it on the applied item in the inbox as `report.first_hand`, so the data's MapRoulette tasks can count first-hand sources: a traveller's value reaches mappers only when at least one of its sources is first-hand.
+
+```ts
+await feedback.report({ place, report: { kind: "fact", fact: "toilets", value: true, first_hand: "seen_nearby" }, consent: true });
+await feedback.report({ place, report: { kind: "doubt", fact: "pets", first_hand: "says_so" }, consent: true });
+```
+
 **A Commons photo that is not of the place.** Apps show Wikimedia Commons photos from `commons.ndjson.gz`. A `commons_mismatch` report says one of them is not of the place: it needs the place and `file`, the photo's `file` from that line (1 to 255 characters on one line, `MAX_COMMONS_FILE_LENGTH`), and may carry a `note` for reviewers. Hide the photo for the traveller who sent it at once, and keep it hidden on that phone: the intake answers `held` (`commons_report`) and a reviewer gets the case. Reports from two different sources within 90 days, at least one attested, add the place and file to the data's `moderation/commons-do-not-match.json` at the next apply run, and later releases leave the photo out for everyone. A reviewer may add it on one report too. A person can undo either, and the app should offer the traveller a way to show the photo again.
 
 ```ts

@@ -523,6 +523,26 @@ describe("run", () => {
     expect(moved).toMatchObject({ intake: { state: "held", held_reason: "ai_check" }, outcome: { result: "needs_review" } });
   });
 
+  it("keeps first_hand on the report of each applied item, so a reader can count first-hand sources", async () => {
+    const day = "2026-10-29";
+    await pending(41, `${day}T01:00:00Z`, "aaaa", { type: "report", report: { kind: "fact", fact: "power", value: true, first_hand: "seen_nearby" } });
+    await pending(42, `${day}T02:00:00Z`, "bbbb", { type: "report", report: { kind: "fact", fact: "power", value: true, first_hand: "says_so" } });
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.counts.applied).toBe(2);
+    const applied = async (n: number) => JSON.parse(await readFile(join(inbox, "applied", day, `${id(n)}.json`), "utf8")) as Record<string, unknown>;
+    expect(await applied(41)).toMatchObject({ report: { kind: "fact", fact: "power", value: true, first_hand: "seen_nearby" }, outcome: { result: "applied" } });
+    expect(await applied(42)).toMatchObject({ report: { first_hand: "says_so" }, outcome: { result: "applied" } });
+  });
+
+  it("refuses an inbox item whose first_hand is not one of its values", async () => {
+    const day = "2026-10-29";
+    await pending(43, `${day}T01:00:00Z`, "aaaa", { type: "report", report: { kind: "fact", fact: "power", value: true, first_hand: "-36.85,144.55" } });
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.counts).toMatchObject({ applied: 0, refused: 1 });
+    const refused = JSON.parse(await readFile(join(inbox, "refused", day, `${id(43)}.json`), "utf8"));
+    expect(refused.outcome.reason).toMatch(/report\.first_hand must be seen_nearby or says_so/);
+  });
+
   it("skips and logs a pending item whose id is already in applied/ or refused/, so it is never decided twice", async () => {
     const day = "2026-10-29";
     const power = { type: "report", report: { kind: "fact", fact: "power", value: true } };

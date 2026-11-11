@@ -29,6 +29,7 @@ import type {
   PhotoReportBody,
   PhotoRemovalBody,
   PhotoReportReason,
+  FirstHand,
   ReportBody,
   ReportKind,
   ReviewBody,
@@ -69,6 +70,9 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   "doubt",
   "commons_mismatch",
 ];
+/** The values `first_hand` may take on a `fact` or `doubt` report. */
+export const FIRST_HAND: readonly FirstHand[] = ["seen_nearby", "says_so"];
+
 /** The contact facts and the address, as a `contact` report may name them. */
 export const CONTACT_FACTS: readonly ContactFactName[] = ["website", "phone", "phone_2", "email", "facebook", "instagram", "tiktok", "x", "address"];
 export const CONTACT_REPORT_REASONS: readonly ContactReportReason[] = ["wrong", "spam"];
@@ -540,6 +544,11 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
     } else out.file = file.trim();
   } else if (value.file !== undefined) {
     errors.push("report.file is only allowed when report.kind is commons_mismatch");
+  }
+  if (value.first_hand !== undefined) {
+    if (kind !== "fact" && kind !== "doubt") errors.push("report.first_hand is only allowed when report.kind is fact or doubt");
+    else if (!(FIRST_HAND as readonly unknown[]).includes(value.first_hand)) errors.push("report.first_hand must be seen_nearby or says_so, or left out");
+    else out.first_hand = value.first_hand as FirstHand;
   }
   const note = checkText(value.note, "report.note", errors, false);
   if (note !== undefined) out.note = note;
