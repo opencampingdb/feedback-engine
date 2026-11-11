@@ -10,7 +10,6 @@ export type FeedbackType =
   | "review"
   | "check"
   | "review_report"
-  | "fee"
   | "photo"
   | "photo_report"
   | "photo_erasure"
@@ -231,6 +230,13 @@ export interface PlaceFacts {
   dangerous_when_wet?: boolean;
   over_50s?: boolean;
   nudist?: boolean;
+  // Charges, in OSM's charge syntax (`parseCharge`, `chargeConditions`).
+  /** What a standard site costs, as the place publishes it: OSM `charge`, such as `57 AUD/night`. Values from OSM are kept as OSM has them. */
+  charge?: string;
+  /** Exceptions to `charge`, such as seasons: OSM `charge:conditional`, such as `75 AUD/night @ (Dec-Jan)`. */
+  charge_conditional?: string;
+  /** What a powered site costs, in the same syntax as `charge`. An extension: OSM has no tag for it yet. */
+  charge_powered?: string;
   // Brand and contacts.
   brand?: BrandValue;
   /** Who runs the place: a council, a parks agency, a company. 1 to 200 characters. */
@@ -417,18 +423,6 @@ export interface CheckBody {
   nearby?: true;
 }
 
-/** The kind of site a reported fee was for. */
-export type FeeSite = "unpowered" | "powered" | "cabin";
-
-/** What a traveller paid for one night at a place. */
-export interface FeeBody {
-  /** Australian dollars per night, more than 0 and at most 1,000, with at most 2 decimal places. */
-  amount: number;
-  site: FeeSite;
-  /** Month it was paid, `YYYY-MM`. Not in the future and not more than 24 months ago. */
-  paid: string;
-}
-
 interface SubmissionBase {
   /** Place id (`ocdb_<ulid>`), or null for a new place. */
   place: string | null;
@@ -439,7 +433,7 @@ interface SubmissionBase {
   /**
    * Opaque id of the traveller's account: a keyed hash made by the app, never
    * a name or email. 16 to 128 characters of `A-Z a-z 0-9 _ -`. Reviews,
-   * review reports and fees need it unless the app key proves the install
+   * review reports and erasures need it unless the app key proves the install
    * with App Attest. The intake hashes it again (`ctr_` and 16 hex) before storage.
    */
   contributor?: string;
@@ -463,13 +457,6 @@ export interface CheckSubmission extends SubmissionBase {
   type: "check";
   place: string;
   check: CheckBody;
-}
-
-/** What a traveller paid to stay at a place. */
-export interface FeeSubmission extends SubmissionBase {
-  type: "fee";
-  place: string;
-  fee: FeeBody;
 }
 
 /** A traveller's report of a published review. `place` is the review's place. */
@@ -617,7 +604,6 @@ export type FeedbackSubmission =
   | ReviewSubmission
   | CheckSubmission
   | ReviewReportSubmission
-  | FeeSubmission
   | PhotoSubmission
   | PhotoReportSubmission
   | PhotoErasureSubmission

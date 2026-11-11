@@ -10,7 +10,7 @@ Open Camping DB holds no photos. This kit lets an app run its own photo service,
 | The apply rules, photos only (`ocdb-apply --places`) | Turn the inbox into photo lines in the app's records repository. A contributor's first photo goes to a person on a review PR. |
 | `ocdb-photos` and the Photo sync workflow | Check the records repository's photo lines, keep the two buckets and the per-place records in step with them, and replace a photo's files. |
 
-The app's photo service runs separately from the Open Camping DB intake. The app keeps using `createFeedbackClient` with Open Camping DB's intake for reports, reviews, checks and fees.
+The app's photo service runs separately from the Open Camping DB intake. The app keeps using `createFeedbackClient` with Open Camping DB's intake for reports, reviews and checks.
 
 ## How a photo travels
 

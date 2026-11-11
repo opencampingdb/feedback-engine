@@ -7,8 +7,8 @@ import type { AwaitingClaim, OwnerRecord } from "./owners.js";
 import { pairKey, withDoNotMatch, type DoNotMatchEntry } from "./review.js";
 import { majorRoads, type MajorRoads } from "./roads.js";
 import type { Decision } from "./rules.js";
-import { dumpFeeLine, dumpPhotoLine, dumpPlace, dumpReviewLine, feePath, photoPath, placePath, reviewPath } from "./serialise.js";
-import type { BlockedList, Fee, Photo, Place, RemovedPhotos, Review } from "./types.js";
+import { dumpPhotoLine, dumpPlace, dumpReviewLine, photoPath, placePath, reviewPath } from "./serialise.js";
+import type { BlockedList, Photo, Place, RemovedPhotos, Review } from "./types.js";
 
 export interface PendingFile {
   path: string;
@@ -321,7 +321,7 @@ export class DataRepo {
   constructor(readonly root: string) {}
 
   /** `relativePath` under the checkout, which must stay inside `folder`. */
-  #inside(folder: "places" | "reviews" | "fees" | "photos", relativePath: string): string {
+  #inside(folder: "places" | "reviews" | "photos", relativePath: string): string {
     const path = join(this.root, relativePath);
     if (!resolve(path).startsWith(resolve(this.root, folder) + sep)) throw new Error(`refusing to write outside ${folder}/: ${relativePath}`);
     return path;
@@ -436,32 +436,6 @@ export class DataRepo {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, text, "utf8");
     return reviewPath(placeId);
-  }
-
-  async fees(placeId: string): Promise<Fee[]> {
-    const path = this.#inside("fees", feePath(placeId));
-    if (!(await exists(path))) return [];
-    return (await readFile(path, "utf8"))
-      .split("\n")
-      .filter((line) => line.trim())
-      .map((line) => JSON.parse(line) as Fee);
-  }
-
-  /**
-   * Writes every fee line of a place, sorted by id, with LF endings and a
-   * trailing newline. Returns the path, or undefined when the file already
-   * holds exactly that.
-   */
-  async writeFees(placeId: string, fees: readonly Fee[]): Promise<string | undefined> {
-    const path = this.#inside("fees", feePath(placeId));
-    const text = [...fees]
-      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-      .map((f) => `${dumpFeeLine(f)}\n`)
-      .join("");
-    if ((await exists(path)) && (await readFile(path, "utf8")) === text) return undefined;
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, text, "utf8");
-    return feePath(placeId);
   }
 
   async photos(placeId: string): Promise<Photo[]> {

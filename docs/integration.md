@@ -67,7 +67,7 @@ export function askConsent(): Promise<boolean> {
 }
 ```
 
-## 5. Send reports, reviews, checks and fees
+## 5. Send reports, reviews, checks and charges
 
 Each call validates the payload, queues it and tries to send it. The result says what happened:
 
@@ -100,7 +100,7 @@ const results = await feedback.reportFacts({
 
 // Details for a place the traveller has just added, before its id is known:
 // give the new_place report a ref, and name the place as { newPlace: <ref> }.
-// Any report, reportFacts, check, fee or review can do this. The SDK keeps
+// Any report, reportFacts, check or review can do this. The SDK keeps
 // those items in its queue, unsent, until the new place is sent, then gives
 // them its ocdb_ id and sends them in order. It survives restarts, and a
 // waiting item never holds up the items behind it. If the new place is
@@ -143,18 +143,29 @@ await feedback.review({
 // true when the app saw the phone near the place at the time.
 await feedback.check({ place, check: { visited: "2026-10-30", still_there: true, nearby: true }, consent: true });
 
-// A fee: what the traveller paid per night in Australian dollars, the site
-// type (FEE_SITES: unpowered, powered, cabin) and the month they paid.
-await feedback.fee({ place, fee: { amount: 32.5, site: "powered", paid: "2026-10" }, contributor, consent: true });
+// Charges: the price the place publishes on its sign or website, in
+// OpenStreetMap's charge syntax.
+await feedback.reportFacts({
+  place,
+  facts: { charge: "57 AUD/night", charge_powered: "68 AUD/night", charge_conditional: "75 AUD/night @ (Dec-Jan)" },
+  consent: true,
+});
 ```
 
-A fee's `amount` is more than 0 and at most 1,000, with at most 2 decimal places. `paid` is `YYYY-MM`, not in the future and not more than 24 months ago. Fees need `contributor`, like reviews (`400 contributor_required`). They are published at the next apply run in `fees/<place id>.ndjson`, one per contributor per place per site type, a newer one replacing the older. Releases carry the fees paid in the last 24 months.
+**Charges.** `charge` is what a standard site costs, `charge_powered` what a powered site costs, and `charge_conditional` the exceptions to `charge`, such as a holiday season. They are OSM's `charge` and `charge:conditional` tags (`charge_powered` has no OSM tag yet). A value is `<amount> <currency>[/<unit>][/<time unit>]`, as the [OSM wiki](https://wiki.openstreetmap.org/wiki/Key:charge) writes it: an amount with at most 2 decimal places, an ISO 4217 currency code, then optionally what it is for (`person`, `vehicle`, `kWh`) and the time it covers, written out in full (`night`, `day`, `hour`, `week`). Spaces may stand around a slash. `charge_conditional` is one or more `<charge> @ <condition>` pairs separated by `;`, with the condition in OSM's [conditional syntax](https://wiki.openstreetmap.org/wiki/Conditional_restrictions), such as `(Dec-Jan)`. A condition holding a `;` goes in parentheses, and when several match, the last one wins. `isCharge` and `isChargeConditional` check a value. A report that fails is refused (`invalid_value`). When a place publishes a range ("powered $68 to $70"), send the lowest, and show it as "from".
+
+A charge is decided as other facts are, with one more hold: a `charge` or `charge_powered` over 250 AUD a night, or more than 50% above or below the place's current charge in the same currency and units, goes to a person (`unlikely_charge`).
+
+Values from OpenStreetMap are kept as OSM has them, so a place may hold a charge out of the syntax, such as `$12`. `parseCharge(value)` reads a charge into `{ amount, currency, unit?, per? }` and returns null for one it can't read: show that value as written. `chargeConditions(value)` reads each exception of a `charge_conditional` into `{ charge, condition }`, or returns null. Prices change, so show when a charge was set: `fact_dates` for a value from feedback, or the place's `osm.timestamp` for one from OSM.
+
+**Fee reports are gone.** What a traveller paid is no longer collected. The intake answers a `fee` submission from any SDK version with `410 {"error": "fee_retired"}`, and a client queue drops it as `rejected`. The `fee` fact (true, false or `donation`) is unchanged.
 
 A check that finds an open place still there sets the record's `last_confirmed` to the time of the next apply run. One check is enough. Checks on a closed or temporarily closed place do not set it.
 
 Facts a report may name:
 
 - `fee` (true, false or `donation`), `caravans` (true, false or `offroad`), `pets` (`yes`, `no`, `leashed`, `seasonal`)
+- `charge`, `charge_powered` and `charge_conditional`, in OSM's charge syntax (see **Charges** above)
 - `pets_months`, the months dogs are allowed at a place whose `pets` is `seasonal`: one OSM month range such as `May-Sep`, which may wrap the year end (`Dec-Feb`), as in OSM's `dog:conditional=yes @ (May-Sep)` (`isMonthRange`)
 - `power`, `tents`, `toilets`, `showers`, `drinking_water`, `dump_station`, `booking_required`, `hot_water` (hot water in the showers or basins) and `air` (air for tyres) (true or false)
 - `toilet_type`, how the toilets work: one of `TOILET_TYPES` (`flush`, `pit`, `chemical`, `dry`, where `dry` is composting or bucket)
@@ -559,6 +570,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `protected_source` | A doubt about a fact from OSM or the owner, which doubts never take down. |
 | `taken_down` | A report of a value doubts took down: it comes back when two new travellers confirm it. |
 | `not_seasonal` | `pets_months` for a place whose `pets` is not `seasonal`, so a person checks it. |
+| `unlikely_charge` | A `charge` or `charge_powered` over 250 AUD a night, or more than 50% above or below the place's current charge, so a person checks it. |
 | `commons_report` | A report that a Commons photo is not of the place. Hide it for the traveller who sent it; a reviewer decides, and two sources hide it for everyone. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. Adding a code later is additive. A code this version does not know is left out of `heldReason`, and `state` is still `held`. `itemDecision(answer)` reads `state` and `heldReason` from an intake answer you fetched yourself.

@@ -4,7 +4,6 @@ import type {
   PlaceFacts,
   AcceptedResponse,
   CheckBody,
-  FeeBody,
   FeedbackSubmission,
   LatLon,
   OwnerClaimResponse,
@@ -73,7 +72,7 @@ export interface FeedbackClientOptions {
   maxBatchSize?: number;
   /**
    * Proves the install to an intake whose app key requires attestation.
-   * Called each time a report, review, check, review report or fee is sent,
+   * Called each time a report, review, check or review report is sent,
    * and once for each batch of them, with the exact body text and its SHA-256
    * (lower case hex). Return the
    * attestation headers: on iOS `x-attest-platform: ios`, `x-attest-key-id`
@@ -229,19 +228,6 @@ export interface ReviewInput {
   place: PlaceTarget;
   review: ReviewBody;
   /** The signed-in traveller's opaque account id (a keyed hash, never a name or email). */
-  contributor?: string;
-  consent: boolean;
-  /**
-   * The caller's own id for this submission, 1 to 100 characters. Kept with
-   * the queued item and passed back to `onAnswered`. Never sent to the intake.
-   */
-  ref?: string;
-}
-
-export interface FeeInput {
-  place: PlaceTarget;
-  fee: FeeBody;
-  /** The signed-in traveller's opaque account id, as for a review. */
   contributor?: string;
   consent: boolean;
   /**
@@ -436,7 +422,7 @@ export type PhotoPassResult =
   | { status: "offline" };
 
 /**
- * What a report, review, check, review report, fee or withdraw came to. On
+ * What a report, review, check, review report or withdraw came to. On
  * `sent`, `state` and `heldReason` are the intake's decision (`ItemDecision`).
  */
 export type SubmitResult =
@@ -485,8 +471,6 @@ export interface FeedbackClient {
   reportFacts(input: FactsInput): Promise<FactResult[]>;
   review(input: ReviewInput): Promise<SubmitResult>;
   check(input: CheckInput): Promise<SubmitResult>;
-  /** Reports what the traveller paid per night. Queued and retried like a review. */
-  fee(input: FeeInput): Promise<SubmitResult>;
   /** Reports a published review. Queued and retried like the others. */
   reportReview(input: ReviewReportInput): Promise<SubmitResult>;
   /**
@@ -718,6 +702,8 @@ export type AnswerOutcome =
  * - `protected_source`: a doubt about a fact from OSM or the owner, which doubts never take down.
  * - `taken_down`: a report of a value doubts took down, which returns when two new travellers confirm it.
  * - `not_seasonal`: `pets_months` for a place whose `pets` is not `seasonal`, so a person checks it.
+ * - `unlikely_charge`: a `charge` or `charge_powered` over 250 AUD a night, or more than 50% above or
+ *   below the place's current charge, so a person checks it before it is published.
  * - `commons_report`: a report that a Commons photo is not of the place. The app hides it for the
  *   traveller at once, a reviewer gets the case, and two sources hide it for everyone.
  */
@@ -740,6 +726,7 @@ export const HELD_REASONS = [
   "protected_source",
   "taken_down",
   "not_seasonal",
+  "unlikely_charge",
   "commons_report",
 ] as const;
 
@@ -1600,7 +1587,6 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     },
     review: (input) => submit({ ...input }, "review"),
     check: (input) => submit({ ...input }, "check"),
-    fee: (input) => submit({ ...input }, "fee"),
     reportReview: ({ place, review, reason, contributor, consent, ref }) =>
       submit(
         { place, review_report: { review, reason }, ...(contributor !== undefined ? { contributor } : {}), consent, ref },
@@ -1633,7 +1619,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
   };
 }
 
-/** A client for Open Camping DB's feedback intake: reports, reviews, checks, fees and owner requests. */
+/** A client for Open Camping DB's feedback intake: reports, reviews, checks and owner requests. */
 export function createFeedbackClient(options: FeedbackClientOptions): FeedbackClient {
   const { photo: _photo, photoPass: _pass, reportPhoto: _report, removePhoto: _remove, erasePhotos: _erase, ...feedback } = createClient(options as PhotoClientOptions);
   return feedback;

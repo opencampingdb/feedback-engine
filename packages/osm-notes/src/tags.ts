@@ -30,6 +30,8 @@ const YES_NO: Readonly<Record<string, string>> = {
 const AS_WRITTEN: Readonly<Record<string, string>> = {
   max_stay: "maxstay",
   opening_hours: "opening_hours",
+  charge: "charge",
+  charge_conditional: "charge:conditional",
   website: "website",
   phone: "phone",
   email: "email",
@@ -159,6 +161,8 @@ const STRING_WORDS: Readonly<Record<string, Readonly<Record<string, string>>>> =
 const LABELS: Readonly<Record<string, string>> = {
   max_stay: "maximum stay",
   opening_hours: "opening hours",
+  charge: "charge for a site",
+  charge_conditional: "charge at other times",
   website: "website",
   phone: "phone number",
   phone_2: "second phone number",

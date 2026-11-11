@@ -1,5 +1,6 @@
 import { MAX_PROOF_LENGTH } from "./contributor-proof.js";
 import { openingHoursProblem } from "./hours.js";
+import { isCharge, isChargeConditional } from "./charge.js";
 import { findContactDetails, findContactDetailsInHours } from "./text.js";
 import { textProblem, tidyName } from "./tidy.js";
 import type {
@@ -11,8 +12,6 @@ import type {
   DoubtFactName,
   FactName,
   FeeValue,
-  FeeBody,
-  FeeSite,
   ReportFactName,
   FactValue,
   FeedbackSubmission,
@@ -44,7 +43,6 @@ export const FEEDBACK_TYPES = [
   "review",
   "check",
   "review_report",
-  "fee",
   "photo",
   "photo_report",
   "photo_erasure",
@@ -192,11 +190,12 @@ export const PHOTO_REPORT_REASONS: readonly PhotoReportReason[] = [
 export const MAX_PHOTO_BYTES = 1_500_000;
 /** Largest thumbnail the intake takes, in bytes. */
 export const MAX_THUMB_BYTES = 200_000;
-export const FEE_SITES: readonly FeeSite[] = ["unpowered", "powered", "cabin"];
-/** Highest fee per night, in Australian dollars. */
-export const MAX_FEE_AMOUNT = 1000;
-/** How many months back a fee may have been paid. */
-export const MAX_FEE_AGE_MONTHS = 24;
+/**
+ * Why `validateSubmission` refuses `type: "fee"`, and what the intake answers
+ * it with (`410 fee_retired`). What a traveller paid is no longer collected:
+ * send the price the place publishes as a `charge` fact report instead.
+ */
+export const FEE_RETIRED = "fee reports are no longer collected: send the price the place publishes as a charge fact report";
 /** Shape of a kind code. The list itself is `data/schema/kinds.json`. */
 const KIND_CODE = /^[a-z][a-z_]{1,39}$/;
 
@@ -316,6 +315,10 @@ export const FACTS: Readonly<Record<ReportFactName, (value: unknown) => boolean>
   // Who runs the place: 1 to 200 characters once trimmed, with no email address, phone number or link.
   operator: (v) => typeof v === "string" && v.trim().length > 0 && v.trim().length <= MAX_OPERATOR_LENGTH && findContactDetails(v).length === 0,
   booking_required: isBoolean,
+  charge: isCharge,
+  // The conditions must hold no email address, phone number or link.
+  charge_conditional: (v) => isChargeConditional(v) && findContactDetails(v).length === 0,
+  charge_powered: isCharge,
   ...(Object.fromEntries(SITE_FEATURES.map((f) => [f, isBoolean])) as Record<(typeof SITE_FEATURES)[number], (v: unknown) => boolean>),
   brand: (v) => typeof v === "string" && (BRANDS as readonly string[]).includes(v),
   address: isAddress,
@@ -356,7 +359,6 @@ const TOP_LEVEL_KEYS = new Set([
   "review",
   "check",
   "review_report",
-  "fee",
   "photo",
   "photo_report",
   "photo_removal",
@@ -727,44 +729,6 @@ function checkPhotoFiles(value: unknown, errors: string[]): PhotoFiles | undefin
 }
 
 /** Months since year 0, for comparing `YYYY-MM` values. */
-function monthIndex(year: number, month: number): number {
-  return year * 12 + (month - 1);
-}
-
-function checkFee(value: unknown, now: Date, errors: string[]): FeeBody | undefined {
-  if (!isObject(value)) {
-    errors.push("fee must be an object");
-    return undefined;
-  }
-  const { amount, site, paid } = value;
-  if (
-    typeof amount !== "number" ||
-    !Number.isFinite(amount) ||
-    amount <= 0 ||
-    amount > MAX_FEE_AMOUNT ||
-    Math.abs(Math.round(amount * 100) - amount * 100) > 1e-6
-  ) {
-    errors.push(`fee.amount must be more than 0 and at most ${MAX_FEE_AMOUNT} dollars, with at most 2 decimal places`);
-  }
-  if (typeof site !== "string" || !(FEE_SITES as readonly string[]).includes(site)) {
-    errors.push(`fee.site must be one of ${FEE_SITES.join(", ")}`);
-  }
-  const m = typeof paid === "string" ? YEAR_MONTH.exec(paid) : null;
-  if (!m) {
-    errors.push("fee.paid must be YYYY-MM");
-  } else {
-    // The latest month is the one already started somewhere (UTC+14), so a
-    // traveller ahead of UTC can report this month on its first day.
-    const ahead = new Date(now.getTime() + 14 * 3_600_000);
-    const latest = monthIndex(ahead.getUTCFullYear(), ahead.getUTCMonth() + 1);
-    const earliest = monthIndex(now.getUTCFullYear(), now.getUTCMonth() + 1) - MAX_FEE_AGE_MONTHS;
-    const month = monthIndex(Number(m[1]), Number(m[2]));
-    if (month > latest) errors.push("fee.paid must not be in the future");
-    else if (month < earliest) errors.push(`fee.paid must be within the last ${MAX_FEE_AGE_MONTHS} months`);
-  }
-  return { amount: amount as number, site: site as FeeSite, paid: paid as string };
-}
-
 function checkCheck(value: unknown, errors: string[]): CheckBody | undefined {
   if (!isObject(value)) {
     errors.push("check must be an object");
@@ -780,9 +744,10 @@ function checkCheck(value: unknown, errors: string[]): CheckBody | undefined {
 /**
  * Validates an incoming submission against the SPEC schema. On success the
  * returned value holds only the known fields, so anything extra an app sent
- * is never stored. `now` is the clock a fee's `paid` month is checked against.
+ * is never stored. `type: "fee"` is refused with `FEE_RETIRED`. `_now` is kept
+ * for callers that pass a clock: no check reads it now.
  */
-export function validateSubmission(input: unknown, now: Date = new Date()): ValidationResult {
+export function validateSubmission(input: unknown, _now: Date = new Date()): ValidationResult {
   const errors: string[] = [];
   if (!isObject(input)) return { ok: false, errors: ["body must be a JSON object"] };
 
@@ -791,12 +756,13 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
   }
 
   const type = input.type;
+  if (type === "fee") return { ok: false, errors: [FEE_RETIRED] };
   if (typeof type !== "string" || !ALL_TYPES.includes(type)) {
     errors.push(`type must be one of ${ALL_TYPES.join(", ")}`);
     return { ok: false, errors };
   }
   if ((OWNER_TYPES as readonly string[]).includes(type)) return validateOwner(input, type as OwnerSubmission["type"]);
-  for (const other of ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "photo_removal", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
+  for (const other of ["report", "review", "check", "review_report", "photo", "photo_report", "photo_removal", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
     if (other !== type && input[other] !== undefined) errors.push(`${other} is not allowed when type is ${type}`);
   }
 
@@ -881,9 +847,6 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
       if (removal) value = { ...base, place: place as string, type: "photo_removal", photo_removal: removal, ...proofField };
     } else if (type === "withdraw") {
       value = { ...base, place: place as string, type: "withdraw" };
-    } else if (type === "fee") {
-      const fee = checkFee(input.fee, now, errors);
-      if (fee) value = { ...base, place: place as string, type: "fee", fee };
     } else {
       const check = checkCheck(input.check, errors);
       if (check) value = { ...base, place: place as string, type: "check", check };
@@ -1043,7 +1006,7 @@ const OWNER_FIELDS: Record<OwnerSubmission["type"], string[]> = {
 /** Validates the three owner submission types (SPEC "Owners"). */
 function validateOwner(input: Record<string, unknown>, type: OwnerSubmission["type"]): ValidationResult {
   const errors: string[] = [];
-  for (const key of ["report", "review", "check", "review_report", "fee", "photo", "photo_report", "photo_removal", "contributor", "contributor_proof", "token", "owner", "claim", "listing", "update", "location"]) {
+  for (const key of ["report", "review", "check", "review_report", "photo", "photo_report", "photo_removal", "contributor", "contributor_proof", "token", "owner", "claim", "listing", "update", "location"]) {
     if (input[key] !== undefined && !OWNER_FIELDS[type].includes(key)) errors.push(`${key} is not allowed when type is ${type}`);
   }
   if (input.terms_accepted !== true) errors.push("terms_accepted must be true");

@@ -215,7 +215,6 @@ jobs:
             places
             moderation
             reviews
-            fees
             photos
           persist-credentials: false
           token: ${{ steps.data-token.outputs.token }}

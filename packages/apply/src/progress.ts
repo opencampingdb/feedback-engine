@@ -8,11 +8,11 @@ import type { ReviewPr } from "./owners.js";
 import { placeOf, type ProgressUpdate } from "./progress-update.js";
 import { inDataOnMain as changeReportOnMain } from "./recent.js";
 import type { DoNotMatchEntry } from "./review.js";
-import { feeIdOf, newPlaceIdOf, reviewIdOf, WINDOW_DAYS, WITHDRAWN, type Outcome } from "./rules.js";
+import { newPlaceIdOf, reviewIdOf, WINDOW_DAYS, WITHDRAWN, type Outcome } from "./rules.js";
 import type { RunDecision } from "./run.js";
 import { roundCoord } from "./serialise.js";
-import { feePath, placePath, reviewPath } from "./serialise.js";
-import type { Fee, Place, Review, SourceKey } from "./types.js";
+import { placePath, reviewPath } from "./serialise.js";
+import type { Place, Review, SourceKey } from "./types.js";
 
 export type { ProgressUpdate } from "./progress-update.js";
 
@@ -33,7 +33,6 @@ export interface ProgressStore {
 export interface MainData {
   places: ReadonlyMap<string, Place>;
   reviews: (placeId: string) => readonly Review[];
-  fees: (placeId: string) => readonly Fee[];
   doNotMatch: readonly Pick<DoNotMatchEntry, "place" | "file">[];
 }
 
@@ -156,12 +155,6 @@ export function itemInDataOnMain(item: DecidedItem, main: MainData): OnMain {
     case "withdraw":
       // Withdrawn more than 24 hours after it was added: it counts as a removal report.
       return onPlace(place.standing === "hidden");
-    case "fee": {
-      const feeId = feeIdOf(item);
-      // A later fee from the same contributor for the same site type replaces it.
-      const holdsChange = main.fees(place.id).some((f) => f.id === feeId || (f.id > feeId && f.contributor === item.contributor && f.site === item.fee.site));
-      return holdsChange ? inDataIn(feePath(place.id)) : notInData;
-    }
     case "review": {
       const reviewId = reviewIdOf(item);
       // A later review from the same contributor replaces it.
@@ -376,14 +369,12 @@ export async function sendProgress(options: SendProgressOptions): Promise<{ sent
   const repo = new DataRepo(options.main);
   const places = await repo.places(history.map(placeOf).filter((p): p is string => p !== null));
   const reviews = new Map<string, Review[]>();
-  const fees = new Map<string, Fee[]>();
   for (const item of history) {
     if (typeof item.place !== "string" || !places.has(item.place)) continue;
     if (item.type === "review" && !reviews.has(item.place)) reviews.set(item.place, await repo.reviews(item.place));
-    if (item.type === "fee" && !fees.has(item.place)) fees.set(item.place, await repo.fees(item.place));
   }
   const doNotMatch = history.some((i) => i.type === "report" && i.report.kind === "commons_mismatch") ? await repo.doNotMatch() : [];
-  const main: MainData = { places, reviews: (id) => reviews.get(id) ?? [], fees: (id) => fees.get(id) ?? [], doNotMatch };
+  const main: MainData = { places, reviews: (id) => reviews.get(id) ?? [], doNotMatch };
   const botLogins = options.botLogins ?? [];
   const declined = turnedDown(idsOnPrs(options.reviewPrs ?? [], botLogins), idsOnPrs(options.autoPrs ?? [], botLogins));
 

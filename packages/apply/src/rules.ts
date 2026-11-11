@@ -1,4 +1,5 @@
 import {
+  FEE_RETIRED,
   newPlaceStanding,
   safeSearchVerdict,
   tidyName,
@@ -37,7 +38,7 @@ import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type 
 import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
 import { dropSource, setSource } from "./sources.js";
-import type { Fee, Photo, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
+import type { Photo, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
 
 export type { ClosedCase, HeldCase };
 
@@ -73,8 +74,6 @@ const DRAFT_GROUP = "overnight";
 export const newPlaceIdOf = (item: { id: string }) => `ocdb_${item.id.replace(/^fb_/, "")}`;
 /** The id a review gets from its feedback item: `rev_` and the item's ulid. */
 export const reviewIdOf = (item: { id: string }) => `rev_${item.id.replace(/^fb_/, "")}`;
-/** The id a fee gets from its feedback item: `fee_` and the item's ulid. */
-export const feeIdOf = (item: { id: string }) => `fee_${item.id.replace(/^fb_/, "")}`;
 
 /** Decision reasons the recent places store is settled by. */
 export const WITHDRAWN = { place: "the person who added it withdrew it", withdrawal: "new place withdrawn" } as const;
@@ -130,8 +129,6 @@ export interface RulesInput {
   places: ReadonlyMap<string, Place>;
   /** Reviews already in the data for a place. */
   reviews: (placeId: string) => readonly Review[];
-  /** Fees already in the data for a place. None when left out. */
-  fees?: (placeId: string) => readonly Fee[];
   /** Kind code to group, from `data/schema/kinds.json`. */
   kinds?: ReadonlyMap<string, string>;
   /** Contributors in `moderation/blocked_contributors.json`. */
@@ -211,11 +208,6 @@ export interface RulesOutput {
    */
   reviews: Map<string, Review[]>;
   /**
-   * Every fee line of each place whose fees changed, sorted by id: new fees
-   * added, a contributor's older fee for the same site type replaced.
-   */
-  fees: Map<string, Fee[]>;
-  /**
    * Every photo line of each place whose photos changed, sorted by id. An
    * empty list means the place has no photos left.
    */
@@ -240,7 +232,6 @@ type ReportItem = Extract<StoredFeedback, { type: "report" }>;
 type ReviewItem = Extract<StoredFeedback, { type: "review" }>;
 type CheckItem = Extract<StoredFeedback, { type: "check" }>;
 type ReviewReportItem = Extract<StoredFeedback, { type: "review_report" }>;
-type FeeItem = Extract<StoredFeedback, { type: "fee" }>;
 type PhotoItem = Extract<StoredFeedback, { type: "photo" }>;
 type PhotoReportItem = Extract<StoredFeedback, { type: "photo_report" }>;
 type ErasureItem = Extract<StoredFeedback, { type: "photo_erasure" }>;
@@ -361,7 +352,6 @@ export function applyRules(input: RulesInput): RulesOutput {
   const decisions = new Map<string, Decision>();
   const working = new Map<string, Place>();
   const newReviews = new Map<string, Review[]>();
-  const newFees = new Map<string, Fee[]>();
   const changes: Change[] = [];
   const edits: ReviewEdit[] = [];
   const held: HeldCase[] = [];
@@ -406,6 +396,11 @@ export function applyRules(input: RulesInput): RulesOutput {
   // Items about a place that is not in the data yet, left waiting for it.
   const waitingForData = new Set<string>();
   for (const item of pending) {
+    // Fee reports are no longer collected. One sent before the intake refused them is refused here.
+    if ((item as { type: string }).type === "fee") {
+      decide(item, "refused", FEE_RETIRED);
+      continue;
+    }
     // A deletion request about the contributor's own photos or reviews is honoured even when they are blocked.
     const deletion = item.type === "photo_erasure" || item.type === "photo_removal" || item.type === "review_erasure";
     if (item.contributor !== undefined && blocked.has(item.contributor) && !deletion) {
@@ -480,7 +475,6 @@ export function applyRules(input: RulesInput): RulesOutput {
     newReviews.set(placeId, lines);
     record(placeId).rating = ratingOf(lines.filter((r) => isVisible(r, blocked)));
   }
-  applyFees(known.filter((i): i is FeeItem => i.type === "fee"));
   // Erasures first, so a photo sent in the same run by an erased contributor is refused.
   const erased = applyErasures(known.filter((i): i is ErasureItem => i.type === "photo_erasure"));
   applyPhotos(known.filter((i): i is PhotoItem => i.type === "photo"), erased);
@@ -539,7 +533,6 @@ export function applyRules(input: RulesInput): RulesOutput {
     decisions: ordered,
     places: changed,
     reviews: newReviews,
-    fees: newFees,
     photos: newPhotos,
     removedPhotos,
     doNotMatch,
@@ -635,47 +628,6 @@ export function applyRules(input: RulesInput): RulesOutput {
       note(item.place, `review added${replaced}`, true, [item]);
       decide(item, "applied", older.length > 0 ? "review accepted, replacing the contributor's earlier review" : "review accepted");
     }
-  }
-
-  /**
-   * Fees hold no free text, so they are published at once. One fee per
-   * contributor per place per site type: the newer replaces the older.
-   */
-  function applyFees(items: FeeItem[]): void {
-    const feeLines = new Map<string, Fee[]>();
-    for (const item of items) {
-      if (item.contributor === undefined) {
-        decide(item, "refused", "fee has no contributor");
-        continue;
-      }
-      let lines = feeLines.get(item.place);
-      if (!lines) {
-        lines = (input.fees?.(item.place) ?? []).map((f) => ({ ...f }));
-        feeLines.set(item.place, lines);
-      }
-      const feeId = feeIdOf(item);
-      if (lines.some((f) => f.id === feeId)) {
-        decide(item, "applied", "fee is already in the data");
-        continue;
-      }
-      const older = lines.filter((f) => f.contributor === item.contributor && f.site === item.fee.site);
-      for (const f of older) lines.splice(lines.indexOf(f), 1);
-      lines.push({
-        id: feeId,
-        place: item.place,
-        amount: item.fee.amount,
-        site: item.fee.site,
-        paid: item.fee.paid,
-        created: item.received,
-        app: item.app,
-        contributor: item.contributor,
-      });
-      newFees.set(item.place, lines);
-      const replaced = older.length > 0 ? `, replacing ${older.map((f) => f.id).join(", ")}` : "";
-      note(item.place, `${item.fee.site} fee of $${item.fee.amount.toFixed(2)} a night paid ${item.fee.paid}${replaced}`, true, [item]);
-      decide(item, "applied", older.length > 0 ? "fee accepted, replacing the contributor's earlier fee for this site type" : "fee accepted");
-    }
-    for (const lines of newFees.values()) lines.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   }
 
   /** The photo lines of a place as this run leaves them. */
