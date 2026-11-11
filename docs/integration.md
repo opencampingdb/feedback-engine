@@ -8,10 +8,24 @@ Open an issue with the **App key** form in [opencampingdb/feedback-engine](https
 
 ## 2. Install
 
+The SDK isn't published to npm. Build it from this repository and install the package file it makes:
+
+```sh
+git clone https://github.com/opencampingdb/feedback-engine.git
+cd feedback-engine
+npm ci
+npm run build -w packages/sdk
+npm pack -w packages/sdk   # writes opencampingdb-feedback-<version>.tgz
+```
+
+Then, in your app:
+
 ```sh
 npx expo install @react-native-async-storage/async-storage
-npm install @opencampingdb/feedback
+npm install /path/to/opencampingdb-feedback-<version>.tgz
 ```
+
+Keep the `.tgz` in your repository (or a folder it can reach) so every build installs the same version. To update, pull, build and pack again. The version is in `packages/sdk/package.json`, and the commit history says what each version changed.
 
 The client needs `crypto.randomUUID` or `crypto.getRandomValues` to make the device id. Expo SDK 52 and later provide them. On older setups, add `react-native-get-random-values` and import it first, or pass your own `randomUUID` option.
 
