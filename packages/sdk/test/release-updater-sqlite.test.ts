@@ -132,7 +132,7 @@ describe.skipIf(!sessions)("createReleaseUpdater with node:sqlite", () => {
 
     const result = await createReleaseUpdater({ adapter: adapterFor(phone), readableLayouts: [1], readableFormats: [12], fetch, manifestUrl: MANIFEST_URL }).update();
 
-    expect(result).toEqual({ status: "failed", dataVersion: V1, reason: "apply" });
+    expect(result).toEqual({ status: "failed", dataVersion: V1, reason: "apply", cause: { name: "Error", message: "a changeset conflicts with the database" } });
     expect(phone.prepare("SELECT id, name FROM places ORDER BY id").all().map((row) => ({ ...row }))).toEqual([
       { id: "ocdb_a", name: "Edited on the phone" },
       { id: "ocdb_b", name: "Old Rest Stop" },
@@ -146,7 +146,7 @@ describe.skipIf(!sessions)("createReleaseUpdater with node:sqlite", () => {
 
     const result = await createReleaseUpdater({ adapter: adapterFor(phone), readableLayouts: [1], readableFormats: [12], fetch, manifestUrl: MANIFEST_URL }).update();
 
-    expect(result).toEqual({ status: "failed", dataVersion: V1, reason: "apply" });
+    expect(result).toEqual({ status: "failed", dataVersion: V1, reason: "apply", cause: { name: "Error", message: "a changeset conflicts with the database" } });
     expect(phone.prepare("SELECT id, name FROM places ORDER BY id").all().map((row) => ({ ...row }))).toEqual([
       { id: "ocdb_a", name: "River Bend" },
       { id: "ocdb_b", name: "Edited on the phone" },

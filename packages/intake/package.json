@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@opencampingdb/apply": "0.1.0",
-    "@opencampingdb/feedback": "0.24.0"
+    "@opencampingdb/feedback": "0.25.0"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
