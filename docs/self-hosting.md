@@ -66,6 +66,8 @@ With the place index loaded, the intake decides `fact`, `contact` and `doubt` re
 
 Intakes set up before the recent list moved to D1 kept it in a `RECENT_PLACES` KV namespace. A copy command moves its new places, their evidence and the block list into `RECENT_LIST`. It runs from your own machine through Wrangler's platform proxy, signed in with `npx wrangler login`, and needs no endpoint on the intake. It lists the `np:` keys once and reads each place's value, and every row it writes is skipped when D1 has it already. Evidence whose place has already left KV is not copied. Add `--local` to rehearse against the local state `wrangler dev` keeps in `.wrangler/state`.
 
+The copy command has since been removed. To move an intake that still uses `RECENT_PLACES`, run steps 1 to 4 from a checkout of [`db7fc14`](https://github.com/opencampingdb/feedback-engine/tree/db7fc145aa4e00549dcb168aaac11bd3003b82f8), the last commit that has it (`git checkout db7fc14`, then `npm ci`), and come back to the current version for step 5.
+
 Go live in this order, running every command from `packages/intake`:
 
 1. Note the `RECENT_PLACES` namespace id before anything else: it is the `id` under `binding = "RECENT_PLACES"` in your current `wrangler.deploy.toml`, or find it with `npx wrangler kv namespace list`. The new `wrangler.toml` no longer names it, so regenerating the deploy copy drops it. Then create the D1 database, regenerate `wrangler.deploy.toml` with the `sed` command in step 6 (which adds the `RECENT_LIST` `database_id`), and apply the migration with that copy:
@@ -90,16 +92,30 @@ Go live in this order, running every command from `packages/intake`:
 
    With `--since` it copies only the new places added and the evidence sent from that time on, and leaves the block list alone. D1 is the recent list by then, so a place the apply run has removed from it, or a contributor it has taken off the block list, stays that way.
 
-5. A week later, once the recent list has served from D1 without trouble, delete the `np:` keys and the `blocked:contributors` key from `RECENT_PLACES`. Until then the old keys are there to fall back to.
+5. A week later, once the recent list has served from D1 without trouble, empty and delete `RECENT_PLACES`. Until then the old keys are there to fall back to. The intake removed a place's `np:` keys whenever the apply run took the place off the recent list, so some may be gone already. List what is left first:
 
    ```sh
    npx wrangler kv key list --namespace-id <RECENT_PLACES namespace id> --prefix np: --remote > recent-places-keys.json
-   npx wrangler kv bulk delete recent-places-keys.json --namespace-id <RECENT_PLACES namespace id> --remote
-   npx wrangler kv key delete blocked:contributors --namespace-id <RECENT_PLACES namespace id> --remote
-   rm recent-places-keys.json
    ```
 
-   Then delete the namespace with `npx wrangler kv namespace delete --namespace-id <RECENT_PLACES namespace id>`.
+   If the list is not empty (`[]`), delete those keys:
+
+   ```sh
+   npx wrangler kv bulk delete recent-places-keys.json --namespace-id <RECENT_PLACES namespace id> --remote
+   ```
+
+   Then delete the block list key:
+
+   ```sh
+   rm recent-places-keys.json
+   npx wrangler kv key delete blocked:contributors --namespace-id <RECENT_PLACES namespace id> --remote
+   ```
+
+   If your `wrangler.deploy.toml` still has a `RECENT_PLACES` binding, regenerate it with the `sed` command in step 6 and deploy, so the running intake no longer binds the namespace. The intake does not read it. Check that the binding list Wrangler prints has no `RECENT_PLACES`, then delete the namespace:
+
+   ```sh
+   npx wrangler kv namespace delete --namespace-id <RECENT_PLACES namespace id>
+   ```
 
 ## 3. Create the private inbox repository
 
