@@ -81,3 +81,9 @@ _Avoid_: blocklist, hidden photos
 **Withheld**:
 A photo the photo server has stopped serving at once, before the next apply run: after a report for a reason that can't wait, or its own contributor removing it. A person releases or removes a reported one.
 _Avoid_: hidden (a photo line left out of the records), blocked
+
+## Place facts
+
+**Open months**:
+The one range of months in each year a place is open, such as April to October, as its opening hours give it. A place open all year has none.
+_Avoid_: season, seasonal closure (a traveller's own yes or no)
