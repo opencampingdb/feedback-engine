@@ -1,7 +1,16 @@
-import type { ListableKV } from "../src/recent-kv.js";
 import type { KVLike } from "../src/ratelimit.js";
 
-/** A fake KV namespace: listable, as the copy reads it, and writable, as tests and the rate limits use it. */
+/** The listing part of a Workers KV namespace: keys with their metadata, a page at a time. */
+interface ListableKV {
+  get(key: string): Promise<string | null>;
+  list(options: { prefix?: string; cursor?: string }): Promise<{
+    keys: { name: string; metadata?: unknown }[];
+    list_complete: boolean;
+    cursor?: string;
+  }>;
+}
+
+/** A fake KV namespace: listable and writable, as tests and the rate limits use it. */
 export type FakeKv = ListableKV &
   KVLike & {
     put(key: string, value: string, options?: { metadata?: unknown; expirationTtl?: number }): Promise<void>;
