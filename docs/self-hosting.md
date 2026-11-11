@@ -111,9 +111,19 @@ Go live in this order, running every command from `packages/intake`:
    npx wrangler kv key delete blocked:contributors --namespace-id <RECENT_PLACES namespace id> --remote
    ```
 
-   If your `wrangler.deploy.toml` still has a `RECENT_PLACES` binding, regenerate it with the `sed` command in step 6 and deploy, so the running intake no longer binds the namespace. The intake does not read it. Check that the binding list Wrangler prints has no `RECENT_PLACES`, then delete the namespace:
+   If your `wrangler.deploy.toml` still has a `RECENT_PLACES` binding, take it out and deploy, so the running intake no longer binds the namespace. The intake does not read it. Edit your deploy copy rather than making a new one with the `sed` command in step 6: that command starts again from `wrangler.toml`, so it leaves out every value you set in your copy by hand, such as `GH_APP_ID` or `AI_REVIEWER`. Keep a backup, delete the `[[kv_namespaces]]` block whose `binding` is `"RECENT_PLACES"`, check that `diff` shows only that block, and deploy from a checkout of the release you already run, so only the binding changes:
 
    ```sh
+   cp wrangler.deploy.toml wrangler.deploy.toml.bak
+   # delete the RECENT_PLACES [[kv_namespaces]] block from wrangler.deploy.toml
+   diff wrangler.deploy.toml.bak wrangler.deploy.toml
+   npx wrangler deploy -c wrangler.deploy.toml
+   ```
+
+   Check that the binding list Wrangler prints has every binding it had before except `RECENT_PLACES`. Then delete the backup and the namespace:
+
+   ```sh
+   rm wrangler.deploy.toml.bak
    npx wrangler kv namespace delete --namespace-id <RECENT_PLACES namespace id>
    ```
 
