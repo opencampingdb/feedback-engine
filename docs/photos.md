@@ -53,7 +53,9 @@ const result = await photos.photo({ place, contributor, consent: true, full, thu
 
 Write your own photo terms and show them, with an agree button, before the first photo is sent. Say who took the photo, who appears in it, which licence it is shared under, how it is credited and how a traveller removes their photos. For example: "You took this photo yourself. It shows the place: people's faces and number plates are not its subject, and anyone you can recognise in it agreed to it being shared. You keep the copyright and share it under CC BY 4.0. Delete your account to remove all your photos."
 
-Make two JPEGs on the phone, with the EXIF data (location, camera, time) removed: a full size one about 1600 pixels on the long side (at most 1.5 MB, about 400 KB is typical) and a thumbnail about 400 pixels (at most 200 KB). Photos need the signed-in traveller's contributor id.
+Make two JPEGs on the phone: a full size one about 1600 pixels on the long side (at most 1.5 MB, about 400 KB is typical) and a thumbnail about 400 pixels (at most 200 KB). Photos need the signed-in traveller's contributor id.
+
+From SDK 0.30.0 `photo()` removes the APP1 segments, which hold the Exif (camera, time and often the GPS position) and XMP metadata, from both files before it sends them, and the hashes and sizes it sends describe the bytes it uploads. `stripJpegMetadata(bytes)` does the same for a file you keep or show. Remove the metadata in your own resize step too where you can: a file the SDK can't read as JPEG segments is sent as it is.
 
 `full` and `thumb` are the file bytes, as an `ArrayBuffer` or `Uint8Array`. The result is one of:
 
