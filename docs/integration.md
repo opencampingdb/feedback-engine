@@ -45,7 +45,7 @@ export const feedback = createFeedbackClient({
 });
 ```
 
-The client keeps its queue and a random device id in storage under keys starting `ocdb.feedback.`.
+The client keeps its queue and a random device id in storage under keys starting `ocdb.feedback.`. Those keys are the SDK's own: see [The stored queue belongs to the SDK](#the-stored-queue-belongs-to-the-sdk).
 
 One client owns a storage prefix. Make the client once, in a module of its own, and use that one client everywhere in the app. It reads the queue and device id on its first call, not when it is made, so anything the app puts in storage before that call is seen. After that it works from its own copy in memory, saving every item before it is sent and the queue again after each flush. A second client over the same prefix does not see the first one's copy, and the two can overwrite each other's items. The photo client uses the `ocdb.photos` prefix, so it can run beside the feedback client.
 
@@ -615,6 +615,42 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `commons_report` | A report that a Commons photo is not of the place. Hide it for the traveller who sent it; a reviewer decides, and two sources hide it for everyone. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. Adding a code later is additive. A code this version does not know is left out of `heldReason`, and `state` is still `held`. `itemDecision(answer)` reads `state` and `heldReason` from an intake answer you fetched yourself.
+
+### The stored queue belongs to the SDK
+
+The keys under the storage prefix (`ocdb.feedback.` and `ocdb.photos.` by default) are private to the SDK. What they hold and how it is laid out may change in any release, so an app never reads, parses or writes them. From SDK 0.29.0 an app uses three calls instead, on either client. Each answers for its own client's queue, sees every item queued by an earlier call, and the last two make no request and write nothing.
+
+`flush({ ignoreBackoff: true })` tries every queued item now, for example when the app opens on good signal after a day offline. It skips the client's own backoff after a failed try, but an item still waits out a wait the intake asked for (a 429 with `Retry-After`, or a batch item's `retry_after`), so a daily limit holds. An item waiting for a new place's id still waits, and items older than 30 days are still dropped.
+
+```ts
+const sub = AppState.addEventListener("change", (state) => {
+  if (state === "active") void feedback.flush({ ignoreBackoff: true });
+});
+```
+
+`queueSummary()` says how the queue stands, in counts and times only, so it is safe to send to an error tracker: it never holds what a traveller wrote, the device or the contributor.
+
+```ts
+const summary = await feedback.queueSummary();
+// { items, tried, oldestQueuedAt, mostAttempts, types, nextAttemptAt, intakeWaitUntil, waitingForNewPlace }
+const stuck = summary.oldestQueuedAt !== null && Date.now() - summary.oldestQueuedAt > 3 * 24 * 60 * 60 * 1000;
+if (stuck && summary.intakeWaitUntil === null) reportToTracker("feedback queue stuck", summary);
+```
+
+`intakeWaitUntil` is the end of the longest wait the intake asked for, or null, so a queue held by a daily limit is not reported as a fault. `nextAttemptAt` is when the next item is due, or null when every item is due now or waits for a new place.
+
+`queuedRefs()` answers the `ref` of each item still queued, in queue order, leaving out items queued without one. On the photo client it also answers `waitingPhotoKeys`, the `key` of each photo still waiting for a new place's id: keep those files.
+
+```ts
+const { refs } = await feedback.queuedRefs();
+const unsent = new Set(refs);
+for (const draft of await drafts.all()) if (!unsent.has(draft.id)) await drafts.markLeftQueue(draft.id);
+
+const { waitingPhotoKeys } = await photos.queuedRefs();
+await photoFiles.deleteAllExcept(waitingPhotoKeys);
+```
+
+An older SDK ignores the one field 0.29.0 adds to a queued item and waits as before, so after a rollback a queue written by 0.29.0 is still read and sent.
 
 ## 9. Show the attribution
 
