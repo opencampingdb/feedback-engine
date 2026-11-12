@@ -58,6 +58,10 @@ _Avoid_: dispute, flag, removal report (for a fact)
 A fact report of the value a place has, or had before doubts took it down, weighed against the doubts about it.
 _Avoid_: check (for a fact), vote
 
+**Edit**:
+A traveller's change to one place's facts, sent as one fact report for each fact.
+_Avoid_: update (an owner's change), batch (how items travel)
+
 **First-hand report**:
 A report from a traveller who was at the place in the last month: the app saw them nearby, or they said so.
 _Avoid_: verified report
