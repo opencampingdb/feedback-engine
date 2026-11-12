@@ -44,14 +44,33 @@ describe("first-hand reports", () => {
     }
   });
 
+  it("keeps first_hand on every report of what a person on site sees", () => {
+    const bodies: Record<string, unknown>[] = [
+      { kind: "fact", fact: "toilets", value: true },
+      { kind: "doubt", fact: "toilets" },
+      { kind: "name", value: "Lake Camp" },
+      { kind: "closed" },
+      { kind: "reopened" },
+      { kind: "kind", place_kind: "free_camp" },
+    ];
+    for (const body of bodies) {
+      expect(report({ ...body, first_hand: "seen_nearby" })).toMatchObject({ ok: true, value: { report: { ...body, first_hand: "seen_nearby" } } });
+    }
+    const moved = validateSubmission({
+      ...base,
+      type: "report",
+      place: PLACE,
+      location: { lat: -33.8, lon: 151.2 },
+      report: { kind: "wrong_location", first_hand: "says_so" },
+    });
+    expect(moved).toMatchObject({ ok: true, value: { report: { kind: "wrong_location", first_hand: "says_so" } } });
+  });
+
   it("refuses first_hand on other report kinds", () => {
-    expect(report({ kind: "name", value: "Lake Camp", first_hand: "seen_nearby" })).toEqual({
-      ok: false,
-      errors: ["report.first_hand is only allowed when report.kind is fact or doubt"],
-    });
-    expect(report({ kind: "contact", fact: "website", reason: "spam", first_hand: "says_so" })).toEqual({
-      ok: false,
-      errors: ["report.first_hand is only allowed when report.kind is fact or doubt"],
-    });
+    const errors = ["report.first_hand is only allowed when report.kind is fact, doubt, name, closed, reopened, kind or wrong_location"];
+    expect(report({ kind: "contact", fact: "website", reason: "spam", first_hand: "says_so" })).toEqual({ ok: false, errors });
+    expect(report({ kind: "other", note: "Gate locked", first_hand: "seen_nearby" })).toEqual({ ok: false, errors });
+    expect(report({ kind: "commons_mismatch", file: "Pool.jpg", first_hand: "seen_nearby" })).toEqual({ ok: false, errors });
+    expect(report({ kind: "description", value: "A quiet camp", first_hand: "seen_nearby" })).toEqual({ ok: false, errors });
   });
 });

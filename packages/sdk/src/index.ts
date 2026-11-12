@@ -68,6 +68,7 @@ export {
   FEEDBACK_TYPES,
   FEE_SITES,
   FIRST_HAND,
+  FIRST_HAND_KINDS,
   LINK_SHORTENERS,
   MAX_COMMONS_FILE_LENGTH,
   MAX_FEE_AGE_MONTHS,
@@ -85,6 +86,7 @@ export {
   PHOTO_REPORT_REASONS,
   REPORT_KINDS,
   REVIEW_REPORT_REASONS,
+  RETIRED_FACTS,
   SITE_FEATURES,
   SOCIAL_HOSTS,
   VEHICLE_ACCESS_VALUES,
@@ -108,6 +110,7 @@ export {
   isValidFactValue,
   monthsInRange,
   newPlaceId,
+  retiredFactProblem,
   sdkCoordinate,
   validateSubmission,
 } from "./validate.js";

@@ -90,4 +90,4 @@ _Avoid_: hidden (a photo line left out of the records), blocked
 
 **Open months**:
 The one range of months in each year a place is open, such as April to October, as its opening hours give it. A place open all year has none.
-_Avoid_: season, seasonal closure (a traveller's own yes or no)
+_Avoid_: season, seasonal closure (the retired yes or no fact that open months replace)

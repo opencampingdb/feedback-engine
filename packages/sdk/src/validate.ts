@@ -70,8 +70,10 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   "doubt",
   "commons_mismatch",
 ];
-/** The values `first_hand` may take on a `fact` or `doubt` report. */
+/** The values `first_hand` may take, on a report of a kind in `FIRST_HAND_KINDS`. */
 export const FIRST_HAND: readonly FirstHand[] = ["seen_nearby", "says_so"];
+/** The report kinds that may carry `first_hand`: what a person at the place sees. */
+export const FIRST_HAND_KINDS: readonly ReportKind[] = ["fact", "doubt", "name", "closed", "reopened", "kind", "wrong_location"];
 
 /** The contact facts and the address, as a `contact` report may name them. */
 export const CONTACT_FACTS: readonly ContactFactName[] = ["website", "phone", "phone_2", "email", "facebook", "instagram", "tiktok", "x", "address"];
@@ -293,6 +295,23 @@ const isHttpsPage = (max: number) => (v: unknown): boolean =>
 const isPhone = (v: unknown): boolean => typeof v === "string" && /^\+?[\d ]{6,20}$/.test(v);
 const EMAIL = /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
 
+/**
+ * Facts the data no longer takes from travellers or owners. A released value
+ * still reads, but a fact report, a doubt or owner facts naming one are
+ * refused with the reason `retiredFactProblem` gives. Leave them out of a
+ * report screen built from `SITE_FEATURES`.
+ */
+export const RETIRED_FACTS: readonly ReportFactName[] = ["seasonal_closure"];
+
+const RETIRED_FACT_REASONS: Readonly<Record<string, string>> = {
+  seasonal_closure: "seasonal_closure is retired: send the months in opening_hours with withOpenMonths",
+};
+
+/** Why a fact can no longer be sent, as the refusal says it, or null for a fact that can. */
+export function retiredFactProblem(fact: string): string | null {
+  return Object.hasOwn(RETIRED_FACT_REASONS, fact) ? (RETIRED_FACT_REASONS[fact] ?? null) : null;
+}
+
 /** Every fact a report may name, with a check for its value. */
 export const FACTS: Readonly<Record<ReportFactName, (value: unknown) => boolean>> = {
   fee: (v) => isBoolean(v) || v === "donation",
@@ -502,6 +521,8 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
   if (kind === "fact") {
     if (!isFactName(value.fact)) {
       errors.push(`report.fact must be one of ${Object.keys(FACTS).join(", ")}`);
+    } else if (retiredFactProblem(value.fact) !== null) {
+      errors.push(`report.fact ${retiredFactProblem(value.fact)}`);
     } else if (value.fact === "address") {
       const problems = addressProblems(value.value, "report.value");
       if (problems.length > 0) errors.push(...problems);
@@ -521,6 +542,7 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
     if (value.value !== undefined) errors.push("report.value is not allowed when report.kind is contact");
   } else if (kind === "doubt") {
     if (!isDoubtFact(value.fact)) errors.push("report.fact must be a fact other than a contact or the address (use the contact kind for those)");
+    else if (retiredFactProblem(value.fact) !== null) errors.push(`report.fact ${retiredFactProblem(value.fact)}`);
     else out.fact = value.fact;
     if (value.value !== undefined) errors.push("report.value is not allowed when report.kind is doubt");
   } else if (kind === "name" || kind === "description") {
@@ -546,7 +568,9 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
     errors.push("report.file is only allowed when report.kind is commons_mismatch");
   }
   if (value.first_hand !== undefined) {
-    if (kind !== "fact" && kind !== "doubt") errors.push("report.first_hand is only allowed when report.kind is fact or doubt");
+    if (!(FIRST_HAND_KINDS as readonly string[]).includes(kind)) {
+      errors.push(`report.first_hand is only allowed when report.kind is ${FIRST_HAND_KINDS.slice(0, -1).join(", ")} or ${FIRST_HAND_KINDS.at(-1)}`);
+    }
     else if (!(FIRST_HAND as readonly unknown[]).includes(value.first_hand)) errors.push("report.first_hand must be seen_nearby or says_so, or left out");
     else out.first_hand = value.first_hand as FirstHand;
   }
@@ -980,7 +1004,8 @@ function checkOwnerFacts(value: unknown, field: string, errors: string[]): Owner
   }
   for (const [name, v] of Object.entries(value)) {
     const valid = Object.hasOwn(OWNER_FACTS, name) ? OWNER_FACTS[name as OwnerFactName] : undefined;
-    if (!valid) errors.push(`${field}.${name} is not a fact an owner can set`);
+    if (retiredFactProblem(name) !== null) errors.push(`${field}.${retiredFactProblem(name)}`);
+    else if (!valid) errors.push(`${field}.${name} is not a fact an owner can set`);
     else if (!valid(v)) errors.push(`${field}.${name} ${hoursReason(name, v) ?? "is not a valid value"}`);
     else out[name] = storedFactValue(name, v as FactValue);
   }

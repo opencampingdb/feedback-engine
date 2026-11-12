@@ -543,6 +543,18 @@ describe("run", () => {
     expect(refused.outcome.reason).toMatch(/report\.first_hand must be seen_nearby or says_so/);
   });
 
+  it("keeps first_hand on a name report, and refuses it on a kind of report a person on site does not see", async () => {
+    const day = "2026-10-29";
+    await pending(44, `${day}T01:00:00Z`, "aaaa", { type: "report", report: { kind: "name", value: "Lake Camp", first_hand: "seen_nearby" } });
+    await pending(45, `${day}T02:00:00Z`, "bbbb", { type: "report", report: { kind: "other", note: "Gate locked", first_hand: "says_so" } });
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.counts).toMatchObject({ needs_review: 1, refused: 1 });
+    const name = JSON.parse(await readFile(join(inbox, "applied", day, `${id(44)}.json`), "utf8"));
+    expect(name).toMatchObject({ report: { kind: "name", first_hand: "seen_nearby" }, outcome: { result: "needs_review" } });
+    const other = JSON.parse(await readFile(join(inbox, "refused", day, `${id(45)}.json`), "utf8"));
+    expect(other.outcome.reason).toMatch(/report\.first_hand must be seen_nearby or says_so, on a fact, doubt, name, closed, reopened, kind or wrong_location report/);
+  });
+
   it("skips and logs a pending item whose id is already in applied/ or refused/, so it is never decided twice", async () => {
     const day = "2026-10-29";
     const power = { type: "report", report: { kind: "fact", fact: "power", value: true } };
