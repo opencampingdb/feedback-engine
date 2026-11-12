@@ -1,5 +1,6 @@
 import { sha256HexBytes } from "./sha256.js";
 import { dataVersionTime } from "./recent.js";
+import type { StorageAdapter } from "./client.js";
 
 /** Where the data repository publishes the newest release's manifest. */
 export const DEFAULT_MANIFEST_URL = "https://github.com/opencampingdb/data/releases/latest/download/manifest.json";
@@ -34,6 +35,18 @@ export interface ReleaseDatabaseAdapter {
    * to this one copy.
    */
   replaceDatabase(bytes: Uint8Array): Promise<void>;
+  /**
+   * Optional. The `data_version` in the `release` table of a whole database
+   * the updater has downloaded and checked (decompressed, as
+   * `replaceDatabase` takes it), or null when it has none. When the adapter
+   * has this call, the updater asks it before the swap and swaps only a file
+   * that holds the manifest's release, so a manifest that points at an older
+   * file cannot roll the app back. Without it, the release is read only after
+   * the swap. The adapter may write the bytes to the file it will swap in and
+   * keep that file for `replaceDatabase`. When it throws, the update stops
+   * with reason `read` and the database is not touched.
+   */
+  candidateDataVersion?(bytes: Uint8Array): Promise<string | null>;
 }
 
 /** The fetch the updater uses: `globalThis.fetch` fits, and must follow redirects. */
@@ -65,6 +78,14 @@ export interface ReleaseUpdaterOptions {
    * such as in React Native.
    */
   gunzip?: Gunzip;
+  /**
+   * Optional storage (AsyncStorage fits), where the updater keeps the
+   * manifest of a release whose database did not hold the manifest's
+   * release (`mismatch`) under the key `ocdb.release.failed`. Such a release
+   * is not downloaded again until the manifest changes, which the updater
+   * remembers in memory without this, and across restarts with it.
+   */
+  storage?: StorageAdapter;
 }
 
 /**
@@ -78,9 +99,12 @@ export type ReleaseUpdateStatus = "up_to_date" | "updated" | "replaced" | "older
  * 2xx. `manifest`: the manifest is not one the updater can read. `checksum`: a
  * download's size or SHA-256 is not the manifest's. `gunzip`: a download did
  * not decompress. `read`, `apply`, `replace`: that adapter call threw.
- * `mismatch`: after the update, even after a whole database replaced a chain
- * that left the wrong release, the database names another release than the
- * manifest's.
+ * `mismatch`: the downloaded database (read with `candidateDataVersion`
+ * before the swap, or after it), or the database after a chain and then a
+ * whole database, names another release than the manifest's. The same
+ * manifest is then answered `mismatch` without a download until it changes.
+ * A manifest also fails as `manifest` when its database url is not https, or
+ * when its `data_version` has no readable time while the app's has one.
  */
 export type ReleaseUpdateReason = "network" | "manifest" | "checksum" | "gunzip" | "read" | "apply" | "replace" | "mismatch";
 
@@ -114,7 +138,9 @@ export interface ReleaseUpdater {
    * Bring the app's database to the newest release. `knownDataVersion` is the
    * newest release the app has heard of (the recent list's
    * `release.data_version`): when it is the database's own, the update makes
-   * no request. Never throws: every outcome is in the result.
+   * no request. Never throws: every outcome is in the result. A call made
+   * while another is running gets the running one's result, whatever its
+   * options.
    */
   update(options?: { knownDataVersion?: string }): Promise<ReleaseUpdateResult>;
 }
@@ -169,22 +195,38 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 const isFile = (value: unknown): value is ReleaseFile =>
   isRecord(value) && typeof value.url === "string" && typeof value.sha256 === "string" && Number.isInteger(value.bytes);
 
-/**
- * The release downloads a database url sits in: the url without its last two
- * path parts (the release tag and the file), ending in "/". A shorter path,
- * as a mirror serving every file from one folder has, gives its origin.
- * Undefined for a url that is not https.
- */
-function downloadsOf(url: string): string | undefined {
+/** A url parsed as `fetch` reads it, or undefined when it is not https. */
+function httpsUrl(url: string): URL | undefined {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
     return undefined;
   }
-  if (parsed.protocol !== "https:") return undefined;
-  const parts = parsed.pathname.split("/").slice(1, -2);
-  return `${parsed.origin}/${parts.map((part) => `${part}/`).join("")}`;
+  return parsed.protocol === "https:" ? parsed : undefined;
+}
+
+/**
+ * The release downloads a database url sits in: its origin and its path
+ * without the last two parts (the release tag and the file), ending in "/".
+ * A shorter path, as a mirror serving every file from one folder has, gives
+ * "/".
+ */
+function downloadsOf(database: URL): { origin: string; path: string } {
+  const parts = database.pathname.split("/").slice(1, -2);
+  return { origin: database.origin, path: `/${parts.map((part) => `${part}/`).join("")}` };
+}
+
+/**
+ * The changeset url as fetched, when it is under `home`. It is parsed first,
+ * as `fetch` would parse it (which drops tabs and newlines and resolves
+ * `..`), and the parsed origin and path are compared, never the raw text.
+ */
+function underHome(url: string, home: { origin: string; path: string }): string | undefined {
+  const parsed = httpsUrl(url);
+  if (!parsed || parsed.origin !== home.origin || !parsed.pathname.startsWith(home.path)) return undefined;
+  if (/\.\.|%2e/i.test(parsed.pathname.slice(home.path.length))) return undefined;
+  return parsed.href;
 }
 
 function readManifest(value: unknown): Manifest {
@@ -197,27 +239,26 @@ function readManifest(value: unknown): Manifest {
   ) {
     throw stopped("manifest", "ManifestInvalid", "the manifest lacks data_version, format_version, layout_version or database");
   }
+  const database = httpsUrl(value.database.url);
+  if (!database) throw stopped("manifest", "ManifestInvalid", "the manifest's database url is not https");
   // A changeset is downloaded only from where the database is: the same release downloads
   // (for GitHub, https://github.com/<owner>/<repo>/releases/download/), so a bad entry
   // cannot send the app to another host or repository.
-  const home = downloadsOf(value.database.url);
-  const changesets = Array.isArray(value.changesets)
-    ? value.changesets.filter(
-        (entry: unknown): entry is ChangesetEntry =>
-          isFile(entry) &&
-          typeof (entry as unknown as Record<string, unknown>).from === "string" &&
-          typeof (entry as unknown as Record<string, unknown>).to === "string" &&
-          home !== undefined &&
-          entry.url.startsWith(home) &&
-          !/\.\.|%2e/i.test(entry.url.slice(home.length)),
-      )
-    : [];
+  const home = downloadsOf(database);
+  const changesets: ChangesetEntry[] = [];
+  for (const entry of Array.isArray(value.changesets) ? (value.changesets as unknown[]) : []) {
+    if (!isFile(entry) || typeof (entry as unknown as Record<string, unknown>).from !== "string" || typeof (entry as unknown as Record<string, unknown>).to !== "string") continue;
+    const url = underHome(entry.url, home);
+    if (url === undefined) continue;
+    const { from, to, day } = entry as unknown as { from: string; to: string; day?: unknown };
+    changesets.push({ url, sha256: entry.sha256, bytes: entry.bytes, from, to, day: day === true });
+  }
   return {
     data_version: value.data_version,
     format_version: value.format_version as number,
     layout_version: value.layout_version as number,
-    database: value.database,
-    changesets: changesets.map((entry) => ({ ...entry, day: entry.day === true })),
+    database: { url: database.href, sha256: value.database.sha256, bytes: value.database.bytes },
+    changesets,
   };
 }
 
@@ -338,66 +379,131 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
     }
   }
 
-  /** Downloads the whole database and swaps it in, then reads back the release it holds. */
-  async function replaceWhole(manifest: Manifest): Promise<string | null> {
+  const mismatch = (manifest: Manifest, holds: string | null, when: string): ReleaseUpdateCause => ({
+    name: "ReleaseMismatch",
+    message: shorten(`the database holds ${holds ?? "no release"} ${when}, the manifest names ${manifest.data_version}`),
+  });
+
+  /**
+   * Downloads the whole database and, unless the adapter's
+   * candidateDataVersion finds it holds another release, swaps it in. Gives
+   * the release the app's database holds after, or a mismatch.
+   */
+  async function replaceWhole(manifest: Manifest): Promise<{ dataVersion: string | null } | { refused: string | null }> {
     const database = await download(manifest.database);
+    if (adapter.candidateDataVersion) {
+      const candidate = await orStop("read", () => adapter.candidateDataVersion!(database));
+      if (candidate !== manifest.data_version) return { refused: candidate };
+    }
     await orStop("replace", () => adapter.replaceDatabase(database));
-    return orStop("read", () => adapter.currentDataVersion());
+    return { dataVersion: await orStop("read", () => adapter.currentDataVersion()) };
   }
 
-  return {
-    async update(updateOptions = {}) {
-      let dataVersion: string | null = null;
-      try {
-        dataVersion = await orStop("read", () => adapter.currentDataVersion());
-        if (updateOptions.knownDataVersion !== undefined && updateOptions.knownDataVersion === dataVersion) {
-          return { status: "up_to_date", dataVersion };
-        }
-        const res = await get(manifestUrl, "application/json");
-        let body: unknown;
-        try {
-          body = await res.json();
-        } catch (error) {
-          throw new UpdateStopped("manifest", causeOf(error));
-        }
-        const manifest = readManifest(body);
-        if (manifest.format_version > newestFormat) return { status: "format_unsupported", dataVersion };
-        if (!readableLayouts.includes(manifest.layout_version)) return { status: "layout_unsupported", dataVersion };
-        const layout = dataVersion === null ? null : await orStop("read", () => adapter.currentLayoutVersion());
-        if (manifest.data_version === dataVersion && manifest.layout_version === layout) return { status: "up_to_date", dataVersion };
-        // A manifest older than the database the app has (an older release marked latest) is never applied:
-        // rolling back would bring back everything later releases took out.
-        const manifestTime = dataVersionTime(manifest.data_version);
-        const localTime = dataVersion === null ? undefined : dataVersionTime(dataVersion);
-        if (manifestTime !== undefined && localTime !== undefined && manifestTime < localTime) return { status: "older_release", dataVersion };
+  // A manifest whose database did not hold its release, as `<data_version> <database sha256>`,
+  // so it is not downloaded again until the manifest changes.
+  const FAILED_KEY = "ocdb.release.failed";
+  let failedRelease: string | null | undefined;
+  const failedKeyOf = (manifest: Manifest) => `${manifest.data_version} ${manifest.database.sha256.toLowerCase()}`;
+  async function readFailed(): Promise<string | null> {
+    if (failedRelease !== undefined) return failedRelease;
+    try {
+      failedRelease = (await options.storage?.getItem(FAILED_KEY)) ?? null;
+    } catch {
+      failedRelease = null;
+    }
+    return failedRelease;
+  }
+  async function writeFailed(value: string | null): Promise<void> {
+    if (failedRelease === value) return;
+    failedRelease = value;
+    try {
+      if (value === null) await options.storage?.removeItem(FAILED_KEY);
+      else await options.storage?.setItem(FAILED_KEY, value);
+    } catch {
+      // Kept in memory: a failed save only means one more download after a restart.
+    }
+  }
 
-        const path = dataVersion !== null && layout === manifest.layout_version ? changesetPath(manifest.changesets, dataVersion, manifest.data_version) : null;
-        const chainBytes = path?.reduce((sum, entry) => sum + entry.bytes, 0) ?? 0;
-        if (path && path.length > 0 && path.length <= MAX_CHANGESET_CHAIN && chainBytes < manifest.database.bytes) {
-          // Download and check every file before touching the database, so a
-          // failed download leaves it on its release.
-          const chain: Uint8Array[] = [];
-          for (const entry of path) chain.push(await download(entry));
-          await orStop("apply", () => adapter.applyChangesets(chain));
-          dataVersion = await orStop("read", () => adapter.currentDataVersion());
-          if (dataVersion === manifest.data_version) return { status: "updated", dataVersion };
-          // The chain left another release than the manifest's, as an apply
-          // that settles conflicts by replacing rows can: start again from the
-          // whole database.
-        }
-        dataVersion = await replaceWhole(manifest);
-        if (dataVersion !== manifest.data_version) {
-          const cause = { name: "ReleaseMismatch", message: shorten(`the database holds ${dataVersion ?? "no release"} after the replace, the manifest names ${manifest.data_version}`) };
-          return { status: "failed", dataVersion, reason: "mismatch", cause };
-        }
-        return { status: "replaced", dataVersion };
-      } catch (error) {
-        const reason = error instanceof UpdateStopped ? error.reason : "read";
-        const cause = error instanceof UpdateStopped ? error.detail : causeOf(error);
-        // A failed chain or replace leaves the database on the release it had.
-        const now = await adapter.currentDataVersion().catch(() => dataVersion);
-        return { status: "failed", dataVersion: now, reason, cause };
-      }
+  let running: Promise<ReleaseUpdateResult> | undefined;
+
+  return {
+    update(updateOptions = {}) {
+      running ??= run(updateOptions).finally(() => {
+        running = undefined;
+      });
+      return running;
     },
   };
+
+  async function run(updateOptions: { knownDataVersion?: string }): Promise<ReleaseUpdateResult> {
+    let dataVersion: string | null = null;
+    try {
+      dataVersion = await orStop("read", () => adapter.currentDataVersion());
+      if (updateOptions.knownDataVersion !== undefined && updateOptions.knownDataVersion === dataVersion) {
+        return { status: "up_to_date", dataVersion };
+      }
+      const res = await get(manifestUrl, "application/json");
+      let body: unknown;
+      try {
+        body = await res.json();
+      } catch (error) {
+        throw new UpdateStopped("manifest", causeOf(error));
+      }
+      const manifest = readManifest(body);
+      if (manifest.format_version > newestFormat) return { status: "format_unsupported", dataVersion };
+      if (!readableLayouts.includes(manifest.layout_version)) return { status: "layout_unsupported", dataVersion };
+      const layout = dataVersion === null ? null : await orStop("read", () => adapter.currentLayoutVersion());
+      if (manifest.data_version === dataVersion && manifest.layout_version === layout) return { status: "up_to_date", dataVersion };
+      // A manifest older than the database the app has (an older release marked latest) is never applied:
+      // rolling back would bring back everything later releases took out.
+      const manifestTime = dataVersionTime(manifest.data_version);
+      const localTime = dataVersion === null ? undefined : dataVersionTime(dataVersion);
+      if (manifestTime !== undefined && localTime !== undefined && manifestTime < localTime) return { status: "older_release", dataVersion };
+      // A release with no readable time can't be shown to be newer than a dated database, so it is not applied.
+      if (manifestTime === undefined && localTime !== undefined) {
+        throw stopped("manifest", "ManifestInvalid", `the manifest's data_version ${manifest.data_version} has no readable time`);
+      }
+      const failedKey = failedKeyOf(manifest);
+      if ((await readFailed()) === failedKey) {
+        const cause = { name: "ReleaseMismatch", message: shorten(`an earlier update found this manifest's database does not hold ${manifest.data_version}, so it is not downloaded again until the manifest changes`) };
+        return { status: "failed", dataVersion, reason: "mismatch", cause };
+      }
+
+      const path = dataVersion !== null && layout === manifest.layout_version ? changesetPath(manifest.changesets, dataVersion, manifest.data_version) : null;
+      const chainBytes = path?.reduce((sum, entry) => sum + entry.bytes, 0) ?? 0;
+      if (path && path.length > 0 && path.length <= MAX_CHANGESET_CHAIN && chainBytes < manifest.database.bytes) {
+        // Download and check every file before touching the database, so a
+        // failed download leaves it on its release.
+        const chain: Uint8Array[] = [];
+        for (const entry of path) chain.push(await download(entry));
+        await orStop("apply", () => adapter.applyChangesets(chain));
+        dataVersion = await orStop("read", () => adapter.currentDataVersion());
+        if (dataVersion === manifest.data_version) {
+        await writeFailed(null);
+        return { status: "updated", dataVersion };
+      }
+        // The chain left another release than the manifest's, as an apply
+        // that settles conflicts by replacing rows can: start again from the
+        // whole database.
+      }
+      const replaced = await replaceWhole(manifest);
+      if ("refused" in replaced) {
+        await writeFailed(failedKey);
+        return { status: "failed", dataVersion, reason: "mismatch", cause: mismatch(manifest, replaced.refused, "in the downloaded file, which was not swapped in") };
+      }
+      dataVersion = replaced.dataVersion;
+      if (dataVersion !== manifest.data_version) {
+        await writeFailed(failedKey);
+        return { status: "failed", dataVersion, reason: "mismatch", cause: mismatch(manifest, dataVersion, "after the replace") };
+      }
+      await writeFailed(null);
+      return { status: "replaced", dataVersion };
+    } catch (error) {
+      const reason = error instanceof UpdateStopped ? error.reason : "read";
+      const cause = error instanceof UpdateStopped ? error.detail : causeOf(error);
+      // A failed chain or replace leaves the database on the release it had.
+      const now = await adapter.currentDataVersion().catch(() => dataVersion);
+      return { status: "failed", dataVersion: now, reason, cause };
+    }
+  }
 }

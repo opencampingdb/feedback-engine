@@ -3,6 +3,6 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["test/release-updater-sqlite.test.ts", "test/hours-oracle.test.ts"],
+  "include": ["test/release-updater-sqlite.test.ts", "test/hours-oracle.test.ts", "test/hours-reference.test.ts", "test/release-safety.test.ts"],
   "exclude": []
 }
