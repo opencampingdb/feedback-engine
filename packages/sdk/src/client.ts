@@ -909,11 +909,19 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
   if (!appKey) throw new Error("appKey is required");
   if (!appVersion) throw new Error("appVersion is required");
 
+  // The parsed queue, read from storage on the first operation, not when the
+  // client is made, and kept in step with every save.
+  let cachedQueue: QueueItem[] | undefined;
+
   // Every read-modify-write of the queue runs through this chain, one at a time.
+  // A task that fails may have changed the in-memory queue without saving it,
+  // so the queue is read from storage again on the next operation.
   let chain: Promise<unknown> = Promise.resolve();
   function serial<T>(task: () => Promise<T>): Promise<T> {
     const run = chain.then(task, task);
-    chain = run.catch(() => undefined);
+    chain = run.catch(() => {
+      cachedQueue = undefined;
+    });
     return run;
   }
 
@@ -926,6 +934,11 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
   }
 
   async function readQueue(): Promise<QueueItem[]> {
+    cachedQueue ??= await loadQueue();
+    return cachedQueue;
+  }
+
+  async function loadQueue(): Promise<QueueItem[]> {
     const raw = await storage.getItem(queueKey);
     if (!raw) return [];
     try {
@@ -972,9 +985,10 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
   const isNewPlaceItem = (item: QueueItem) =>
     item.ref !== undefined && item.body.type === "report" && (item.body as { report?: { kind?: string } }).report?.kind === "new_place";
 
-  async function writeQueue(queue: QueueItem[]): Promise<void> {
-    if (queue.length === 0) await storage.removeItem(queueKey);
-    else await storage.setItem(queueKey, JSON.stringify(queue));
+  async function writeQueue(items: QueueItem[]): Promise<void> {
+    if (items.length === 0) await storage.removeItem(queueKey);
+    else await storage.setItem(queueKey, JSON.stringify(items));
+    cachedQueue = items;
   }
 
   type Sent = "sent" | "drop" | "stop";
