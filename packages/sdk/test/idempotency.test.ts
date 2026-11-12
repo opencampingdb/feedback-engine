@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createFeedbackClient, createPhotoClient, isIdempotencyKey, type FetchLike, type PhotoFetchLike, type StorageAdapter } from "../src/index.js";
 
+/** A clock in December 2026, after every visit date the tests send. */
+const T0 = Date.UTC(2026, 11, 1);
+
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const PHOTO = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB";
 const CONTRIBUTOR = "acct_3f9a8b7c6d5e4f30";
@@ -31,7 +34,7 @@ function fakeIntake(replies: (number | "lost")[]) {
   return { fetch, calls };
 }
 
-let clock = 1_000_000;
+let clock = T0;
 /** Moves the clock past any wait, so the next flush sends what is queued. */
 const later = () => void (clock += 24 * 60 * 60 * 1000);
 const client = (fetch: FetchLike, storage: StorageAdapter = memoryStorage(), randomUUID?: () => string) =>

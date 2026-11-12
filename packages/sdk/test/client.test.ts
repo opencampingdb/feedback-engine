@@ -18,6 +18,9 @@ import {
   type StorageAdapter,
 } from "../src/index.js";
 
+/** A clock in December 2026, after every visit date the tests send. */
+const T0 = Date.UTC(2026, 11, 1);
+
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 
 function memoryStorage(): StorageAdapter & { data: Map<string, string> } {
@@ -56,7 +59,7 @@ function fakeFetch(replies: Reply[]) {
   return { fetch, calls };
 }
 
-function setup(replies: Reply[], start = 1_000_000, extra: Partial<FeedbackClientOptions> = {}) {
+function setup(replies: Reply[], start = T0, extra: Partial<FeedbackClientOptions> = {}) {
   const storage = memoryStorage();
   const { fetch, calls } = fakeFetch(replies);
   let clock = start;
@@ -212,7 +215,7 @@ describe("createFeedbackClient", () => {
       appVersion: "1.2.3",
       storage: first.storage,
       fetch,
-      now: () => 10_000_000,
+      now: () => T0 + 9_000_000,
     });
     expect(await again.flush()).toEqual({ sent: 1, dropped: 0, remaining: 0 });
     expect(calls).toHaveLength(1);
@@ -242,7 +245,7 @@ describe("refusal reasons", () => {
 
   it("passes the reason and details of a refused assertion to the app's hook", async () => {
     const seen: unknown[][] = [];
-    const { client } = setup([refused("counter_not_increased")], 1_000_000, {
+    const { client } = setup([refused("counter_not_increased")], T0, {
       attest,
       onAttestationRejected: (...args) => void seen.push(args),
     });
@@ -254,7 +257,7 @@ describe("refusal reasons", () => {
 
   it("calls the hook with the error alone when the intake gave no reason", async () => {
     const seen: unknown[][] = [];
-    const { client } = setup([{ status: 401, body: { error: "attestation_required" } }], 1_000_000, {
+    const { client } = setup([{ status: 401, body: { error: "attestation_required" } }], T0, {
       attest,
       onAttestationRejected: (...args) => void seen.push(args),
     });
@@ -264,7 +267,7 @@ describe("refusal reasons", () => {
 
   it("still works with a hook written for one argument", async () => {
     const seen: string[] = [];
-    const { client } = setup([refused("bad_signature")], 1_000_000, {
+    const { client } = setup([refused("bad_signature")], T0, {
       attest,
       onAttestationRejected: (error: string) => void seen.push(error),
     });
@@ -274,7 +277,7 @@ describe("refusal reasons", () => {
 
   it("keeps the details but leaves out a reason code it does not know", async () => {
     const seen: unknown[][] = [];
-    const { client } = setup([refused("some_later_code", ["a newer check failed"])], 1_000_000, {
+    const { client } = setup([refused("some_later_code", ["a newer check failed"])], T0, {
       attest,
       onAttestationRejected: (...args) => void seen.push(args),
     });
@@ -283,7 +286,7 @@ describe("refusal reasons", () => {
   });
 
   it("keeps a refused item queued and sends it on a later flush", async () => {
-    const { client, advance } = setup([refused("unknown_key"), 202], 1_000_000, { attest });
+    const { client, advance } = setup([refused("unknown_key"), 202], T0, { attest });
     expect(await client.check(check)).toEqual({ status: "queued" });
     expect(await client.pending()).toBe(1);
     advance(60 * 60 * 1000);
@@ -292,7 +295,7 @@ describe("refusal reasons", () => {
 
   it("keeps the item queued and leaves the hook alone on 503 unavailable", async () => {
     const seen: unknown[] = [];
-    const { client, advance } = setup([{ status: 503, body: { error: "unavailable" } }, 202], 1_000_000, {
+    const { client, advance } = setup([{ status: 503, body: { error: "unavailable" } }, 202], T0, {
       attest,
       onAttestationRejected: (error) => void seen.push(error),
     });
@@ -336,14 +339,14 @@ describe("a caller's own ref and onAnswered", () => {
 
   it("tells onAnswered the ref and id of an item sent at once", async () => {
     const answers: Answer[] = [];
-    const { client } = setup([202], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    const { client } = setup([202], T0, { onAnswered: (a) => void answers.push(a) });
     expect(await client.check({ ...check, ref: "my-record-1" })).toEqual({ status: "sent", id: "fb_1" });
     expect(answers).toEqual([{ ref: "my-record-1", type: "check", outcome: { kind: "sent", id: "fb_1" } }]);
   });
 
   it("tells onAnswered the ref and id of a new place sent by a later flush", async () => {
     const answers: Answer[] = [];
-    const { client, advance } = setup(["network", { status: 202, body: { id: "fb_new" } }], 1_000_000, {
+    const { client, advance } = setup(["network", { status: 202, body: { id: "fb_new" } }], T0, {
       onAnswered: (a) => void answers.push(a),
     });
     const newPlace = { place: null, location: { lat: -36.8, lon: 144.5 }, report: { kind: "new_place", name: "River Bend", place_kind: "campground" }, consent: true } as const;
@@ -356,14 +359,14 @@ describe("a caller's own ref and onAnswered", () => {
 
   it("tells onAnswered the status of a dropped item", async () => {
     const answers: Answer[] = [];
-    const { client } = setup([400], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    const { client } = setup([400], T0, { onAnswered: (a) => void answers.push(a) });
     expect(await client.check({ ...check, ref: "r-1" })).toEqual({ status: "rejected", httpStatus: 400 });
     expect(answers).toEqual([{ ref: "r-1", type: "check", outcome: { kind: "dropped", httpStatus: 400 } }]);
   });
 
   it("tells onAnswered with status 0 when an item grows too old to send", async () => {
     const answers: Answer[] = [];
-    const { client, advance } = setup(["network"], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    const { client, advance } = setup(["network"], T0, { onAnswered: (a) => void answers.push(a) });
     await client.check({ ...check, ref: "old" });
     advance(31 * 24 * 60 * 60 * 1000);
     await client.flush();
@@ -372,7 +375,7 @@ describe("a caller's own ref and onAnswered", () => {
 
   it("passes on an older intake's bare id with no state", async () => {
     const answers: Answer[] = [];
-    const { client } = setup([{ status: 202, body: { id: "fb_old" } }], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    const { client } = setup([{ status: 202, body: { id: "fb_old" } }], T0, { onAnswered: (a) => void answers.push(a) });
     expect(await client.check({ ...check, ref: "r-old" })).toEqual({ status: "sent", id: "fb_old" });
     expect(answers).toEqual([{ ref: "r-old", type: "check", outcome: { kind: "sent", id: "fb_old" } }]);
     expect(answers[0]!.outcome).not.toHaveProperty("state");
@@ -383,14 +386,14 @@ describe("a caller's own ref and onAnswered", () => {
 
   it("tells onAnswered and the caller that a change is live", async () => {
     const answers: Answer[] = [];
-    const { client } = setup([{ status: 202, body: { id: "fb_live", state: "live" } }], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    const { client } = setup([{ status: 202, body: { id: "fb_live", state: "live" } }], T0, { onAnswered: (a) => void answers.push(a) });
     expect(await client.report({ ...toilets, ref: "r-live" })).toEqual({ status: "sent", id: "fb_live", state: "live" });
     expect(answers).toEqual([{ ref: "r-live", type: "report", outcome: { kind: "sent", id: "fb_live", state: "live" } }]);
   });
 
   it("tells onAnswered that a change is held, with the reason, on a later flush", async () => {
     const answers: Answer[] = [];
-    const { client, advance } = setup(["network", { status: 202, body: { id: "fb_held", state: "held", held_reason: "owner_value" } }], 1_000_000, {
+    const { client, advance } = setup(["network", { status: 202, body: { id: "fb_held", state: "held", held_reason: "owner_value" } }], T0, {
       onAnswered: (a) => void answers.push(a),
     });
     expect(await client.report({ ...toilets, ref: "r-held" })).toEqual({ status: "queued" });
@@ -401,7 +404,7 @@ describe("a caller's own ref and onAnswered", () => {
 
   it("keeps held but leaves out a held reason this SDK does not know", async () => {
     const answers: Answer[] = [];
-    const { client } = setup([{ status: 202, body: { id: "fb_x", state: "held", held_reason: "a_newer_code" } }], 1_000_000, {
+    const { client } = setup([{ status: 202, body: { id: "fb_x", state: "held", held_reason: "a_newer_code" } }], T0, {
       onAnswered: (a) => void answers.push(a),
     });
     expect(await client.report(toilets)).toEqual({ status: "sent", id: "fb_x", state: "held" });
@@ -411,7 +414,7 @@ describe("a caller's own ref and onAnswered", () => {
   it("keeps sending when onAnswered throws", async () => {
     const answers: Answer[] = [];
     // One at a time, so each try is a call of its own (batches are in batch.test.ts).
-    const { client, calls, advance } = setup(["network", "network", 202], 1_000_000, {
+    const { client, calls, advance } = setup(["network", "network", 202], T0, {
       maxBatchSize: 1,
       onAnswered: (a) => {
         answers.push(a);
@@ -429,9 +432,9 @@ describe("a caller's own ref and onAnswered", () => {
 
   it("sends an item queued before refs existed and answers it without a ref", async () => {
     const answers: Answer[] = [];
-    const { client, storage, calls } = setup([202], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    const { client, storage, calls } = setup([202], T0, { onAnswered: (a) => void answers.push(a) });
     const body = { type: "check", place: PLACE, device: "d-1", app_version: "1.2.2", consent: true, check: check.check };
-    storage.data.set("ocdb.feedback.queue", JSON.stringify([{ localId: "old-1", body, queuedAt: 1_000_000, attempts: 1, nextAttemptAt: 0 }]));
+    storage.data.set("ocdb.feedback.queue", JSON.stringify([{ localId: "old-1", body, queuedAt: T0, attempts: 1, nextAttemptAt: 0 }]));
     expect(await client.flush()).toEqual({ sent: 1, dropped: 0, remaining: 0 });
     expect(calls[0]!.body).toEqual(body);
     expect(answers).toEqual([{ type: "check", outcome: { kind: "sent", id: "fb_1" } }]);
@@ -447,7 +450,7 @@ describe("a caller's own ref and onAnswered", () => {
 
   it("carries a ref on review reports and withdraws without sending it", async () => {
     const answers: Answer[] = [];
-    const { client, calls } = setup([202], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    const { client, calls } = setup([202], T0, { onAnswered: (a) => void answers.push(a) });
     await client.reportReview({ place: PLACE, review: "rev_01JBXK3M8Q4R5S6T7V8W9X0YZA", reason: "spam_ad", consent: true, ref: "rr" });
     await client.withdraw({ place: PLACE, consent: true, ref: "wd" });
     expect(calls.every((c) => !("ref" in (c.body as object)))).toBe(true);
@@ -540,7 +543,7 @@ describe("reportFacts", () => {
 
   it("gives each fact's report the ref <ref>:<fact> for onAnswered", async () => {
     const answers: Answer[] = [];
-    const { client } = setup([202], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    const { client } = setup([202], T0, { onAnswered: (a) => void answers.push(a) });
     await client.reportFacts({ ...edit, ref: "edit-1" });
     expect(answers.map((a) => a.ref)).toEqual(["edit-1:toilets", "edit-1:pets", "edit-1:fee"]);
   });
@@ -575,7 +578,7 @@ describe("items waiting for a new place's id (NewPlaceRef)", () => {
 
   it("holds items about a new place until its id comes, then sends them with that id, in order", async () => {
     // One at a time, so each item is a call of its own (batches are in batch.test.ts).
-    const { client, calls, advance } = setup(["network", sentNew, 202], 1_000_000, { maxBatchSize: 1 });
+    const { client, calls, advance } = setup(["network", sentNew, 202], T0, { maxBatchSize: 1 });
     expect((await client.report(newPlace)).status).toBe("queued");
     const facts = await client.reportFacts({ place: { newPlace: "np-1" }, facts: { toilets: true, pets: "leashed" }, consent: true });
     expect(facts.map((f) => f.result.status)).toEqual(["queued", "queued"]);
@@ -600,7 +603,7 @@ describe("items waiting for a new place's id (NewPlaceRef)", () => {
 
   it("drops the waiting items, telling onAnswered why, when the new place is refused", async () => {
     const answers: Answer[] = [];
-    const { client, calls, advance } = setup(["network", 400], 1_000_000, { onAnswered: (a) => void answers.push(a) });
+    const { client, calls, advance } = setup(["network", 400], T0, { onAnswered: (a) => void answers.push(a) });
     await client.report(newPlace);
     await client.report({ place: { newPlace: "np-1" }, report: { kind: "fact", fact: "toilets", value: true }, consent: true, ref: "t" });
     advance(60 * 60 * 1000);
@@ -627,7 +630,7 @@ describe("items waiting for a new place's id (NewPlaceRef)", () => {
       appVersion: "1.2.3",
       storage: first.storage,
       fetch,
-      now: () => 1_000_000 + 60 * 60 * 1000,
+      now: () => T0 + 60 * 60 * 1000,
       random: () => 0,
     });
     expect(await second.flush()).toEqual({ sent: 2, dropped: 0, remaining: 0 });

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createFeedbackClient, MAX_BATCH_SIZE, newPlaceId, type Answer, type FeedbackClientOptions, type FetchLike, type StorageAdapter } from "../src/index.js";
 
+/** A clock in December 2026, after every visit date the tests send. */
+const T0 = Date.UTC(2026, 11, 1);
+
 /** The intake's id for the n-th item it accepts. */
 const fb = (n: number) => `fb_01JBXK3M8Q4R5S6T7V8W9${String(n).padStart(5, "0")}`;
 const place = (i: number) => `ocdb_01JBXK3M8Q4R5S6T7V8W9${String(i).padStart(5, "0")}`;
@@ -50,7 +53,7 @@ function fakeIntake(reply?: (call: Call, n: number) => Reply | undefined) {
 function setup(intake: ReturnType<typeof fakeIntake>, extra: Partial<FeedbackClientOptions> = {}) {
   const answers: Answer[] = [];
   const attests: string[] = [];
-  let clock = 1_000_000;
+  let clock = T0;
   let uuid = 0;
   const client = createFeedbackClient({
     endpoint: "https://intake.example",
