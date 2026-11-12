@@ -58,6 +58,10 @@ _Avoid_: dispute, flag, removal report (for a fact)
 A fact report of the value a place has, or had before doubts took it down, weighed against the doubts about it.
 _Avoid_: check (for a fact), vote
 
+**First-hand report**:
+A report from a traveller who was at the place in the last month: the app saw them nearby, or they said so.
+_Avoid_: verified report
+
 **Progress**:
 Where a contribution is: received, live, waiting, accepted, held, refused or in the data.
 _Avoid_: status, outcome, decision
@@ -86,4 +90,4 @@ _Avoid_: hidden (a photo line left out of the records), blocked
 
 **Open months**:
 The one range of months in each year a place is open, such as April to October, as its opening hours give it. A place open all year has none.
-_Avoid_: season, seasonal closure (a traveller's own yes or no)
+_Avoid_: season, seasonal closure (the retired yes or no fact that open months replace)

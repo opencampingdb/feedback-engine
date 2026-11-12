@@ -5,5 +5,5 @@
     "types": []
   },
   "include": ["src", "test"],
-  "exclude": ["test/release-updater-sqlite.test.ts"]
+  "exclude": ["test/release-updater-sqlite.test.ts", "test/hours-oracle.test.ts"]
 }

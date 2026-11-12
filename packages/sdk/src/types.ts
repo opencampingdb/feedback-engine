@@ -226,6 +226,11 @@ export interface PlaceFacts {
   sharks?: boolean;
   /** Box jellyfish, Irukandji or other dangerous jellyfish, at least in season. */
   marine_stingers?: boolean;
+  /**
+   * @deprecated Retired: open months in `opening_hours` replace it
+   * (`openMonths`, `withOpenMonths`). Released values still read, but a fact
+   * report, a doubt or owner facts naming it are refused (`RETIRED_FACTS`).
+   */
   seasonal_closure?: boolean;
   dangerous_when_wet?: boolean;
   over_50s?: boolean;
@@ -279,6 +284,14 @@ export interface LatLon {
   lon: number;
 }
 
+/**
+ * How a traveller knows what a first-hand report says. `seen_nearby`: the app
+ * saw the device within its set distance of the place in the last 30 days.
+ * `says_so`: with location off, the traveller answered yes to "Are you at
+ * this place now, or were you here in the last month?". Never a location.
+ */
+export type FirstHand = "seen_nearby" | "says_so";
+
 export interface ReportBody {
   kind: ReportKind;
   /**
@@ -327,6 +340,13 @@ export interface ReportBody {
   fee?: FeeValue;
   /** Required on `commons_mismatch`, and allowed only there: the Commons file name, as `file` in `commons.ndjson.gz`, 1 to 255 characters on one line. */
   file?: string;
+  /**
+   * On `fact`, `doubt`, `name`, `closed`, `reopened`, `kind` and
+   * `wrong_location` only (`FIRST_HAND_KINDS`), what a person at the place
+   * sees: the report is a first-hand report, and how the app knows
+   * (`FirstHand`). Leave it out otherwise. The location itself is never sent.
+   */
+  first_hand?: FirstHand;
 }
 
 /** The contact facts a new place may carry. */
