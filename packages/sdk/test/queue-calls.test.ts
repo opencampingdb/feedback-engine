@@ -332,6 +332,28 @@ describe("the new calls cost nothing outside the client", () => {
     expect(store.reads()).toBe(1);
   });
 
+  it("as the first call over a stored item with an invalid localId, queueSummary saves the new key once and makes no request", async () => {
+    const store = countingStorage();
+    const first = setup(store);
+    first.intake.mode.value = "offline";
+    await first.client.check(check("c1"));
+    const stored = JSON.parse(store.data.get(QUEUE)!) as Record<string, unknown>[];
+    stored[0]!.localId = "not a key";
+    store.data.set(QUEUE, JSON.stringify(stored));
+
+    const { client, intake } = setup(store);
+    store.reset();
+    expect((await client.queueSummary()).items).toBe(1);
+    expect(store.writes()).toBe(1);
+    expect(intake.requests).toHaveLength(0);
+    const [saved] = JSON.parse(store.data.get(QUEUE)!) as { localId: string }[];
+    expect(saved!.localId).not.toBe("not a key");
+    store.reset();
+    await client.queueSummary();
+    expect(store.writes()).toBe(0);
+    expect(intake.requests).toHaveLength(0);
+  });
+
   it("on the photo client they make no request and no storage write", async () => {
     const { client, intake, store } = photoSetup();
     intake.mode.value = "offline";
@@ -358,7 +380,7 @@ describe("the stored queue across SDK versions", () => {
     expect(item!.nextAttemptAt).toBe(item!.intakeWaitUntil);
   });
 
-  it("a reader that ignores intakeWaitUntil waits on nextAttemptAt alone, as 0.28.x does", async () => {
+  it("an item without intakeWaitUntil still waits on nextAttemptAt alone", async () => {
     const store = countingStorage();
     const first = setup(store);
     first.intake.mode.value = { status: 429, retryAfter: 3_600 };

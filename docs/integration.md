@@ -618,9 +618,9 @@ Being held is not a refusal: a reviewer (a person, bot or AI the maintainers all
 
 ### The stored queue belongs to the SDK
 
-The keys under the storage prefix (`ocdb.feedback.` and `ocdb.photos.` by default) are private to the SDK. What they hold and how it is laid out may change in any release, so an app never reads, parses or writes them. From SDK 0.29.0 an app uses three calls instead, on either client. Each answers for its own client's queue, sees every item queued by an earlier call, and the last two make no request and write nothing.
+The keys under the storage prefix (`ocdb.feedback.` and `ocdb.photos.` by default) are private to the SDK. What they hold and how it is laid out may change in any release, so an app never reads, parses or writes them. From SDK 0.29.0 an app uses three calls instead, on either client. Each answers for its own client's queue, sees every item queued by an earlier call, and the last two make no request and change nothing in the queue. The only write they can cause is a one-off save of new idempotency keys, when one of them is the client's first call over a stored queue holding an item whose key the intake would refuse.
 
-`flush({ ignoreBackoff: true })` tries every queued item now, for example when the app opens on good signal after a day offline. It skips the client's own backoff after a failed try, but an item still waits out a wait the intake asked for (a 429 with `Retry-After`, or a batch item's `retry_after`), so a daily limit holds. An item waiting for a new place's id still waits, and items older than 30 days are still dropped.
+`flush({ ignoreBackoff: true })` tries every queued item now, for example when the app opens on good signal after a day offline. It skips the client's own backoff after a failed try, but each item waits out the wait the intake gave it (a 429 with `Retry-After`, or a batch item's `retry_after`). The wait is kept per item, so an item the intake has not yet answered is tried once, even when another item is waiting out a long wait. An item that went into an intake wait under an SDK older than 0.29.0 carries no record of that wait, so the first `flush({ ignoreBackoff: true })` after an app updates tries it once. An item waiting for a new place's id still waits, and items older than 30 days are still dropped.
 
 ```ts
 const sub = AppState.addEventListener("change", (state) => {
@@ -637,7 +637,7 @@ const stuck = summary.oldestQueuedAt !== null && Date.now() - summary.oldestQueu
 if (stuck && summary.intakeWaitUntil === null) reportToTracker("feedback queue stuck", summary);
 ```
 
-`intakeWaitUntil` is the end of the longest wait the intake asked for, or null, so a queue held by a daily limit is not reported as a fault. `nextAttemptAt` is when the next item is due, or null when every item is due now or waits for a new place.
+`intakeWaitUntil` is the end of the longest wait the intake asked for, or null, so a queue the intake has asked to wait is not reported as a fault. `nextAttemptAt` is when the next item is due, or null when every item is due now or waits for a new place. On the photo client `waitingForNewPlace` is always 0, because its photos waiting for a new place are not queue items: they are in `queuedRefs().waitingPhotoKeys`.
 
 `queuedRefs()` answers the `ref` of each item still queued, in queue order, leaving out items queued without one. On the photo client it also answers `waitingPhotoKeys`, the `key` of each photo still waiting for a new place's id: keep those files.
 

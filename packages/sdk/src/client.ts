@@ -456,8 +456,9 @@ export type SubmitResult =
 export interface FlushOptions {
   /**
    * `true` tries every item now, skipping the client's own backoff after a
-   * failed try. An item still waits out a wait the intake asked for (a 429
-   * with `Retry-After`, or a batch item's `retry_after`), and an item waiting
+   * failed try. Each item waits out the wait the intake gave it (a 429 with
+   * `Retry-After`, or a batch item's `retry_after`), so an item the intake has
+   * not yet answered is tried once, and an item waiting
    * for a new place's id still waits for it. Items older than
    * `maxQueueAgeMs` are still dropped.
    */
@@ -581,13 +582,19 @@ export interface FeedbackClient {
   pending(): Promise<number>;
   /**
    * How this client's queue stands (`QueueSummary`). Sees every item queued
-   * by an earlier call, makes no request and writes nothing.
+   * by an earlier call. Makes no request and changes nothing in the queue. The
+   * only write it can cause is the one-off save of new idempotency keys, when
+   * it is the client's first call over a stored queue holding an item whose
+   * key the intake would refuse.
    */
   queueSummary(): Promise<QueueSummary>;
   /**
    * The `ref` of each item still queued, in queue order. An item queued
-   * without a ref is left out. Sees every item queued by an earlier call,
-   * makes no request and writes nothing.
+   * without a ref is left out. Sees every item queued by an earlier call.
+   * Makes no request and changes nothing in the queue. The only write it can
+   * cause is the one-off save of new idempotency keys, when it is the client's
+   * first call over a stored queue holding an item whose key the intake would
+   * refuse.
    */
   queuedRefs(): Promise<QueuedRefs>;
   /**
@@ -646,12 +653,18 @@ export interface PhotoClient {
   flush(options?: FlushOptions): Promise<FlushResult>;
   /** Number of items waiting to be sent. */
   pending(): Promise<number>;
-  /** How this client's queue stands, as the feedback client's `queueSummary` answers. */
+  /**
+   * How this client's queue stands, as the feedback client's `queueSummary`
+   * answers, with the same single write it can cause as its first call. On this
+   * client `waitingForNewPlace` is always 0, because photos waiting for a new
+   * place are not queue items: they are in `queuedRefs().waitingPhotoKeys`.
+   */
   queueSummary(): Promise<QueueSummary>;
   /**
    * The `ref` of each item still queued, as the feedback client's
    * `queuedRefs` answers, and the `key` of each photo still waiting for a new
-   * place's id, in the order they were taken: keep those files.
+   * place's id, in the order they were taken: keep those files. Causes the same
+   * single write as `queueSummary` when it is the client's first call.
    */
   queuedRefs(): Promise<PhotoQueuedRefs>;
   /**
