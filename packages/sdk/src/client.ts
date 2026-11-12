@@ -68,6 +68,13 @@ export interface FeedbackClientOptions {
    */
   timeoutMs?: number;
   /**
+   * The device id to send, a UUID, in place of the one the client keeps in
+   * storage. For a server that sends on behalf of many installs, with one
+   * client each: pass each install's own id here. It is never written to
+   * storage, and the stored id, if any, is left alone.
+   */
+  deviceId?: string;
+  /**
    * Most items kept in the queue. Past this the oldest item is dropped,
    * except an erasure (`eraseReviews`, `erasePhotos` or `removePhoto`): the
    * oldest item of any other kind goes instead, and when only erasures are
@@ -1016,6 +1023,9 @@ function createClient(
   const doFetchPhoto: PhotoFetchLike =
     options.fetchPhoto ?? ((input, init) => (globalThis.fetch as unknown as PhotoFetchLike)(input, init));
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
+  if (options.deviceId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(options.deviceId)) {
+    throw new Error("deviceId must be a UUID");
+  }
   const now = options.now ?? Date.now;
   const random = options.random ?? Math.random;
   const deviceKey = `${storagePrefix}.device`;
@@ -1044,7 +1054,7 @@ function createClient(
   }
 
   // The device id, read or made on the first operation that needs it, then kept.
-  let deviceId: string | undefined;
+  let deviceId: string | undefined = options.deviceId;
   async function device(): Promise<string> {
     if (deviceId) return deviceId;
     const existing = await storage.getItem(deviceKey);
