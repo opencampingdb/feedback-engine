@@ -89,14 +89,25 @@ await feedback.report({
 
 // A traveller's edit of a place: every fact they set, in one call. Each fact
 // is its own report, decided on its own, and the call answers one result per
-// fact. An install's reports about one place in a day count once against the
-// daily limits, however many facts the edit has (up to 100).
+// fact. Every fact is checked first: one refused fact throws and nothing is
+// queued. The facts then go in one batch with one attestation. An install's
+// reports about one place in a day count once against the daily limits,
+// however many facts the edit has (up to 100).
 const results = await feedback.reportFacts({
   place,
   facts: { toilets: true, pets: "leashed", fee: false, caravans: true },
   consent: true,
   ref: "edit-42", // each fact's report gets the ref "edit-42:<fact>"
+  first_hand: "says_so", // optional: the traveller was at the place in the last month
 });
+
+// To close a screen without waiting for the network, pass { wait: false } to
+// report, reportFacts, check or review. The call resolves { status: "queued" }
+// once the input is checked and saved, starts a send, and the outcome reaches
+// onAnswered (section 8). A refused input still throws first, so the screen
+// can stay open. Leave it out where the answer is needed at once, such as
+// the id of a new place.
+await feedback.report({ place, report: { kind: "closed" }, consent: true, ref: "close-9" }, { wait: false });
 
 // Details for a place the traveller has just added, before its id is known:
 // give the new_place report a ref, and name the place as { newPlace: <ref> }.
@@ -539,9 +550,13 @@ export function useFlushFeedback(): void {
 
 Items older than 30 days, or past the 100 newest, are dropped unsent.
 
+**Timeouts.** Each request to the intake, including reading its answer, and each call of your `attest` function is given up on after `timeoutMs` (default 30 000), and treated as offline: the item stays queued and is tried again later. The client passes an `AbortSignal` as `signal` in the fetch's `init`, and abandons a fetch that ignores it. Without a timeout, one stalled connection on weak coverage would hold every later call. The queue saves one change at a time, so a call made while a send is under way, even with `{ wait: false }`, waits for it, at most `timeoutMs`.
+
+**Which refusals drop an item.** An item is dropped only on the intake's own refusal, which is always JSON with a string `error`. A 4xx answer without one, such as a firewall's or a proxy's HTML page, keeps the item to try again with backoff, so a block page in front of the intake never empties a queue.
+
 **Batches.** A flush sends its due items together, up to 50 in one `POST /v1/feedback/batch`, with one attestation over the whole batch body: your `attest` function is called once a batch, with the batch's body and its SHA-256. On Android that is one Play Integrity token a batch instead of one an item. Google's default is "up to 10,000 total requests per day across all installs" (developer.android.com/google/play/integrity/overview), and you can ask for more, so sending one token per item would stop an app's Android contributions at 10,000 a day across every user. Set `maxBatchSize` (1 to 50, default 50) to send fewer at a time. A flush with one item due sends it alone to `POST /v1/feedback`, and `report()` and the other calls behave and answer as before.
 
-Each item in a batch is answered as it would be alone, and settled the same way: sent, dropped on a refusal, or kept on a 429 (with its own `retry_after`). An item waiting for a new place's id goes in the next batch of the same flush once a batch has given the new place its id. When the whole batch fails (offline, 408, 429, 5xx or a refused assertion), every item in it is kept and the flush stops. When the intake refuses the batch itself with 400, 403 or 413, which says nothing about any one item, the client sends that batch's items again one at a time, so each gets its own answer, and goes on batching after. Only a 401 `invalid_app_key` drops every item of a batch at once. An intake without the batch route answers 404 or 405, and the client then sends one item at a time for the rest of its life. Owner submissions and photos are never batched. Each item keeps one idempotency key every time it is sent, alone or in a batch, so an intake that took it before answers the same again and stores it once (see [self-hosting.md](self-hosting.md), "Idempotency keys"). An older intake ignores the keys.
+Each item in a batch is answered as it would be alone, and settled the same way: sent, dropped on a refusal, or kept on a 429 (with its own `retry_after`). An item waiting for a new place's id goes in the next batch of the same flush once a batch has given the new place its id. When the whole batch fails (offline, 408, 429, 5xx or a refused assertion), every item in it is kept and the flush stops. When the intake refuses the batch itself with 400, 403 or 413 (its own JSON refusal; any other such answer keeps every item), which says nothing about any one item, the client sends that batch's items again one at a time, so each gets its own answer, and goes on batching after. Only a 401 `invalid_app_key` drops every item of a batch at once. An intake without the batch route answers 404 or 405, and the client then sends one item at a time for the rest of its life. Owner submissions and photos are never batched. Each item keeps one idempotency key every time it is sent, alone or in a batch, so an intake that took it before answers the same again and stores it once (see [self-hosting.md](self-hosting.md), "Idempotency keys"). An older intake ignores the keys.
 
 **Connecting answers to your own records.** The client normalises a submission before it queues it: a location is rounded to 6 decimal places and names are trimmed. So what was queued can differ from what you passed in, and matching an answer to your record by content fails. Tidy what the traveller typed with `tidyName` and `tidyText`, round a location with `sdkCoordinate`, and store those values if you keep a copy.
 

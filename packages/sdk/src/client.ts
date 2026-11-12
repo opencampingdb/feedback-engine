@@ -14,6 +14,7 @@ import type {
   ReviewBody,
   ReviewReportReason,
   PhotoReportReason,
+  FirstHand,
 } from "./types.js";
 import { isFeedbackId, readProgress, type Progress } from "./progress.js";
 import { sha256Hex, sha256HexBytes } from "./sha256.js";
@@ -30,6 +31,8 @@ export type FetchLike = (input: string, init: {
   method: string;
   headers: Record<string, string>;
   body: string;
+  /** Aborted when the request runs past `timeoutMs`. A fetch that ignores it is still given up on. */
+  signal?: AbortSignal;
 }) => Promise<{ status: number; json(): Promise<unknown>; headers: { get(name: string): string | null } }>;
 
 /** The fetch a photo upload uses: the same as FetchLike, with the files as the body. */
@@ -57,6 +60,12 @@ export interface FeedbackClientOptions {
   now?: () => number;
   /** Random number in [0, 1) used for backoff jitter. Defaults to `Math.random`. */
   random?: () => number;
+  /**
+   * Longest wait, in milliseconds, for one request to the intake, including
+   * reading its answer, and for one attestation. Past it the request is
+   * aborted and treated as offline, so the queue moves on. Default 30 000.
+   */
+  timeoutMs?: number;
   /** Most items kept in the queue. The oldest are dropped past this. Default 100. */
   maxQueueLength?: number;
   /** Items older than this are dropped unsent. Default 30 days. */
@@ -216,6 +225,19 @@ export interface FactsInput {
    * is queued with the ref `<ref>:<fact>`, passed back to `onAnswered`.
    */
   ref?: string;
+  /** Marks every fact of the edit first-hand, as `report.first_hand` does on a single report. */
+  first_hand?: FirstHand;
+}
+
+/** How a queued call resolves. */
+export interface SubmitOptions {
+  /**
+   * `true` (the default) resolves once a send has been tried, with `sent`,
+   * `rejected` or `queued`. `false` resolves `{ status: "queued" }` as soon as
+   * the item is checked and saved, and starts a send without waiting for it:
+   * the outcome reaches `onAnswered`. A refused input still throws first.
+   */
+  wait?: boolean;
 }
 
 /** What one fact of a `reportFacts` edit came to. */
@@ -460,17 +482,23 @@ export interface OwnerUpdateInput {
 }
 
 export interface FeedbackClient {
-  report(input: ReportInput): Promise<SubmitResult>;
+  /**
+   * Queues a report and tries to send it. Resolves once the send has been
+   * tried, or with `{ wait: false }` as soon as it is saved (`SubmitOptions`).
+   */
+  report(input: ReportInput, options?: SubmitOptions): Promise<SubmitResult>;
   /**
    * Sends a traveller's edit of one place: one fact report for each fact, in
-   * the order given, each queued and retried like `report`. The intake counts
-   * an install's reports about one place in a day once against its daily
-   * limits, so a full edit costs no more than one fact. Resolves with each
-   * fact's result, in the same order.
+   * the order given, each queued and retried like `report`. Every fact is
+   * checked first, so one refused fact throws before anything is queued. The
+   * facts are then queued together and sent in one batch with one
+   * attestation. The intake counts an install's reports about one place in a
+   * day once against its daily limits, so a full edit costs no more than one
+   * fact. Resolves with each fact's result, in the same order.
    */
-  reportFacts(input: FactsInput): Promise<FactResult[]>;
-  review(input: ReviewInput): Promise<SubmitResult>;
-  check(input: CheckInput): Promise<SubmitResult>;
+  reportFacts(input: FactsInput, options?: SubmitOptions): Promise<FactResult[]>;
+  review(input: ReviewInput, options?: SubmitOptions): Promise<SubmitResult>;
+  check(input: CheckInput, options?: SubmitOptions): Promise<SubmitResult>;
   /** Reports a published review. Queued and retried like the others. */
   reportReview(input: ReviewReportInput): Promise<SubmitResult>;
   /**
@@ -778,6 +806,16 @@ const BASE_DELAY_MS = 30_000;
 const PASS_REFRESH_MS = 5 * 60 * 1000;
 const MAX_DELAY_MS = 6 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** Default longest wait for one request or attestation (`timeoutMs`). */
+export const DEFAULT_TIMEOUT_MS = 30_000;
+
+/** A request or attestation that ran past `timeoutMs`. */
+class RequestTimeoutError extends Error {
+  constructor() {
+    super("the request ran past its timeout");
+    this.name = "RequestTimeoutError";
+  }
+}
 
 function defaultRandomUUID(): string {
   const c = (globalThis as { crypto?: { randomUUID?: () => string; getRandomValues?: (a: Uint8Array) => Uint8Array } }).crypto;
@@ -811,6 +849,11 @@ function base64Url(bytes: Uint8Array): string {
   return out;
 }
 
+/** Whether an answer is the intake's own refusal: JSON with a string `error`. */
+function isIntakeRefusal(answer: unknown): boolean {
+  return answer !== null && typeof answer === "object" && typeof (answer as { error?: unknown }).error === "string";
+}
+
 /** Delay before the next try after `attempts` failures, with jitter between half and all of it. */
 export function backoffDelay(attempts: number, random: () => number = Math.random): number {
   const ceiling = Math.min(MAX_DELAY_MS, BASE_DELAY_MS * 2 ** Math.max(0, attempts - 1));
@@ -836,8 +879,23 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
   let batchRoute = true;
   const photoUrl = `${options.endpoint.replace(/\/+$/, "")}/v1/photos`;
   const passUrl = `${photoUrl}/pass`;
-  const doFetch: FetchLike =
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!(timeoutMs > 0)) throw new Error("timeoutMs must be above 0");
+  /** Runs `work`, aborting it and rejecting with RequestTimeoutError past `timeoutMs`, whether or not it heeds the signal. */
+  function withTimeout<T>(work: (signal?: AbortSignal) => Promise<T>): Promise<T> {
+    const controller = typeof AbortController === "function" ? new AbortController() : undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller?.abort();
+        reject(new RequestTimeoutError());
+      }, timeoutMs);
+    });
+    return Promise.race([work(controller?.signal), late]).finally(() => clearTimeout(timer));
+  }
+  const rawFetch: FetchLike =
     options.fetch ?? ((input, init) => (globalThis.fetch as unknown as FetchLike)(input, init));
+  const doFetch: FetchLike = (input, init) => withTimeout((signal) => rawFetch(input, signal ? { ...init, signal } : init));
   const doFetchPhoto: PhotoFetchLike =
     options.fetchPhoto ?? ((input, init) => (globalThis.fetch as unknown as PhotoFetchLike)(input, init));
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
@@ -948,6 +1006,9 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
       await callRefusalHook(options.onAttestationRejected, error, answer);
       return { result: "stop" };
     }
+    // Only the intake's own refusal (JSON with a string `error`) drops an item. Anything
+    // else, such as a firewall's or proxy's HTML page or an unbound route, is kept to try again.
+    if (!isIntakeRefusal(answer)) return { result: "stop" };
     return { result: "drop", outcome: { kind: "dropped", httpStatus: status } };
   }
 
@@ -963,7 +1024,8 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     let attestation: Record<string, string> = {};
     if (options.attest) {
       try {
-        attestation = await options.attest({ body, bodySha256: sha256Hex(body) });
+        const attest = options.attest;
+        attestation = await withTimeout(() => Promise.resolve(attest({ body, bodySha256: sha256Hex(body) })));
       } catch {
         return undefined; // the platform could not attest now, so try again later
       }
@@ -980,8 +1042,10 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     }
     let answer: unknown;
     try {
-      answer = await res.json();
-    } catch {
+      answer = await withTimeout(() => res.json());
+    } catch (error) {
+      // An answer that stalls part way is treated as no answer at all: try again later.
+      if (error instanceof RequestTimeoutError) return undefined;
       answer = undefined;
     }
     return { status: res.status, answer, retryAfter: Number(res.headers.get("retry-after")) };
@@ -1008,6 +1072,10 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     const res = await post(batchUrl, JSON.stringify({ items: items.map((item) => item.body), keys: items.map((item) => item.localId) }));
     if (!res) return items.map(() => ({ result: "stop" as const }));
     if (res.status === 404 || res.status === 405) return "fallback";
+    // A 400, 403 or 413 that is not the intake's own (a firewall's page, say) says nothing about the batch: keep every item.
+    if ((res.status === 400 || res.status === 403 || res.status === 413) && !isIntakeRefusal(res.answer)) {
+      return items.map(() => ({ result: "stop" as const }));
+    }
     if (res.status === 400 || res.status === 403 || res.status === 413) return "singly";
     const answers = (res.answer as { items?: unknown } | null | undefined)?.items;
     if (res.status === 200 && Array.isArray(answers) && answers.length === items.length) {
@@ -1164,65 +1232,99 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     return result;
   }
 
-  async function submit(
-    { ref, ...input }: { consent: boolean; ref?: string | undefined } & Record<string, unknown>,
-    type: FeedbackSubmission["type"],
-  ) {
+  type Call = { input: Record<string, unknown> & { consent: boolean }; ref?: string | undefined };
+
+  /** Checks consent and the ref before anything is queued. */
+  function checkCall({ input, ref }: Call): void {
     if (input.consent !== true) throw new ConsentRequiredError();
     if (ref !== undefined && (typeof ref !== "string" || ref.length < 1 || ref.length > MAX_REF_LENGTH)) {
       throw new FeedbackValidationError([`ref must be a string of 1 to ${MAX_REF_LENGTH} characters`]);
     }
-    const localId = await serial(async () => {
-      await readNewPlaces();
-      // A place still waiting for its id: follow its new place, or wait for it in the queue.
-      let waitsFor: string | undefined;
-      const target = input.place;
-      if (target !== null && typeof target === "object") {
-        const newPlace = (target as Partial<NewPlaceRef>).newPlace;
-        if (typeof newPlace !== "string" || newPlace.length < 1 || newPlace.length > MAX_REF_LENGTH) {
-          throw new FeedbackValidationError([`place.newPlace must be the ref of a new_place report, 1 to ${MAX_REF_LENGTH} characters`]);
-        }
-        const known = (await readNewPlaces()).get(newPlace);
-        if (known?.dropped) throw new FeedbackValidationError([`the new place ${newPlace} was dropped, so nothing can be sent about it`]);
-        if (known?.place) input = { ...input, place: known.place };
-        else if ((await readQueue()).some((q) => q.ref === newPlace && isNewPlaceItem(q))) {
-          waitsFor = newPlace;
-          input = { ...input, place: PENDING_PLACE };
-        } else throw new FeedbackValidationError([`no new_place report with the ref ${newPlace} is queued or was sent`]);
+  }
+
+  /** Validates one call into a queue item, without saving it. Runs inside `serial`, with the queue already read. */
+  async function prepareItem(queue: readonly QueueItem[], { input, ref }: Call, type: FeedbackSubmission["type"], deviceId: string): Promise<QueueItem> {
+    // A place still waiting for its id: follow its new place, or wait for it in the queue.
+    let waitsFor: string | undefined;
+    const target = input.place;
+    if (target !== null && typeof target === "object") {
+      const newPlace = (target as Partial<NewPlaceRef>).newPlace;
+      if (typeof newPlace !== "string" || newPlace.length < 1 || newPlace.length > MAX_REF_LENGTH) {
+        throw new FeedbackValidationError([`place.newPlace must be the ref of a new_place report, 1 to ${MAX_REF_LENGTH} characters`]);
       }
-      const body = { ...input, type, device: await device(), app_version: appVersion, consent: true };
-      const checked = validateSubmission(body, new Date(now()));
-      if (!checked.ok) throw new FeedbackValidationError(checked.errors);
+      const known = (await readNewPlaces()).get(newPlace);
+      if (known?.dropped) throw new FeedbackValidationError([`the new place ${newPlace} was dropped, so nothing can be sent about it`]);
+      if (known?.place) input = { ...input, place: known.place };
+      else if (queue.some((q) => q.ref === newPlace && isNewPlaceItem(q))) {
+        waitsFor = newPlace;
+        input = { ...input, place: PENDING_PLACE };
+      } else throw new FeedbackValidationError([`no new_place report with the ref ${newPlace} is queued or was sent`]);
+    }
+    const body = { ...input, type, device: deviceId, app_version: appVersion, consent: true };
+    const checked = validateSubmission(body, new Date(now()));
+    if (!checked.ok) throw new FeedbackValidationError(checked.errors);
+    return {
+      localId: newKey(),
+      ...(ref !== undefined ? { ref } : {}),
+      body: checked.value as FeedbackSubmission,
+      queuedAt: now(),
+      attempts: 0,
+      nextAttemptAt: 0,
+      ...(waitsFor !== undefined ? { waitsFor } : {}),
+    };
+  }
+
+  /**
+   * Validates every call, then queues them all with one write, and sends
+   * them in one flush. Nothing is queued when any call is refused. Resolves
+   * with each call's result, in order. With `wait: false`, each is `queued`
+   * as soon as it is saved, and the flush runs without being waited for.
+   */
+  async function submitAll(calls: readonly Call[], type: FeedbackSubmission["type"], wait: boolean): Promise<SubmitResult[]> {
+    for (const call of calls) checkCall(call);
+    if (calls.length === 0) return [];
+    const ids = await serial(async () => {
       const queue = await readQueue();
-      const item: QueueItem = {
-        localId: newKey(),
-        ...(ref !== undefined ? { ref } : {}),
-        body: checked.value as FeedbackSubmission,
-        queuedAt: now(),
-        attempts: 0,
-        nextAttemptAt: 0,
-        ...(waitsFor !== undefined ? { waitsFor } : {}),
-      };
-      queue.push(item);
+      await readNewPlaces();
+      const deviceId = await device();
+      const items: QueueItem[] = [];
+      for (const call of calls) items.push(await prepareItem(queue, call, type, deviceId));
+      queue.push(...items);
       while (queue.length > maxQueueLength) record(queue.shift()!, { kind: "dropped", httpStatus: 0 });
       await writeQueue(queue);
       await writeNewPlaces();
-      waiting.add(item.localId);
-      return item.localId;
+      if (wait) for (const item of items) waiting.add(item.localId);
+      return items.map((item) => item.localId);
     });
+    if (!wait) {
+      // The answer reaches onAnswered. A failed flush is tried again by the next call or flush().
+      void flushNow().catch(() => undefined);
+      return ids.map(() => ({ status: "queued" }) as const);
+    }
     try {
       await flushNow();
     } finally {
-      waiting.delete(localId);
+      for (const id of ids) waiting.delete(id);
     }
-    const outcome = outcomes.get(localId);
-    outcomes.delete(localId);
-    if (!outcome) return { status: "queued" } as const;
-    if (outcome.kind === "sent") {
-      const { kind: _kind, ...sent } = outcome;
-      return { status: "sent", ...sent } as const;
-    }
-    return { status: "rejected", httpStatus: outcome.httpStatus } as const;
+    return ids.map((localId) => {
+      const outcome = outcomes.get(localId);
+      outcomes.delete(localId);
+      if (!outcome) return { status: "queued" } as const;
+      if (outcome.kind === "sent") {
+        const { kind: _kind, ...sent } = outcome;
+        return { status: "sent", ...sent } as const;
+      }
+      return { status: "rejected", httpStatus: outcome.httpStatus } as const;
+    });
+  }
+
+  async function submit(
+    { ref, ...input }: { consent: boolean; ref?: string | undefined } & Record<string, unknown>,
+    type: FeedbackSubmission["type"],
+    submitOptions?: SubmitOptions,
+  ): Promise<SubmitResult> {
+    const [result] = await submitAll([{ input, ref }], type, submitOptions?.wait !== false);
+    return result!;
   }
 
   /** Sends an owner submission straight away and returns the intake's answer. */
@@ -1565,28 +1667,24 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
       });
       return { id: String(answer.id ?? "") };
     },
-    report: (input) => submit({ ...input }, "report"),
-    reportFacts: async ({ place, facts, contributor, consent, ref }) => {
+    report: (input, submitOptions) => submit({ ...input }, "report", submitOptions),
+    reportFacts: async ({ place, facts, contributor, consent, ref, first_hand }, submitOptions) => {
       if (ref !== undefined && (ref.length < 1 || ref.length > 90)) throw new RangeError("ref must be 1 to 90 characters");
-      const results: FactResult[] = [];
-      for (const [fact, value] of Object.entries(facts) as [FactName, FactValue | undefined][]) {
-        if (value === undefined) continue;
-        const result = await submit(
-          {
-            place,
-            report: { kind: "fact", fact, value },
-            ...(contributor !== undefined ? { contributor } : {}),
-            consent,
-            ...(ref !== undefined ? { ref: `${ref}:${fact}` } : {}),
-          },
-          "report",
-        );
-        results.push({ fact, result });
-      }
-      return results;
+      const set = (Object.entries(facts) as [FactName, FactValue | undefined][]).filter(([, value]) => value !== undefined);
+      const calls: Call[] = set.map(([fact, value]) => ({
+        input: {
+          place,
+          report: { kind: "fact", fact, value, ...(first_hand !== undefined ? { first_hand } : {}) },
+          ...(contributor !== undefined ? { contributor } : {}),
+          consent,
+        },
+        ...(ref !== undefined ? { ref: `${ref}:${fact}` } : {}),
+      }));
+      const results = await submitAll(calls, "report", submitOptions?.wait !== false);
+      return set.map(([fact], i) => ({ fact, result: results[i]! }));
     },
-    review: (input) => submit({ ...input }, "review"),
-    check: (input) => submit({ ...input }, "check"),
+    review: (input, submitOptions) => submit({ ...input }, "review", submitOptions),
+    check: (input, submitOptions) => submit({ ...input }, "check", submitOptions),
     reportReview: ({ place, review, reason, contributor, consent, ref }) =>
       submit(
         { place, review_report: { review, reason }, ...(contributor !== undefined ? { contributor } : {}), consent, ref },
