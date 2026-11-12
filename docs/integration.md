@@ -639,7 +639,7 @@ if (stuck && summary.intakeWaitUntil === null) reportToTracker("feedback queue s
 
 `intakeWaitUntil` is the end of the longest wait the intake asked for, or null, so a queue the intake has asked to wait is not reported as a fault. `nextAttemptAt` is when the next item is due, or null when every item is due now or waits for a new place. On the photo client `waitingForNewPlace` is always 0, because its photos waiting for a new place are not queue items: they are in `queuedRefs().waitingPhotoKeys`.
 
-`queuedRefs()` answers the `ref` of each item still queued, in queue order, leaving out items queued without one. On the photo client it also answers `waitingPhotoKeys`, the `key` of each photo still waiting for a new place's id: keep those files.
+`queuedRefs()` answers the `ref` of each item still queued, in queue order, then of each item already settled whose answer `onAnswered` has not finished with yet, leaving out items queued without one, so an app can tell an item still with the SDK from one that is lost. On the photo client it also answers `waitingPhotoKeys`, the `key` of each photo still waiting for a new place's id: keep those files.
 
 ```ts
 const { refs } = await feedback.queuedRefs();

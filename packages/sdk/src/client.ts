@@ -589,8 +589,10 @@ export interface FeedbackClient {
    */
   queueSummary(): Promise<QueueSummary>;
   /**
-   * The `ref` of each item still queued, in queue order. An item queued
-   * without a ref is left out. Sees every item queued by an earlier call.
+   * The `ref` of each item still queued, in queue order, then of each item
+   * already settled whose answer `onAnswered` has not finished with yet, so an
+   * app can tell an item still with the SDK from one that is lost. An item
+   * queued without a ref is left out. Sees every item queued by an earlier call.
    * Makes no request and changes nothing in the queue. The only write it can
    * cause is the one-off save of new idempotency keys, when it is the client's
    * first call over a stored queue holding an item whose key the intake would
@@ -661,8 +663,8 @@ export interface PhotoClient {
    */
   queueSummary(): Promise<QueueSummary>;
   /**
-   * The `ref` of each item still queued, as the feedback client's
-   * `queuedRefs` answers, and the `key` of each photo still waiting for a new
+   * The `ref` of each item still queued or settled with its answer not yet
+   * given to `onAnswered`, as the feedback client's `queuedRefs` answers, and the `key` of each photo still waiting for a new
    * place's id, in the order they were taken: keep those files. Causes the same
    * single write as `queueSummary` when it is the client's first call.
    */
@@ -1226,6 +1228,8 @@ function createClient(
   const outcomes = new Map<string, Outcome>();
   // Answers for onAnswered, kept until the queue is saved and then told in order.
   const answers: Answer[] = [];
+  // Answers taken from `answers` whose onAnswered call has not returned or thrown yet.
+  const telling = new Set<Answer>();
   function record(item: QueueItem, outcome: Outcome): void {
     if (waiting.has(item.localId)) outcomes.set(item.localId, outcome);
     // A new place's answer settles the items waiting for it (`NewPlaceRef`).
@@ -1241,10 +1245,13 @@ function createClient(
     const hook = options.onAnswered;
     if (!hook) return;
     for (let answer = answers.shift(); answer; answer = answers.shift()) {
+      telling.add(answer);
       try {
         await hook(answer);
       } catch {
         // The app's own record keeping failing must not stop the queue.
+      } finally {
+        telling.delete(answer);
       }
     }
   }
@@ -1592,7 +1599,14 @@ function createClient(
     });
   }
 
-  const refsIn = (queue: readonly QueueItem[]) => queue.flatMap((item) => (item.ref !== undefined ? [item.ref] : []));
+  // The refs of the queued items in queue order, then of the settled items whose
+  // answer onAnswered has not finished with yet, in the order they are told. No ref twice.
+  const refsIn = (queue: readonly QueueItem[]) => {
+    const refs = new Set<string>();
+    for (const item of queue) if (item.ref !== undefined) refs.add(item.ref);
+    for (const answer of [...telling, ...answers]) if (answer.ref !== undefined) refs.add(answer.ref);
+    return [...refs];
+  };
   const queuedRefs = (): Promise<QueuedRefs> => serial(async () => ({ refs: refsIn(await readQueue()) }));
   const photoQueuedRefs = (): Promise<PhotoQueuedRefs> =>
     serial(async () => ({ refs: refsIn(await readQueue()), waitingPhotoKeys: (await readWaitingPhotos()).map((w) => w.key) }));
