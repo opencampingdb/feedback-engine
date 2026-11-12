@@ -519,15 +519,18 @@ describe("itemDecision", () => {
 describe("reportFacts", () => {
   const edit: FactsInput = { place: PLACE, facts: { toilets: true, pets: "leashed", fee: false }, consent: true };
 
-  it("sends one fact report per fact, in order, and returns each fact's result", async () => {
+  it("sends one fact report per fact, in order, in one batch, and returns each fact's result", async () => {
     const { client, calls } = setup([202]);
     const results = await client.reportFacts(edit);
-    expect(calls.map((c) => (c.body as { report: unknown }).report)).toEqual([
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toMatch(/\/v1\/feedback\/batch$/);
+    const items = (calls[0]!.body as { items: { place: string; report: unknown }[] }).items;
+    expect(items.map((item) => item.report)).toEqual([
       { kind: "fact", fact: "toilets", value: true },
       { kind: "fact", fact: "pets", value: "leashed" },
       { kind: "fact", fact: "fee", value: false },
     ]);
-    expect(calls.every((c) => (c.body as { place: string }).place === PLACE)).toBe(true);
+    expect(items.every((item) => item.place === PLACE)).toBe(true);
     expect(results.map((r) => [r.fact, r.result.status])).toEqual([
       ["toilets", "sent"],
       ["pets", "sent"],

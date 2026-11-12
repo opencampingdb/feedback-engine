@@ -6,6 +6,7 @@ export {
   createFeedbackClient,
   createPhotoClient,
   backoffDelay,
+  DEFAULT_TIMEOUT_MS,
   isJpeg,
   keyIsUnusable,
   MAX_REF_LENGTH,
@@ -55,6 +56,7 @@ export type {
   ReviewInput,
   ReviewReportInput,
   StorageAdapter,
+  SubmitOptions,
   SubmitResult,
   WithdrawInput,
 } from "./client.js";
