@@ -18,8 +18,8 @@ The page fills in the place id, shows the owner terms and takes the owner throug
 
 1. The owner sends a claim (`owner_claim`) for a place in the data, or a listing (`owner_listing`) for private land that is not. The intake answers with an id, a short code such as `OCDB-7KQ2`, and a token. The token is shown once and never stored: the intake keeps only its SHA-256.
 2. The owner puts the code on their own website or public Facebook page, at the address they gave as `proof_url`.
-3. Each hourly apply run fetches that page and looks for the code. Once it is there, the claim goes to the `feedback/review` PR on the data repository with an approval box and the label `owner-claim`. After 7 days without it, the claim goes there without another fetch, marked as not found.
-4. A person checks that the proof page belongs to the place, ticks the box and merges the PR. The box shows the address the code was found at, and flags it when a redirect led to a different site from the one submitted. The next run writes the owner record in the private inbox and marks the place `owner_verified: true`, or adds the farm stay, through the automatic PR. Unticked boxes in a merged PR, and claims in a PR closed without merging, are refused.
+3. Each apply run fetches that page and looks for the code. Once it is there, the claim goes to the `feedback/review` PR on the data repository with an approval box and the label `owner-claim`. After 7 days without it, the claim goes there without another fetch, marked as not found.
+4. A person checks that the proof page belongs to the place, ticks the box and merges the PR. The box shows the address the code was found at, and flags it when a redirect led to a different site from the one submitted. The next run writes the owner record in the private inbox and marks the place `owner_verified: true`, or adds the farm stay, through the automatic PR. Unticked boxes in a merged PR, claims in a PR closed without merging, and claims with no decision within 60 days of reaching the PR are refused.
 5. From then on the owner sends updates (`owner_update`) with the token. A matching token is applied within the hour. A wrong token, or a token for another place, is refused.
 
 A lost token means claiming again. Once approved, the new claim replaces the old token.
@@ -54,7 +54,7 @@ Apps should show, for every `farm_stay`: **Private property. Book with the owner
 
 ## Submissions
 
-All three go to `POST /v1/feedback` with the `X-App-Key` header, like other feedback. They carry `terms_accepted: true` instead of `consent`, and count against a limit of 5 owner submissions per device, and 10 per client network, a day.
+All three go to `POST /v1/feedback` with the `X-App-Key` header, never in a batch. They carry `terms_accepted: true` instead of `consent`. Each device may send 5 owner submissions a day and each client network 10, and the app key's `owner_daily_limit` counts them apart from its other feedback.
 
 ```json
 {
@@ -110,7 +110,7 @@ Rules worth knowing:
 - A description holding an email address, phone number or link is refused with `400`. Use the phone, website and booking fields.
 - `owner` (name and email) is stored only in the private inbox and is never written to the data or a PR.
 
-Answers: `202 {"id","code","token"}` for a claim or listing, `202 {"id"}` for an update, `400` with `details`, `401` for the app key, `429` for the limit.
+Answers: `202 {"id","code","token"}` for a claim or listing, `202 {"id"}` for an update, `400 invalid` with `details`, `401 invalid_app_key`, `403 type_not_allowed_for_app_key` for a key without `owner` in its `kinds`, `429 rate_limited` with `retry-after`, and `503 storage_unavailable` when the intake could not store it.
 
 ## SDK
 
