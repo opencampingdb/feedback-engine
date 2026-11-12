@@ -47,6 +47,8 @@ export const feedback = createFeedbackClient({
 
 The client keeps its queue and a random device id in storage under keys starting `ocdb.feedback.`.
 
+One client owns a storage prefix. Make the client once, in a module of its own, and use that one client everywhere in the app. It reads the queue and device id on its first call, not when it is made, so anything the app puts in storage before that call is seen. After that it works from its own copy in memory, saving every item before it is sent and the queue again after each flush. A second client over the same prefix does not see the first one's copy, and the two can overwrite each other's items. The photo client uses the `ocdb.photos` prefix, so it can run beside the feedback client.
+
 ## 4. Ask for consent
 
 Show `CONSENT_TITLE` and `CONSENT_TEXT` before the first submission, with an agree button. Store the answer yourself and pass `consent: true` only when the user agreed. Without it the client throws `ConsentRequiredError` and sends nothing.
