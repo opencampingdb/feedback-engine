@@ -930,37 +930,43 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
   async function device(): Promise<string> {
     if (deviceId) return deviceId;
     const existing = await storage.getItem(deviceKey);
-    if (existing) return (deviceId = existing);
+    if (existing) {
+      deviceId = existing;
+      return existing;
+    }
     const id = randomUUID();
     await storage.setItem(deviceKey, id);
-    return (deviceId = id);
+    deviceId = id;
+    return id;
   }
 
   async function readQueue(): Promise<QueueItem[]> {
-    cachedQueue ??= await loadQueue();
+    cachedQueue ??= await readQueueFromStorage();
     return cachedQueue;
   }
 
-  async function loadQueue(): Promise<QueueItem[]> {
+  async function readQueueFromStorage(): Promise<QueueItem[]> {
     const raw = await storage.getItem(queueKey);
     if (!raw) return [];
+    let queue: QueueItem[];
+    let changed = false;
     try {
       const parsed: unknown = JSON.parse(raw);
       if (!Array.isArray(parsed)) return [];
-      const queue = parsed as QueueItem[];
+      queue = parsed as QueueItem[];
       // Every item needs a key the intake takes. One queued without (or with one it would refuse) gets a new one, kept from now on.
-      let changed = false;
       for (const item of queue) {
         if (!isIdempotencyKey(item.localId)) {
           item.localId = newKey();
           changed = true;
         }
       }
-      if (changed) await writeQueue(queue);
-      return queue;
     } catch {
       return [];
     }
+    // Saved outside the try, so a failed save rejects the operation and nothing is cached over the stored items.
+    if (changed) await writeQueue(queue);
+    return queue;
   }
 
   // What became of new places that items can wait for, by the new place's ref.

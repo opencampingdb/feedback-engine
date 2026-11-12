@@ -123,6 +123,35 @@ describe("storage calls for an edit", () => {
     expect(await client.flush()).toEqual({ sent: 1, dropped: 0, remaining: 0 });
   });
 
+  it("a failed save of new keys while reading the queue keeps the stored items", async () => {
+    const store = countingStorage();
+    const first = setup(store);
+    first.intake.online.value = false;
+    await first.client.check({ place: PLACE, check: { still_there: true, visited: "2026-11-01" }, consent: true });
+    const stored = JSON.parse(store.data.get(QUEUE)!) as { localId: string }[];
+    stored[0]!.localId = "bad";
+    store.data.set(QUEUE, JSON.stringify(stored));
+
+    const { client, intake, clock } = setup(store);
+    intake.online.value = false;
+    // The next save of the queue fails once.
+    const setItem = store.storage.setItem;
+    let failNext = true;
+    store.storage.setItem = async (k, v) => {
+      if (k === QUEUE && failNext) {
+        failNext = false;
+        throw new Error("disk full");
+      }
+      return setItem(k, v);
+    };
+    await expect(client.pending()).rejects.toThrow("disk full");
+    expect(await client.flush()).toEqual({ sent: 0, dropped: 0, remaining: 1 });
+    expect(JSON.parse(store.data.get(QUEUE)!)).toHaveLength(1);
+    intake.online.value = true;
+    clock.t += 60_000;
+    expect(await client.flush()).toEqual({ sent: 1, dropped: 0, remaining: 0 });
+  });
+
   it("reads the device id on the first operation only", async () => {
     const { client, store, clock } = setup();
     await client.check({ place: PLACE, check: { still_there: true, visited: "2026-11-01" }, consent: true });
