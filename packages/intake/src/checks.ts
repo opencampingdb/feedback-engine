@@ -11,8 +11,8 @@
  *    so the network and key caps hold when an install changes it.
  * 2. URLhaus (abuse.ch), for the links that passed step 1.
  * 3. Llama Guard 3 on Workers AI, for the name, description and note, and only
- *    from a contributor without a track record. Facts, fees, choices from a
- *    list and links never go to it.
+ *    from a contributor without a track record. Facts, choices from a list and
+ *    links never go to it.
  *
  * A check service that is down, answers with an error, or takes longer than
  * `CHECK_TIMEOUT_MS` holds the item as `check_unavailable`. So does a check

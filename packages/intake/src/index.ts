@@ -15,6 +15,7 @@ import {
   isPlaceId,
   isDoubtFact,
   isValidFactValue,
+  FEE_RETIRED,
   isFeedbackId,
   isPhotoId,
   isContributor,
@@ -1477,6 +1478,10 @@ export function createHandler(deps: Deps) {
    */
   async function admit(intake: Intake, body: unknown): Promise<Admitted | ItemAnswer> {
     const { request, env, app, nowMs, received, day, origin } = intake;
+    // Fee reports are no longer collected. Answered before validation, so a client of any SDK version gets the same refusal.
+    if (typeof body === "object" && body !== null && (body as { type?: unknown }).type === "fee") {
+      return { status: 410, body: { error: "fee_retired", details: [FEE_RETIRED] } };
+    }
     const checked = validateSubmission(body, new Date(nowMs));
     if (!checked.ok) return { status: 400, body: { error: "invalid", details: checked.errors } };
     const submission = checked.value;
@@ -1519,7 +1524,7 @@ export function createHandler(deps: Deps) {
       if (contributor === undefined && proof && feedback.type === "report" && feedback.report.kind === "new_place") {
         contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
       }
-      if (contributor === undefined && ["review", "review_report", "fee", "photo_report", "photo_erasure", "photo_removal", "review_erasure"].includes(feedback.type)) {
+      if (contributor === undefined && ["review", "review_report", "photo_report", "photo_erasure", "photo_removal", "review_erasure"].includes(feedback.type)) {
         return { status: 400, body: { error: "contributor_required" } };
       }
       // With a proof key, only the app's server can say the account is the contributor's: a removal or
@@ -1611,7 +1616,6 @@ export function createHandler(deps: Deps) {
       ...("review" in rest ? { review: rest.review } : {}),
       ...("check" in rest ? { check: rest.check } : {}),
       ...("review_report" in rest ? { review_report: rest.review_report } : {}),
-      ...("fee" in rest ? { fee: rest.fee } : {}),
       ...("photo_report" in rest ? { photo_report: rest.photo_report } : {}),
       ...("photo_removal" in rest ? { photo_removal: rest.photo_removal } : {}),
     } as StoredFeedback;

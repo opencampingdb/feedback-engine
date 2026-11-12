@@ -1,6 +1,6 @@
 # @opencampingdb/feedback
 
-Client for sending reports, reviews, checks, fees and photos about places in Open Camping DB. Works in React Native, Expo and the browser, with no dependencies.
+Client for sending reports, reviews, checks and photos about places in Open Camping DB. Works in React Native, Expo and the browser, with no dependencies.
 
 It isn't published to npm: build and pack it from this repository, as [docs/integration.md](../../docs/integration.md#2-install) shows, and install the package file.
 
@@ -17,9 +17,9 @@ await feedback.review({ place, review: { stars: 5, text: "Quiet and shady", visi
 - A random per-install device id is made once and kept in storage.
 - Nothing is sent unless `consent: true` is passed. Show `CONSENT_TEXT` first.
 - Show `ATTRIBUTION` wherever the data appears.
-- Reviews, fees and `reportReview()` carry the signed-in traveller's opaque `contributor` id. `eraseReviews({ contributor })` removes every review that contributor wrote, for example when they delete their account (docs/integration.md section 6). Pass an `attest` function when the app key requires App Attest or Play Integrity; it gets the exact body and its SHA-256 at send time. A refused assertion keeps the item queued and calls `onAttestationRejected` (see below).
+- Reviews and `reportReview()` carry the signed-in traveller's opaque `contributor` id. `eraseReviews({ contributor })` removes every review that contributor wrote, for example when they delete their account (docs/integration.md section 6). Pass an `attest` function when the app key requires App Attest or Play Integrity; it gets the exact body and its SHA-256 at send time. A refused assertion keeps the item queued and calls `onAttestationRejected` (see below).
 - Photos of a new place can wait for its id too: give the photo client `resolveNewPlace: feedback.newPlace`, `loadPhoto` and `onPhotoSettled`, and call `photos.photo({ place: { newPlace }, key, ... })`. See docs/photos.md.
-- A place the traveller has just added can be named before its id is known, as `{ newPlace: <the new_place report's ref> }`, in `report`, `reportFacts`, `check`, `fee` and `review`. The items wait in the queue, unsent, until the new place is sent, then go with its `ocdb_` id in order. They're dropped with `reason: "new_place_dropped"` if it is dropped or refused.
+- A place the traveller has just added can be named before its id is known, as `{ newPlace: <the new_place report's ref> }`, in `report`, `reportFacts`, `check` and `review`. The items wait in the queue, unsent, until the new place is sent, then go with its `ocdb_` id in order. They're dropped with `reason: "new_place_dropped"` if it is dropped or refused.
 - `reportFacts({ place, facts, consent })` sends a traveller's edit of one place, every fact they set, in one call, and resolves with each fact's result. The intake counts an install's reports about one place in a day once against the install's and the contributor's daily limits, and each against the app's.
 - Facts include `pets_months` (an OSM month range such as `May-Sep`, read with `monthsInRange`) and `vehicle_access` (`heavy_vehicles_only`). A `commons_mismatch` report says a Wikimedia Commons photo shown for a place is not of it.
 - `progress(ids)` says what became of each contribution, by the id the intake answered when it was sent: `received`, `live`, `waiting`, `accepted`, `held`, `refused` (with `reason` and `by`), `in_data` (with `in_data_at`) or `unknown` (`PROGRESS_STATES`). `progressInRelease(progress, dataVersion)` says whether the app's data release has the change. See docs/integration.md, "What became of a contribution".

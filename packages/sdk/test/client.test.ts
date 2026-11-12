@@ -490,7 +490,7 @@ describe("itemDecision", () => {
     expect(itemDecision("fb_1")).toEqual({});
   });
 
-  it("lists the nineteen codes the intake sends", () => {
+  it("lists the twenty codes the intake sends", () => {
     expect(HELD_REASONS).toEqual([
       "not_attested",
       "owner_value",
@@ -510,6 +510,7 @@ describe("itemDecision", () => {
       "protected_source",
       "taken_down",
       "not_seasonal",
+      "unlikely_charge",
       "commons_report",
     ]);
   });

@@ -5,6 +5,7 @@ import {
   isDoubtFact,
   isFactName,
   isValidFactValue,
+  parseCharge,
   tidyText,
   type ContactFactName,
   type ContactReportReason,
@@ -70,6 +71,8 @@ export type PlaceState = Pick<Place, "facts" | "fact_sources" | "fact_dates">;
  * On a doubt, `not_attested` means no doubt counted was attested, and
  * `disagreement` that as many sources confirm the value as doubt it, or more.
  * `not_seasonal`: `pets_months` for a place whose `pets` is not `seasonal`.
+ * `unlikely_charge`: a charge a person checks before it is published
+ * (`unlikelyCharge`).
  */
 export type HeldReason =
   | "not_attested"
@@ -82,7 +85,8 @@ export type HeldReason =
   | "single_doubt"
   | "protected_source"
   | "taken_down"
-  | "not_seasonal";
+  | "not_seasonal"
+  | "unlikely_charge";
 
 /** The reasons the intake holds an item for one of its checks rather than for these rules. */
 export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "check_unavailable"];
@@ -196,6 +200,32 @@ export function factsClearedBy(facts: PlaceState["facts"], fact: FactName, value
   return fact === "pets" && value !== "seasonal" && facts.pets_months !== undefined ? ["pets_months"] : [];
 }
 
+/** Most a site is likely to cost a night, in Australian dollars. A reported charge above it goes to a person. */
+export const MAX_LIKELY_CHARGE_AUD = 250;
+/** How far, as a share of the current charge, a reported charge may move before a person checks it. */
+export const MAX_LIKELY_CHARGE_CHANGE = 0.5;
+
+/**
+ * Why a reported charge is unlikely enough for a person to check, or null.
+ * A charge in Australian dollars a night (or with no time unit) above
+ * MAX_LIKELY_CHARGE_AUD, or one more than MAX_LIKELY_CHARGE_CHANGE above or
+ * below the place's current charge in the same currency, unit and time unit.
+ * It catches a slip such as 570 for 57 without slowing ordinary price rises.
+ */
+export function unlikelyCharge(value: unknown, current: unknown): string | null {
+  const reported = parseCharge(value);
+  if (reported === null) return null;
+  const nightly = reported.per === undefined || reported.per === "night";
+  if (reported.currency === "AUD" && nightly && reported.unit === undefined && reported.amount > MAX_LIKELY_CHARGE_AUD) {
+    return `is more than ${MAX_LIKELY_CHARGE_AUD} AUD a night`;
+  }
+  const now = parseCharge(current);
+  if (now === null || now.amount === 0 || now.currency !== reported.currency || now.unit !== reported.unit || now.per !== reported.per) return null;
+  const change = (reported.amount - now.amount) / now.amount;
+  if (Math.abs(change) > MAX_LIKELY_CHARGE_CHANGE) return `is more than ${MAX_LIKELY_CHARGE_CHANGE * 100}% ${change > 0 ? "above" : "below"} the current ${current as string}`;
+  return null;
+}
+
 /**
  * A `fact` report. An attested report changes the fact at once, unless the
  * owner set it, another source disagrees within 90 days, or (for a contact
@@ -213,6 +243,10 @@ export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemD
     // OSM opening_hours allows free text between double quotes: it gets the same text checks as a note.
     const problem = firstProblem(...[...value.matchAll(/"([^"]*)"/g)].map((m) => tidyText(m[1]!)));
     if (problem !== null) return { verdict: "held", reason: "text_check", why: `opening_hours comment fails the text checks (${problem})` };
+  }
+  if (fact === "charge" || fact === "charge_powered") {
+    const unlikely = unlikelyCharge(value, (place.facts as Record<string, unknown>)[fact]);
+    if (unlikely !== null) return { verdict: "held", reason: "unlikely_charge", why: `${fact} ${show(value)} ${unlikely}, so a person checks it` };
   }
   if (fact === "pets_months" && place.facts.pets !== "seasonal") {
     return { verdict: "held", reason: "not_seasonal", why: "pets_months applies only when pets is seasonal, so a person checks it" };

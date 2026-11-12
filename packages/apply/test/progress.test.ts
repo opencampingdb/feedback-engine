@@ -19,7 +19,7 @@ import {
 } from "../src/progress.js";
 import type { ReviewPr } from "../src/owners.js";
 import { intakeRecentStore } from "../src/recent.js";
-import type { Fee, Place, Review } from "../src/types.js";
+import type { Place, Review } from "../src/types.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const TARGET = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZB";
@@ -44,7 +44,7 @@ const record: Place = {
 };
 
 function main(places: Place[] = [record], extra: Partial<MainData> = {}): MainData {
-  return { places: new Map(places.map((p) => [p.id, p])), reviews: () => [], fees: () => [], doNotMatch: [], ...extra };
+  return { places: new Map(places.map((p) => [p.id, p])), reviews: () => [], doNotMatch: [], ...extra };
 }
 
 /** An item as the inbox keeps it once a run decided it. */
@@ -144,17 +144,6 @@ describe("itemInDataOnMain", () => {
     expect(inData(item, main([{ ...record, standing: "shown" }]))).toBe(true);
   });
 
-  it("fee: its line is in fees/ on main, or a later one from the contributor for that site type", () => {
-    const item = decided(1, { type: "fee", contributor: "ctr_0000000000000001", fee: { amount: 30, site: "powered", paid: "2026-10" } });
-    const line = (n: number, site: Fee["site"] = "powered"): Fee => ({
-      id: `fee_${id(n).slice(3)}`, place: PLACE, amount: 30, site, paid: "2026-10", created: RUN, app: "example-app", contributor: "ctr_0000000000000001",
-    });
-    expect(inData(item, main([record], { fees: () => [] }))).toBe(false);
-    expect(inData(item, main([record], { fees: () => [line(1)] }))).toBe(true);
-    expect(inData(item, main([record], { fees: () => [line(2)] }))).toBe(true);
-    expect(inData(item, main([record], { fees: () => [line(2, "cabin")] }))).toBe(false);
-  });
-
   it("review: its line is in reviews/ on main, or a later one from the contributor", () => {
     const item = decided(1, { type: "review", contributor: "ctr_0000000000000001", review: { stars: 4, text: "Quiet", visited: "2026-10" } }, "needs_review");
     const line = (n: number, contributor = "ctr_0000000000000001"): Review => ({
@@ -211,8 +200,6 @@ describe("itemInDataOnMain", () => {
     };
     const who = { contributor: "ctr_0000000000000001" };
     expect(fileOf(decided(1, report({ kind: "fact", fact: "power", value: false })), main())).toBe(`places/za/${PLACE}.json`);
-    const fee = decided(2, { type: "fee", ...who, fee: { amount: 30, site: "powered", paid: "2026-10" } });
-    expect(fileOf(fee, main([record], { fees: () => [{ id: `fee_${id(2).slice(3)}` } as Fee] }))).toBe(`fees/${PLACE}.ndjson`);
     const review = decided(3, { type: "review", ...who, review: { stars: 4, text: "Quiet", visited: "2026-10" } });
     expect(fileOf(review, main([record], { reviews: () => [{ id: `rev_${id(3).slice(3)}` } as Review] }))).toBe(`reviews/${PLACE}.ndjson`);
     const commons = decided(4, report({ kind: "commons_mismatch", file: "Lake Pool 6.jpg" }));
@@ -338,7 +325,7 @@ describe("lastCommitTimes", () => {
 
   it("dates each file by the last commit that touched it, an untracked one by the last commit, and falls back without git", async () => {
     await commitIn(repo, `places/za/${PLACE}.json`, "{}", "2026-11-01T10:00:00Z");
-    await commitIn(repo, `fees/${PLACE}.ndjson`, "{}", "2026-11-02T10:00:00Z");
+    await commitIn(repo, `reviews/${PLACE}.ndjson`, "{}", "2026-11-02T10:00:00Z");
     const times = await lastCommitTimes(repo, [`places/za/${PLACE}.json`, `places/zb/${TARGET}.json`], "2026-11-03T00:00:00Z");
     expect(Object.fromEntries(times)).toEqual({ [`places/za/${PLACE}.json`]: "2026-11-01T10:00:00Z", [`places/zb/${TARGET}.json`]: "2026-11-02T10:00:00Z" });
     const plain = await mkdtemp(join(tmpdir(), "ocdb-progress-plain-"));
@@ -506,17 +493,15 @@ describe("sendProgress", () => {
     });
   });
 
-  it("reads reviews, fees and the do-not-match list from main", async () => {
+  it("reads reviews and the do-not-match list from main", async () => {
     await inInbox(decided(1, { type: "review", contributor: "ctr_0000000000000001", review: { stars: 4, text: "Quiet", visited: "2026-10" } }));
-    await inInbox(decided(2, { type: "fee", contributor: "ctr_0000000000000001", fee: { amount: 30, site: "powered", paid: "2026-10" } }));
     await inInbox(decided(3, report({ kind: "commons_mismatch", file: "Lake Pool 6.jpg" })));
     await onMain(record);
     await put(join(mainDir, "reviews", `${PLACE}.ndjson`), { id: `rev_${id(1).slice(3)}`, place: PLACE, contributor: "ctr_0000000000000001" });
-    await put(join(mainDir, "fees", `${PLACE}.ndjson`), { id: `fee_${id(2).slice(3)}`, place: PLACE, contributor: "ctr_0000000000000001", site: "powered" });
     await put(join(mainDir, "moderation", "commons-do-not-match.json"), { pairs: [{ place: PLACE, file: "Lake Pool 6.jpg", added: "2026-11-01", source: "reports" }] });
     const sent = store();
     await sendProgress({ inbox, main: mainDir, store: sent, decisions: [], now: NOW });
-    expect(sent.progress.mock.calls[0]![0].map((u) => u.state)).toEqual(["in_data", "in_data", "in_data"]);
+    expect(sent.progress.mock.calls[0]![0].map((u) => u.state)).toEqual(["in_data", "in_data"]);
   });
 
   it("sends at most 500 items a call", async () => {

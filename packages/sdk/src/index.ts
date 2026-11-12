@@ -31,7 +31,6 @@ export type {
   NewPlaceStatus,
   PhotoSettled,
   PlaceTarget,
-  FeeInput,
   FeedbackClient,
   FeedbackClientOptions,
   FetchLike,
@@ -66,13 +65,11 @@ export {
   CONTACT_REPORT_REASONS,
   FACTS,
   FEEDBACK_TYPES,
-  FEE_SITES,
+  FEE_RETIRED,
   FIRST_HAND,
   FIRST_HAND_KINDS,
   LINK_SHORTENERS,
   MAX_COMMONS_FILE_LENGTH,
-  MAX_FEE_AGE_MONTHS,
-  MAX_FEE_AMOUNT,
   MAX_ADDRESS_FIELD_LENGTH,
   MAX_DESCRIPTION_LENGTH,
   MAX_NAME_LENGTH,
@@ -116,6 +113,7 @@ export {
 } from "./validate.js";
 export type { ValidationResult } from "./validate.js";
 export { isOpeningHours, openingHoursProblem, openMonths, withOpenMonths, withoutOpenMonths } from "./hours.js";
+export { CHARGE_TIME_UNITS, MAX_CHARGE_LENGTH, chargeConditions, isCharge, isChargeConditional, parseCharge, type Charge, type ChargeCondition, type ChargeTimeUnit } from "./charge.js";
 export { dataVersionTime, withRecentChanges } from "./recent.js";
 export type { RecentChange, RecentList, RecentPlace, RecentRelease, ReleasePlace } from "./recent.js";
 export { PHOTO_HELD_REASONS, PROGRESS_STATES, isFeedbackId, progressInRelease } from "./progress.js";
