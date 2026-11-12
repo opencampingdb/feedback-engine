@@ -1,49 +1,81 @@
 # @opencampingdb/feedback
 
-Client for sending reports, reviews, checks and photos about places in Open Camping DB. Works in React Native, Expo and the browser, with no dependencies.
+Client for sending reports, reviews, checks and photos about places in Open Camping DB, and for keeping an app's copy of the data current. Works in React Native, Expo and the browser, with no dependencies.
 
-It isn't published to npm: build and pack it from this repository, as [docs/integration.md](../../docs/integration.md#2-install) shows, and install the package file.
+It isn't published to npm: build and pack it from this repository, as [docs/integration.md](../../docs/integration.md#2-install) shows, and install the package file. The full guide, with a quick start, is [docs/integration.md](../../docs/integration.md).
 
 ```ts
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { createFeedbackClient, CONSENT_TEXT, ATTRIBUTION } from "@opencampingdb/feedback";
+import { createFeedbackClient } from "@opencampingdb/feedback";
 
-const feedback = createFeedbackClient({ endpoint, appKey, appVersion: "1.0.0", storage: AsyncStorage });
-await feedback.review({ place, review: { stars: 5, text: "Quiet and shady", visited: "2026-10" }, consent: true });
+const feedback = createFeedbackClient({
+  endpoint: "https://feedback.example.org",
+  appKey: "your-app-key",
+  appVersion: "1.0.0",
+  storage: AsyncStorage,
+});
+
+// After the traveller agreed to CONSENT_TEXT:
+await feedback.review({ place: "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA", review: { stars: 5, text: "Quiet and shady", visited: "2026-10" }, contributor, consent: true });
+// When the app comes back to the foreground:
+await feedback.flush();
 ```
 
-- Submissions are validated, queued in the storage you pass and retried with backoff. Network errors, 429 and 5xx keep an item; 400 and 401 drop it.
-- `flush()` sends due items together, up to `maxBatchSize` (1 to 50, default 50) in one `POST /v1/feedback/batch` with one `attest` call over the batch body, so an Android app spends one Play Integrity token a batch, not one an item (Google's default is 10,000 requests a day across all installs). Each item is answered and settled as it would be alone. A whole-batch failure keeps every item, a whole-batch 400, 403 or 413 sends the batch's items again one at a time, and only a 401 `invalid_app_key` drops them all. One due item goes alone to `POST /v1/feedback`, and an intake without the batch route (404 or 405) is sent one item at a time. See docs/integration.md, "Batches".
-- A full queue (`maxQueueLength`, default 100) drops its oldest item, but never an erasure (`eraseReviews`, `erasePhotos`, `removePhoto`): the oldest item of another kind goes instead, and erasures alone are all kept. A `Retry-After` waits at most a day, and times saved under a clock that was ahead are put right on the next flush. When the queue can't be saved after a send, the call still answers from the send.
-- A stored queue that can't be read is moved to `<storagePrefix>.queue.corrupt` before anything is saved over it, and reported to `onQueueUnreadable({ keptAt })`. Its items are not sent. See docs/integration.md section 8.
-- A random per-install device id is made once and kept in storage.
-- One client owns a storage prefix, so make one client for each prefix and keep it for the life of the app (docs/integration.md section 3). The keys under the prefix are private to the SDK and their layout may change in any release: from 0.29.0 use `flush({ ignoreBackoff: true })`, `queueSummary()` and `queuedRefs()` instead of reading them. See docs/integration.md, "The stored queue belongs to the SDK".
-- Nothing is sent unless `consent: true` is passed. Show `CONSENT_TEXT` first.
-- Show `ATTRIBUTION` wherever the data appears.
-- Reviews and `reportReview()` carry the signed-in traveller's opaque `contributor` id. `eraseReviews({ contributor })` removes every review that contributor wrote, for example when they delete their account (docs/integration.md section 6). Pass an `attest` function when the app key requires App Attest or Play Integrity; it gets the exact body and its SHA-256 at send time. A refused assertion keeps the item queued and calls `onAttestationRejected` (see below).
-- Photos of a new place can wait for its id too: give the photo client `resolveNewPlace: feedback.newPlace`, `loadPhoto` and `onPhotoSettled`, and call `photos.photo({ place: { newPlace }, key, ... })`. See docs/photos.md.
-- A place the traveller has just added can be named before its id is known, as `{ newPlace: <the new_place report's ref> }`, in `report`, `reportFacts`, `check` and `review`. The items wait in the queue, unsent, until the new place is sent, then go with its `ocdb_` id in order. They're dropped with `reason: "new_place_dropped"` if it is dropped or refused.
-- `reportFacts({ place, facts, consent })` sends a traveller's edit of one place, every fact they set, in one call, and resolves with each fact's result. Every fact is checked before anything is queued, and the edit goes in one batch with one attestation. `first_hand` marks the whole edit first-hand.
-- `report`, `reportFacts`, `check` and `review` take `{ wait: false }` as a second argument to resolve as soon as the input is checked and saved, with the outcome sent to `onAnswered`. A `deviceId` option (a UUID) sends a caller's own device id in place of the stored one, for a server with one client per install. Each request and attestation gives up after `timeoutMs` (default 30 seconds), and only the intake's own JSON refusal drops a queued item. The intake counts an install's reports about one place in a day once against the install's and the contributor's daily limits, and each against the app's.
-- Facts include `pets_months` (an OSM month range such as `May-Sep`, read with `monthsInRange`) and `vehicle_access` (`heavy_vehicles_only`). A `commons_mismatch` report says a Wikimedia Commons photo shown for a place is not of it.
-- `progress(ids)` says what became of each contribution, by the id the intake answered when it was sent: `received`, `live`, `waiting`, `accepted`, `held`, `refused` (with `reason` and `by`), `in_data` (with `in_data_at`) or `unknown` (`PROGRESS_STATES`). `progressInRelease(progress, dataVersion)` says whether the app's data release has the change. See docs/integration.md, "What became of a contribution".
-- Every send carries an idempotency key (`Idempotency-Key`, or `keys` in a batch) that stays the same when the SDK sends an item again, so an intake from 0.21.0 never stores an item twice after a lost answer. Nothing to do in the app. See docs/self-hosting.md, "Idempotency keys".
-- `photos.photo` removes the Exif and XMP metadata (APP1 segments: camera, time, GPS position) from both JPEGs before it uploads them, and `stripJpegMetadata(bytes)` does the same for any JPEG. See docs/photos.md.
-- `photos.removePhoto({ place, photo, contributor, consent })` removes one of the traveller's own photos, and `photos.photo` answers `{ status: "update_required", minimum }` when the photo service takes photos only from a newer app (`PHOTO_MIN_APP_VERSION`). See docs/photos.md.
-- `photos.progress(ids)` on the photo client answers the same way for photos, by the `pho_` id the upload answered, from the app's photo intake (`GET /v1/photos/progress`): `received`, `waiting`, `accepted`, `held` (with `held_reason`, one of `PHOTO_HELD_REASONS`), `refused`, `in_data` (published) or `unknown`. A published photo can go back to `held` when reports hide it, or to `refused` when it is removed. See docs/photos.md, "What became of a photo".
-- `createReleaseUpdater({ adapter, readableLayouts, readableFormats, gunzip })` keeps the app's copy of the release database (`ocdb.sqlite.gz`) current: `update({ knownDataVersion })` hands the adapter the manifest's chain of changesets to apply in one exclusive transaction, or downloads the whole database with none, across a layout change, with no chain, past 50 files or when the chain's files add up to at least the database's bytes. It checks every download's size and SHA-256, never moves to a layout the build can't read or a format newer than it reads, and replaces the whole database when a chain leaves another release than the manifest's. It answers `up_to_date`, `updated`, `replaced`, `layout_unsupported`, `format_unsupported` or `failed` (with a `reason`, and a `cause` naming the error or check behind it), and the release the database is on. A failure leaves the database on the release it started from. The adapter is four calls over the app's SQLite library, and gets a whole database as one copy of its bytes. Give it the optional fifth, `candidateDataVersion(bytes)`, and the updater checks a downloaded database holds the manifest's release before the swap, so a manifest pointing at an older file can't roll the app back. A release that doesn't match is not downloaded again until the manifest changes (remembered across restarts with the `storage` option). Two `update()` calls at once share one run. A database url that isn't https, or a `data_version` with no readable time over a dated database, fails as `manifest`. Ask only when the recent list's `release` differs from the phone's, at most once an hour, never on a timer. Pass `gunzip` where there is no `DecompressionStream`, as in React Native. See docs/integration.md, "Keeping the data current", for keeping the traveller's own data in tables apart from the release, a worked Expo SQLite adapter, and the phone's peak memory.
-- `opening_hours` must be OSM opening_hours syntax (`Mo-Fr 08:00-17:00; Sa 09:00-12:00`), as opening_hours.js 3.15 reads it. `openingHoursProblem(value)` says why a value isn't, and how to write it. `openMonths(value)` gives the months a value says the place is open, as one range such as `Apr-Oct`, or null when it can't tell for certain. It reads whole-month dates (`Feb 01-Nov 30` is `Feb-Nov`) and closed months on their own (`Feb-Apr closed` is `May-Jan`). Write open months with `withOpenMonths(value, range)` from one From and To month pair, so `openMonths` always reads it back, and take it off with `withoutOpenMonths(value)`. See docs/integration.md, "Opening hours".
-- `tidyName`, `tidyText` and `textProblem` tidy what a traveller types and find rude words, contact details and spam before it is sent. `withdraw()` takes back a new place the same install sent.
+## What it does
 
-## Refused assertion
+- Nothing is sent unless `consent: true` is passed. Show `CONSENT_TEXT` first, and `ATTRIBUTION` wherever the data appears.
+- Every call checks its input first and throws `FeedbackValidationError` (or `ConsentRequiredError`) before anything is queued.
+- Submissions are saved in the storage you pass, sent, and retried with backoff. A call answers `sent`, `queued` or `rejected`. Only the intake's own JSON refusal drops an item: offline, a timeout, 408, 429, 5xx and a refused proof keep it.
+- Make one client for each storage prefix (`ocdb.feedback` by default) and keep it for the life of the app. The keys under the prefix are private to the SDK and may change in any release.
+- `flush()` sends due items in batches of up to 50 (`maxBatchSize`) in one `POST /v1/feedback/batch`, with one `attest` call over each batch, so an Android app spends one Play Integrity token a batch.
+- Every send carries an idempotency key that stays the same when the SDK sends an item again, so the intake stores it once.
+
+## Calls
+
+**Feedback client** (`createFeedbackClient(options)`):
+
+| Call | What it does |
+| --- | --- |
+| `report(input, { wait? })` | A report about a place: a fact, a doubt, a contact, closed or reopened, a new place and the other `REPORT_KINDS`. |
+| `reportFacts({ place, facts, first_hand?, ref? }, { wait? })` | A traveller's edit of one place, every fact they set, checked together and sent in one batch. Resolves with each fact's result. |
+| `review(input, { wait? })`, `check(input, { wait? })` | A review (1 to 5 stars, text, month of visit) and a check that the place is still there. |
+| `reportReview(input)`, `eraseReviews({ contributor })` | Reports a published review, and removes every review a contributor wrote. |
+| `withdraw({ place })` | Takes back a new place this install sent, within 24 hours. |
+| `ownerClaim`, `ownerListing`, `ownerUpdate` | Owner requests, sent at once and never queued. They throw `OwnerTermsRequiredError` or `OwnerRequestError`. |
+| `flush({ ignoreBackoff? })`, `pending()` | Sends due items (or every item, skipping the client's own backoff), and counts what is waiting. |
+| `queueSummary()`, `queuedRefs()` | How the queue stands, in counts and times only, and the `ref` of each item still with the SDK. |
+| `newPlace(ref)` | Where a new place a `new_place` report's `ref` names stands. |
+| `progress(ids)` | What became of each contribution, by the id the intake answered (`PROGRESS_STATES`). Throws `ProgressRequestError`. |
+
+`report`, `reportFacts`, `check` and `review` take `{ wait: false }` to resolve as soon as the input is saved, with the outcome sent to `onAnswered`. A place the traveller has just added can be named as `{ newPlace: <its report's ref> }` in `report`, `reportFacts`, `check` and `review`: the items wait unsent until the new place has its id.
+
+**Photo client** (`createPhotoClient(options)`, for an app's own photo service, [docs/photos.md](../../docs/photos.md)): `photo`, `photoPass`, `reportPhoto`, `removePhoto`, `erasePhotos`, `flush`, `pending`, `queueSummary`, `queuedRefs` and `progress`. `photo` removes the Exif and XMP metadata from both JPEGs before it uploads them, and `stripJpegMetadata(bytes)` does the same for any JPEG.
+
+**Release updater** (`createReleaseUpdater({ adapter, readableLayouts, readableFormats, gunzip?, fetch?, storage? })`): `update({ knownDataVersion })` keeps the app's SQLite copy of the release database current, by a chain of changesets in one transaction or a whole new database. It answers `up_to_date`, `updated`, `replaced`, `older_release`, `layout_unsupported`, `format_unsupported` or `failed` (with a `reason` and a `cause`), and never throws. Data releases are at format 13 and layout 2. See [docs/integration.md](../../docs/integration.md#10-keeping-the-data-current) section 10 for the adapter, a worked Expo SQLite adapter and the phone's peak memory.
+
+**Helpers**: `tidyName`, `tidyText`, `textProblem` and `firstProblem` for text, `contactProblem` and `addressProblems` for contacts and addresses, `openingHoursProblem`, `openMonths`, `withOpenMonths` and `withoutOpenMonths` for `opening_hours`, `parseCharge` and `chargeConditions` for charges, `monthsInRange` for `pets_months`, `withRecentChanges` and `dataVersionTime` for the recent list, `progressInRelease`, `newPlaceId` and `sdkCoordinate`.
+
+## Options
+
+`endpoint`, `appKey`, `appVersion` and `storage` are required. The others:
+
+- `attest({ body, bodySha256 })` returns the App Attest or Play Integrity headers for an app key that requires them, and `onAttestationRejected(error, refusal?)` hears of a refused proof ([Refused proof](#refused-proof)).
+- `onAnswered({ ref, type, outcome })` is called once for each queued item when it is settled, after the queue is saved. Give each submission a `ref` (1 to 100 characters, or 1 to 90 on `reportFacts`) to connect the answer to your own record.
+- `onQueueUnreadable({ keptAt })` is called when the stored queue can't be read: its text is moved to `<storagePrefix>.queue.corrupt` and its items are not sent.
+- `deviceId` (a UUID) sends a caller's own device id in place of the stored one, for a server with one client per install. It is never written to storage.
+- `timeoutMs` (default 30,000) gives up on a request or `attest` call, which then counts as offline.
+- `maxQueueLength` (default 100) drops the oldest item past it, but never an erasure (`eraseReviews`, `erasePhotos`, `removePhoto`). `maxQueueAgeMs` (default 30 days) drops older items unsent.
+- `maxBatchSize` (1 to 50, default 50), `storagePrefix`, `fetch`, `randomUUID`, `now` and `random`.
+
+## Refused proof
 
 When the intake refuses an item's proof it answers `401` with `attestation_required` (no proof was sent) or `attestation_invalid`. For `attestation_invalid` it also sends a `reason` code and readable `details`, and the client passes both to your hook. The item stays queued either way. A `503 unavailable` is a storage error at the intake, not a refusal: the item waits, the hook is not called and the key is kept.
 
 ```ts
-import { keyIsUnusable } from "@opencampingdb/feedback";
+import { createFeedbackClient, keyIsUnusable } from "@opencampingdb/feedback";
 
 const feedback = createFeedbackClient({
-  // ...
+  ...options,
   onAttestationRejected: async (error, refusal) => {
     report(error, refusal?.reason, refusal?.details);
     if (keyIsUnusable(refusal?.reason)) await dropStoredKey(); // register a new key before the next try
@@ -51,7 +83,7 @@ const feedback = createFeedbackClient({
 });
 ```
 
-A hook written for one argument still works. `keyIsUnusable(reason)` is the one rule for dropping the key: it is true only for the codes marked below, and false when there is no reason. Every other refusal keeps the key, so it does not spend one of the network's daily key registrations.
+`keyIsUnusable(reason)` is the one rule for dropping the key: it is true only for the codes marked below, and false when there is no reason. Every other refusal keeps the key, so it does not spend one of the network's daily key registrations. A hook written for one argument still works.
 
 | `reason` | Meaning | Drops the key |
 | --- | --- | --- |
@@ -63,42 +95,10 @@ A hook written for one argument still works. `keyIsUnusable(reason)` is the one 
 | `malformed` | The proof could not be read. | No |
 | `integrity_not_met` | Android: the Play Integrity verdict falls short of what the app key requires. | No |
 
-Key registration refusals use the same codes. Registration also answers `malformed` for an unknown or used challenge (`401`) and for a key that is already registered (`409`), `counter_not_increased` when a new key's counter is not 0, and `category_not_accepted` when the key is not from this app key's environment. The reason type is exported as `RefusalReason`, and the second argument of the hook as `AttestationRefusal`. Adding a code later is additive; a code this version does not know is left out of `reason`, and its `details` still reach the hook.
-
-## What is queued, and connecting answers to your records
-
-The client normalises a submission before it queues it, so the queue can hold something other than what you passed in. A location is rounded to 6 decimal places (`sdkCoordinate`), and names are trimmed. To keep exactly what was queued, tidy the traveller's words with `tidyName` and `tidyText` before you submit them, round with `sdkCoordinate`, and store those values. Never match an answer to your own record by comparing content: a value you held before normalising will not match.
-
-A new place's id arrives only to the send that carried it. When the place is sent at once, `report()` answers `{ status: "sent", id }`. When it was queued, the id comes back later to whichever `flush()` sends it, and `flush()` itself returns only counts.
-
-To connect answers to your records, give each submission a `ref` of your own (1 to 100 characters, such as your record's id) and pass `onAnswered`. The client keeps `ref` with the queued item and never sends it to the intake. `onAnswered` is called once for each queued item when it is settled, whether by the call that submitted it or by a later flush, after the queue is saved:
-
-```ts
-import type { Answer } from "@opencampingdb/feedback";
-
-const feedback = createFeedbackClient({
-  // ...
-  onAnswered: async ({ ref, type, outcome }: Answer) => {
-    if (!ref) return; // items queued before 0.8.0 have no ref
-    if (outcome.kind === "sent") {
-      await markSent(ref, type, outcome.id); // for a new place, newPlaceId(outcome.id) is its place id
-    } else {
-      await markDropped(ref, outcome.httpStatus); // 0 when it grew too old or the queue was full
-    }
-  },
-});
-
-await feedback.report({ place: null, location, report: { kind: "new_place", name }, consent: true, ref: draft.id });
-```
-
-`outcome` is `{ kind: "sent", id, state?, heldReason? }` or `{ kind: "dropped", httpStatus }`. On a fact report, contact report, doubt or new place, `state` is `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`, one of `HELD_REASONS` (absent for a code this version does not know). A `commons_mismatch` report is always `held` (`commons_report`): hide the photo for that traveller at once. Other items, and items sent to an intake from before 0.10.0, have neither. `httpStatus` is the intake's refusal, or 0 when the client dropped the item unsent because it was older than `maxQueueAgeMs` or pushed out past `maxQueueLength`. An item still waiting to be retried has no answer yet. Errors thrown by the hook are caught and never stop the queue. `ref` works on every call that queues: `report`, `review`, `check`, `fee`, `reportReview`, `eraseReviews`, `withdraw`, and on the photo client `reportPhoto`, `removePhoto` and `erasePhotos`. Owner requests and photo uploads are sent at once and answer directly, so they take no `ref`.
-
-## Recent changes
-
-`GET /v1/places/recent` on the intake answers a `RecentList`: new places not yet in a release, and `changes`, the changes to released places that went live. Lay them over a release place record with `withRecentChanges(place, changes, dataVersion)`, passing the `data_version` of the release you have. A change with `value` null takes the fact off. Changes the release already has, those whose `in_data_at` is earlier than the commit time at the front of `dataVersion` (`dataVersionTime` reads it), are skipped. `release`, a `RecentRelease`, names the newest data release the intake was told of, when it has been told of one.
-
-The full guide is [docs/integration.md](../../docs/integration.md). Licence: Apache 2.0.
+Key registration refusals use the same codes. Registration also answers `malformed` for an unknown or used challenge (`401`) and for a key that is already registered (`409`), `counter_not_increased` when a new key's counter is not 0, and `category_not_accepted` when the key is not from this app key's environment. The reason type is exported as `RefusalReason`, and the hook's second argument as `AttestationRefusal`. A code this version does not know is left out of `reason`, and its `details` still reach the hook.
 
 ## Versions
 
-A patch version (0.14.1) is a fix or a small change to an existing call. A minor version (0.15.0) adds a call, option, field or type, and before 1.0.0 also marks a breaking change, which its release notes spell out.
+A patch version (0.28.1) is a fix or a small change to an existing call. A minor version (0.31.0) adds a call, option, field or type, and before 1.0.0 may also mark a breaking change, which its release notes spell out. [docs/integration.md](../../docs/integration.md#what-changed-by-version), "What changed by version", lists the recent ones.
+
+Licence: Apache 2.0.
