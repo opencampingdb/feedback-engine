@@ -1,6 +1,6 @@
 // What an app can ask the client about its queue, and trying every queued item now, without reading or writing the client's storage.
 import { describe, expect, it } from "vitest";
-import { createFeedbackClient, createPhotoClient, type Answer, type FeedbackClientOptions, type FetchLike, type StorageAdapter } from "../src/index.js";
+import { createFeedbackClient, createPhotoClient, type Answer, type FeedbackClientOptions, type FetchLike, type PhotoClientOptions, type StorageAdapter } from "../src/index.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const QUEUE = "ocdb.feedback.queue";
@@ -243,7 +243,7 @@ const PHOTO = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const CONTRIBUTOR = "acct_abc123def456ghi";
 const jpeg = (n: number) => new Uint8Array([0xff, 0xd8, 0xff, ...Array(n).fill(0)]);
 
-function photoSetup(store = countingStorage(), intake = fakeIntake()) {
+function photoSetup(store = countingStorage(), intake = fakeIntake(), extra: Partial<PhotoClientOptions> = {}) {
   const client = createPhotoClient({
     endpoint: "https://photos.example",
     appKey: "key",
@@ -257,6 +257,7 @@ function photoSetup(store = countingStorage(), intake = fakeIntake()) {
     random: () => 0.5,
     resolveNewPlace: async () => ({ status: "waiting" }),
     loadPhoto: async () => null,
+    ...extra,
   });
   return { client, store, intake };
 }
@@ -302,6 +303,61 @@ describe("queuedRefs()", () => {
     expect(await photos.client.queuedRefs()).toEqual({ refs: ["pr1"], waitingPhotoKeys: [] });
     expect((await photos.client.queueSummary()).types).toEqual(["photo_report"]);
   });
+});
+
+describe("queuedRefs() while a flush is telling onAnswered", () => {
+  const REFS = ["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8"];
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  /** An onAnswered hook that awaits a tick, then notes the ref as told, and throws when asked to. */
+  function slowHook(throws: boolean) {
+    const told: string[] = [];
+    const onAnswered = async (answer: Answer) => {
+      await tick();
+      told.push(answer.ref!);
+      if (throws) throw new Error("the app's records failed");
+    };
+    return { told, onAnswered };
+  }
+
+  /**
+   * Starts flush() and queuedRefs() together and, at the moment queuedRefs()
+   * resolves, checks that every queued ref is either in `refs` or its
+   * onAnswered call has already finished.
+   */
+  async function flushAndAsk(client: { flush: (o?: { ignoreBackoff?: boolean }) => Promise<unknown>; queuedRefs: () => Promise<{ refs: string[] }> }, told: string[]) {
+    const flushing = client.flush({ ignoreBackoff: true });
+    const seen = await client.queuedRefs().then(({ refs }) => ({ refs, told: [...told] }));
+    for (const ref of REFS) expect(seen.refs.includes(ref) || seen.told.includes(ref), `${ref} is neither queued nor told`).toBe(true);
+    expect(new Set(seen.refs).size).toBe(seen.refs.length);
+    await flushing;
+    expect(told).toEqual(REFS);
+    expect((await client.queuedRefs()).refs).toEqual([]);
+  }
+
+  for (const throws of [false, true]) {
+    it(`on the feedback client, answers each sent ref until onAnswered has finished with it${throws ? ", when the hook throws" : ""}`, async () => {
+      const hook = slowHook(throws);
+      const { client, intake, clock } = setup(undefined, undefined, { onAnswered: hook.onAnswered });
+      intake.mode.value = "offline";
+      for (const ref of REFS) await client.check(check(ref));
+      expect(await client.queuedRefs()).toEqual({ refs: REFS });
+      intake.mode.value = "online";
+      clock.t += 1_000;
+      await flushAndAsk(client, hook.told);
+      expect(intake.requests.filter((r) => r.url.endsWith("/batch")).at(-1)?.body.items).toHaveLength(8);
+    });
+
+    it(`on the photo client, answers each sent ref until onAnswered has finished with it${throws ? ", when the hook throws" : ""}`, async () => {
+      const hook = slowHook(throws);
+      const { client, intake } = photoSetup(undefined, undefined, { onAnswered: hook.onAnswered });
+      intake.mode.value = "offline";
+      for (const ref of REFS) await client.reportPhoto({ place: PLACE, photo: PHOTO, reason: "not_this_place", consent: true, ref });
+      expect((await client.queuedRefs()).refs).toEqual(REFS);
+      intake.mode.value = "online";
+      await flushAndAsk(client, hook.told);
+    });
+  }
 });
 
 describe("the new calls cost nothing outside the client", () => {
