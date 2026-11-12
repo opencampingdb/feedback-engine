@@ -452,6 +452,18 @@ export type SubmitResult =
   | { status: "queued" }
   | { status: "rejected"; httpStatus: number };
 
+/** How a `flush` picks the items it tries. */
+export interface FlushOptions {
+  /**
+   * `true` tries every item now, skipping the client's own backoff after a
+   * failed try. An item still waits out a wait the intake asked for (a 429
+   * with `Retry-After`, or a batch item's `retry_after`), and an item waiting
+   * for a new place's id still waits for it. Items older than
+   * `maxQueueAgeMs` are still dropped.
+   */
+  ignoreBackoff?: boolean;
+}
+
 export interface FlushResult {
   sent: number;
   dropped: number;
@@ -524,8 +536,12 @@ export interface FeedbackClient {
   ownerListing(input: OwnerListingInput): Promise<OwnerClaimResponse>;
   /** Sends an owner's change, with the token from their approved claim. Sent at once. */
   ownerUpdate(token: string, input: OwnerUpdateInput): Promise<AcceptedResponse>;
-  /** Sends queued items that are due. Call when the app comes to the foreground or regains a connection. */
-  flush(): Promise<FlushResult>;
+  /**
+   * Sends queued items that are due. Call when the app comes to the foreground
+   * or regains a connection. With `ignoreBackoff`, every item is tried now
+   * (`FlushOptions`).
+   */
+  flush(options?: FlushOptions): Promise<FlushResult>;
   /** Number of items waiting to be sent. */
   pending(): Promise<number>;
   /**
@@ -580,8 +596,8 @@ export interface PhotoClient {
    * deleting the account. Queued and retried, like feedback.
    */
   erasePhotos(input: PhotoErasureInput): Promise<SubmitResult>;
-  /** Sends queued reports and erasures that are due. Call when the app comes to the foreground. */
-  flush(): Promise<FlushResult>;
+  /** Sends queued reports and erasures that are due, as the feedback client's `flush` does. Call when the app comes to the foreground. */
+  flush(options?: FlushOptions): Promise<FlushResult>;
   /** Number of items waiting to be sent. */
   pending(): Promise<number>;
   /**
@@ -674,6 +690,13 @@ interface QueueItem {
   queuedAt: number;
   attempts: number;
   nextAttemptAt: number;
+  /**
+   * The end of a wait the intake asked for (a 429 with `Retry-After`, or a
+   * batch item's `retry_after`), in milliseconds. `nextAttemptAt` is set to the
+   * same time, so a client that does not know this field waits as before.
+   * Removed once the wait is over. Items queued before 0.29.0 have none.
+   */
+  intakeWaitUntil?: number;
   /** The ref of the new place this item waits for. While set, `body.place` is a placeholder and the item is never sent. */
   waitsFor?: string;
 }
@@ -1015,10 +1038,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
       return { result: "sent", outcome: { kind: "sent", id: typeof id === "string" ? id : "", ...itemDecision(answer) } };
     }
     if (status === 429) {
-      if (Number.isFinite(retryAfter) && retryAfter > 0) {
-        item.attempts += 1;
-        item.nextAttemptAt = now() + retryAfter * 1000;
-      }
+      waitForIntake(item, retryAfter);
       return { result: "stop" };
     }
     if (status >= 500 || status === 408) return { result: "stop" };
@@ -1120,11 +1140,16 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
 
   /** The rest of a batch kept as a whole: a 429's wait, without calling the refusal hook again. */
   async function settleKept(item: QueueItem, status: number, retryAfter: number): Promise<{ result: Sent }> {
-    if (status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) {
-      item.attempts += 1;
-      item.nextAttemptAt = now() + retryAfter * 1000;
-    }
+    if (status === 429) waitForIntake(item, retryAfter);
     return { result: "stop" };
+  }
+
+  /** Counts a 429 as a try and keeps the item until the wait it asked for is over, when it gave one in seconds. */
+  function waitForIntake(item: QueueItem, retryAfter: number): void {
+    if (!(Number.isFinite(retryAfter) && retryAfter > 0)) return;
+    item.attempts += 1;
+    item.nextAttemptAt = now() + retryAfter * 1000;
+    item.intakeWaitUntil = item.nextAttemptAt;
   }
 
   // Outcomes are kept only for items a report(), review(), check() or reportReview() call is waiting on.
@@ -1161,7 +1186,8 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
    * which can be from an earlier batch of the same flush. The flush stops
    * after the first answer that keeps an item to try again.
    */
-  async function flushNow(): Promise<FlushResult> {
+  async function flushNow(flushOptions: FlushOptions = {}): Promise<FlushResult> {
+    const ignoreBackoff = flushOptions.ignoreBackoff === true;
     const result = await serial(async () => {
       const queue = await readQueue();
       const known = await readNewPlaces();
@@ -1196,7 +1222,9 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
             (item.body as { place: string }).place = target.place;
             delete item.waitsFor;
           }
-          if (stopped || item.nextAttemptAt > t || due.length >= maxBatchSize) continue;
+          if (item.intakeWaitUntil !== undefined && item.intakeWaitUntil <= t) delete item.intakeWaitUntil;
+          const dueAt = ignoreBackoff ? (item.intakeWaitUntil ?? 0) : item.nextAttemptAt;
+          if (stopped || dueAt > t || due.length >= maxBatchSize) continue;
           due.push(item);
         }
         const attemptsBefore = new Map(due.map((item) => [item, item.attempts]));
@@ -1728,8 +1756,8 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
       submit({ place: null, contributor, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}), consent, ref }, "review_erasure"),
     erasePhotos: ({ contributor, contributorProof, consent, ref }) =>
       submit({ place: null, contributor, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}), consent, ref }, "photo_erasure"),
-    flush: async () => {
-      const result = await flushNow();
+    flush: async (flushOptions) => {
+      const result = await flushNow(flushOptions);
       await flushWaitingPhotos();
       return result;
     },
