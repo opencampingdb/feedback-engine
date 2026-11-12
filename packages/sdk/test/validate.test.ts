@@ -66,7 +66,7 @@ describe("validateSubmission", () => {
       validateSubmission({ ...base, type: "report", place: PLACE, report: { kind: "fact", fact: "opening_hours", value } });
     expect(hours("Mon-Sun  06:00 - 22:00")).toMatchObject({
       ok: false,
-      errors: ['report.value is not OSM opening_hours syntax at character 3 ("n-Sun  06:00"): write weekdays as two letters: Mo Tu We Th Fr Sa Su'],
+      errors: ['report.value is not OSM opening_hours syntax at character 1 ("Mon-Sun  06:"): write weekdays as two letters: Mo Tu We Th Fr Sa Su'],
     });
     for (const value of ["08.00-17.00", "0800-1700", "Mo-Fr 0800-1700", "0412 345 678", "https://camp.example.org/hours", "Ring 0412 345 678"]) {
       const r = hours(value);

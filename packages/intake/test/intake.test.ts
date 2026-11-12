@@ -245,6 +245,55 @@ describe("intake", () => {
     expect((await handle(post(review), e)).status).toBe(202);
   });
 
+  it("keeps first_hand on a stored fact report and doubt", async () => {
+    const reports = [
+      { kind: "fact", fact: "toilets", value: true, first_hand: "seen_nearby" },
+      { kind: "doubt", fact: "pets", first_hand: "says_so" },
+    ];
+    for (const report of reports) {
+      gh.calls.length = 0;
+      const res = await handle(post({ ...review, type: "report", review: undefined, report }), env());
+      expect(res.status).toBe(202);
+      const stored = decodeContent(gh.calls.find((c) => c.method === "PUT")!);
+      expect(stored.report).toEqual(report);
+    }
+  });
+
+  it("keeps first_hand on a stored closure, reopening, name, kind and wrong location report", async () => {
+    const reports: [Record<string, unknown>, Record<string, unknown>][] = [
+      [{ kind: "closed", first_hand: "seen_nearby" }, {}],
+      [{ kind: "reopened", first_hand: "says_so" }, {}],
+      [{ kind: "name", value: "Lake Camp", first_hand: "seen_nearby" }, {}],
+      [{ kind: "kind", place_kind: "free_camp", first_hand: "says_so" }, {}],
+      [{ kind: "wrong_location", first_hand: "seen_nearby" }, { location: { lat: -33.8, lon: 151.2 } }],
+    ];
+    for (const [report, extra] of reports) {
+      gh.calls.length = 0;
+      const res = await handle(post({ ...review, type: "report", review: undefined, ...extra, report }), env());
+      expect(res.status).toBe(202);
+      const stored = decodeContent(gh.calls.find((c) => c.method === "PUT")!);
+      expect(stored.report).toMatchObject(report);
+    }
+  });
+
+  it("refuses a new report or doubt of seasonal_closure, which open months in opening_hours replace", async () => {
+    for (const report of [
+      { kind: "fact", fact: "seasonal_closure", value: true },
+      { kind: "doubt", fact: "seasonal_closure" },
+    ]) {
+      const res = await handle(post({ ...review, type: "report", review: undefined, report }), env());
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(await res.json())).toContain("seasonal_closure is retired: send the months in opening_hours with withOpenMonths");
+    }
+  });
+
+  it("refuses a report whose first_hand is not one of its values", async () => {
+    const report = { kind: "fact", fact: "toilets", value: true, first_hand: { lat: -33.8, lon: 151.2 } };
+    const res = await handle(post({ ...review, type: "report", review: undefined, report }), env());
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(await res.json())).toContain("report.first_hand must be seen_nearby or says_so, or left out");
+  });
+
   it("counts a device's reports about one place in a day once, up to the place edit limit", async () => {
     const kv = fakeKv();
     const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 10_000 } }) };
