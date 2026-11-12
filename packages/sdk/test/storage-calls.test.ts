@@ -122,4 +122,37 @@ describe("storage calls for an edit", () => {
     clock.t += 60_000;
     expect(await client.flush()).toEqual({ sent: 1, dropped: 0, remaining: 0 });
   });
+
+  it("reads the device id on the first operation only", async () => {
+    const { client, store, clock } = setup();
+    await client.check({ place: PLACE, check: { still_there: true, visited: "2026-11-01" }, consent: true });
+    store.reset();
+    await client.reportFacts({ place: PLACE, facts: TEN_FACTS, consent: true });
+    await client.review(review(1));
+    clock.t += 60_000;
+    await client.flush();
+    await client.ownerClaim({ place: PLACE, owner: { name: "Sam Owner", email: "owner@example.com" }, proofUrl: "https://example.com/proof", termsAccepted: true }).catch(() => undefined);
+    expect(store.reads(DEVICE)).toBe(0);
+    expect(store.writes(DEVICE)).toBe(0);
+  });
+
+  it("the photo client reads the device id on the first operation only", async () => {
+    const store = countingStorage();
+    const intake = fakeIntake();
+    const photos = createPhotoClient({
+      endpoint: "https://photos.example",
+      appKey: "key",
+      appVersion: "1.0.0",
+      storage: store.storage,
+      fetch: intake.fetch,
+      now: () => Date.UTC(2026, 10, 12),
+      random: () => 0.5,
+    });
+    await photos.photoPass();
+    store.reset();
+    await photos.photoPass({ renew: true });
+    await photos.reportPhoto({ place: PLACE, photo: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZA", reason: "not_this_place", consent: true });
+    expect(store.reads("ocdb.photos.device")).toBe(0);
+  });
 });
+

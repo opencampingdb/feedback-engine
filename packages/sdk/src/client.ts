@@ -925,12 +925,15 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     return run;
   }
 
+  // The device id, read or made on the first operation that needs it, then kept.
+  let deviceId: string | undefined;
   async function device(): Promise<string> {
+    if (deviceId) return deviceId;
     const existing = await storage.getItem(deviceKey);
-    if (existing) return existing;
+    if (existing) return (deviceId = existing);
     const id = randomUUID();
     await storage.setItem(deviceKey, id);
-    return id;
+    return (deviceId = id);
   }
 
   async function readQueue(): Promise<QueueItem[]> {
