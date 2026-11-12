@@ -99,14 +99,26 @@ const TEN_FACTS = {
 const review = (i: number) => ({ place: PLACE, review: { stars: 4 as const, text: `Lovely spot by the river, visit ${i}. `.repeat(20), visited: "2026-10" }, consent: true as const });
 
 describe("storage calls for an edit", () => {
-  it("a ten fact edit behind a backlog makes at most 1 queue read and exactly 2 queue writes", async () => {
+  it("a ten fact edit behind a backlog, on a client that has read the queue, makes 0 queue reads and 2 queue writes", async () => {
     const { client, store, intake } = setup();
     intake.online.value = false;
     for (let i = 0; i < 90; i++) await client.review(review(i));
     intake.online.value = true;
     store.reset();
     await client.reportFacts({ place: PLACE, facts: TEN_FACTS, consent: true });
-    expect(store.reads(QUEUE)).toBeLessThanOrEqual(1);
+    expect(store.reads(QUEUE)).toBe(0);
+    expect(store.writes(QUEUE)).toBe(2);
+  });
+
+  it("a ten fact edit behind a stored backlog, on a new client, makes 1 queue read and 2 queue writes", async () => {
+    const store = countingStorage();
+    const first = setup(store);
+    first.intake.online.value = false;
+    for (let i = 0; i < 90; i++) await first.client.review(review(i));
+    const { client } = setup(store);
+    store.reset();
+    await client.reportFacts({ place: PLACE, facts: TEN_FACTS, consent: true });
+    expect(store.reads(QUEUE)).toBe(1);
     expect(store.writes(QUEUE)).toBe(2);
   });
 
@@ -153,7 +165,7 @@ describe("storage calls for an edit", () => {
   });
 
   it("reads the device id on the first operation only", async () => {
-    const { client, store, clock } = setup();
+    const { client, store, clock, intake } = setup();
     await client.check({ place: PLACE, check: { still_there: true, visited: "2026-11-01" }, consent: true });
     store.reset();
     await client.reportFacts({ place: PLACE, facts: TEN_FACTS, consent: true });
@@ -161,6 +173,10 @@ describe("storage calls for an edit", () => {
     clock.t += 60_000;
     await client.flush();
     await client.ownerClaim({ place: PLACE, owner: { name: "Sam Owner", email: "owner@example.com" }, proofUrl: "https://example.com/proof", termsAccepted: true }).catch(() => undefined);
+    // The claim was sent, with the device id the client already held.
+    const claim = intake.requests.at(-1)!.body;
+    expect(claim.type).toBe("owner_claim");
+    expect(claim.device).toBe(store.data.get(DEVICE));
     expect(store.reads(DEVICE)).toBe(0);
     expect(store.writes(DEVICE)).toBe(0);
   });
