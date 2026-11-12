@@ -1,6 +1,6 @@
 # The recent list lives in D1, not Workers KV
 
-The intake built the recent list by listing every new place and its evidence in Workers KV on each request. KV's free plan allows 1,000 list operations a day, and one traveller's map panning used them up in a day. The recent list now lives in D1: one table of new places and one of evidence, queried by bounding box, with each standing still worked out at read time. KV keeps registered keys, challenges and rate limits, which only need reads and writes by key.
+The intake built the recent list by listing every new place and its evidence in Workers KV on each request. KV's free plan allows 1,000 list operations a day, and one traveller's map panning used them up in a day. The recent list now lives in D1: one table of new places and one of evidence, queried by bounding box, with each standing still worked out at read time. KV keeps registered App Attest keys and their challenges, which only need reads and writes by key. The daily counters later moved to D1 too (`rate_counts`), because KV takes one write a second to a key.
 
 ## Considered options
 
@@ -10,4 +10,4 @@ The intake built the recent list by listing every new place and its evidence in 
 
 ## Consequences
 
-A self-hosted intake needs a D1 database bound to it to serve the recent list. Without one, the recent-list routes answer 404.
+A self-hosted intake needs a D1 database bound to it to serve the recent list. Without one, the recent-list routes answer 404, and so does the batch route, which came later and stores through the same database.
