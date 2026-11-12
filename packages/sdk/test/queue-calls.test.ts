@@ -152,3 +152,89 @@ describe("flush({ ignoreBackoff: true })", () => {
     expect(answers.at(-1)).toEqual({ ref: "old", type: "check", outcome: { kind: "dropped", httpStatus: 0 } });
   });
 });
+
+describe("queueSummary()", () => {
+  it("answers an empty queue", async () => {
+    const { client } = setup();
+    expect(await client.queueSummary()).toEqual({
+      items: 0,
+      tried: 0,
+      oldestQueuedAt: null,
+      mostAttempts: 0,
+      types: [],
+      nextAttemptAt: null,
+      intakeWaitUntil: null,
+      waitingForNewPlace: 0,
+    });
+  });
+
+  it("answers a fresh queue, including an item queued a moment ago by another call", async () => {
+    const { client, clock } = setup();
+    const queued = client.check(check("c1"), { wait: false });
+    const summary = await client.queueSummary();
+    await queued;
+    expect(summary).toEqual({
+      items: 1,
+      tried: 0,
+      oldestQueuedAt: clock.t,
+      mostAttempts: 0,
+      types: ["check"],
+      nextAttemptAt: null,
+      intakeWaitUntil: null,
+      waitingForNewPlace: 0,
+    });
+  });
+
+  it("answers a queue with tried items in backoff", async () => {
+    const { client, intake, clock } = setup();
+    const start = clock.t;
+    intake.mode.value = "offline";
+    await client.check(check("c1"));
+    clock.t += 60_000;
+    await client.review({ place: PLACE, review: { stars: 4, text: "Quiet spot by the river with shade.", visited: "2026-10" }, consent: true, ref: "r1" });
+    await client.flush({ ignoreBackoff: true });
+    // The check was tried by its own call, with the review in one batch, and by the flush: three times. The review twice.
+    expect(await client.queueSummary()).toEqual({
+      items: 2,
+      tried: 2,
+      oldestQueuedAt: start,
+      mostAttempts: 3,
+      types: ["check", "review"],
+      // The review's backoff after its second try, 45 s with random 0.5, ends before the check's 90 s.
+      nextAttemptAt: clock.t + 45_000,
+      intakeWaitUntil: null,
+      waitingForNewPlace: 0,
+    });
+  });
+
+  it("answers a queue held by a wait the intake asked for", async () => {
+    const { client, intake, clock } = setup();
+    intake.mode.value = { status: 429, retryAfter: 3_600 };
+    await client.check(check("c1"));
+    const summary = await client.queueSummary();
+    expect(summary).toMatchObject({ items: 1, tried: 1, mostAttempts: 1, nextAttemptAt: clock.t + 3_600_000, intakeWaitUntil: clock.t + 3_600_000 });
+    clock.t += 3_600_001;
+    expect(await client.queueSummary()).toMatchObject({ items: 1, nextAttemptAt: null, intakeWaitUntil: null });
+  });
+
+  it("answers a queue with items waiting for a new place", async () => {
+    const { client, intake } = setup();
+    intake.mode.value = "offline";
+    await client.report({ place: null, location: { lat: -33.87, lon: 151.21 }, report: { kind: "new_place", name: "River Bend", place_kind: "campground" }, consent: true, ref: "np" });
+    await client.check({ ...check("c1"), place: { newPlace: "np" } });
+    await client.review({ place: { newPlace: "np" }, review: { stars: 5, text: "Shady and quiet, a good stop.", visited: "2026-10" }, consent: true });
+    expect(await client.queueSummary()).toMatchObject({ items: 3, tried: 1, mostAttempts: 1, types: ["check", "report", "review"], waitingForNewPlace: 2 });
+  });
+
+  it("holds no text, device or contributor from any item", async () => {
+    const { client, intake, store } = setup();
+    intake.mode.value = "offline";
+    const text = "The creek crossing near the gate washed out after the storm.";
+    await client.review({ place: PLACE, review: { stars: 3, text, visited: "2026-10" }, contributor: "acct_abc123def456ghi", consent: true, ref: "secret-ref" });
+    const json = JSON.stringify(await client.queueSummary());
+    expect(json).not.toContain("creek");
+    expect(json).not.toContain("acct_abc123def456ghi");
+    expect(json).not.toContain("secret-ref");
+    expect(json).not.toContain(store.data.get("ocdb.feedback.device")!);
+  });
+});

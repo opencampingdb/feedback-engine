@@ -464,6 +464,30 @@ export interface FlushOptions {
   ignoreBackoff?: boolean;
 }
 
+/**
+ * How the queue stands, in counts and times only: never what a traveller
+ * wrote, the device or the contributor, so it can go to an error tracker.
+ */
+export interface QueueSummary {
+  items: number;
+  /** Items tried at least once. */
+  tried: number;
+  /** When the oldest item was queued, in milliseconds, or null for an empty queue. */
+  oldestQueuedAt: number | null;
+  mostAttempts: number;
+  /** The submission types in the queue, sorted, each once. */
+  types: string[];
+  /**
+   * When the next item is due, in milliseconds, or null when none is waiting:
+   * every item is due now or waits for a new place's id.
+   */
+  nextAttemptAt: number | null;
+  /** The end of the longest wait the intake asked for that is not over yet, or null. */
+  intakeWaitUntil: number | null;
+  /** Items waiting for a new place's id. */
+  waitingForNewPlace: number;
+}
+
 export interface FlushResult {
   sent: number;
   dropped: number;
@@ -545,6 +569,11 @@ export interface FeedbackClient {
   /** Number of items waiting to be sent. */
   pending(): Promise<number>;
   /**
+   * How this client's queue stands (`QueueSummary`). Sees every item queued
+   * by an earlier call, makes no request and writes nothing.
+   */
+  queueSummary(): Promise<QueueSummary>;
+  /**
    * Where the new place a `new_place` report's ref names stands: `waiting`,
    * `sent` with its `ocdb_` id, `dropped`, or `unknown`. Pass it to a photo
    * client as `resolveNewPlace`, so photos of a new place can wait for its id.
@@ -600,6 +629,8 @@ export interface PhotoClient {
   flush(options?: FlushOptions): Promise<FlushResult>;
   /** Number of items waiting to be sent. */
   pending(): Promise<number>;
+  /** How this client's queue stands, as the feedback client's `queueSummary` answers. */
+  queueSummary(): Promise<QueueSummary>;
   /**
    * Where each photo is, by the `pho_` id its upload answered (`id` in a
    * `sent` result or in `onPhotoSettled`). Asks the photo intake's
@@ -1489,6 +1520,40 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     });
   }
 
+  function queueSummary(): Promise<QueueSummary> {
+    return serial(async () => {
+      const queue = await readQueue();
+      const t = now();
+      const types = new Set<string>();
+      const summary: QueueSummary = {
+        items: queue.length,
+        tried: 0,
+        oldestQueuedAt: null,
+        mostAttempts: 0,
+        types: [],
+        nextAttemptAt: null,
+        intakeWaitUntil: null,
+        waitingForNewPlace: 0,
+      };
+      for (const item of queue) {
+        types.add(item.body.type);
+        if (item.attempts > 0) summary.tried += 1;
+        summary.mostAttempts = Math.max(summary.mostAttempts, item.attempts);
+        summary.oldestQueuedAt = Math.min(summary.oldestQueuedAt ?? item.queuedAt, item.queuedAt);
+        if (item.waitsFor !== undefined) {
+          summary.waitingForNewPlace += 1;
+          continue;
+        }
+        if (item.nextAttemptAt > t) summary.nextAttemptAt = Math.min(summary.nextAttemptAt ?? item.nextAttemptAt, item.nextAttemptAt);
+        if (item.intakeWaitUntil !== undefined && item.intakeWaitUntil > t) {
+          summary.intakeWaitUntil = Math.max(summary.intakeWaitUntil ?? item.intakeWaitUntil, item.intakeWaitUntil);
+        }
+      }
+      summary.types = [...types].sort();
+      return summary;
+    });
+  }
+
   /** A photo kept until its new place has an id: the app keeps the files under `key`. */
   interface WaitingPhoto {
     key: string;
@@ -1762,6 +1827,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
       return result;
     },
     pending: () => serial(async () => (await readQueue()).length),
+    queueSummary,
     newPlace,
     progress,
     photoProgress,
@@ -1788,6 +1854,7 @@ export function createPhotoClient(options: PhotoClientOptions): PhotoClient {
     erasePhotos: client.erasePhotos,
     flush: client.flush,
     pending: client.pending,
+    queueSummary: client.queueSummary,
     progress: client.photoProgress,
   };
 }
