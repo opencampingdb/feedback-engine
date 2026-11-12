@@ -452,6 +452,54 @@ export type SubmitResult =
   | { status: "queued" }
   | { status: "rejected"; httpStatus: number };
 
+/** How a `flush` picks the items it tries. */
+export interface FlushOptions {
+  /**
+   * `true` tries every item now, skipping the client's own backoff after a
+   * failed try. Each item waits out the wait the intake gave it (a 429 with
+   * `Retry-After`, or a batch item's `retry_after`), so an item the intake has
+   * not yet answered is tried once, and an item waiting
+   * for a new place's id still waits for it. Items older than
+   * `maxQueueAgeMs` are still dropped.
+   */
+  ignoreBackoff?: boolean;
+}
+
+/**
+ * How the queue stands, in counts and times only: never what a traveller
+ * wrote, the device or the contributor, so it can go to an error tracker.
+ */
+export interface QueueSummary {
+  items: number;
+  /** Items tried at least once. */
+  tried: number;
+  /** When the oldest item was queued, in milliseconds, or null for an empty queue. */
+  oldestQueuedAt: number | null;
+  mostAttempts: number;
+  /** The submission types in the queue, sorted, each once. */
+  types: string[];
+  /**
+   * When the next item is due, in milliseconds, or null when none is waiting:
+   * every item is due now or waits for a new place's id.
+   */
+  nextAttemptAt: number | null;
+  /** The end of the longest wait the intake asked for that is not over yet, or null. */
+  intakeWaitUntil: number | null;
+  /** Items waiting for a new place's id. */
+  waitingForNewPlace: number;
+}
+
+/** What `queuedRefs` answers on the feedback client. */
+export interface QueuedRefs {
+  refs: string[];
+}
+
+/** What `queuedRefs` answers on the photo client. */
+export interface PhotoQueuedRefs extends QueuedRefs {
+  /** The `key` of each photo waiting for a new place's id. */
+  waitingPhotoKeys: string[];
+}
+
 export interface FlushResult {
   sent: number;
   dropped: number;
@@ -524,10 +572,31 @@ export interface FeedbackClient {
   ownerListing(input: OwnerListingInput): Promise<OwnerClaimResponse>;
   /** Sends an owner's change, with the token from their approved claim. Sent at once. */
   ownerUpdate(token: string, input: OwnerUpdateInput): Promise<AcceptedResponse>;
-  /** Sends queued items that are due. Call when the app comes to the foreground or regains a connection. */
-  flush(): Promise<FlushResult>;
+  /**
+   * Sends queued items that are due. Call when the app comes to the foreground
+   * or regains a connection. With `ignoreBackoff`, every item is tried now
+   * (`FlushOptions`).
+   */
+  flush(options?: FlushOptions): Promise<FlushResult>;
   /** Number of items waiting to be sent. */
   pending(): Promise<number>;
+  /**
+   * How this client's queue stands (`QueueSummary`). Sees every item queued
+   * by an earlier call. Makes no request and changes nothing in the queue. The
+   * only write it can cause is the one-off save of new idempotency keys, when
+   * it is the client's first call over a stored queue holding an item whose
+   * key the intake would refuse.
+   */
+  queueSummary(): Promise<QueueSummary>;
+  /**
+   * The `ref` of each item still queued, in queue order. An item queued
+   * without a ref is left out. Sees every item queued by an earlier call.
+   * Makes no request and changes nothing in the queue. The only write it can
+   * cause is the one-off save of new idempotency keys, when it is the client's
+   * first call over a stored queue holding an item whose key the intake would
+   * refuse.
+   */
+  queuedRefs(): Promise<QueuedRefs>;
   /**
    * Where the new place a `new_place` report's ref names stands: `waiting`,
    * `sent` with its `ocdb_` id, `dropped`, or `unknown`. Pass it to a photo
@@ -580,10 +649,24 @@ export interface PhotoClient {
    * deleting the account. Queued and retried, like feedback.
    */
   erasePhotos(input: PhotoErasureInput): Promise<SubmitResult>;
-  /** Sends queued reports and erasures that are due. Call when the app comes to the foreground. */
-  flush(): Promise<FlushResult>;
+  /** Sends queued reports and erasures that are due, as the feedback client's `flush` does. Call when the app comes to the foreground. */
+  flush(options?: FlushOptions): Promise<FlushResult>;
   /** Number of items waiting to be sent. */
   pending(): Promise<number>;
+  /**
+   * How this client's queue stands, as the feedback client's `queueSummary`
+   * answers, with the same single write it can cause as its first call. On this
+   * client `waitingForNewPlace` is always 0, because photos waiting for a new
+   * place are not queue items: they are in `queuedRefs().waitingPhotoKeys`.
+   */
+  queueSummary(): Promise<QueueSummary>;
+  /**
+   * The `ref` of each item still queued, as the feedback client's
+   * `queuedRefs` answers, and the `key` of each photo still waiting for a new
+   * place's id, in the order they were taken: keep those files. Causes the same
+   * single write as `queueSummary` when it is the client's first call.
+   */
+  queuedRefs(): Promise<PhotoQueuedRefs>;
   /**
    * Where each photo is, by the `pho_` id its upload answered (`id` in a
    * `sent` result or in `onPhotoSettled`). Asks the photo intake's
@@ -674,6 +757,13 @@ interface QueueItem {
   queuedAt: number;
   attempts: number;
   nextAttemptAt: number;
+  /**
+   * The end of a wait the intake asked for (a 429 with `Retry-After`, or a
+   * batch item's `retry_after`), in milliseconds. `nextAttemptAt` is set to the
+   * same time, so a client that does not know this field waits as before.
+   * Removed once the wait is over. Items queued before 0.29.0 have none.
+   */
+  intakeWaitUntil?: number;
   /** The ref of the new place this item waits for. While set, `body.place` is a placeholder and the item is never sent. */
   waitsFor?: string;
 }
@@ -860,7 +950,9 @@ export function backoffDelay(attempts: number, random: () => number = Math.rando
   return Math.round(ceiling * (0.5 + random() * 0.5));
 }
 
-function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoClient, "progress"> & { photoProgress: PhotoClient["progress"] } {
+function createClient(
+  options: PhotoClientOptions,
+): FeedbackClient & Omit<PhotoClient, "progress" | "queuedRefs"> & { photoProgress: PhotoClient["progress"]; photoQueuedRefs: PhotoClient["queuedRefs"] } {
   const {
     appKey,
     appVersion,
@@ -1015,10 +1107,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
       return { result: "sent", outcome: { kind: "sent", id: typeof id === "string" ? id : "", ...itemDecision(answer) } };
     }
     if (status === 429) {
-      if (Number.isFinite(retryAfter) && retryAfter > 0) {
-        item.attempts += 1;
-        item.nextAttemptAt = now() + retryAfter * 1000;
-      }
+      waitForIntake(item, retryAfter);
       return { result: "stop" };
     }
     if (status >= 500 || status === 408) return { result: "stop" };
@@ -1120,11 +1209,16 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
 
   /** The rest of a batch kept as a whole: a 429's wait, without calling the refusal hook again. */
   async function settleKept(item: QueueItem, status: number, retryAfter: number): Promise<{ result: Sent }> {
-    if (status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) {
-      item.attempts += 1;
-      item.nextAttemptAt = now() + retryAfter * 1000;
-    }
+    if (status === 429) waitForIntake(item, retryAfter);
     return { result: "stop" };
+  }
+
+  /** Counts a 429 as a try and keeps the item until the wait it asked for is over, when it gave one in seconds. */
+  function waitForIntake(item: QueueItem, retryAfter: number): void {
+    if (!(Number.isFinite(retryAfter) && retryAfter > 0)) return;
+    item.attempts += 1;
+    item.nextAttemptAt = now() + retryAfter * 1000;
+    item.intakeWaitUntil = item.nextAttemptAt;
   }
 
   // Outcomes are kept only for items a report(), review(), check() or reportReview() call is waiting on.
@@ -1161,7 +1255,8 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
    * which can be from an earlier batch of the same flush. The flush stops
    * after the first answer that keeps an item to try again.
    */
-  async function flushNow(): Promise<FlushResult> {
+  async function flushNow(flushOptions: FlushOptions = {}): Promise<FlushResult> {
+    const ignoreBackoff = flushOptions.ignoreBackoff === true;
     const result = await serial(async () => {
       const queue = await readQueue();
       const known = await readNewPlaces();
@@ -1196,7 +1291,9 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
             (item.body as { place: string }).place = target.place;
             delete item.waitsFor;
           }
-          if (stopped || item.nextAttemptAt > t || due.length >= maxBatchSize) continue;
+          if (item.intakeWaitUntil !== undefined && item.intakeWaitUntil <= t) delete item.intakeWaitUntil;
+          const dueAt = ignoreBackoff ? (item.intakeWaitUntil ?? 0) : item.nextAttemptAt;
+          if (stopped || dueAt > t || due.length >= maxBatchSize) continue;
           due.push(item);
         }
         const attemptsBefore = new Map(due.map((item) => [item, item.attempts]));
@@ -1460,6 +1557,45 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
       return (await readQueue()).some((q) => q.ref === ref && isNewPlaceItem(q)) ? ({ status: "waiting" } as const) : ({ status: "unknown" } as const);
     });
   }
+
+  function queueSummary(): Promise<QueueSummary> {
+    return serial(async () => {
+      const queue = await readQueue();
+      const t = now();
+      const types = new Set<string>();
+      const summary: QueueSummary = {
+        items: queue.length,
+        tried: 0,
+        oldestQueuedAt: null,
+        mostAttempts: 0,
+        types: [],
+        nextAttemptAt: null,
+        intakeWaitUntil: null,
+        waitingForNewPlace: 0,
+      };
+      for (const item of queue) {
+        types.add(item.body.type);
+        if (item.attempts > 0) summary.tried += 1;
+        summary.mostAttempts = Math.max(summary.mostAttempts, item.attempts);
+        summary.oldestQueuedAt = Math.min(summary.oldestQueuedAt ?? item.queuedAt, item.queuedAt);
+        if (item.waitsFor !== undefined) {
+          summary.waitingForNewPlace += 1;
+          continue;
+        }
+        if (item.nextAttemptAt > t) summary.nextAttemptAt = Math.min(summary.nextAttemptAt ?? item.nextAttemptAt, item.nextAttemptAt);
+        if (item.intakeWaitUntil !== undefined && item.intakeWaitUntil > t) {
+          summary.intakeWaitUntil = Math.max(summary.intakeWaitUntil ?? item.intakeWaitUntil, item.intakeWaitUntil);
+        }
+      }
+      summary.types = [...types].sort();
+      return summary;
+    });
+  }
+
+  const refsIn = (queue: readonly QueueItem[]) => queue.flatMap((item) => (item.ref !== undefined ? [item.ref] : []));
+  const queuedRefs = (): Promise<QueuedRefs> => serial(async () => ({ refs: refsIn(await readQueue()) }));
+  const photoQueuedRefs = (): Promise<PhotoQueuedRefs> =>
+    serial(async () => ({ refs: refsIn(await readQueue()), waitingPhotoKeys: (await readWaitingPhotos()).map((w) => w.key) }));
 
   /** A photo kept until its new place has an id: the app keeps the files under `key`. */
   interface WaitingPhoto {
@@ -1728,12 +1864,15 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
       submit({ place: null, contributor, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}), consent, ref }, "review_erasure"),
     erasePhotos: ({ contributor, contributorProof, consent, ref }) =>
       submit({ place: null, contributor, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}), consent, ref }, "photo_erasure"),
-    flush: async () => {
-      const result = await flushNow();
+    flush: async (flushOptions) => {
+      const result = await flushNow(flushOptions);
       await flushWaitingPhotos();
       return result;
     },
     pending: () => serial(async () => (await readQueue()).length),
+    queueSummary,
+    queuedRefs,
+    photoQueuedRefs,
     newPlace,
     progress,
     photoProgress,
@@ -1742,7 +1881,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
 
 /** A client for Open Camping DB's feedback intake: reports, reviews, checks and owner requests. */
 export function createFeedbackClient(options: FeedbackClientOptions): FeedbackClient {
-  const { photo: _photo, photoPass: _pass, reportPhoto: _report, removePhoto: _remove, erasePhotos: _erase, ...feedback } = createClient(options as PhotoClientOptions);
+  const { photo: _photo, photoPass: _pass, reportPhoto: _report, removePhoto: _remove, erasePhotos: _erase, photoQueuedRefs: _refs, ...feedback } = createClient(options as PhotoClientOptions);
   return feedback;
 }
 
@@ -1760,6 +1899,8 @@ export function createPhotoClient(options: PhotoClientOptions): PhotoClient {
     erasePhotos: client.erasePhotos,
     flush: client.flush,
     pending: client.pending,
+    queueSummary: client.queueSummary,
+    queuedRefs: client.photoQueuedRefs,
     progress: client.photoProgress,
   };
 }
