@@ -488,6 +488,17 @@ export interface QueueSummary {
   waitingForNewPlace: number;
 }
 
+/** What `queuedRefs` answers on the feedback client. */
+export interface QueuedRefs {
+  refs: string[];
+}
+
+/** What `queuedRefs` answers on the photo client. */
+export interface PhotoQueuedRefs extends QueuedRefs {
+  /** The `key` of each photo waiting for a new place's id. */
+  waitingPhotoKeys: string[];
+}
+
 export interface FlushResult {
   sent: number;
   dropped: number;
@@ -574,6 +585,12 @@ export interface FeedbackClient {
    */
   queueSummary(): Promise<QueueSummary>;
   /**
+   * The `ref` of each item still queued, in queue order. An item queued
+   * without a ref is left out. Sees every item queued by an earlier call,
+   * makes no request and writes nothing.
+   */
+  queuedRefs(): Promise<QueuedRefs>;
+  /**
    * Where the new place a `new_place` report's ref names stands: `waiting`,
    * `sent` with its `ocdb_` id, `dropped`, or `unknown`. Pass it to a photo
    * client as `resolveNewPlace`, so photos of a new place can wait for its id.
@@ -631,6 +648,12 @@ export interface PhotoClient {
   pending(): Promise<number>;
   /** How this client's queue stands, as the feedback client's `queueSummary` answers. */
   queueSummary(): Promise<QueueSummary>;
+  /**
+   * The `ref` of each item still queued, as the feedback client's
+   * `queuedRefs` answers, and the `key` of each photo still waiting for a new
+   * place's id, in the order they were taken: keep those files.
+   */
+  queuedRefs(): Promise<PhotoQueuedRefs>;
   /**
    * Where each photo is, by the `pho_` id its upload answered (`id` in a
    * `sent` result or in `onPhotoSettled`). Asks the photo intake's
@@ -914,7 +937,9 @@ export function backoffDelay(attempts: number, random: () => number = Math.rando
   return Math.round(ceiling * (0.5 + random() * 0.5));
 }
 
-function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoClient, "progress"> & { photoProgress: PhotoClient["progress"] } {
+function createClient(
+  options: PhotoClientOptions,
+): FeedbackClient & Omit<PhotoClient, "progress" | "queuedRefs"> & { photoProgress: PhotoClient["progress"]; photoQueuedRefs: PhotoClient["queuedRefs"] } {
   const {
     appKey,
     appVersion,
@@ -1554,6 +1579,11 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     });
   }
 
+  const refsIn = (queue: readonly QueueItem[]) => queue.flatMap((item) => (item.ref !== undefined ? [item.ref] : []));
+  const queuedRefs = (): Promise<QueuedRefs> => serial(async () => ({ refs: refsIn(await readQueue()) }));
+  const photoQueuedRefs = (): Promise<PhotoQueuedRefs> =>
+    serial(async () => ({ refs: refsIn(await readQueue()), waitingPhotoKeys: (await readWaitingPhotos()).map((w) => w.key) }));
+
   /** A photo kept until its new place has an id: the app keeps the files under `key`. */
   interface WaitingPhoto {
     key: string;
@@ -1828,6 +1858,8 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
     },
     pending: () => serial(async () => (await readQueue()).length),
     queueSummary,
+    queuedRefs,
+    photoQueuedRefs,
     newPlace,
     progress,
     photoProgress,
@@ -1836,7 +1868,7 @@ function createClient(options: PhotoClientOptions): FeedbackClient & Omit<PhotoC
 
 /** A client for Open Camping DB's feedback intake: reports, reviews, checks and owner requests. */
 export function createFeedbackClient(options: FeedbackClientOptions): FeedbackClient {
-  const { photo: _photo, photoPass: _pass, reportPhoto: _report, removePhoto: _remove, erasePhotos: _erase, ...feedback } = createClient(options as PhotoClientOptions);
+  const { photo: _photo, photoPass: _pass, reportPhoto: _report, removePhoto: _remove, erasePhotos: _erase, photoQueuedRefs: _refs, ...feedback } = createClient(options as PhotoClientOptions);
   return feedback;
 }
 
@@ -1855,6 +1887,7 @@ export function createPhotoClient(options: PhotoClientOptions): PhotoClient {
     flush: client.flush,
     pending: client.pending,
     queueSummary: client.queueSummary,
+    queuedRefs: client.photoQueuedRefs,
     progress: client.photoProgress,
   };
 }
