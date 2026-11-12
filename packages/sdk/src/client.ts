@@ -18,6 +18,7 @@ import type {
 } from "./types.js";
 import { isFeedbackId, readProgress, type Progress } from "./progress.js";
 import { sha256Hex, sha256HexBytes } from "./sha256.js";
+import { stripJpegMetadata } from "./jpeg.js";
 import { IDEMPOTENCY_HEADER, MAX_PHOTO_BYTES, MAX_THUMB_BYTES, isIdempotencyKey, isPhotoId, isPlaceId, newPlaceId, validateSubmission } from "./validate.js";
 
 /** Storage the client keeps its queue and device id in. AsyncStorage matches this shape. */
@@ -66,7 +67,12 @@ export interface FeedbackClientOptions {
    * aborted and treated as offline, so the queue moves on. Default 30 000.
    */
   timeoutMs?: number;
-  /** Most items kept in the queue. The oldest are dropped past this. Default 100. */
+  /**
+   * Most items kept in the queue. Past this the oldest item is dropped,
+   * except an erasure (`eraseReviews`, `erasePhotos` or `removePhoto`): the
+   * oldest item of any other kind goes instead, and when only erasures are
+   * left, all of them are kept. Default 100.
+   */
   maxQueueLength?: number;
   /** Items older than this are dropped unsent. Default 30 days. */
   maxQueueAgeMs?: number;
@@ -108,6 +114,19 @@ export interface FeedbackClientOptions {
    * record with `ref`, not by comparing content.
    */
   onAnswered?: (answer: Answer) => Promise<void> | void;
+  /**
+   * Called when the stored queue can't be read (cut short, or not a list),
+   * after its text is moved to the key `keptAt` (`<storagePrefix>.queue.corrupt`,
+   * which keeps the latest such text) and the queue starts again empty. The
+   * items in it are not sent, and `onAnswered` is not called for them. It is
+   * not waited for, and errors it throws are caught.
+   */
+  onQueueUnreadable?: (unreadable: QueueUnreadable) => Promise<void> | void;
+}
+
+/** What `onQueueUnreadable` is told: the storage key the unreadable queue text was moved to. */
+export interface QueueUnreadable {
+  keptAt: string;
 }
 
 /** Why the intake refused an item's attestation. */
@@ -898,6 +917,10 @@ const BASE_DELAY_MS = 30_000;
 const PASS_REFRESH_MS = 5 * 60 * 1000;
 const MAX_DELAY_MS = 6 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** The longest wait an intake's `Retry-After` or `retry_after` sets: a day. */
+const MAX_INTAKE_WAIT_MS = DAY_MS;
+/** Kinds kept when the queue is full: a request to erase or remove what a contributor sent. */
+const ERASURES: ReadonlySet<string> = new Set(["review_erasure", "photo_erasure", "photo_removal"]);
 /** Default longest wait for one request or attestation (`timeoutMs`). */
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -997,6 +1020,7 @@ function createClient(
   const random = options.random ?? Math.random;
   const deviceKey = `${storagePrefix}.device`;
   const queueKey = `${storagePrefix}.queue`;
+  const corruptQueueKey = `${queueKey}.corrupt`;
   const newPlacesKey = `${storagePrefix}.newplaces`;
   const waitingPhotosKey = `${storagePrefix}.waitingphotos`;
 
@@ -1042,12 +1066,27 @@ function createClient(
   async function readQueueFromStorage(): Promise<QueueItem[]> {
     const raw = await storage.getItem(queueKey);
     if (!raw) return [];
-    let queue: QueueItem[];
+    let queue: QueueItem[] | undefined;
     let changed = false;
     try {
       const parsed: unknown = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      queue = parsed as QueueItem[];
+      if (Array.isArray(parsed)) queue = parsed as QueueItem[];
+    } catch {
+      // Unreadable: kept aside below.
+    }
+    if (!queue) {
+      // Moved aside before anything is saved over it, so the text is not lost. A failed move rejects the operation.
+      await storage.setItem(corruptQueueKey, raw);
+      await storage.removeItem(queueKey);
+      const hook = options.onQueueUnreadable;
+      if (hook) {
+        void Promise.resolve()
+          .then(() => hook({ keptAt: corruptQueueKey }))
+          .catch(() => undefined);
+      }
+      return [];
+    }
+    try {
       // Every item needs a key the intake takes. One queued without (or with one it would refuse) gets a new one, kept from now on.
       for (const item of queue) {
         if (!isIdempotencyKey(item.localId)) {
@@ -1196,8 +1235,12 @@ function createClient(
       const out: { result: Sent; outcome?: Outcome }[] = [];
       for (const [i, item] of items.entries()) {
         const answer = answers[i] as { status?: unknown; retry_after?: unknown } | null;
-        const status = typeof answer?.status === "number" ? answer.status : 0;
-        out.push(await settle(item, status, answer, Number(answer?.retry_after)));
+        // An item answer without a numeric status says nothing about the item: keep it to try again.
+        if (typeof answer?.status !== "number") {
+          out.push({ result: "stop" });
+          continue;
+        }
+        out.push(await settle(item, answer.status, answer, Number(answer.retry_after)));
       }
       return out;
     }
@@ -1215,11 +1258,14 @@ function createClient(
     return { result: "stop" };
   }
 
-  /** Counts a 429 as a try and keeps the item until the wait it asked for is over, when it gave one in seconds. */
+  /**
+   * Counts a 429 as a try and keeps the item until the wait it asked for is
+   * over, when it gave one in seconds, for at most a day.
+   */
   function waitForIntake(item: QueueItem, retryAfter: number): void {
     if (!(Number.isFinite(retryAfter) && retryAfter > 0)) return;
     item.attempts += 1;
-    item.nextAttemptAt = now() + retryAfter * 1000;
+    item.nextAttemptAt = now() + Math.min(retryAfter * 1000, MAX_INTAKE_WAIT_MS);
     item.intakeWaitUntil = item.nextAttemptAt;
   }
 
@@ -1273,6 +1319,18 @@ function createClient(
       let sent = 0;
       let dropped = 0;
       let stopped = false;
+      // Times saved under a wrong clock. A queuedAt ahead of now came from a clock that was ahead, as did the
+      // item's next try, so it is due now. No other wait runs past the longest backoff, or a day for the intake's.
+      for (const item of queue) {
+        if (item.queuedAt > t) {
+          item.queuedAt = t;
+          item.nextAttemptAt = Math.min(item.nextAttemptAt, t);
+          if (item.intakeWaitUntil !== undefined) item.intakeWaitUntil = Math.min(item.intakeWaitUntil, t);
+        }
+        const longest = t + (item.intakeWaitUntil !== undefined ? MAX_INTAKE_WAIT_MS : MAX_DELAY_MS);
+        if (item.nextAttemptAt > longest) item.nextAttemptAt = longest;
+        if (item.intakeWaitUntil !== undefined && item.intakeWaitUntil > t + MAX_INTAKE_WAIT_MS) item.intakeWaitUntil = t + MAX_INTAKE_WAIT_MS;
+      }
       for (;;) {
         // Outcomes are recorded in queue order within each round, as each item is reached.
         const outcomes = new Map<QueueItem, Outcome>();
@@ -1351,8 +1409,16 @@ function createClient(
         if (results.size === 0) break;
       }
       const kept = queue.filter((item) => !done.has(item));
-      await writeQueue(kept);
-      await writeNewPlaces();
+      try {
+        await writeQueue(kept);
+        await writeNewPlaces();
+      } catch (error) {
+        // Nothing settled: the failed save is the answer.
+        if (done.size === 0) throw error;
+        // Items were sent or dropped, so their outcomes stand. The stored queue still holds them, and a later save
+        // (or a resend under the same idempotency key, after a restart) puts it right.
+        cachedQueue = kept;
+      }
       return { sent, dropped, remaining: kept.length };
     });
     await tellAnswers();
@@ -1417,10 +1483,20 @@ function createClient(
       const items: QueueItem[] = [];
       for (const call of calls) items.push(await prepareItem(queue, call, type, deviceId));
       queue.push(...items);
-      while (queue.length > maxQueueLength) record(queue.shift()!, { kind: "dropped", httpStatus: 0 });
-      await writeQueue(queue);
-      await writeNewPlaces();
       if (wait) for (const item of items) waiting.add(item.localId);
+      try {
+        // Past the limit the oldest item goes, but never an erasure: when only erasures are left, they all stay.
+        while (queue.length > maxQueueLength) {
+          const oldest = queue.findIndex((item) => !ERASURES.has(item.body.type));
+          if (oldest < 0) break;
+          record(queue.splice(oldest, 1)[0]!, { kind: "dropped", httpStatus: 0 });
+        }
+        await writeQueue(queue);
+        await writeNewPlaces();
+      } catch (error) {
+        for (const item of items) waiting.delete(item.localId);
+        throw error;
+      }
       return items.map((item) => item.localId);
     });
     if (!wait) {
@@ -1487,8 +1563,9 @@ function createClient(
   /** Sends a photo's meta in a header and both files, full then thumb, as the body. */
   async function uploadPhoto(input: Omit<PhotoInput, "place" | "key"> & { place: string }): Promise<PhotoResult> {
     if (input.consent !== true) throw new ConsentRequiredError();
-    const full = input.full instanceof Uint8Array ? input.full : new Uint8Array(input.full);
-    const thumb = input.thumb instanceof Uint8Array ? input.thumb : new Uint8Array(input.thumb);
+    // Exif and XMP (camera, time, GPS position) are removed here, whatever the app did, and the meta describes the bytes sent.
+    const full = stripJpegMetadata(input.full instanceof Uint8Array ? input.full : new Uint8Array(input.full));
+    const thumb = stripJpegMetadata(input.thumb instanceof Uint8Array ? input.thumb : new Uint8Array(input.thumb));
     const problems: string[] = [];
     if (!isJpeg(full)) problems.push("full is not a JPEG");
     if (!isJpeg(thumb)) problems.push("thumb is not a JPEG");
@@ -1671,7 +1748,16 @@ function createClient(
    * are gone or that waited too long. A photo that can't go now (offline,
    * a passing refusal) stays for the next flush without holding up the rest.
    */
-  async function flushWaitingPhotos(): Promise<void> {
+  let photoFlush: Promise<void> | undefined;
+  /** One run of `uploadWaitingPhotos` at a time: a flush during a run waits for it, so each photo is settled once. */
+  function flushWaitingPhotos(): Promise<void> {
+    photoFlush ??= uploadWaitingPhotos().finally(() => {
+      photoFlush = undefined;
+    });
+    return photoFlush;
+  }
+
+  async function uploadWaitingPhotos(): Promise<void> {
     const list = await serial(readWaitingPhotos);
     if (list.length === 0) return;
     const settledKeys = new Set<string>();

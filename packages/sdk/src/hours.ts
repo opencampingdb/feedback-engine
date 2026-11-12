@@ -35,6 +35,10 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 /** The last day of each month, with Feb 29 allowed. */
 const MONTH_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as const;
 const EVENTS = ["sunrise", "sunset", "dawn", "dusk"] as const;
+/** The minutes after midnight opening_hours.js takes for each of EVENTS when it checks an open end. */
+const EVENT_MINUTES = [6 * 60, 18 * 60, 5 * 60 + 30, 18 * 60 + 30] as const;
+/** The most days before easter a date in a date range may be. */
+const MAX_EASTER_BACK = 80;
 /** Minutes in a day. */
 const DAY = 24 * 60;
 
@@ -48,6 +52,8 @@ class Parser {
   private lastDay = 1;
   /** Whether the last date read had a year in front of it. */
   private lastHadYear = false;
+  /** How many days before easter the last date read was, or 0 when it was not before easter. */
+  private lastEasterBack = 0;
   /** Whether the last date read was an nth weekday such as `Apr Su[1]`. */
   private lastNthWeekday = false;
   /** Whether the last date range read was one nth weekday date, which ends a list. */
@@ -162,32 +168,50 @@ class Parser {
     return minutes;
   }
 
-  private variableTime(): boolean {
-    return (
-      this.oneOf(EVENTS) ||
-      this.attempt(() => this.lit("(") && this.oneOf(EVENTS) && this.plusMinus() && this.hourMinutes(DAY) !== null && this.lit(")"))
-    );
+  /**
+   * `sunrise`, `(sunset-01:00)` and the like, as the minutes after midnight
+   * opening_hours.js takes for it when it checks an open end (EVENT_MINUTES),
+   * or null.
+   */
+  private variableTime(): number | null {
+    const event = this.indexOf(EVENTS);
+    if (event >= 0) return EVENT_MINUTES[event]!;
+    let at: number | null = null;
+    this.attempt(() => {
+      if (!this.lit("(")) return false;
+      const e = this.indexOf(EVENTS);
+      if (e < 0) return false;
+      const sign = this.lit("+") ? 1 : this.lit("-") ? -1 : 0;
+      const offset = sign === 0 ? null : this.hourMinutes(DAY);
+      if (offset === null || !this.lit(")")) return false;
+      at = EVENT_MINUTES[e]! + sign * offset;
+      return true;
+    });
+    return at;
   }
 
-  /** A time a timespan starts at, before 24:00: minutes after midnight, -1 for sunrise and the like, or null. */
+  /** A time a timespan starts at, before 24:00, or a variable time: minutes after midnight, or null. */
   private time(): number | null {
     const at = this.hourMinutes(DAY - 1);
     if (at !== null) return at;
-    return this.variableTime() ? -1 : null;
+    return this.variableTime();
   }
 
-  /** A time a timespan ends at, up to 48:00: minutes after midnight, -1 for sunrise and the like, or null. */
+  /** A time a timespan ends at, up to 48:00, or a variable time: minutes after midnight, or null. */
   private extendedTime(): number | null {
     const at = this.hourMinutes(2 * DAY);
     if (at !== null) return at;
-    return this.variableTime() ? -1 : null;
+    return this.variableTime();
   }
 
   /**
    * A timespan in opening hours mode: `08:00-17:00`, `18:00-22:00+` or
    * `18:00+`. As in opening_hours.js, an open end runs on from the end time
    * for up to ten hours and may not pass a second midnight: `20:00-02:00+`
-   * is accepted, `20:00-18:00+` and `10:00-41:00+` are not.
+   * is accepted, `20:00-18:00+` and `10:00-41:00+` are not. Sunrise and
+   * the like count at the times in EVENT_MINUTES, so `dusk-18:00+` is not
+   * accepted either, nor is an open end after a variable start that falls
+   * outside the day.
    */
   private timespan(): boolean {
     return this.attempt(() => {
@@ -197,7 +221,8 @@ class Parser {
       if (!this.lit("-")) return false;
       const to = this.extendedTime();
       if (to === null) return false;
-      if (this.lit("+") && from >= 0 && to >= 0) {
+      if (this.lit("+")) {
+        if (from < 0 || from >= DAY) return false;
         if (to < from ? to >= 17 * 60 : to > 40 * 60) return false;
       }
       return true;
@@ -215,12 +240,30 @@ class Parser {
     return true;
   }
 
-  private nth(): boolean {
-    return this.oneOf(["1", "2", "3", "4", "5"]);
+  /** An nth from 1 to 5, or 0 when there is none. */
+  private nth(): number {
+    const n = this.indexOf(["1", "2", "3", "4", "5"]);
+    return n + 1;
   }
 
+  /** `-1`, `2`, or a range such as `2-4` that does not run backwards. */
   private nthEntry(): boolean {
-    return this.attempt(() => this.lit("-") && this.nth()) || this.attempt(() => this.nth() && (this.attempt(() => this.lit("-") && this.nth()) || true));
+    return (
+      this.attempt(() => this.lit("-") && this.nth() > 0) ||
+      this.attempt(() => {
+        const from = this.nth();
+        if (from === 0) return false;
+        let backwards = false;
+        this.attempt(() => {
+          if (!this.lit("-")) return false;
+          const to = this.nth();
+          if (to === 0) return false;
+          backwards = to < from;
+          return true;
+        });
+        return !backwards;
+      })
+    );
   }
 
   /**
@@ -261,24 +304,31 @@ class Parser {
     });
   }
 
+  /** The year read last by `year`. */
+  private lastYear = 0;
+
   private year(): boolean {
     return this.attempt(() => {
       const y = this.digits(4);
       // A year is never followed by `:`, which would make it a time, or straight by a letter.
-      return y !== null && y > 1900 && !/[A-Za-z]/.test(this.text[this.pos] ?? "") && !this.lit(":");
+      if (y === null || y <= 1900 || /[A-Za-z]/.test(this.text[this.pos] ?? "") || this.lit(":")) return false;
+      this.lastYear = y;
+      return true;
     });
   }
 
-  /** A year selector. A single year in front of a month belongs to the date or month range instead. */
+  /** A year selector. A single year in front of a month or `easter` belongs to the date or month range instead. */
   private yearRange(): boolean {
     return this.attempt(() => {
       if (!this.year()) return false;
+      const first = this.lastYear;
       if (this.lit("+")) return true;
-      if (this.attempt(() => this.lit("-") && this.year() && (this.attempt(() => this.lit("/") && this.positive()) || true))) return true;
+      // As in opening_hours.js, a range of years ends after the year it starts in.
+      if (this.attempt(() => this.lit("-") && this.year() && this.lastYear > first && (this.attempt(() => this.lit("/") && this.positive()) || true))) return true;
       const at = this.pos;
-      const month = this.indexOf(MONTHS) >= 0;
+      const date = this.indexOf(MONTHS) >= 0 || this.lit("easter");
       this.pos = at;
-      return !month;
+      return !date;
     });
   }
 
@@ -313,8 +363,12 @@ class Parser {
     this.attempt(() => {
       this.lastHadYear = this.yearPrefix();
       this.lastNthWeekday = false;
+      this.lastEasterBack = 0;
       if (this.lit("easter")) {
-        this.dayOffset(199);
+        const at = this.pos;
+        const back = this.attempt(() => this.lit("-") && this.positive(199) && (this.lit("days") || this.lit("day")));
+        if (back) this.lastEasterBack = Number(/\d+/.exec(this.text.slice(at))![0]);
+        else this.dayOffset(199);
         month = -1;
         return true;
       }
@@ -326,7 +380,7 @@ class Parser {
         month = m;
         return true;
       }
-      if (!this.attempt(() => this.oneOf(WDAYS) && this.lit("[") && (this.lit("-") || true) && this.nth() && this.lit("]"))) return false;
+      if (!this.attempt(() => this.oneOf(WDAYS) && this.lit("[") && (this.lit("-") || true) && this.nth() > 0 && this.lit("]"))) return false;
       this.dayOffset(6);
       this.lastNthWeekday = true;
       month = -1;
@@ -342,12 +396,15 @@ class Parser {
         const from = this.dateFrom();
         if (from === null) return false;
         const hadYear = this.lastHadYear;
+        const startBack = this.lastEasterBack;
         this.endsList = this.lastNthWeekday;
         this.dayListMonth = from >= 0 ? from : null;
         this.attempt(() => {
           if (!this.lit("-")) return false;
           // As in opening_hours.js, the end date has a year when, and only when, the start date has one.
-          if (this.attempt(() => this.dateFrom() !== null && this.lastHadYear === hadYear)) {
+          // And a range refuses an easter date that falls in another year: easter is on 22 March at
+          // the earliest, so up to 80 days before it stays in the year every year.
+          if (this.attempt(() => this.dateFrom() !== null && this.lastHadYear === hadYear && startBack <= MAX_EASTER_BACK && this.lastEasterBack <= MAX_EASTER_BACK)) {
             this.dayListMonth = null;
             this.endsList = false;
             return true;
@@ -357,9 +414,12 @@ class Parser {
         return true;
       }) ||
       this.attempt(() => {
-        this.yearPrefix();
+        const year = this.yearPrefix();
         if (!this.oneOf(MONTHS)) return false;
-        this.attempt(() => this.lit("-") && this.oneOf(MONTHS));
+        const range = this.attempt(() => this.lit("-") && this.oneOf(MONTHS));
+        // opening_hours.js reads digits after a year and one month as the month's day, so it
+        // refuses times there: `2027 Feb 08:00-17:00`.
+        if (year && !range && /^ *\d/.test(this.text.slice(this.pos))) return false;
         this.dayListMonth = null;
         this.endsList = false;
         return true;
@@ -386,15 +446,42 @@ class Parser {
    */
   private monthdaySelector(): boolean {
     this.dayListMonth = null;
-    const item = (): boolean => {
-      const start = this.pos;
-      if (!this.monthdayRange()) return false;
-      monthOnly = /^ *(\d{4} +)?[A-Z][a-z]{2}( *- *[A-Z][a-z]{2})?$/.test(this.text.slice(start, this.pos));
-      return true;
-    };
+    let first = true;
     let monthOnly = false;
+    let sawMonthOnly = false;
+    let singleDay = false;
+    const item = (): boolean =>
+      this.attempt(() => {
+        const start = this.pos;
+        if (!this.monthdayRange()) return false;
+        const text = this.text.slice(start, this.pos);
+        const wasMonthOnly = /^ *(\d{4} +)?[A-Z][a-z]{2}( *- *[A-Z][a-z]{2})?$/.test(text);
+        // As in opening_hours.js: a month with a year in front of it does not follow another item in a list
+        // (`Jan,2027 Nov`), and a list does not start with one month that nth weekdays follow (`Jun Th[1,3]`).
+        if (!first && wasMonthOnly && /^ *\d{4}/.test(text)) return false;
+        if (first && /^ *(\d{4} +)?[A-Z][a-z]{2}$/.test(text) && /^ *(Mo|Tu|We|Th|Fr|Sa|Su) *\[/.test(this.text.slice(this.pos))) return false;
+        monthOnly = wasMonthOnly;
+        sawMonthOnly ||= wasMonthOnly;
+        singleDay = /^ *(\d{4} +)?[A-Z][a-z]{2} *\d{1,2}$/.test(text);
+        first = false;
+        return true;
+      });
+    const start = this.pos;
     if (!item()) return false;
-    while (this.attempt(() => !this.endsList && this.lit(",") && (this.dayListItem() || (!(monthOnly && /^ *(\d{4} *)?easter/.test(this.text.slice(this.pos))) && item()))));
+    while (
+      this.attempt(
+        () =>
+          !this.endsList &&
+          this.lit(",") &&
+          ((this.dayListItem() && (singleDay = true)) || (!(monthOnly && /^ *(\d{4} *)?easter/.test(this.text.slice(this.pos))) && item())),
+      )
+    );
+    // opening_hours.js refuses a single day after a month in a list when a `:` and a time follow: `Dec,Feb 28: 10:00-12:00`.
+    if (sawMonthOnly && singleDay && /^ *: *\d/.test(this.text.slice(this.pos))) {
+      this.pos = start;
+      this.dayListMonth = null;
+      return false;
+    }
     return true;
   }
 
@@ -406,8 +493,14 @@ class Parser {
       });
     const week = (): boolean =>
       this.attempt(() => {
+        const at = this.pos;
         if (!weeknum()) return false;
-        this.attempt(() => this.lit("-") && weeknum() && (this.attempt(() => this.lit("/") && this.positive()) || true));
+        const from = Number(this.text.slice(at, this.pos).trim());
+        // As in opening_hours.js, a range of weeks does not run over the end of the year.
+        this.attempt(() => {
+          const to = this.pos;
+          return this.lit("-") && weeknum() && Number(this.text.slice(to, this.pos).replace("-", "").trim()) >= from && (this.attempt(() => this.lit("/") && this.positive()) || true);
+        });
         return true;
       });
     return this.attempt(() => this.lit("week") && this.list(week));

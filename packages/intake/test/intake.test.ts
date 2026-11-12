@@ -201,6 +201,24 @@ describe("intake", () => {
     expect(((await res.json()) as { details: string[] }).details.join()).toContain("review.stars");
   });
 
+  it("takes a visit dated today where the day has started, at 00:30 on 1 December in UTC+11", async () => {
+    // 13:30 on 30 November in UTC, the intake's clock.
+    clock = Date.parse("2026-11-30T13:30:00Z");
+    const check = { ...review, type: "check", review: undefined, check: { visited: "2026-12-01", still_there: true } };
+    expect((await handle(post(check), env())).status).toBe(202);
+    expect((await handle(post({ ...review, review: { ...review.review, visited: "2026-12" } }), env())).status).toBe(202);
+  });
+
+  it("refuses a visit dated after the day already started anywhere, with 400", async () => {
+    clock = Date.parse("2026-11-30T13:30:00Z");
+    const check = await handle(post({ ...review, type: "check", review: undefined, check: { visited: "2026-12-02", still_there: true } }), env());
+    expect(check.status).toBe(400);
+    expect(((await check.json()) as { details: string[] }).details).toEqual(["check.visited must not be in the future"]);
+    const later = await handle(post({ ...review, review: { ...review.review, visited: "2027-01" } }), env());
+    expect(later.status).toBe(400);
+    expect(((await later.json()) as { details: string[] }).details).toEqual(["review.visited must not be in the future"]);
+  });
+
   it("refuses a submission without consent with 400", async () => {
     expect((await handle(post({ ...review, consent: false }), env())).status).toBe(400);
   });

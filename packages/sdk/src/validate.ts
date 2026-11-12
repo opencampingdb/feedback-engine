@@ -291,7 +291,8 @@ const isBoolean = (v: unknown): boolean => typeof v === "boolean";
 /** An https link to a page, as for the website and social pages. */
 const isHttpsPage = (max: number) => (v: unknown): boolean =>
   typeof v === "string" && v.length <= max && /^https:\/\/[^\s]+$/.test(v);
-const isPhone = (v: unknown): boolean => typeof v === "string" && /^\+?[\d ]{6,20}$/.test(v);
+/** A phone number: digits and spaces after an optional `+`, 6 to 20 characters, with at least 6 digits. */
+const isPhone = (v: unknown): boolean => typeof v === "string" && /^\+?[\d ]{6,20}$/.test(v) && (v.match(/\d/g)?.length ?? 0) >= 6;
 const EMAIL = /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
 
 /**
@@ -678,7 +679,17 @@ function checkContacts(value: unknown, errors: string[]): NewPlaceContacts | und
   return out;
 }
 
-function checkReview(value: unknown, errors: string[]): ReviewBody | undefined {
+/**
+ * The latest day a traveller can have reached, as `YYYY-MM-DD`: the day
+ * already started somewhere (UTC+14). A traveller's visit is their local date,
+ * so one ahead of UTC can report today, and this month, from their first hour,
+ * while the intake's clock is on UTC.
+ */
+function latestLocalDate(now: Date): string {
+  return new Date(now.getTime() + 14 * 3_600_000).toISOString().slice(0, 10);
+}
+
+function checkReview(value: unknown, errors: string[], now: Date): ReviewBody | undefined {
   if (!isObject(value)) {
     errors.push("review must be an object");
     return undefined;
@@ -690,6 +701,8 @@ function checkReview(value: unknown, errors: string[]): ReviewBody | undefined {
   const text = checkText(value.text ?? "", "review.text", errors, true);
   if (typeof visited !== "string" || !YEAR_MONTH.test(visited)) {
     errors.push("review.visited must be YYYY-MM");
+  } else if (visited > latestLocalDate(now).slice(0, 7)) {
+    errors.push("review.visited must not be in the future");
   }
   if (value.visited_nearby !== undefined && value.visited_nearby !== true) {
     errors.push("review.visited_nearby must be true, or left out");
@@ -761,14 +774,14 @@ function checkPhotoFiles(value: unknown, errors: string[]): PhotoFiles | undefin
   };
 }
 
-/** Months since year 0, for comparing `YYYY-MM` values. */
-function checkCheck(value: unknown, errors: string[]): CheckBody | undefined {
+function checkCheck(value: unknown, errors: string[], now: Date): CheckBody | undefined {
   if (!isObject(value)) {
     errors.push("check must be an object");
     return undefined;
   }
   const { visited, still_there, nearby } = value;
   if (typeof visited !== "string" || !isValidDate(visited)) errors.push("check.visited must be YYYY-MM-DD");
+  else if (visited > latestLocalDate(now)) errors.push("check.visited must not be in the future");
   if (typeof still_there !== "boolean") errors.push("check.still_there must be true or false");
   if (nearby !== undefined && nearby !== true) errors.push("check.nearby must be true, or left out");
   return { visited: visited as string, still_there: still_there as boolean, ...(nearby === true ? { nearby: true as const } : {}) };
@@ -777,10 +790,11 @@ function checkCheck(value: unknown, errors: string[]): CheckBody | undefined {
 /**
  * Validates an incoming submission against the SPEC schema. On success the
  * returned value holds only the known fields, so anything extra an app sent
- * is never stored. `type: "fee"` is refused with `FEE_RETIRED`. `_now` is kept
- * for callers that pass a clock: no check reads it now.
+ * is never stored. `type: "fee"` is refused with `FEE_RETIRED`. A review's or
+ * check's `visited` must not be after the day already started somewhere
+ * (UTC+14) at `now`.
  */
-export function validateSubmission(input: unknown, _now: Date = new Date()): ValidationResult {
+export function validateSubmission(input: unknown, now: Date = new Date()): ValidationResult {
   const errors: string[] = [];
   if (!isObject(input)) return { ok: false, errors: ["body must be a JSON object"] };
 
@@ -864,7 +878,7 @@ export function validateSubmission(input: unknown, _now: Date = new Date()): Val
     if (place === null) errors.push(`place is required for a ${type}`);
     if (input.location !== undefined) errors.push(`location is not allowed on a ${type}`);
     if (type === "review") {
-      const review = checkReview(input.review, errors);
+      const review = checkReview(input.review, errors, now);
       if (review) value = { ...base, place: place as string, type: "review", review };
     } else if (type === "review_report") {
       const reviewReport = checkReviewReport(input.review_report, errors);
@@ -881,7 +895,7 @@ export function validateSubmission(input: unknown, _now: Date = new Date()): Val
     } else if (type === "withdraw") {
       value = { ...base, place: place as string, type: "withdraw" };
     } else {
-      const check = checkCheck(input.check, errors);
+      const check = checkCheck(input.check, errors, now);
       if (check) value = { ...base, place: place as string, type: "check", check };
     }
   }
@@ -914,7 +928,8 @@ export function isPublicHttpsUrl(value: unknown): value is string {
   } catch {
     return false;
   }
-  const host = url.hostname.toLowerCase();
+  // A name may end in one dot (`localhost.`), which means the same name: drop it before the checks.
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
   if (url.protocol !== "https:" || url.username || url.password || url.port) return false;
   if (!host.includes(".") || /\.(local|localhost|internal|home|lan)$/.test(host)) return false;
   if (/^[\d.]+$/.test(host) || host.startsWith("[")) return false;

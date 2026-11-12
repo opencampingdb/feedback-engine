@@ -59,6 +59,7 @@ export type {
   ReviewErasureInput,
   ReviewInput,
   ReviewReportInput,
+  QueueUnreadable,
   StorageAdapter,
   SubmitOptions,
   SubmitResult,
@@ -136,7 +137,7 @@ export type {
   ReleaseUpdater,
   ReleaseUpdaterOptions,
 } from "./release.js";
-export { jpegSize } from "./jpeg.js";
+export { jpegSize, stripJpegMetadata } from "./jpeg.js";
 export { sha256Hex, sha256HexBytes } from "./sha256.js";
 export { REMOVED_MARKER, findContactDetails, findContactDetailsInHours, stripContactDetails } from "./text.js";
 export type { ContactDetailKind } from "./text.js";

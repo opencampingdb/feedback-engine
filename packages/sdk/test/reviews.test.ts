@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createFeedbackClient, sha256Hex, validateSubmission, type FetchLike, type StorageAdapter } from "../src/index.js";
 
+/** A clock in December 2026, after every visit date the tests send. */
+const T0 = Date.UTC(2026, 11, 1);
+
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const REVIEW = "rev_01JBXK3M8Q4R5S6T7V8W9X0YZB";
 const CONTRIBUTOR = "acct_3f9a8b7c6d5e4f30";
@@ -126,7 +129,7 @@ describe("client", () => {
 
 describe("refused attestation", () => {
   function setup(replies: { status: number; error?: string }[], onAttestationRejected?: (e: string) => void) {
-    let clock = 1_000_000;
+    let clock = T0;
     let n = 0;
     const fetch: FetchLike = async () => {
       const reply = replies[Math.min(n++, replies.length - 1)]!;

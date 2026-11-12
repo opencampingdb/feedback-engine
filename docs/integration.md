@@ -550,7 +550,20 @@ export function useFlushFeedback(): void {
 }
 ```
 
-Items older than 30 days, or past the 100 newest, are dropped unsent.
+Items older than 30 days, or past the 100 newest, are dropped unsent. A full queue never drops an erasure (`eraseReviews`, `erasePhotos` or `removePhoto`) to make room: the oldest item of any other kind goes instead, and when only erasures are left, the queue keeps all of them past the limit. `onAnswered` hears of each item dropped this way, with `httpStatus` 0, and a call whose own item was dropped answers `rejected` with `httpStatus` 0.
+
+**A wrong clock.** A queued item whose `queuedAt` is ahead of the phone's clock was queued while the clock was ahead, so on the next flush it is counted as queued now and is due at once. No item waits past the longest backoff, 6 hours, from the flush, or a day when the intake asked it to wait. A `Retry-After` or a batch item's `retry_after` waits at most a day.
+
+**A failed save after a send.** When the queue can't be saved after a flush has sent or dropped items (storage full, say), the call still answers from what the intake said, and `onAnswered` is still called, instead of rejecting with the storage error. The stored queue still holds those items until a later save succeeds, and after a restart they go again under the same idempotency keys, so the intake stores each once. A flush that settled nothing still rejects when its save fails.
+
+**An unreadable queue.** When the stored queue can't be read (a write cut short, or text that is not a list), the client moves its text to `<storagePrefix>.queue.corrupt`, which keeps the latest such text, before anything is saved over it, starts again with an empty queue, and calls `onQueueUnreadable({ keptAt })` if you passed it. The items in that text are not sent and `onAnswered` is not called for them, so report it, for example to an error tracker, and read the kept text from storage if you need to find out what was in it. The hook is not waited for, and errors it throws are caught.
+
+```ts
+const feedback = createFeedbackClient({
+  // ...
+  onQueueUnreadable: ({ keptAt }) => reportToTracker("feedback queue unreadable", { keptAt }),
+});
+```
 
 **Timeouts.** Each request to the intake, including reading its answer, and each call of your `attest` function is given up on after `timeoutMs` (default 30 000), and treated as offline: the item stays queued and is tried again later. The client passes an `AbortSignal` as `signal` in the fetch's `init`, and abandons a fetch that ignores it. Without a timeout, one stalled connection on weak coverage would hold every later call. The queue saves one change at a time, so a call made while a send is under way, even with `{ wait: false }`, waits for it, at most `timeoutMs`.
 
@@ -677,6 +690,7 @@ interface ReleaseDatabaseAdapter {
   currentLayoutVersion(): Promise<number | null>; // release.layout_version, or null with no database
   applyChangesets(chain: Uint8Array[]): Promise<void>; // the whole chain in order, in one exclusive transaction, all or nothing
   replaceDatabase(bytes: Uint8Array): Promise<void>; // swap the whole file in one step
+  candidateDataVersion?(bytes: Uint8Array): Promise<string | null>; // optional: release.data_version in a downloaded file, before the swap
 }
 
 const updater = createReleaseUpdater({
@@ -686,6 +700,7 @@ const updater = createReleaseUpdater({
   gunzip, // where there is no DecompressionStream, as in React Native
   // fetch: defaults to globalThis.fetch, which must follow redirects
   // manifestUrl: defaults to https://github.com/opencampingdb/data/releases/latest/download/manifest.json
+  // storage: optional, such as AsyncStorage, to remember a release that did not match across restarts
 });
 
 const result = await updater.update({ knownDataVersion: recent.release?.data_version });
@@ -695,10 +710,14 @@ const result = await updater.update({ knownDataVersion: recent.release?.data_ver
 `update()` does this:
 
 1. When `knownDataVersion`, the recent list's `release.data_version`, is the database's own, it answers `up_to_date` with no request.
-2. Otherwise it fetches the manifest, one request. When its `format_version` is higher than every one in `readableFormats`, it stops, keeps the database and answers `format_unsupported`: the records have changed in a way this build can't read. A lower format is read, as CONNECTING.md says. When its `layout_version` is not in `readableLayouts` it stops the same way and answers `layout_unsupported`. When its `data_version` is the database's own, it answers `up_to_date`. When its `data_version` is older than the database's own (an older release marked latest), it changes nothing and answers `older_release`.
-3. It uses only changesets served from the same release downloads as the database: their url starts with the database url less its last two parts (the release tag and the file), which on GitHub is `https://github.com/<owner>/<repo>/releases/download/`, and has no `..`. Any other entry is ignored, so a bad manifest entry cannot send the app to another host or repository. It downloads the whole database when the app has none, when the layout differs from the database's, when no chain of changesets in the manifest leads from the database's `data_version` to the newest, when the chain is more than 50 files (`MAX_CHANGESET_CHAIN`), or when the chain's files add up to at least the database's own `bytes`. It answers `replaced`.
+2. Otherwise it fetches the manifest, one request. When its `format_version` is higher than every one in `readableFormats`, it stops, keeps the database and answers `format_unsupported`: the records have changed in a way this build can't read. A lower format is read, as CONNECTING.md says. When its `layout_version` is not in `readableLayouts` it stops the same way and answers `layout_unsupported`. When its `data_version` is the database's own, it answers `up_to_date`. When its `data_version` is older than the database's own (an older release marked latest), it changes nothing and answers `older_release`. When its `data_version` has no readable time and the database's has one, so it can't be shown to be newer, it changes nothing and answers `failed` with `manifest`. A manifest whose database url is not https is refused the same way, before anything is downloaded.
+3. It uses only changesets served from the same release downloads as the database. Each changeset url is parsed as `fetch` reads it, which drops tabs and newlines and resolves `..`, and then its origin must be the database url's and its path must start with the database url's path less its last two parts (the release tag and the file), which on GitHub is `https://github.com/<owner>/<repo>/releases/download/`. Any other entry is ignored, so a bad manifest entry cannot send the app to another host or repository, and the url fetched is the one checked. It downloads the whole database when the app has none, when the layout differs from the database's, when no chain of changesets in the manifest leads from the database's `data_version` to the newest, when the chain is more than 50 files (`MAX_CHANGESET_CHAIN`), or when the chain's files add up to at least the database's own `bytes`. It answers `replaced`.
 4. Otherwise it takes the chain with the fewest files, and of two as short, the one with more daily changesets. It downloads every file on it and checks each one's `bytes` and `sha256` before applying any, undoes gzip, then hands the whole chain to one `applyChangesets` call, which applies it in order in one exclusive transaction, and answers `updated`.
 5. After the chain it reads `data_version` back from the adapter. When that is not the manifest's, it downloads the whole database and replaces the one the chain left, and answers `replaced`. After a replace, it answers `failed` with `mismatch` when the database still names another release.
+6. When the adapter has `candidateDataVersion`, the updater asks it for the release a downloaded whole database holds before it calls `replaceDatabase`, and swaps the file in only when that is the manifest's `data_version`. Otherwise it answers `failed` with `mismatch` and the database is not touched, so a manifest that names a new release but points at an older file can't roll the app back. Without the call the release is read only after the swap, as in step 5, so give your adapter this call. It may write the bytes to the file it would swap in and keep that file for `replaceDatabase`, as the Expo adapter below does. When it throws, the update answers `failed` with `read`.
+7. A manifest whose database did not hold its release (`mismatch`) is remembered by its `data_version` and the database's `sha256`, and answered `failed` with `mismatch` without a download until the manifest changes. The updater remembers it in memory, and in `storage` under the key `ocdb.release.failed` when you pass `storage`, so an app that calls `update()` on each launch does not download a 12 MB file each time.
+
+A second `update()` call made while one is running gets the running one's result, whatever its options, so two parts of the app asking at once apply one chain.
 
 `update()` never throws. On any failure it answers `failed` with a `reason`: `network` (a request failed or answered other than 2xx), `manifest`, `checksum`, `gunzip`, `read`, `apply` or `replace` (that adapter call threw), or `mismatch`, and a `cause`, `{ name, message }`, that says what went wrong behind it: the error a request, gunzip or adapter call threw (its name and message, no stack), or for the updater's own checks `HttpStatus`, `SizeMismatch`, `ChecksumMismatch`, `ManifestInvalid` or `ReleaseMismatch` with what it found. The message is cut to 500 characters (`MAX_CAUSE_MESSAGE`). Report both: `reason` groups failures, `cause` tells two of them apart. A failed download or checksum leaves the database as it was, because nothing is applied until every file has passed. The chain is one transaction, so when any changeset in it fails, the database stays on the release it started from and `dataVersion` names it. The next run tries the chain again. A failed replace leaves the old database in use. `dataVersion` is always the release the app's database holds after the run, so compare contribution progress against it (`progressInRelease`).
 
@@ -822,6 +841,17 @@ async function releaseRow() {
   return db ? await db.getFirstAsync<{ data_version: string; layout_version: number }>("SELECT data_version, layout_version FROM main.release") : null;
 }
 
+/** A file candidateDataVersion wrote, kept for replaceDatabase. Deleted when it is not swapped in. */
+let staged: { bytes: Uint8Array; name: string; file: File } | null = null;
+function dropStaged() {
+  try {
+    staged?.file.delete();
+  } catch {
+    // Nothing to tidy.
+  }
+  staged = null;
+}
+
 /** Writes `bytes` to a new file in expo-sqlite's directory, a slice at a time. */
 async function writeDatabaseFile(name: string, bytes: Uint8Array): Promise<File> {
   const directory = new Directory(`file://${defaultDatabaseDirectory}`);
@@ -857,12 +887,36 @@ const adapter: ReleaseDatabaseAdapter = {
     });
   },
 
-  async replaceDatabase(bytes) {
+  // Writes the download to the file replaceDatabase will swap in, and reads its release.
+  async candidateDataVersion(bytes) {
+    dropStaged();
     const name = `ocdb-${Date.now()}.sqlite`;
-    let file: File | null = null;
+    const file = await writeDatabaseFile(name, bytes);
+    try {
+      const db = await openDatabaseAsync(name);
+      try {
+        const row = await db.getFirstAsync<{ data_version: string }>("SELECT data_version FROM main.release");
+        staged = { bytes, name, file };
+        return row?.data_version ?? null;
+      } finally {
+        await db.closeAsync();
+      }
+    } catch (error) {
+      file.delete();
+      throw error;
+    }
+  },
+
+  async replaceDatabase(bytes) {
+    // The file candidateDataVersion wrote for these bytes, or a new one.
+    const kept = staged?.bytes === bytes ? staged : null;
+    if (!kept) dropStaged();
+    staged = null;
+    const name = kept?.name ?? `ocdb-${Date.now()}.sqlite`;
+    let file: File | null = kept?.file ?? null;
     let next: SQLiteDatabase | null = null;
     try {
-      file = await writeDatabaseFile(name, bytes);
+      file ??= await writeDatabaseFile(name, bytes);
       next = await openRelease(name);
       const previous = await Storage.getItemAsync(CURRENT);
       await Storage.setItemAsync(CURRENT, name); // the step that moves the app to the new release
@@ -928,8 +982,8 @@ A whole database is the largest thing the updater handles: 67.4 MB, 12.2 MB gzip
 | `expo/fetch` downloads the file, and `arrayBuffer()` hands JavaScript the native buffer without a copy | 12.2 MB gzipped | 12.2 MB |
 | The updater checks its size and SHA-256 in place, copying only the last 64 or 128 bytes | 12.2 MB | 12.2 MB |
 | `gunzipSync` allocates exactly the size the gzip trailer gives and inflates into it | 12.2 MB + 67.4 MB | **79.6 MB** |
-| The updater lets go of the download and calls `replaceDatabase` with the one plain copy | 67.4 MB (the 12.2 MB until it is collected) | 79.6 MB |
-| `writeDatabaseFile` writes 1 MiB slices, each copied to native memory once | 67.4 MB + 1 MiB | 79.6 MB |
+| The updater lets go of the download and calls `candidateDataVersion`, then `replaceDatabase`, with the one plain copy | 67.4 MB (the 12.2 MB until it is collected) | 79.6 MB |
+| `writeDatabaseFile` writes 1 MiB slices, each copied to native memory once, in `candidateDataVersion`, and `replaceDatabase` swaps in that file | 67.4 MB + 1 MiB | 79.6 MB |
 | SQLite opens the file and reads pages as queries need them | its page cache | |
 
 So the peak is about 80 MB, while gunzip runs, and the JavaScript copy is free to be collected once `replaceDatabase` returns. Writing with `File.write(bytes)` instead would copy the whole 67.4 MB once more on iOS (`FileSystemFile.write` builds a `Data` from the buffer), and opening the bytes with `deserializeDatabaseAsync` would hold a second whole copy as an in-memory database. A chain's downloads add up to fewer bytes than the database's (step 3), and the chain is held only while one transaction applies it.
