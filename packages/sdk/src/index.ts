@@ -72,6 +72,7 @@ export {
   CONTACT_REPORT_REASONS,
   FACTS,
   FEEDBACK_TYPES,
+  FREE_TEXT_FACTS,
   FEE_RETIRED,
   FIRST_HAND,
   FIRST_HAND_KINDS,
@@ -98,7 +99,10 @@ export {
   MAX_OPERATOR_LENGTH,
   addressProblems,
   contactProblem,
+  factFreeText,
   isAddress,
+  isCommonsFileName,
+  hasLoneSurrogate,
   isContactFact,
   isDoubtFact,
   isContributor,
@@ -119,9 +123,10 @@ export {
   validateSubmission,
 } from "./validate.js";
 export type { ValidationResult } from "./validate.js";
+export { PYTHON_SPACE } from "./python-space.js";
 export { isOpeningHours, openingHoursProblem, openMonths, withOpenMonths, withoutOpenMonths } from "./hours.js";
 export { CHARGE_TIME_UNITS, MAX_CHARGE_LENGTH, chargeConditions, isCharge, isChargeConditional, parseCharge, type Charge, type ChargeCondition, type ChargeTimeUnit } from "./charge.js";
-export { dataVersionTime, withRecentChanges } from "./recent.js";
+export { dataVersionProblem, dataVersionTime, withRecentChanges } from "./recent.js";
 export type { RecentChange, RecentList, RecentPlace, RecentRelease, ReleasePlace } from "./recent.js";
 export { PHOTO_HELD_REASONS, PROGRESS_STATES, isFeedbackId, progressInRelease } from "./progress.js";
 export type { PhotoHeldReason, Progress, ProgressState, RefusedBy } from "./progress.js";
@@ -137,7 +142,7 @@ export type {
   ReleaseUpdater,
   ReleaseUpdaterOptions,
 } from "./release.js";
-export { jpegSize, stripJpegMetadata } from "./jpeg.js";
+export { jpegMetadata, jpegSize, stripJpegMetadata, type JpegMetadata } from "./jpeg.js";
 export { sha256Hex, sha256HexBytes } from "./sha256.js";
 export { REMOVED_MARKER, findContactDetails, findContactDetailsInHours, stripContactDetails } from "./text.js";
 export type { ContactDetailKind } from "./text.js";

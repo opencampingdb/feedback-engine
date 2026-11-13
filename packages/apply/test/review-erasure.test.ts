@@ -6,7 +6,7 @@ import type { StoredFeedback } from "@opencampingdb/feedback";
 import { applyRules } from "../src/rules.js";
 import { run } from "../src/run.js";
 import { changesData } from "../src/progress.js";
-import { dumpPlace, dumpReviewLine, reviewPath } from "../src/serialise.js";
+import { dumpPlace, dumpReviewLine, placePath, reviewPath } from "../src/serialise.js";
 import type { Place, Review } from "../src/types.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
@@ -152,5 +152,64 @@ describe("review erasure in a run", () => {
     expect(await readFile(join(review, reviewPath(OTHER)), "utf8")).toBe("");
     const record = JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
     expect(record.rating).toEqual({ count: 1, mean: 3 });
+  });
+});
+
+describe("review erasure across runs", () => {
+  const NEW = "ocdb_01JC0000000000000000000NEW";
+  let root: string;
+  let inbox: string;
+  let data: string;
+  let review: string;
+
+  async function put(path: string, text: string): Promise<void> {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, text);
+  }
+  const folderOf = async (item: StoredFeedback) => {
+    for (const folder of ["pending", "applied", "refused"]) {
+      if (await readFile(join(inbox, folder, "2026-11-02", `${item.id}.json`), "utf8").then(() => true, () => false)) return folder;
+    }
+    return undefined;
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "review-erasure-runs-"));
+    inbox = join(root, "inbox");
+    data = join(root, "data");
+    review = join(root, "review");
+    for (const tree of [data, review]) await put(join(tree, "places", "za", `${PLACE}.json`), dumpPlace(place(PLACE)));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("refuses a review of a new place sent before the erasure, so a later run never publishes it", async () => {
+    const r = reviewItem("sam", NEW, "2026-11-02T09:00:00Z");
+    const e = erasure("sam", "2026-11-02T10:00:00Z");
+    for (const item of [r, e]) await put(join(inbox, "pending", "2026-11-02", `${item.id}.json`), JSON.stringify(item));
+    const one = await run({ inbox, data, reviewData: review, now: new Date(NOW), recentList: { ids: async () => new Set([NEW]) } });
+    expect(one.decisions.find((d) => d.id === r.id)).toMatchObject({ outcome: "refused", reason: "the contributor's reviews were erased at their request" });
+    expect(await folderOf(r)).toBe("refused");
+    expect(await folderOf(e)).toBe("applied");
+
+    for (const tree of [data, review]) await put(join(tree, placePath(NEW)), dumpPlace(place(NEW)));
+    await run({ inbox, data, reviewData: review, now: new Date("2026-11-04T00:00:00Z") });
+    await expect(readFile(join(data, reviewPath(NEW)), "utf8")).rejects.toThrow();
+    await expect(readFile(join(review, reviewPath(NEW)), "utf8")).rejects.toThrow();
+  });
+
+  it("refuses a waiting review sent before an erasure an earlier run applied, and decides one sent after it", async () => {
+    const e = { ...erasure("sam", "2026-11-02T10:00:00Z"), outcome: { result: "applied", reason: "", run: "2026-11-02T12:00:00Z" } };
+    await put(join(inbox, "applied", "2026-11-02", `${e.id}.json`), JSON.stringify(e));
+    const before = reviewItem("sam", PLACE, "2026-11-02T09:00:00Z");
+    const after = reviewItem("sam", PLACE, "2026-11-02T11:00:00Z");
+    for (const item of [before, after]) await put(join(inbox, "pending", "2026-11-02", `${item.id}.json`), JSON.stringify(item));
+    const summary = await run({ inbox, data, reviewData: review, now: new Date(NOW) });
+    expect(summary.decisions.find((d) => d.id === before.id)).toMatchObject({ outcome: "refused", reason: "the contributor's reviews were erased at their request" });
+    // The erasure earns no trust, so the later review is a first review for a person.
+    expect(summary.decisions.find((d) => d.id === after.id)?.outcome).toBe("needs_review");
+    await expect(readFile(join(data, reviewPath(PLACE)), "utf8")).rejects.toThrow();
   });
 });

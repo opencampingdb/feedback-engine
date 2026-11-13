@@ -126,6 +126,16 @@ describe("checks: the intake's own rules", () => {
     expect(t.ai!.runs).toEqual([]);
   });
 
+  it("holds an operator, a conditional charge's condition or a charge's unit that fails the text checks", async () => {
+    const t = setup();
+    expect(await t.check(fact("operator", "the owner is a wanker"), NEWCOMER)).toEqual({ held: "text_check" });
+    expect(await t.check(fact("charge_conditional", "10 AUD @ (the owner is a wanker)"), NEWCOMER)).toEqual({ held: "text_check" });
+    expect(await t.check(fact("charge", "10 AUD/wanker"), NEWCOMER)).toEqual({ held: "text_check" });
+    expect(await t.check(fact("operator", "Example Shire Council"), NEWCOMER)).toMatchObject({ pass: true });
+    expect(await t.check(fact("charge_conditional", "10 AUD/person @ (Dec-Jan)"), NEWCOMER)).toMatchObject({ pass: true });
+    expect(t.ai!.runs).toEqual([]);
+  });
+
   it("holds a description with a phone number in it, but not a note, which is stored without it", async () => {
     const t = setup();
     expect(await t.check(newPlace({ description: "Ring 0412 345 678 to book" }), NEWCOMER)).toEqual({ held: "text_check" });

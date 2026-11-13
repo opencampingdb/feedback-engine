@@ -1,4 +1,6 @@
-import type { FactValue, StoredOwnerSubmission } from "@opencampingdb/feedback";
+import type { FactName, FactValue, StoredOwnerSubmission } from "@opencampingdb/feedback";
+import { newProblems, placeProblems } from "./data-check.js";
+import { factsClearedBy } from "./decide.js";
 import { moderateReview } from "./moderation.js";
 import type { ProofResult } from "./proof.js";
 import { resolvePlace, type Change, type Decision, type ReviewEdit } from "./rules.js";
@@ -24,6 +26,12 @@ import type { Place, SourceKey } from "./types.js";
 
 export const PROOF_WAIT_DAYS = 7;
 export const DECISION_DAYS = 60;
+/**
+ * Most claims and listings one run sends to a person, so their approval boxes
+ * always fit in the review PR body. The rest wait in `pending/`, oldest
+ * first, for the next run.
+ */
+export const MAX_CLAIMS_PER_RUN = 20;
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const FARM_STAY_KIND = "farm_stay";
 
@@ -53,13 +61,22 @@ export interface AwaitingClaim {
   proof: ProofResult;
 }
 
+/**
+ * Who wrote a PR or a comment. `type` is the account type (`Bot`, `User`,
+ * `Organization`), as GitHub's GraphQL API gives it in `__typename`.
+ */
+export interface PrAuthor {
+  login: string;
+  type?: string;
+}
+
 export interface ReviewPr {
   number: number;
   state: "OPEN" | "MERGED" | "CLOSED";
   body: string;
-  comments: { author: { login: string } | null; body: string }[];
+  comments: { author: PrAuthor | null; body: string }[];
   /** Who opened the PR. Only PRs the bot opened count. */
-  author: { login: string } | null;
+  author: PrAuthor | null;
   /** True when the PR comes from a fork. Those never count. */
   isCrossRepository: boolean;
 }
@@ -110,22 +127,44 @@ export interface OwnerOutput {
   changes: Change[];
 }
 
-const APPROVAL_LINE = /^- \[([ xX])\] Approve owner (?:claim|listing) (fb_[0-9A-HJKMNP-TV-Z]{26})\b/gm;
+const APPROVAL_LINE = /^- \[([ xX])\] Approve owner (?:claim|listing) (fb_[0-9A-HJKMNP-TV-Z]{26})\b/;
+
+/**
+ * Whether `author` is the bot GitHub App named by one of `botLogins` (its
+ * slug). Only forms a person's account cannot hold count: an account of type
+ * `Bot` with the slug or `<slug>[bot]` as its login, `<slug>[bot]` as GitHub's
+ * REST API writes it, or `app/<slug>` as the GitHub CLI writes it. A login
+ * equal to the bare slug with no account type never counts.
+ */
+export function isBotAuthor(author: PrAuthor | null | undefined, botLogins: readonly string[]): boolean {
+  if (!author) return false;
+  return botLogins.some(
+    (slug) =>
+      author.login === `${slug}[bot]` || author.login === `app/${slug}` || (author.type === "Bot" && author.login === slug),
+  );
+}
+
+/** The PRs in `prs`, in order, that the bot opened from the data repository itself (`isBotAuthor`). */
+export function botPrs<Pr extends Pick<ReviewPr, "isCrossRepository" | "author">>(prs: readonly Pr[], botLogins: readonly string[]): Pr[] {
+  return prs.filter((pr) => pr.isCrossRepository === false && isBotAuthor(pr.author, botLogins));
+}
 
 /**
  * The approval boxes in a review PR: in its body, and in comments written by
- * the bot. Only boxes at the start of a line count, so text quoted from an
- * owner (always on one line, after the box) cannot add or tick one. A PR from
- * a fork, or one the bot did not open, has none.
+ * the bot. Only a box at the start of a line counts, and lines end only at a
+ * newline, so text quoted from a traveller or an owner (always on one line,
+ * after the box) cannot add or tick one. A PR from a fork, or one the bot did
+ * not open, has none.
  */
 export function parseApprovals(pr: ReviewPr, botLogins: readonly string[]): { ticked: string[]; listed: string[] } {
-  const logins = new Set(botLogins.flatMap((l) => [l, `${l}[bot]`, `app/${l}`]));
   const ticked: string[] = [];
   const listed: string[] = [];
-  if (pr.isCrossRepository !== false || !pr.author || !logins.has(pr.author.login)) return { ticked, listed };
-  const texts = [pr.body, ...pr.comments.filter((c) => c.author && logins.has(c.author.login)).map((c) => c.body)];
+  if (pr.isCrossRepository !== false || !isBotAuthor(pr.author, botLogins)) return { ticked, listed };
+  const texts = [pr.body, ...pr.comments.filter((c) => isBotAuthor(c.author, botLogins)).map((c) => c.body)];
   for (const text of texts) {
-    for (const m of text.replace(/\r\n/g, "\n").matchAll(APPROVAL_LINE)) {
+    for (const line of text.split("\n")) {
+      const m = APPROVAL_LINE.exec(line.replace(/\r$/, ""));
+      if (!m) continue;
       const id = m[2]!;
       if (!listed.includes(id)) listed.push(id);
       if (m[1] !== " " && !ticked.includes(id)) ticked.push(id);
@@ -226,7 +265,17 @@ export function applyOwnerRules(input: OwnerInput): OwnerOutput {
     const replaces = previous && previous.claim !== item.id ? `; it replaces claim ${previous.claim} approved ${previous.approved}` : "";
 
     if (item.type === "owner_listing") {
-      if (!input.places.has(target) && !working.has(target)) working.set(target, farmStay(item, target));
+      if (!input.places.has(target) && !working.has(target)) {
+        const stay = farmStay(item, target);
+        const problems = placeProblems(stay, { now: nowIso, ...(input.kinds ? { kinds: input.kinds } : {}) });
+        if (problems.length > 0) {
+          // Sent before the listing check: the record waits for a person, who writes it by hand.
+          out.edits.push({ kind: "note", place: target, feedback: item.id });
+          note(target, `owner listing ${item.id} approved, but its farm stay would fail the data checks (${problems.join("; ")}): add the record by hand`, false, [item.id]);
+        } else {
+          working.set(target, stay);
+        }
+      }
       note(target, `owner listing ${item.id} approved on review PR #${prNumber}: new farm stay "${item.listing.name}"${replaces}`, true, [item.id]);
     } else {
       record(target).owner_verified = true;
@@ -276,11 +325,26 @@ export function applyOwnerRules(input: OwnerInput): OwnerOutput {
         return;
       }
       target = `ocdb_${item.id.replace(/^fb_/, "")}`;
+      // The farm stay a person would approve must be one the data validator accepts.
+      const problems = placeProblems(farmStay(item, target), { now: nowIso, ...(input.kinds ? { kinds: input.kinds } : {}) });
+      if (problems.length > 0) {
+        decide(item, "refused", `the listing would fail the data checks: ${problems.join("; ")}`);
+        return;
+      }
     }
-    const proof = input.proofs.get(item.id) ?? { found: false, checked: nowIso, detail: "not checked" };
+    const proof = input.proofs.get(item.id);
+    if (!proof) {
+      // Its clock does not run out for want of a check: a person sees only a proof checked this run.
+      decide(item, "waiting", "waiting for its proof address to be checked", item.place);
+      return;
+    }
     const age = now - Date.parse(item.received);
     if (!proof.found && age < PROOF_WAIT_DAYS * DAY_MS) {
       decide(item, "waiting", `waiting for ${item.code} to appear at the proof address`, item.place);
+      return;
+    }
+    if (out.forReview.length >= MAX_CLAIMS_PER_RUN) {
+      decide(item, "waiting", `waiting for room on the review PR: ${MAX_CLAIMS_PER_RUN} claims go to a person each run`, item.place);
       return;
     }
     const current = owners.get(target);
@@ -342,10 +406,18 @@ export function applyOwnerRules(input: OwnerInput): OwnerOutput {
       return;
     }
 
-    const place = record(target);
+    // The update is worked out on a copy, and written only when the data validator would accept the result.
+    const current = working.get(target) ?? input.places.get(target)!;
+    const place = structuredClone(current);
     const changed: string[] = [];
     let forPerson = false;
     for (const [fact, value] of Object.entries(u.facts ?? {})) {
+      // pets_months goes when pets is no longer seasonal, unless the update sets it too.
+      for (const cleared of factsClearedBy(place.facts, fact as FactName, value as FactValue)) {
+        if ((u.facts as Record<string, unknown>)[cleared] !== undefined) continue;
+        delete (place.facts as Record<string, FactValue | undefined>)[cleared];
+        dropSource(place, cleared);
+      }
       (place.facts as Record<string, FactValue>)[fact] = value as FactValue;
       setSource(place, fact as SourceKey, "owner", nowIso);
       changed.push(fact);
@@ -377,6 +449,19 @@ export function applyOwnerRules(input: OwnerInput): OwnerOutput {
         forPerson = true;
       }
     }
+    if (changed.length > 0) {
+      place.owner_verified = true;
+      const check = { now: nowIso, ...(input.kinds ? { kinds: input.kinds } : {}) };
+      const problems = newProblems(placeProblems(current, check), placeProblems({ ...place, updated: nowIso }, check));
+      if (problems.length > 0) {
+        const why = `the update would fail the data checks (${problems.join("; ")})`;
+        out.edits.push({ kind: "note", place: target, feedback: item.id });
+        note(target, `owner update: ${why}, so a person decides (apply it by hand if it is right)`, false, [item.id]);
+        decide(item, "needs_review", `${why}, so a person decides`, target);
+        return;
+      }
+      working.set(target, place);
+    }
     if (u.name !== undefined) {
       out.edits.push({ kind: "name", place: target, name: u.name, feedback: item.id, source: "owner" });
       note(target, `the owner renames it "${u.name}" (check before merging)`, false, [item.id]);
@@ -388,10 +473,7 @@ export function applyOwnerRules(input: OwnerInput): OwnerOutput {
       note(target, `the owner moves it to ${location.lat}, ${location.lon} (check before merging)`, false, [item.id]);
       forPerson = true;
     }
-    if (changed.length > 0) {
-      place.owner_verified = true;
-      note(target, `owner update: ${changed.join(", ")}`, true, [item.id]);
-    }
+    if (changed.length > 0) note(target, `owner update: ${changed.join(", ")}`, true, [item.id]);
     decide(
       item,
       forPerson ? "needs_review" : "applied",

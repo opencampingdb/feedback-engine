@@ -1,6 +1,6 @@
 # Integrating with an Expo app
 
-This guide adds Open Camping DB feedback to an Expo (React Native) app with `@opencampingdb/feedback`, SDK 0.31.0. The same client works on the web with a `localStorage` adapter ([On the web](#on-the-web)).
+This guide adds Open Camping DB feedback to an Expo (React Native) app with `@opencampingdb/feedback`, SDK 0.32.0. The same client works on the web with a `localStorage` adapter ([On the web](#on-the-web)).
 
 ## Quick start
 
@@ -340,9 +340,9 @@ await feedback.report({ place, report: { kind: "description", value: "Shady rive
 await feedback.report({ place, report: { kind: "kind", place_kind: "caravan_park" }, consent: true });
 ```
 
-A name is 1 to 300 characters (`MAX_NAME_LENGTH`) and a description at most 500 (`MAX_DESCRIPTION_LENGTH`). Neither may hold an email address, phone number or link. `place_kind` is a code from `data/schema/kinds.json`: an unknown code is refused at the next apply run. Once accepted, the new kind is kept through later OSM syncs.
+A name is 1 to 300 characters (`MAX_NAME_LENGTH`) and a description at most 500 (`MAX_DESCRIPTION_LENGTH`). Neither may hold an email address, phone number or link. Every text in a submission other than a note, review text and a description must be on one line: `validateSubmission` refuses one that holds U+0085, U+2028 or U+2029, and the intake answers `400 invalid`. Every text, notes and review text included, must be well formed: one holding a lone surrogate (half of a pair, which a JSON escape such as `\ud83d` can carry) is refused the same way. `hasLoneSurrogate` checks a string. `place_kind` is a code from `data/schema/kinds.json`: an unknown code is refused at the next apply run. Once accepted, the new kind is kept through later OSM syncs.
 
-**A Commons photo that is not of the place.** Apps show Wikimedia Commons photos from `commons.ndjson.gz`. A `commons_mismatch` report says one of them is not of the place: it needs the place and `file`, the photo's `file` from that line (1 to 255 characters on one line, `MAX_COMMONS_FILE_LENGTH`), and may carry a `note`. The intake answers `held` (`commons_report`). Hide the photo for the traveller who sent it at once, keep it hidden on that phone, and offer a way to show it again. Reports from two different sources within 90 days, at least one attested, add the place and file to the data's `moderation/commons-do-not-match.json` at the next apply run, and later releases leave the photo out for everyone. A reviewer may add it on one report too, and a person can undo either.
+**A Commons photo that is not of the place.** Apps show Wikimedia Commons photos from `commons.ndjson.gz`. A `commons_mismatch` report says one of them is not of the place: it needs the place and `file`, the photo's `file` from that line (1 to 255 characters on one line, `MAX_COMMONS_FILE_LENGTH`), and may carry a `note`. `isCommonsFileName` says whether a file has the shape of a Commons file name, which the intake requires: an extension, no `File:` prefix, none of `# < > [ ] { } |` or the backtick, and no link or email address. The apply run writes no other file to the do-not-match list. The intake answers `held` (`commons_report`). Hide the photo for the traveller who sent it at once, keep it hidden on that phone, and offer a way to show it again. Reports from two different sources within 90 days, at least one attested, add the place and file to the data's `moderation/commons-do-not-match.json` at the next apply run, and later releases leave the photo out for everyone. A reviewer may add it on one report too, and a person can undo either.
 
 ```ts
 await feedback.report({ place, report: { kind: "commons_mismatch", file: "Brunswick River and Pool Precinct 6.jpg" }, consent: true });
@@ -449,7 +449,7 @@ It needs no app key. `bbox` is optional: west, south, east and north in degrees.
 
 The SDK types the answer as `RecentList`, with `RecentPlace`, `RecentChange` and `RecentRelease`.
 
-**New places on the list.** A place is listed when its report came from an attested install (an app key with `requires_attestation`) and its note, with contact details stripped, passes `textProblem`. Other new places reach a person through the apply run. `kind` is the code the traveller picked, or `null`. `name` is the report's `name` after `tidyName`, or `null`. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive: only `still_there` checks with `nearby: true` count towards `confirmed`, and reports from two other devices on two different client networks take the place off the list. `description`, `fee` and `contacts` (the contact facts and the `address`) are there when the report carried them and they passed the checks. The list never carries the note or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. A blocked contributor's new places leave the list.
+**New places on the list.** A place is listed when its report came from an attested install (an app key with `requires_attestation`) and its note, with contact details stripped, passes `textProblem`. Other new places reach a person through the apply run. `kind` is the code the traveller picked, or `null`. `name` is the report's `name` after `tidyName`, or `null`. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive: only `still_there` checks with `nearby: true` from two sources other than the adder count towards `confirmed` (a check from the adder's device, or from the client network the place was added from, never does), and reports from two other devices on two different client networks take the place off the list. `description`, `fee` and `contacts` (the contact facts and the `address`) are there when the report carried them and they passed the checks. The list never carries the note or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. A blocked contributor's new places leave the list.
 
 Once the apply run has written a place into the data, the entry gains `in_data_at` and stays on the list for 7 more days with its current standing, which can then also be `hidden` or `withdrawn`. For those 7 days:
 
@@ -528,8 +528,9 @@ A review is 1 to 5 whole stars, `text` of up to 2,000 characters (it may be empt
 
 **What happens to a review.**
 
-- One review per contributor per place: a newer one replaces the older.
-- A contributor's first review is held for a person. Once one of their reviews or other feedback has been accepted, later reviews are published at the next apply run.
+- One review per contributor per place: a newer one replaces the older. The replacement is published at the next apply run only when it comes from the install (or App Attest key) that sent the review it replaces, or when it carries a contributor proof the intake checked. Any other replacement is held for a person, and the earlier review stays until then.
+- A contributor's first review is held for a person. Only a review earns trust: once one of their reviews is visible in the data, or an apply run published one of their reviews in the last 90 days, later reviews are published at the next apply run. Checks, reports, photos and erasures earn no trust for reviews.
+- The review PR does not quote a held review's text. It names the inbox item, where a person reads the text before merging.
 - Text sent word for word for another place is held for a person.
 
 **Daily limits.** Each contributor may send 200 submissions a day (the app key can set `contributor_daily_limit`), and so may each install and each App Attest key. Each client network may send 500. An install's reports about one released place in a day count as one of the install's and the contributor's submissions, up to 100 reports a place, so a full edit of a place (`reportFacts`) costs the traveller one. Each report still counts against the app's daily limit and the client network's. Past a limit the intake answers `429 rate_limited`, and the item stays queued.
@@ -553,9 +554,9 @@ Every report goes to a person on the `feedback/review` PR, who looks at reported
 await feedback.eraseReviews({ contributor, consent: true });
 ```
 
-Send the same `contributor` value their reviews were sent with. The next apply run takes every one of their reviews out of the data, on every place, works out the ratings again, and drops any review still waiting for a person. Reviews they sent before the erasure and still in the queue are refused. The erasure is queued and retried like other feedback, and a full queue never drops it (section 8). Its progress is `accepted` once a run has decided it, and the reviews leave the data when the automatic PR merges. It is honoured for a blocked contributor too, and erasing a contributor with no reviews succeeds. The data repository is a public git repository, so earlier commits still hold the removed lines: they leave the release, the ratings and the current files, not the history.
+Send the same `contributor` value their reviews were sent with. The next apply run takes every one of their reviews out of the data, on every place, works out the ratings again, and drops any review still waiting for a person. Reviews they sent before the erasure are refused in whichever later run decides them, including a review of a new place that was still waiting for the place to reach the data, for as long as the erasure stays in the apply run's 90 day history. The erasure is queued and retried like other feedback, and a full queue never drops it (section 8). Its progress is `accepted` once a run has decided it, and the reviews leave the data when the automatic PR merges. It is honoured for a blocked contributor too, and erasing a contributor with no reviews succeeds. The data repository is a public git repository, so earlier commits still hold the removed lines: they leave the release, the ratings and the current files, not the history.
 
-The contributor value is all an erasure names, so anyone who learns it could erase that traveller's reviews. Keep it secret from other users, or give the app key `contributor_proof_key` ([self-hosting.md](self-hosting.md)): the intake then takes an erasure only with a proof your server signed for the signed-in account, with `action: "review_erasure"` and `photo: "*"`, the same as for photos ([photos.md](photos.md), "Prove the account for removal and erasure"):
+The contributor value is all an erasure names, so on an app key without `contributor_proof_key` anyone who learns it and holds the app key could erase that traveller's reviews. Keep it secret from other users, or give the app key `contributor_proof_key` ([self-hosting.md](self-hosting.md)): the intake then takes an erasure only with a proof your server signed for the signed-in account, with `action: "review_erasure"` and `photo: "*"`, the same as for photos ([photos.md](photos.md), "Prove the account for removal and erasure"):
 
 ```ts
 // On your server, for the signed-in account only:
@@ -565,6 +566,17 @@ await feedback.eraseReviews({ contributor, contributorProof: proof, consent: tru
 ```
 
 Photos are erased separately, with the photo client's `erasePhotos`, on your own photo service.
+
+**Proving a review.** A review that replaces the contributor's earlier review of the place from another install is held for a person, so a traveller who reviews from a new phone waits for one. From SDK 0.32.0 your server can sign a proof for a review, with `action: "review"` and `photo: "*"`, and the app sends it with the review. With `contributor_proof_key` on the app key, the intake checks it and marks the stored item `proved`, and the replacement is published at the next apply run:
+
+```ts
+// On your server, for the signed-in account only:
+const proof = await signContributorProof(privateKey, { app: "example-app", contributor, action: "review", photo: "*", issued: now, expires: now + 600 });
+// In the app:
+await feedback.review({ place, review, contributor, contributorProof: proof, consent: true });
+```
+
+A proof is optional for a review. The intake takes a review without one as before, and a proof that is wrong or has expired by the time a queued review is sent counts as none: the review is taken, and a replacement from another install waits for a person. The proof is checked and never stored.
 
 **Blocking on the phone.** Published reviews carry `contributor`, so let a traveller hide everything from one contributor on their own phone, straight away, and keep that list on the device. Hide a review the traveller reported straight away on their phone as well. The data catches up at the next release.
 
@@ -590,7 +602,7 @@ If `attest` throws or runs past `timeoutMs`, the item stays queued and is tried 
 
 1. `POST /v1/attest/challenge` with your `x-app-key`. The answer is `{ "challenge": "..." }`, usable once within 5 minutes.
 2. Call `DCAppAttestService.attestKey` with the key id and the SHA-256 of the challenge text (its UTF-8 bytes) as `clientDataHash`.
-3. `POST /v1/attest/register` with `{ "key_id": "<base64 key id>", "attestation": "<base64 attestation object>", "challenge": "<the challenge>" }`. `201` means the key is registered. Keep the key id.
+3. `POST /v1/attest/register` with `{ "key_id": "<base64 key id>", "attestation": "<base64 attestation object>", "challenge": "<the challenge>" }`. The key id is base64 of its 32 bytes, in the standard or URL-safe alphabet, with or without `=` padding: every spelling of the same bytes names the same key, and a key id that is not 32 bytes answers `400`. `201` means the key is registered. Keep the key id.
 
 For each submission, call `generateAssertion` with the key id and `bodySha256` (as bytes) as `clientDataHash`, and return `x-attest-platform: ios`, `x-attest-key-id: <key id>` and `x-attest-assertion: <base64 assertion>`. The intake checks the signature against the registered key, that it is for this app, and that its counter has risen since the last one, so an assertion cannot be replayed. With Expo's `@expo/app-integrity`, which hashes the string you pass itself, call `attestKeyAsync(keyId, challenge)` and `generateAssertionAsync(keyId, body)` with the body text, not its hash. Keys from development builds work only with an app key whose `ios.environment` is `development`.
 
@@ -776,11 +788,11 @@ const result = await updater.update(known === undefined ? {} : { knownDataVersio
 `createReleaseUpdater` throws `TypeError` when `readableLayouts` or `readableFormats` is empty or holds anything but whole numbers, and when there is neither `gunzip` nor `DecompressionStream`. `update()` does this:
 
 1. When `knownDataVersion`, the recent list's `release.data_version`, is the database's own, it answers `up_to_date` with no request.
-2. Otherwise it fetches the manifest, one request. When its `format_version` is higher than every one in `readableFormats`, it keeps the database and answers `format_unsupported`: the records have changed in a way this build can't read. A lower format is read, as CONNECTING.md says. When its `layout_version` is not in `readableLayouts`, it answers `layout_unsupported`. When its `data_version` and layout are the database's own, it answers `up_to_date`. When its `data_version` is older than the database's own (an older release marked latest), it changes nothing and answers `older_release`. A manifest whose `data_version` has no readable time over a database whose has one, or whose database url is not https, fails with `manifest` before anything is downloaded.
+2. Otherwise it fetches the manifest, one request. When its `format_version` is higher than every one in `readableFormats`, it keeps the database and answers `format_unsupported`: the records have changed in a way this build can't read. A lower format is read, as CONNECTING.md says. When its `layout_version` is not in `readableLayouts`, it answers `layout_unsupported`. When its `data_version` and layout are the database's own, it answers `up_to_date`. When its `data_version` is older than the database's own (an older release marked latest), it changes nothing and answers `older_release`. A manifest whose `data_version` is not a release name (`<yyyymmdd>T<hhmmss>Z-<short sha>`, the short sha in lower-case hex), or is dated more than 7 days ahead of the phone's clock, or whose database url is not https, fails with `manifest` before anything is downloaded. `dataVersionProblem(dataVersion)` applies the same rule. A release refused for its date answers `{ status: "failed", reason: "manifest", cause: { name: "ManifestInvalid", message } }`, where `message` says the `data_version` is dated more than 7 days ahead of the clock, and the database stays on its release. The usual cause is a phone whose clock is set wrong, more than 7 days slow: the updater refuses every release until the clock is right, so when you see this reason with that message, ask the traveller to check the date and time on their phone. A database whose own `data_version` breaks that rule is not kept as newer: the updater moves it onto the manifest's release.
 3. It uses only changesets served from the same release downloads as the database: a changeset url, parsed as `fetch` reads it, must have the database url's origin and a path under the database url's path less its last two parts (on GitHub, `https://github.com/<owner>/<repo>/releases/download/`). Any other entry is ignored. It downloads the whole database when the app has none, when the layout differs from the database's, when no chain of changesets leads from the database's `data_version` to the newest, when the chain is more than 50 files (`MAX_CHANGESET_CHAIN`), or when the chain's files add up to at least the database's own `bytes`, and answers `replaced`.
 4. Otherwise it takes the chain with the fewest files, and of two as short, the one with more daily changesets. It downloads every file on it and checks each one's `bytes` and `sha256` before applying any, undoes gzip, hands the whole chain to one `applyChangesets` call, and answers `updated`.
 5. After the chain it reads `data_version` back. When that is not the manifest's, it downloads the whole database and replaces the one the chain left, and answers `replaced`.
-6. When the adapter has `candidateDataVersion`, the updater asks it for the release a downloaded whole database holds before it calls `replaceDatabase`, and swaps the file in only when that is the manifest's `data_version`. Otherwise it answers `failed` with `mismatch` and the database is not touched, so a manifest that points at an older file can't roll the app back. Without the call the release is read only after the swap, so give your adapter this call. It may write the bytes to the file it would swap in and keep that file for `replaceDatabase`, as the Expo adapter below does.
+6. When the adapter has `candidateDataVersion`, the updater asks it for the release a downloaded whole database holds before it calls `replaceDatabase`, and swaps the file in only when that is the manifest's `data_version`. Otherwise it answers `failed` with `mismatch` and the database is not touched, so a manifest that points at an older file can't roll the app back. Without the call the release is read only after the swap, so give your adapter this call. It may write the bytes to the file it would swap in and keep that file for `replaceDatabase`, as the Expo adapter below does. The Expo adapter also refuses a file that holds a trigger or a view, which the updater answers as `failed` with `read`, leaving the database as it was.
 7. A manifest whose database did not hold its release is remembered by its `data_version` and the database's `sha256`, and answered `failed` with `mismatch` without a download until the manifest changes. The updater remembers it in memory, and in `storage` under the key `ocdb.release.failed` when you pass `storage`, so an app that calls `update()` on each launch does not download the whole database each time.
 
 A second `update()` call made while one is running gets the running one's result, whatever its options, so two parts of the app asking at once apply one chain.
@@ -953,7 +965,8 @@ const adapter: ReleaseDatabaseAdapter = {
     });
   },
 
-  // Writes the download to the file replaceDatabase will swap in, and reads its release.
+  // Writes the download to the file replaceDatabase will swap in, checks it holds no trigger or
+  // view, and reads its release row before the swap.
   async candidateDataVersion(bytes) {
     dropStaged();
     const name = `ocdb-${Date.now()}.sqlite`;
@@ -961,6 +974,9 @@ const adapter: ReleaseDatabaseAdapter = {
     try {
       const db = await openDatabaseAsync(name);
       try {
+        // A release file holds tables and indexes only.
+        const code = await db.getFirstAsync<{ n: number }>("SELECT count(*) AS n FROM main.sqlite_master WHERE type IN ('trigger', 'view')");
+        if (code?.n !== 0) throw new Error("the downloaded file holds a trigger or a view");
         const row = await db.getFirstAsync<{ data_version: string }>("SELECT data_version FROM main.release");
         staged = { bytes, name, file };
         return row?.data_version ?? null;
@@ -1076,8 +1092,16 @@ const feedback = createFeedbackClient({
 
 ## What changed by version
 
-What an app moving to 0.31.0 needs to know. A minor version (0.31.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
+What an app moving to 0.32.0 needs to know. A minor version (0.32.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
 
+- **0.32.0.** New calls, options and fields:
+  - `review()` takes `contributorProof`, and `signContributorProof` takes the action `review` with `photo: "*"` ([Proving a review](#6-reviews-contributors-reports-and-blocking)). A review that replaces the contributor's earlier review of a place from another install is now held for a person unless it carries a proof the intake checked, which marks the stored item `proved`.
+  - `photo()` and `stripJpegMetadata` remove IPTC, comments, the multi-picture index and anything after the end of the image as well as Exif and XMP, and keep the colour profile. `jpegMetadata(bytes)` names what a JPEG still carries ([photos.md](photos.md)). A photo service may refuse uploads that still carry metadata with `422 photo_metadata`, so move every build that uploads photos to this version.
+  - The release updater fails with `manifest` on a `data_version` that is not a release name or is dated more than 7 days ahead of the phone's clock, and moves a database whose own `data_version` breaks that rule onto the manifest's release. `dataVersionProblem(dataVersion)` applies the rule ([section 10](#10-keeping-the-data-current)).
+  - `hasLoneSurrogate`, `isCommonsFileName`, `factFreeText`, `FREE_TEXT_FACTS` and `PYTHON_SPACE` (the characters the data repository's validator reads as whitespace) are exported. `StoredIntakeDecision` gains an optional `links`. `isCommonsFileName` counts a file name's length in code points, as the data repository's validator does.
+  - `jpegMetadata` reads a JPEG whose image data runs to the end of the file, with no end of image marker, as complete, so every file a camera or picker makes comes out of `photo()` with nothing a photo service's metadata check refuses. A file still `unreadable` after `stripJpegMetadata` is damaged: decode and encode it again ([photos.md](photos.md)).
+
+  Validation is stricter, for input a genuine app does not send: every text other than a note, review text and a description must be on one line (no U+0085, U+2028 or U+2029), no text may hold a lone surrogate, an email refuses U+001C to U+001F and U+0085, and a `commons_mismatch` report's `file` must have the shape of a Commons file name. The intake applies the same rules to every SDK version. An App Attest key id may be sent in any base64 spelling of its 32 bytes. A key registered under another spelling before this release answers `unknown_key` once: `keyIsUnusable` is true for it, so an app that drops the key in `onAttestationRejected` registers a new one ([section 7](#7-prove-the-app-with-app-attest-or-play-integrity)). `newPlaceStanding` no longer counts a check from the client network the place was added from towards `confirmed`. An intake with the optional per-network limit answers `GET /v1/places/recent` and the progress calls with `429` and `retry-after` past it. A batch refused while other batches still hold part of the app's daily count answers `429` with `retry-after: 60`, not the seconds to midnight, and a network at its own daily limit no longer holds any of the app's count. Photo uploads, photo passes and key registrations answer `503` with `retry-after: 60` when the daily counters cannot be reached, and the `429` for a photo pass or a key registration now carries `retry-after`.
 - **0.31.0.** `deviceId` sends a given device id in place of the stored one.
 - **0.30.0.** The release updater takes `candidateDataVersion` and `storage`, answers `older_release`, and fails as `manifest` on a database url that isn't https. `onQueueUnreadable` and `<storagePrefix>.queue.corrupt` keep an unreadable queue. A full queue keeps erasures. Photos lose their Exif and XMP before upload (`stripJpegMetadata`). Validation is stricter: a visit may not be in the future, a phone needs 6 digits, local host names with a trailing dot are refused, and `opening_hours` refuses what opening_hours.js refuses.
 - **0.29.0 and 0.29.1.** The stored queue is private to the SDK: `flush({ ignoreBackoff })`, `queueSummary()` and `queuedRefs()` answer what apps used to read from storage.

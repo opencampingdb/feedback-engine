@@ -80,6 +80,17 @@ describe("a Commons photo that is not of this place", () => {
     }
   });
 
+  it("refuses a report whose file is not a Commons file name, and puts nothing on the list", () => {
+    const file = "call someone@example.com [here](https://example.org/x)";
+    const first = mismatch(-2, "net-a", { report: { kind: "commons_mismatch", file } });
+    const second = attested(mismatch(0, "net-b", { report: { kind: "commons_mismatch", file } }));
+    const out = run([second], { history: [applied(first)] });
+    expect(out.doNotMatch).toEqual([]);
+    expect(out.decisions).toEqual([{ id: second.id, place: PLACE, outcome: "refused", reason: "the file is not a Commons file name" }]);
+    expect(out.held).toEqual([]);
+    expect(out.changes).toEqual([]);
+  });
+
   it("changes nothing for a pair already on the list", () => {
     const item = attested(mismatch(0, "net-a"));
     const out = run([item], { doNotMatch: [{ place: PLACE, file: FILE }] });
@@ -129,6 +140,15 @@ describe("commons_mismatch cases for a reviewer", async () => {
       )}\n`,
     );
     expect(withDoNotMatch(text, [{ place: PLACE, file: "A.jpg", added: "2026-11-07", source: "reports" }])).toBe(text);
+  });
+
+  it("writes no pair whose file is not a Commons file name", () => {
+    const text = withDoNotMatch(undefined, [
+      { place: PLACE, file: "A.jpg", added: "2026-11-06", source: "reviewer" },
+      { place: PLACE, file: "x.jpg [here](https://example.org/x)", added: "2026-11-06", source: "reviewer" },
+      { place: PLACE, file: "File:B.jpg", added: "2026-11-06", source: "reports" },
+    ]);
+    expect(JSON.parse(text)).toEqual({ pairs: [{ added: "2026-11-06", file: "A.jpg", place: PLACE, source: "reviewer" }] });
   });
 });
 

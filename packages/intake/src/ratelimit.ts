@@ -1,4 +1,4 @@
-import { chunks, type D1Like, type D1Statement } from "./recent.js";
+import { chunks, type D1Like } from "./recent.js";
 
 /** The part of a Workers KV namespace the rate limiter uses. */
 export interface KVLike {
@@ -17,6 +17,14 @@ export const OWNER_DAILY_LIMIT = 5;
 /** Submissions per hashed client network per day, and owner submissions per network. */
 export const ORIGIN_DAILY_LIMIT = 500;
 export const OWNER_ORIGIN_DAILY_LIMIT = 10;
+/**
+ * URLhaus lookups per hashed client network per day for the links of items
+ * the rules hold (the checks of items they pass have their own daily cap).
+ * A traveller adds a handful of links in a day, so normal use never comes
+ * near it. Past it the item is held with no record that its links passed,
+ * and the apply sends it to a person.
+ */
+export const LINK_LOOKUP_ORIGIN_DAILY_LIMIT = 100;
 /** Feedback per contributor per day, unless the app key sets `contributor_daily_limit`. */
 export const CONTRIBUTOR_DAILY_LIMIT = 200;
 /** Photo uploads per contributor per day. */
@@ -33,6 +41,22 @@ export const ATTEST_KEY_DAILY_LIMIT = 200;
 export const PLACE_EDIT_DAILY_LIMIT = 100;
 /** The counters the rest of an edit leaves alone: the device's and the contributor's. */
 const EDIT_RELIEVED = ["d:", "c:"];
+/**
+ * The counters every sender of an app shares: the app's daily counters. An
+ * item is counted on these last, after the counters of its own device,
+ * contributor, key and network, so a sender refused for its own limits never
+ * holds the shared count up.
+ */
+const SHARED_PREFIXES = ["a:", "ao:"];
+const isShared = (key: string) => SHARED_PREFIXES.some((p) => key.startsWith(p));
+/**
+ * Beside each reserved counter, a mark of how much of it batches still in
+ * flight hold. A request refused while the count is only full because of such
+ * holds is asked to try again soon, not at midnight.
+ */
+const heldKey = (key: string) => `held:${key}`;
+/** The wait asked of a request refused while batches in flight hold the counter. */
+export const HELD_RETRY_SECONDS = 60;
 /** How long a counter lives in KV, on an intake without D1. */
 const TTL_SECONDS = 2 * 24 * 60 * 60;
 
@@ -64,6 +88,9 @@ export type CountStore = { d1: D1Like } | { kv: KVLike };
 const MAX_BOUND = 100;
 const marks = (n: number) => Array.from({ length: n }, () => "?").join(", ");
 
+/** The daily counters could not be read or written. The route answers 503, and nothing is stored. */
+export class CountUnavailable extends Error {}
+
 /** Today's count for each of `keys`, in order, 0 for one not counted yet. One query for up to 100 keys on D1. */
 export async function readCounts(store: CountStore, keys: readonly string[]): Promise<number[]> {
   if ("kv" in store) return Promise.all(keys.map(async (key) => Number((await store.kv.get(key)) ?? 0)));
@@ -75,37 +102,73 @@ export async function readCounts(store: CountStore, keys: readonly string[]): Pr
   return keys.map((key) => found.get(key) ?? 0);
 }
 
+/** What one step on several counters did: the keys it changed, and whether every key was changed. */
+interface Landed<T> {
+  /** The keys the step changed, with what each answered, in the order asked. */
+  landed: { key: string; value: T }[];
+  /** The first failure, when a key could not be changed. */
+  failure?: unknown;
+}
+
+/** Runs `step` on every key at once and reports exactly which keys it changed, even when some fail. */
+async function onEach<T>(keys: readonly string[], step: (key: string) => Promise<T>): Promise<Landed<T>> {
+  const settled = await Promise.allSettled(keys.map(step));
+  const landed: { key: string; value: T }[] = [];
+  let failure: unknown;
+  settled.forEach((r, i) => {
+    if (r.status === "fulfilled") landed.push({ key: keys[i]!, value: r.value });
+    else failure ??= r.reason;
+  });
+  return failure === undefined ? { landed } : { landed, failure };
+}
+
 /**
- * Adds one to each of `keys` for `day`. On D1 these are statements for the
- * caller's batch, the one that stores the item, so a count lands only with
- * what it counts and costs no round trip of its own. On KV the counts are
- * written now, from `current` (what `readCounts` gave), and none are returned.
+ * Adds `by` to each of `keys` for `day` on D1 and answers each new count, in
+ * order. Each counter is one statement that adds and returns in one step, so
+ * requests that arrive together each see the count their own addition made.
  */
-export async function countStatements(store: CountStore, day: string, keys: readonly string[], current: readonly number[]): Promise<D1Statement[]> {
-  if ("kv" in store) {
-    await Promise.all(keys.map((key, i) => store.kv.put(key, String((current[i] ?? 0) + 1), { expirationTtl: TTL_SECONDS })));
-    return [];
+function addCounts(db: D1Like, day: string, keys: readonly string[], by = 1): Promise<Landed<number>> {
+  const add = "INSERT INTO rate_counts (key, day, count) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET count = count + excluded.count RETURNING count";
+  return onEach(keys, async (key) => Number((await db.prepare(add).bind(key, day, by).first<number>("count")) ?? 0));
+}
+
+/** Takes back what `addCounts` added, and drops a counter that is back at nothing. A key counts as given back once its count is lowered. */
+function giveBackCounts(db: D1Like, amounts: ReadonlyMap<string, number>): Promise<Landed<number>> {
+  const given = new Map([...amounts].filter(([, n]) => n > 0));
+  return onEach([...given.keys()], async (key) => {
+    const n = given.get(key)!;
+    await db.prepare("UPDATE rate_counts SET count = count - ? WHERE key = ?").bind(n, key).run();
+    await db
+      .prepare("DELETE FROM rate_counts WHERE key = ? AND count <= 0")
+      .bind(key)
+      .run()
+      .catch(() => undefined);
+    return n;
+  });
+}
+
+/** Throws CountUnavailable for a step that did not change every key. */
+function unavailableIfFailed(step: Landed<unknown>): void {
+  if (step.failure !== undefined) {
+    const { failure } = step;
+    throw new CountUnavailable(failure instanceof Error ? failure.message : String(failure));
   }
-  return keys.map((key) =>
-    store.d1.prepare("INSERT INTO rate_counts (key, day, count) VALUES (?, ?, 1) ON CONFLICT (key) DO UPDATE SET count = count + 1").bind(key, day),
-  );
 }
 
 export interface RateLimitResult {
   allowed: boolean;
   /** Seconds until the counters reset at midnight UTC. */
   retryAfter: number;
-  /** The counts to add, for the batch that stores the item (see `countStatements`). Empty when refused. */
-  writes: D1Statement[];
 }
 
 /**
  * Checks `counters` and, when every one is under its limit, counts one more
- * on each. The check and the count are separate steps, so requests that
- * arrive together can pass a limit by a few, as they could on KV. That is
- * acceptable: the limits stop floods, and the apply rules count distinct
- * networks, not submissions or device ids. Refusing inside a transaction
- * would make every request wait on the others for no real gain.
+ * on each. On D1 the count and the check are one step: each counter is
+ * added to and its new count read back in the same statement, and when any
+ * is over its limit every addition is taken back and the item is refused.
+ * Requests that arrive together can never pass a limit between them. On KV
+ * (an intake without D1) the counts are read and then written, so requests
+ * that arrive together can pass a limit by a few.
  */
 export async function checkCounters(store: CountStore, day: string, counters: readonly Counter[], nowMs: number): Promise<RateLimitResult> {
   return countSession(store, day, nowMs).check(counters);
@@ -114,50 +177,217 @@ export async function checkCounters(store: CountStore, day: string, counters: re
 /**
  * Daily counters for the items of one request, checked and counted in turn,
  * so the second item of a batch sees the first one's counts as it would if
- * the first had been sent alone and stored. Each counter is read once, the
- * first time an item needs it, in one query for every counter that item
- * needs that the session has not read yet.
+ * the first had been sent alone and stored.
  */
 export interface CountSession {
-  /** Today's counts for `keys`, from what the session has read and counted. */
-  counts(keys: readonly string[]): Promise<number[]>;
+  /**
+   * Counts `items` more on each of `counters` at once, for a batch, and keeps
+   * what fits under each limit for the items that follow. Answers how many
+   * items fit under every one of them: 0 when any counter is at its limit.
+   * The part that does not fit is given back at once, and the part the items
+   * do not use is given back by `settle`.
+   */
+  reserve(counters: readonly Counter[], items: number): Promise<number>;
+  /**
+   * How long to ask a request refused on `counter` to wait: until midnight
+   * when the counted items fill it, or HELD_RETRY_SECONDS when it is only
+   * full because batches still in flight hold part of it.
+   */
+  retryAfter(counter: Counter): Promise<number>;
   /** Checks and counts one item, as `checkAndCount` does. */
   check(counters: readonly Counter[], edit?: { deviceHash: string; place: string }): Promise<RateLimitResult>;
+  /**
+   * Gives back what reserved counters kept and no item used. Call once the
+   * request's items are stored. When a give-back fails, what did not go back
+   * is kept, and calling again tries it again.
+   */
+  settle(): Promise<void>;
+  /** Gives back everything the session counted, when the request's items were not stored after all. */
+  giveBack(): Promise<void>;
 }
 
 export function countSession(store: CountStore, day: string, nowMs: number): CountSession {
+  return "kv" in store ? kvSession(store.kv, day, nowMs) : d1Session(store.d1, day, nowMs);
+}
+
+/**
+ * The counters on D1: every addition is an atomic statement that returns the
+ * new count, so the limit holds however requests are timed.
+ */
+function d1Session(db: D1Like, day: string, nowMs: number): CountSession {
+  const retryAfter = secondsToMidnightUtc(nowMs);
+  /** Everything this session added, by key, so a failed store can give it all back. */
+  const added = new Map<string, number>();
+  /** Reserved counters: how many items the reservation holds, and how many have used it. */
+  const reserved = new Map<string, { held: number; used: number }>();
+  /** What `settle` has still to give back, after a give-back that did not land. */
+  const owed = new Map<string, number>();
+  const note = (key: string, n: number) => added.set(key, (added.get(key) ?? 0) + n);
+  /** Adds `by` to each key. Only what landed is noted, so a later give-back takes back exactly that. */
+  const take = async (keys: readonly string[], by = 1) => {
+    const step = await addCounts(db, day, keys, by);
+    for (const { key } of step.landed) note(key, by);
+    unavailableIfFailed(step);
+    return step.landed.map(({ value }) => value);
+  };
+  const undo = async (keys: readonly string[], by = 1) => {
+    const step = await giveBackCounts(db, new Map(keys.map((key) => [key, by])));
+    for (const { key } of step.landed) note(key, -by);
+    unavailableIfFailed(step);
+  };
+
+  /** Adds one to `counters`, and takes the additions back when any is over its limit. */
+  async function countOn(counters: readonly Counter[]): Promise<boolean> {
+    if (counters.length === 0) return true;
+    const keys = counters.map((c) => c.key);
+    const counts = await take(keys);
+    if (counts.every((n, i) => n <= counters[i]!.limit)) return true;
+    await undo(keys);
+    return false;
+  }
+
+  /**
+   * Counts one item on `counters`, using a reservation where there is one.
+   * The counters only this traveller uses are counted first and the app's
+   * counter last, so an item refused for the traveller's own limits never
+   * adds to the count every other sender of the app shares. Refused, it
+   * leaves nothing counted.
+   */
+  async function countItem(counters: readonly Counter[]): Promise<boolean> {
+    const held = counters.filter((c) => reserved.has(c.key));
+    if (held.some((c) => reserved.get(c.key)!.used >= reserved.get(c.key)!.held)) return false;
+    const rest = counters.filter((c) => !reserved.has(c.key));
+    const narrow = rest.filter((c) => !isShared(c.key));
+    const shared = rest.filter((c) => isShared(c.key));
+    if (!(await countOn(narrow))) return false;
+    if (!(await countOn(shared))) {
+      await undo(narrow.map((c) => c.key));
+      return false;
+    }
+    for (const c of held) reserved.get(c.key)!.used += 1;
+    return true;
+  }
+
+  return {
+    async reserve(counters, items) {
+      if (items <= 0) return 0;
+      const keys = counters.map((c) => c.key);
+      const counts = await take([...keys, ...keys.map(heldKey)], items);
+      let fits = items;
+      counters.forEach((c, i) => {
+        fits = Math.min(fits, Math.max(0, c.limit - (counts[i]! - items)));
+      });
+      const spare = items - fits;
+      if (spare > 0) await undo([...keys, ...keys.map(heldKey)], spare);
+      for (const key of keys) reserved.set(key, { held: fits, used: 0 });
+      return fits;
+    },
+    async retryAfter(counter) {
+      const [count = 0, held = 0] = await readCounts({ d1: db }, [counter.key, heldKey(counter.key)]);
+      return count - held >= counter.limit ? retryAfter : HELD_RETRY_SECONDS;
+    },
+    async check(counters, edit) {
+      if (!edit) return { allowed: await countItem(counters), retryAfter };
+      const editKey = `pe:${day}:${edit.deviceHash}:${edit.place}`;
+      const [edited = 0] = await take([editKey]);
+      if (edited > PLACE_EDIT_DAILY_LIMIT) {
+        await undo([editKey]);
+        return { allowed: false, retryAfter };
+      }
+      // The rest of an edit is free of the traveller's own device and contributor counters only.
+      // The app, network and attested-key counters bound every item.
+      const binding = counters.filter((c) => edited === 1 || !EDIT_RELIEVED.some((p) => c.key.startsWith(p)));
+      if (await countItem(binding)) return { allowed: true, retryAfter };
+      await undo([editKey]);
+      return { allowed: false, retryAfter };
+    },
+    async settle() {
+      // The unused part of each reservation goes back, and the whole hold mark: what the items used now counts as theirs.
+      for (const [key, r] of reserved) {
+        owed.set(key, (owed.get(key) ?? 0) + r.held - r.used);
+        owed.set(heldKey(key), (owed.get(heldKey(key)) ?? 0) + r.held);
+      }
+      reserved.clear();
+      const step = await giveBackCounts(db, owed);
+      // What did not go back stays owed, for the caller to try again.
+      for (const { key, value } of step.landed) {
+        note(key, -value);
+        owed.delete(key);
+      }
+      unavailableIfFailed(step);
+    },
+    async giveBack() {
+      reserved.clear();
+      owed.clear();
+      const step = await giveBackCounts(db, added);
+      for (const { key, value } of step.landed) note(key, -value);
+      unavailableIfFailed(step);
+    },
+  };
+}
+
+/**
+ * The counters on KV, for an intake without D1. Each counter is read once,
+ * the first time an item needs it, and written as each item is counted. KV
+ * has no atomic addition, so requests that arrive together can pass a limit
+ * by a few. Such an intake takes single items only, so nothing is reserved.
+ * What the session counted can be given back, from the counts it read.
+ */
+function kvSession(kv: KVLike, day: string, nowMs: number): CountSession {
   const known = new Map<string, number>();
   const retryAfter = secondsToMidnightUtc(nowMs);
   async function counts(keys: readonly string[]): Promise<number[]> {
     const missing = [...new Set(keys.filter((key) => !known.has(key)))];
     if (missing.length > 0) {
-      const read = await readCounts(store, missing);
+      const read = await readCounts({ kv }, missing);
       missing.forEach((key, i) => known.set(key, read[i] ?? 0));
     }
     return keys.map((key) => known.get(key) ?? 0);
   }
-  async function count(keys: readonly string[], current: readonly number[]): Promise<D1Statement[]> {
-    const writes = await countStatements(store, day, keys, current);
-    keys.forEach((key, i) => known.set(key, (current[i] ?? 0) + 1));
-    return writes;
+  /** What this session added, by key, so it can be given back. */
+  const added = new Map<string, number>();
+  async function count(keys: readonly string[], current: readonly number[]): Promise<void> {
+    await Promise.all(keys.map((key, i) => kv.put(key, String((current[i] ?? 0) + 1), { expirationTtl: TTL_SECONDS })));
+    keys.forEach((key, i) => {
+      known.set(key, (current[i] ?? 0) + 1);
+      added.set(key, (added.get(key) ?? 0) + 1);
+    });
   }
   return {
-    counts,
+    async reserve(counters, items) {
+      const current = await counts(counters.map((c) => c.key));
+      return current.some((n, i) => n >= counters[i]!.limit) ? 0 : items;
+    },
+    async retryAfter() {
+      return retryAfter;
+    },
     async check(counters, edit) {
       const keys = counters.map((c) => c.key);
       if (!edit) {
         const current = await counts(keys);
-        if (current.some((n, i) => n >= counters[i]!.limit)) return { allowed: false, retryAfter, writes: [] };
-        return { allowed: true, retryAfter, writes: await count(keys, current) };
+        if (current.some((n, i) => n >= counters[i]!.limit)) return { allowed: false, retryAfter };
+        await count(keys, current);
+        return { allowed: true, retryAfter };
       }
       const editKey = `pe:${day}:${edit.deviceHash}:${edit.place}`;
       const [edited = 0, ...current] = await counts([editKey, ...keys]);
-      if (edited >= PLACE_EDIT_DAILY_LIMIT) return { allowed: false, retryAfter, writes: [] };
-      // The rest of an edit is free of the traveller's own device and contributor counters only.
-      // The app, network and attested-key counters bound every item.
+      if (edited >= PLACE_EDIT_DAILY_LIMIT) return { allowed: false, retryAfter };
       const binding = counters.map((c, i) => ({ c, n: current[i]! })).filter(({ c }) => edited === 0 || !EDIT_RELIEVED.some((p) => c.key.startsWith(p)));
-      if (binding.some(({ c, n }) => n >= c.limit)) return { allowed: false, retryAfter, writes: [] };
-      return { allowed: true, retryAfter, writes: await count([editKey, ...binding.map(({ c }) => c.key)], [edited, ...binding.map(({ n }) => n)]) };
+      if (binding.some(({ c, n }) => n >= c.limit)) return { allowed: false, retryAfter };
+      await count([editKey, ...binding.map(({ c }) => c.key)], [edited, ...binding.map(({ n }) => n)]);
+      return { allowed: true, retryAfter };
+    },
+    async settle() {},
+    async giveBack() {
+      const given = [...added].filter(([, n]) => n > 0);
+      added.clear();
+      await Promise.all(
+        given.map(async ([key, n]) => {
+          const left = Math.max(0, (known.get(key) ?? n) - n);
+          known.set(key, left);
+          await kv.put(key, String(left), { expirationTtl: TTL_SECONDS });
+        }),
+      );
     },
   };
 }

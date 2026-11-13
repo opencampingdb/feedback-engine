@@ -1,7 +1,8 @@
-import { resolve } from "node:path";
+import { basename, relative, resolve, sep } from "node:path";
 import { isOwnerSubmission, type StoredFeedback, type StoredOwnerSubmission } from "@opencampingdb/feedback";
 import {
   DataRepo,
+  type EarlierFact,
   moveDecided,
   readAwaiting,
   readHistory,
@@ -13,7 +14,7 @@ import {
   writeOwners,
 } from "./io.js";
 import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
-import { autoPrBody, jobSummary, reviewPrBody } from "./prbody.js";
+import { autoPrBody, jobSummary, reviewPrTexts } from "./prbody.js";
 import { previewUrl, PREVIEW_TTL_SECONDS } from "./preview.js";
 import { checkProof as realCheckProof, type ProofResult } from "./proof.js";
 import {
@@ -22,6 +23,7 @@ import {
   applyRules,
   isVisible,
   newPlaceIdOf,
+  photoIdOf,
   ratingOf,
   resolvePlace,
   WINDOW_DAYS,
@@ -102,6 +104,30 @@ export interface RunSummary {
   auto_pr_body: string;
   /** Empty when `review_changed` is false. */
   review_pr_body: string;
+  /** Follow-up comments on the review PR, posted in order after `review_pr_body`, for held and closed cases it had no room for. */
+  review_pr_comments: string[];
+  /**
+   * The owner claims and listings this run moved from `pending/` to
+   * `owner-claims/`, as paths in the inbox. They are listed only in the review
+   * PR text, so when GitHub refuses that text the workflow moves them back and
+   * a later run sends them again.
+   */
+  claim_moves: { from: string; to: string }[];
+  /**
+   * The moves from `pending/` of the items whose changes are on the automatic
+   * branch. When the automatic PR does not open, or its changes do not land,
+   * the workflow moves them back and a later run decides them again. Empty
+   * when `auto_changed` is false.
+   */
+  auto_moves: { from: string; to: string }[];
+  /**
+   * The moves from `pending/` of the items that reach a person only through
+   * the review PR: decided for a person, or behind a review change or a held
+   * case, and not behind an automatic change. When the review PR text is not
+   * accepted, the workflow moves them back as it does `claim_moves`. Empty
+   * when `review_changed` is false.
+   */
+  review_moves: { from: string; to: string }[];
   /** Every change of the run, for the job summary the PR bodies point to when they are too long to list them all. */
   job_summary: string;
   /** New places this run wrote into the automatic checkout for the first time. */
@@ -173,9 +199,19 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const allReviews = erasing.size > 0 ? await auto.allReviews() : [];
   const erasedPlaces = new Set(allReviews.filter((r) => erasing.has(r.contributor)).map((r) => r.place));
 
+  // Every photo line, when anything in this run is about photos.
+  const photos = crowd.some((p) => photoTypes.has(p.type)) ? await auto.allPhotos() : [];
+  // The place a photo named by a removal is filed under, which may have been merged since.
+  const removing = new Set(crowd.map((p) => (p.type === "photo_removal" ? p.photo_removal.photo : undefined)));
+  const removedFrom = [
+    ...photos.filter((p) => removing.has(p.id)).map((p) => p.place),
+    ...history.filter((h) => h.type === "photo" && removing.has(photoIdOf(h))).map((h) => h.place),
+  ];
+
   // Every record the rules may read, following merged ids to their targets.
   const wanted = new Set<string>([
     ...erasedPlaces,
+    ...removedFrom,
     ...crowd.map((p) => p.place),
     // A new place's own record, when an earlier run already wrote it.
     ...crowd.filter((p) => p.type === "report" && p.report.kind === "new_place").map(newPlaceIdOf),
@@ -206,9 +242,6 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const blocked = await auto.blocked();
   const reviewers = await auto.reviewers(blocked);
   const removedReviews = crowd.some((p) => p.type === "review") ? await auto.removedReviews() : new Set<string>();
-  // Every photo line, when anything in this run is about photos.
-  const photos = crowd.some((p) => photoTypes.has(p.type)) ? await auto.allPhotos() : [];
-
   // Every record, for the duplicates check, when anything in this run is about a new place.
   const aboutNewPlaces = crowd.some(
     (p) =>
@@ -234,6 +267,19 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   // The do-not-match list, when anything in this run says a Commons photo is not of a place.
   const doNotMatch = crowd.some((p) => p.type === "report" && p.report.kind === "commons_mismatch") && !photosOnly ? await auto.doNotMatch() : undefined;
 
+  // Earlier values of facts that doubts and contact reports name and their place no longer has: a
+  // run that published its automatic changes may have taken them down and stopped before it
+  // recorded its inbox moves.
+  const earlierFacts = new Map<string, Map<string, EarlierFact>>();
+  for (const p of crowd) {
+    if (p.type !== "report" || (p.report.kind !== "doubt" && p.report.kind !== "contact") || typeof p.place !== "string" || photosOnly) continue;
+    const record = places.get(p.place);
+    const fact = p.report.fact as string;
+    if (!record || (record.facts as Record<string, unknown>)[fact] !== undefined || earlierFacts.get(p.place)?.has(fact)) continue;
+    const earlier = await auto.earlierFact(p.place, fact);
+    if (earlier) earlierFacts.set(p.place, (earlierFacts.get(p.place) ?? new Map()).set(fact, earlier));
+  }
+
   const crowdResult = applyRules({
     now: runAt,
     pending: crowd,
@@ -252,17 +298,17 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     ...(roads ? { roads } : {}),
     ...(doNotMatch ? { doNotMatch } : {}),
     ...(recent !== undefined ? { recent } : {}),
+    ...(earlierFacts.size > 0 ? { earlierFacts } : {}),
   });
 
   // Proof pages for claims and listings still in pending/, oldest first, within
-  // the budget. Claims for a missing place are refused and claims past the wait
-  // go to a person without a fresh check. Claims left unchecked keep waiting.
+  // the budget. Claims for a missing place are refused. A claim left unchecked
+  // keeps waiting, past its proof wait too, so a person always sees a fresh check.
   const proofs = new Map<string, ProofResult>();
   const budget = options.proofBudget ?? PROOF_BUDGET;
   const toCheck = ownerItems
     .filter((i): i is Exclude<StoredOwnerSubmission, { type: "owner_update" }> => i.type !== "owner_update")
     .filter((i) => i.type === "owner_listing" || resolvePlace(i.place, places) !== undefined)
-    .filter((i) => now.getTime() - Date.parse(i.received) < PROOF_WAIT_DAYS * DAY_MS)
     .sort((a, b) => a.received.localeCompare(b.received) || a.id.localeCompare(b.id));
   const deadline = Date.now() + budget.ms;
   let next = 0;
@@ -363,9 +409,13 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     if (edit.kind === "photo_removal") {
       // A held photo its contributor removed leaves the review checkout.
       if (sameTree) continue;
-      const lines = await review.photos(edit.place);
-      if (!lines.some((p) => p.id === edit.photo)) continue;
-      const written = await review.writePhotos(edit.place, lines.filter((p) => p.id !== edit.photo));
+      // The held line may be filed under a place that was merged into this one since.
+      const filedUnder = (await review.photos(edit.place)).some((p) => p.id === edit.photo)
+        ? edit.place
+        : (await review.allPhotos()).find((p) => p.id === edit.photo)?.place;
+      if (filedUnder === undefined) continue;
+      const lines = await review.photos(filedUnder);
+      const written = await review.writePhotos(filedUnder, lines.filter((p) => p.id !== edit.photo));
       if (written) reviewFiles.push(written);
       continue;
     }
@@ -406,10 +456,37 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const reviewChanges = changes.filter((c) => !c.automatic && c.feedback.some((f) => effective.has(f)));
   const autoChanged = autoFiles.length > 0;
   const ownerClaims = ownerResult.forReview.length > 0;
-  // A held case is listed when this run wrote its place or its edit for a person.
-  const held = crowdResult.held.filter((h) => crowdResult.places.has(h.place) || h.feedback.some((f) => effective.has(f)));
+  // A held case is listed when this run wrote its place or its edit for a person, or repeated a takedown already in the data.
+  const held = crowdResult.held.filter((h) => crowdResult.places.has(h.place) || h.feedback.some((f) => effective.has(f)) || crowdResult.replayed.includes(h));
   const closed = crowdResult.closed;
   const reviewChanged = reviewFiles.length > 0 || reviewChanges.length > 0 || ownerClaims || held.length > 0 || closed.length > 0;
+
+  const reviewTexts = reviewChanged
+    ? reviewPrTexts(runAt, reviewChanges, allPlaces, ownerResult.forReview, held, await previewLinks(reviewChanges, options.reviewPreview, now), closed)
+    : { body: "", comments: [] };
+  const sentToPerson = new Set(ownerResult.awaiting.map((a) => a.item.id));
+  const inboxPath = (path: string) => relative(options.inbox, path).split(sep).join("/");
+  const claimMoves = pendingFiles
+    .filter((f) => sentToPerson.has(f.item.id) && decisions.some((d) => d.id === f.item.id && d.outcome === "awaiting_approval"))
+    .map((f) => ({ from: inboxPath(f.path), to: `owner-claims/${basename(f.path)}` }));
+
+  // Each decided pending file's move, as moveDecided made it.
+  const movesOf = (ids: ReadonlySet<string>) =>
+    pendingFiles.flatMap((f) => {
+      const outcome = decisions.find((d) => d.id === f.item.id)?.outcome;
+      if (!ids.has(f.item.id) || (outcome !== "applied" && outcome !== "needs_review" && outcome !== "refused")) return [];
+      return [{ from: inboxPath(f.path), to: `${outcome === "refused" ? "refused" : "applied"}/${f.day}/${basename(f.path)}` }];
+    });
+  const autoIds = new Set(autoChanged ? autoChanges.flatMap((c) => c.feedback) : []);
+  const reviewOnlyIds = new Set(
+    reviewChanged
+      ? [
+          ...decisions.filter((d) => d.outcome === "needs_review").map((d) => d.id),
+          ...reviewChanges.flatMap((c) => c.feedback),
+          ...held.flatMap((h) => h.feedback),
+        ].filter((id) => !autoIds.has(id))
+      : [],
+  );
 
   return {
     run_at: runAt,
@@ -421,9 +498,11 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     auto_files: autoFiles,
     review_files: reviewFiles,
     auto_pr_body: autoChanged ? autoPrBody(runAt, autoChanges, decisions, allPlaces) : "",
-    review_pr_body: reviewChanged
-      ? reviewPrBody(runAt, reviewChanges, allPlaces, ownerResult.forReview, held, await previewLinks(reviewChanges, options.reviewPreview, now), closed)
-      : "",
+    review_pr_body: reviewTexts.body,
+    review_pr_comments: reviewTexts.comments,
+    claim_moves: claimMoves,
+    auto_moves: movesOf(autoIds),
+    review_moves: movesOf(reviewOnlyIds),
     job_summary: autoChanged || reviewChanged ? jobSummary(runAt, autoChanged ? autoChanges : [], reviewChanged ? reviewChanges : [], allPlaces) : "",
     new_places: newPlaces,
     not_applied: [...new Set(decisions.filter((d) => d.outcome !== "applied" && d.outcome !== "waiting").map((d) => d.id))].sort(),

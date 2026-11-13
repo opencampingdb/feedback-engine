@@ -1,4 +1,5 @@
 import {
+  CHECK_HOLDS,
   decideContactReport,
   decideDoubt,
   decideFact,
@@ -106,6 +107,8 @@ export interface SendTimeDecision {
   addToDecided?: (decided: DecidedInRequest) => void;
   /** The live change the checks took from the daily caps, to give back with `releaseLive` when the item is not recorded. */
   slot?: LiveSlot;
+  /** On an item the rules held: its links passed the link rules and URLhaus. The inbox stores it with the decision. */
+  linksPassed?: true;
 }
 
 /** The answer when the decision could not be made or recorded. */
@@ -382,8 +385,24 @@ const heldWithEvidence = (reason: HeldReason, item: ReportItem): SendTimeDecisio
   held(reason, (d) => [evidenceStatement(d, item, "held")], (p) => void p.evidence.push(evidenceRow(item)));
 const countAccepted = (decided: DecidedInRequest, contributor: string) => decided.accepted.set(contributor, (decided.accepted.get(contributor) ?? 0) + 1);
 
-/** Decides one item that `decidedHere` says the intake decides. Reads D1 and runs the checks, and writes nothing. */
+/**
+ * Decides one item that `decidedHere` says the intake decides. Reads D1 and
+ * runs the checks, and writes nothing. When the rules hold an item that would
+ * set a link, the checks never run, so its links still get the link rules and
+ * URLhaus: a link that fails is held as `link_check`, and links that pass are
+ * marked `linksPassed`, without which the apply sends the item to a person.
+ */
 export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDecision> {
+  const decision = await decideByRulesAndChecks(input);
+  const { answer } = decision;
+  if (answer.state !== "held" || CHECK_HOLDS.includes(answer.held_reason) || answer.held_reason === "blocked") return decision;
+  const links = await input.checks.links(input.submission);
+  if (links === "none" || links === "check_unavailable") return decision;
+  if (links === "passed") return { ...decision, linksPassed: true };
+  return { ...decision, answer: { state: "held", held_reason: links } };
+}
+
+async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecision> {
   const { db, checks, item, submission, contributor, decided = noneDecided() } = input;
   const record = await contributorRecord(db, contributor, decided);
   if (record.blocked) return held("blocked");
@@ -474,6 +493,7 @@ async function decideNewPlace({ checks, item, submission }: DecideInput, record:
     contributor: item.contributor,
     device: item.device,
     ...(item.attest_key !== undefined ? { attest_key: item.attest_key } : {}),
+    ...(item.origin !== undefined ? { origin: item.origin } : {}),
     ...(fields.description !== undefined ? { description: fields.description } : {}),
     ...(fields.fee !== undefined ? { fee: fields.fee } : {}),
     ...(Object.keys(contacts).length > 0 ? { contacts } : {}),

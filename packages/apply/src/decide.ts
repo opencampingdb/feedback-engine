@@ -1,5 +1,6 @@
 import {
   contactProblem,
+  factFreeText,
   firstProblem,
   isContactFact,
   isDoubtFact,
@@ -15,6 +16,7 @@ import {
   type StoredFeedback,
   type TextProblem,
 } from "@opencampingdb/feedback";
+import { textProblems } from "./data-check.js";
 import type { Place } from "./types.js";
 
 /**
@@ -91,18 +93,35 @@ export type HeldReason =
 /** The reasons the intake holds an item for one of its checks rather than for these rules. */
 export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "check_unavailable"];
 
+/** Contact facts that are links, which URLhaus checks at the intake. */
+export const LINK_FACTS: readonly ContactFactName[] = ["website", "facebook", "instagram", "tiktok", "x"];
+
+/** Whether `item` would set a link: a fact report of a link fact, or a new place with one among its contacts. */
+export function setsLink(item: StoredFeedback): boolean {
+  if (item.type !== "report") return false;
+  const report = item.report;
+  if (report.kind === "fact") return (LINK_FACTS as readonly string[]).includes(report.fact as string);
+  if (report.kind === "new_place") return Object.entries(report.contacts ?? {}).some(([fact, value]) => value !== undefined && (LINK_FACTS as readonly string[]).includes(fact));
+  return false;
+}
+
 /**
  * The check the intake held `item` for at send time (its `intake` field), or
  * null when it did not hold it for one. The apply has none of those checks,
- * so such an item goes to a person, never into the data on its own. Items the
- * intake held for a reason of these rules, and items without the field, are
- * decided here as before.
+ * so such an item goes to a person, never into the data on its own. An item
+ * the intake held for a reason of these rules is decided here as before,
+ * unless it would set a link and the intake does not say its links passed
+ * the link rules and URLhaus (`links: "passed"`): its links were never looked
+ * up, so it is held as `link_check`. Items without the field are decided here
+ * as before.
  */
 export function heldForCheck(item: StoredFeedback): string | null {
   const intake: unknown = (item as { intake?: unknown }).intake;
   if (typeof intake !== "object" || intake === null) return null;
-  const { state, held_reason: reason } = intake as { state?: unknown; held_reason?: unknown };
-  return state === "held" && typeof reason === "string" && CHECK_HOLDS.includes(reason) ? reason : null;
+  const { state, held_reason: reason, links } = intake as { state?: unknown; held_reason?: unknown; links?: unknown };
+  if (state !== "held" || typeof reason !== "string") return null;
+  if (CHECK_HOLDS.includes(reason)) return reason;
+  return links !== "passed" && setsLink(item) ? "link_check" : null;
 }
 
 /** How a `fact_doubted` case was settled: its value restored, or replaced with another. */
@@ -192,11 +211,11 @@ export function factRefusal(item: ReportItem): Extract<ItemDecision, { verdict: 
 }
 
 /**
- * Facts that mean nothing once `fact` is set to `value`, so they come off the
+ * Facts that mean nothing once `fact` is set to `value` (null when it is taken down), so they come off the
  * place with it: `pets_months` when `pets` is no longer `seasonal`. Only those
  * the place has are named.
  */
-export function factsClearedBy(facts: PlaceState["facts"], fact: FactName, value: FactValue): FactName[] {
+export function factsClearedBy(facts: PlaceState["facts"], fact: FactName, value: FactValue | null): FactName[] {
   return fact === "pets" && value !== "seasonal" && facts.pets_months !== undefined ? ["pets_months"] : [];
 }
 
@@ -239,11 +258,9 @@ export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemD
   if (refusal !== null) return refusal;
   const fact = item.report.fact as FactName;
   const value = item.report.value as FactValue;
-  if (fact === "opening_hours" && typeof value === "string") {
-    // OSM opening_hours allows free text between double quotes: it gets the same text checks as a note.
-    const problem = firstProblem(...[...value.matchAll(/"([^"]*)"/g)].map((m) => tidyText(m[1]!)));
-    if (problem !== null) return { verdict: "held", reason: "text_check", why: `opening_hours comment fails the text checks (${problem})` };
-  }
+  // Free words in a fact value (an opening hours comment, the operator, a charge's condition or unit) get the same text checks as a note.
+  const problem = firstProblem(...factFreeText(fact, value));
+  if (problem !== null) return { verdict: "held", reason: "text_check", why: `${fact} fails the text checks (${problem})` };
   if (fact === "charge" || fact === "charge_powered") {
     const unlikely = unlikelyCharge(value, (place.facts as Record<string, unknown>)[fact]);
     if (unlikely !== null) return { verdict: "held", reason: "unlikely_charge", why: `${fact} ${show(value)} ${unlikely}, so a person checks it` };
@@ -377,9 +394,9 @@ export interface NewPlaceFields {
   contacts: Partial<Record<ContactFactName, FactValue>>;
   /** The contacts that fail `contactProblem` (`link_check`): a published place leaves them for a person. */
   failing: ContactFactName[];
-  /** The description as published: tidied, and left out when it is empty or fails the text checks. */
+  /** The description as published: tidied, and left out when it is empty or fails the text checks or the data validator's text rules. */
   description?: string;
-  /** The text check the description failed (`text_check`), or null. */
+  /** The text check the description failed (`text_check`), or null. The data validator's text rules count as `contact`. */
   descriptionProblem: TextProblem | null;
   fee?: FeeValue;
 }
@@ -389,7 +406,8 @@ export function newPlaceFields(item: ReportItem): NewPlaceFields {
   const contacts: Partial<Record<ContactFactName, FactValue>> = { ...sent, ...(address ? { address } : {}) };
   const failing = (Object.keys(contacts) as ContactFactName[]).filter((fact) => contactProblem(fact, contacts[fact]) !== null);
   const tidied = text === undefined ? undefined : tidyText(text);
-  const descriptionProblem = tidied === undefined ? null : firstProblem(tidied);
+  // The data validator checks a description as it checks review text, so text it refuses is not published either.
+  const descriptionProblem = tidied === undefined ? null : (firstProblem(tidied) ?? (textProblems(tidied).length > 0 ? "contact" : null));
   return {
     contacts,
     failing,
@@ -513,8 +531,8 @@ export const protectedSource = (place: PlaceState, fact: string): string | undef
  * refused. Doubts sent before the fact was last set are about an older value
  * and do not count, the item itself included.
  *
- * The caller records the takedown as it does a contact takedown, with the
- * item's source and date on the fact, and keeps the value with that date as
+ * The caller takes the fact off with its source and date, as it does for a
+ * contact takedown, and keeps the value with the item's date on the item as
  * the open case `decideFact` restores it from.
  */
 export function decideDoubt({ item, place, earlier }: ItemInput): ItemDecision {

@@ -1,7 +1,7 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyAttestation } from "../src/appattest.js";
-import { createHandler, type Env } from "../src/index.js";
+import { ATTEST_ORIGIN_DAILY_LIMIT, createHandler, type Env } from "../src/index.js";
 import { verifyPass } from "../src/pass.js";
 import type { KVLike } from "../src/ratelimit.js";
 import { APP_ID, makeDevice, type Device } from "./attest-fixtures.js";
@@ -203,6 +203,25 @@ describe("App Attest", () => {
     const again = await handle(request("/v1/attest/register", body), env(kv, IOS));
     expect(again.status).toBe(401);
     expect(await again.json()).toMatchObject({ error: "attestation_invalid", reason: "malformed", details: ["unknown or used challenge"] });
+  });
+
+  it(`limits challenges to ${ATTEST_ORIGIN_DAILY_LIMIT} a day for each client network, before one is stored`, async () => {
+    const e = env(kv, IOS);
+    const ask = (ip: string) => handle(request("/v1/attest/challenge", "", { "cf-connecting-ip": ip }), e);
+    for (let i = 0; i < ATTEST_ORIGIN_DAILY_LIMIT; i++) expect((await ask("203.0.113.7")).status).toBe(200);
+    const stored = kv.data.size;
+    const over = await ask("203.0.113.9");
+    expect(over.status).toBe(429);
+    expect(await over.json()).toEqual({ error: "rate_limited" });
+    expect(kv.data.size).toBe(stored);
+    expect((await ask("198.51.100.1")).status).toBe(200);
+  });
+
+  it("answers 503 unavailable when a challenge cannot be stored", async () => {
+    kv.failing = "put";
+    const res = await handle(request("/v1/attest/challenge", ""), env(kv, IOS));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "unavailable" });
   });
 
   it("limits key registrations to 500 a day for each client network", async () => {
@@ -447,13 +466,71 @@ describe("App Attest", () => {
     expect((await registered()).status).toBe(201);
   });
 
-  it("accepts a key record stored before records named their environment, and names it from the app key it is used with", async () => {
+  it("answers a key record that names no environment as an unknown key, and leaves it as it is, so the install registers again", async () => {
     await registered();
     const { app, public_key, counter } = JSON.parse(kv.data.get(`aa:${device.keyId}`)!) as Record<string, unknown>;
-    kv.data.set(`aa:${device.keyId}`, JSON.stringify({ app, public_key, counter }));
-    expect((await send(reviewBody(), 1)).status).toBe(202);
-    // The record now names the environment and App ID it was used under.
-    expect(JSON.parse(kv.data.get(`aa:${device.keyId}`)!)).toMatchObject({ environment: "production", app_id: APP_ID });
+    const legacy = JSON.stringify({ app, public_key, counter });
+    kv.data.set(`aa:${device.keyId}`, legacy);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const res = await send(reviewBody(), 1);
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ error: "attestation_invalid", reason: "unknown_key" });
+    } finally {
+      warn.mockRestore();
+    }
+    expect(kv.data.get(`aa:${device.keyId}`)).toBe(legacy);
+    expect(services.writes).toEqual([]);
+  });
+
+  it("registers a key under any spelling of its 32 bytes, names the record by the standard padded form, and takes assertions under either spelling", async () => {
+    const bare = device.keyId.replace(/=+$/, "");
+    const urlSafe = bare.replace(/\+/g, "-").replace(/\//g, "_");
+    const { challenge } = (await (await handle(request("/v1/attest/challenge", ""), env(kv, IOS))).json()) as { challenge: string };
+    const res = await handle(request("/v1/attest/register", JSON.stringify({ key_id: urlSafe, challenge, attestation: b64(device.attest(challenge)) })), env(kv, IOS));
+    expect(res.status).toBe(201);
+    expect([...kv.data.keys()].filter((k) => k.startsWith("aa:"))).toEqual([`aa:${device.keyId}`]);
+    const sendAs = (keyId: string, body: string, counter: number) =>
+      handle(request("/v1/feedback", body, { "x-attest-platform": "ios", "x-attest-key-id": keyId, "x-attest-assertion": b64(device.assert(body, counter)) }), env(kv, IOS));
+    expect((await sendAs(bare, reviewBody(), 1)).status).toBe(202);
+    expect((await sendAs(device.keyId, reviewBody({ review: { stars: 4, text: "Shady sites by the river", visited: "2026-10", visited_nearby: true } }), 2)).status).toBe(202);
+    expect(JSON.parse(kv.data.get(`aa:${device.keyId}`)!)).toMatchObject({ counter: 2 });
+    // One key, one attested-key hash, whatever the spelling.
+    expect(services.writes.map((w) => w.attest_key)).toEqual([services.writes[0]!.attest_key, services.writes[0]!.attest_key]);
+  });
+
+  it("refuses a key id that does not decode to 32 bytes", async () => {
+    for (const keyId of [`${"A".repeat(40)}`, `${"A".repeat(46)}==`, ` ${device.keyId}`]) {
+      const { challenge } = (await (await handle(request("/v1/attest/challenge", ""), env(kv, IOS))).json()) as { challenge: string };
+      const res = await handle(request("/v1/attest/register", JSON.stringify({ key_id: keyId, challenge, attestation: b64(device.attest(challenge)) })), env(kv, IOS));
+      expect(res.status).toBe(400);
+    }
+    expect([...kv.data.keys()].filter((k) => k.startsWith("aa:"))).toEqual([]);
+  });
+
+  it("keeps one record for one key when registrations under several spellings arrive together", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const { challenge } = (await (await handle(request("/v1/attest/challenge", ""), env(kv, IOS))).json()) as { challenge: string };
+      const attestation = b64(device.attest(challenge));
+      const bare = device.keyId.replace(/=+$/, "");
+      await Promise.all(
+        [device.keyId, bare, `${bare}==`].map((keyId) => handle(request("/v1/attest/register", JSON.stringify({ key_id: keyId, challenge, attestation })), env(kv, IOS))),
+      );
+      expect([...kv.data.keys()].filter((k) => k.startsWith("aa:"))).toEqual([`aa:${device.keyId}`]);
+      // An assertion is taken once, under any spelling of the key id: the spellings share one counter.
+      const body = reviewBody();
+      const assertion = b64(device.assert(body, 1));
+      const sendAs = (keyId: string) =>
+        handle(request("/v1/feedback", body, { "x-attest-platform": "ios", "x-attest-key-id": keyId, "x-attest-assertion": assertion }), env(kv, IOS));
+      expect((await sendAs(device.keyId)).status).toBe(202);
+      const again = await sendAs(bare);
+      expect(again.status).toBe(401);
+      expect(await again.json()).toMatchObject({ reason: "counter_not_increased" });
+      expect(services.writes).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("refuses an assertion whose stored key record cannot be read as an unknown key", async () => {
@@ -506,6 +583,37 @@ describe("Play Integrity", () => {
     };
     return { send, services };
   }
+
+  it(`asks Google about at most ${ATTEST_ORIGIN_DAILY_LIMIT} unreadable tokens a day from one client network`, async () => {
+    const services = fakeServices(new Map());
+    const handle = createHandler({ fetch: services.fetch, now: () => NOW });
+    const e = env(fakeKv(), ANDROID);
+    const send = (ip: string, token: string) =>
+      handle(request("/v1/feedback", reviewBody(), { "x-attest-platform": "android", "x-attest-token": token, "cf-connecting-ip": ip }), e);
+    for (let i = 0; i < ATTEST_ORIGIN_DAILY_LIMIT; i++) expect((await send("203.0.113.7", `unreadable-${i}`)).status).toBe(401);
+    const decodes = () => services.google.filter((call) => call === "decode").length;
+    expect(decodes()).toBe(ATTEST_ORIGIN_DAILY_LIMIT);
+    const over = await send("203.0.113.9", "unreadable-over");
+    expect(over.status).toBe(429);
+    expect(await over.json()).toEqual({ error: "rate_limited" });
+    expect(decodes()).toBe(ATTEST_ORIGIN_DAILY_LIMIT);
+    // Another network is still asked about.
+    expect((await send("198.51.100.1", "unreadable-other")).status).toBe(401);
+    expect(decodes()).toBe(ATTEST_ORIGIN_DAILY_LIMIT + 1);
+  });
+
+  it("does not count a token Google accepts against the network's failed tokens", async () => {
+    const verdicts = new Map<string, Verdict>();
+    const services = fakeServices(verdicts);
+    const handle = createHandler({ fetch: services.fetch, now: () => NOW });
+    const e = env(fakeKv(), { ...ANDROID, daily_limit: 100_000 });
+    for (let i = 0; i < ATTEST_ORIGIN_DAILY_LIMIT + 5; i++) {
+      const body = reviewBody({ device: `${String(i).padStart(8, "0")}-e2bb-4255-8caf-4136c566a962`, contributor: `acct_${String(i).padStart(16, "0")}` });
+      verdicts.set(`good-${i}`, { requestHash: hex(body) });
+      const res = await handle(request("/v1/feedback", body, { "x-attest-platform": "android", "x-attest-token": `good-${i}`, "cf-connecting-ip": `203.0.${i % 2}.7` }), e);
+      expect(res.status).toBe(202);
+    }
+  });
 
   it("accepts a token for this body from a recognised app on a sound device", async () => {
     const { send, services } = setup((body) => ({ requestHash: hex(body) }));

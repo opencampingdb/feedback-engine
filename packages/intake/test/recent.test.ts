@@ -1,4 +1,5 @@
 import { NEW_PLACE_DAILY_LIMIT } from "../src/recent.js";
+import { LINK_LOOKUP_ORIGIN_DAILY_LIMIT } from "../src/ratelimit.js";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import type { HeldReason as SdkHeldReason } from "@opencampingdb/feedback";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
@@ -66,6 +67,9 @@ const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 /** GitHub and Play Integrity. A token `ok:<hash>` decodes to a sound verdict for the body with that hash. */
 function fakeServices() {
   const writes: Record<string, unknown>[] = [];
+  /** Hosts URLhaus lists, and every lookup it was asked for. */
+  const listed = new Set<string>();
+  const lookups: string[] = [];
   const fetch = async (url: string, init?: RequestInit) => {
     if (url.endsWith("/access_tokens")) {
       return new Response(JSON.stringify({ token: "ghs_x", expires_at: new Date(NOW + 100 * HOUR).toISOString() }), { status: 201 });
@@ -76,6 +80,11 @@ function fakeServices() {
       return new Response("{}", { status: 201 });
     }
     if (url.startsWith("https://urlhaus-api.abuse.ch/")) {
+      const asked = new URLSearchParams(String(init?.body));
+      lookups.push(asked.toString());
+      if (listed.has(asked.get("host") ?? "")) {
+        return new Response(JSON.stringify({ query_status: "ok", blacklists: { surbl: "listed", spamhaus_dbl: "not listed" }, urls: [] }), { status: 200 });
+      }
       return new Response(JSON.stringify({ query_status: "no_results" }), { status: 200 });
     }
     if (url === "https://oauth2.googleapis.com/token") {
@@ -97,7 +106,7 @@ function fakeServices() {
     }
     return new Response("not found", { status: 404 });
   };
-  return { fetch, writes };
+  return { fetch, writes, listed, lookups };
 }
 
 let clock = NOW;
@@ -227,6 +236,50 @@ describe("recent places", () => {
     expect(places[0]!.contributor).toMatch(/^ctr_[0-9a-f]{16}$/);
   });
 
+  it("limits the public reads per client address when a rate limit binding is set, and not without one", async () => {
+    const seen: string[] = [];
+    const PER_IP = {
+      limit: async ({ key }: { key: string }) => {
+        seen.push(key);
+        return { success: seen.filter((k) => k === key).length <= 2 };
+      },
+    };
+    const limited: Env = { ...e, PER_IP };
+    const read = (path: string, ip: string) => handle(new Request(`https://intake.example${path}`, { headers: { "cf-connecting-ip": ip } }), limited);
+    expect((await read("/v1/places/recent", "203.0.113.7")).status).toBe(200);
+    expect((await read("/v1/places/recent?bbox=146,-37,147,-36", "203.0.113.7")).status).toBe(200);
+    const before = store.statements.length;
+    for (const path of ["/v1/places/recent?bbox=140,-37,147,-30", "/v1/feedback/progress?ids=fb_01JB0000000000000000000001", "/v1/photos/progress?ids=pho_01JB0000000000000000000001"]) {
+      const over = await read(path, "203.0.113.7");
+      expect(over.status).toBe(429);
+      expect(over.headers.get("retry-after")).toBe("60");
+      expect(await over.json()).toEqual({ error: "rate_limited" });
+    }
+    expect(store.statements.length).toBe(before);
+    expect((await read("/v1/places/recent", "198.51.100.1")).status).toBe(200);
+    // Without the binding, nothing changes.
+    for (let i = 0; i < 5; i++) expect((await handle(new Request("https://intake.example/v1/places/recent", { headers: { "cf-connecting-ip": "203.0.113.7" } }), e)).status).toBe(200);
+  });
+
+  it("limits the public reads per client network, as the daily budgets count them", async () => {
+    const seen: string[] = [];
+    const PER_IP = {
+      limit: async ({ key }: { key: string }) => {
+        seen.push(key);
+        return { success: seen.filter((k) => k === key).length <= 2 };
+      },
+    };
+    const limited: Env = { ...e, PER_IP };
+    const read = (ip: string) => handle(new Request("https://intake.example/v1/places/recent", { headers: { "cf-connecting-ip": ip } }), limited);
+    // Addresses in one IPv6 network share one allowance, whatever the rest of the address.
+    expect((await read("2001:db8:1:1::1")).status).toBe(200);
+    expect((await read("2001:db8:1:2::9")).status).toBe(200);
+    expect((await read("2001:db8:1:ffff:1:2:3:4")).status).toBe(429);
+    expect((await read("2001:db8:2::1")).status).toBe(200);
+    // The binding never sees the address itself.
+    expect(seen.some((k) => k.includes("2001"))).toBe(false);
+  });
+
   it("refuses a contributor's new place past the daily limit, and takes it the next day", async () => {
     for (let i = 0; i < NEW_PLACE_DAILY_LIMIT; i++) await add({ device: otherDevice(i) });
     const res = await handle(feedback(newPlace({ device: otherDevice(NEW_PLACE_DAILY_LIMIT) })), e);
@@ -348,6 +401,20 @@ describe("recent places", () => {
     await handle(check(otherDevice(3), false), e);
     expect((await list())[0]!.standing).toBe("shown");
     await handle(check(otherDevice(2)), e);
+    expect((await list())[0]!.standing).toBe("confirmed");
+  });
+
+  it("does not confirm a place on a check from the adder's own network under another device id", async () => {
+    const net = (n: number) => ({ "cf-connecting-ip": ["", "203.0.113.9", "198.51.100.9", "192.0.2.9"][n]! });
+    const res = await handle(feedback(newPlace(), net(1)), e);
+    expect(res.status).toBe(202);
+    const id = `ocdb_${((await res.json()) as { id: string }).id.replace(/^fb_/, "")}`;
+    const check = (i: number, n: number) =>
+      feedback({ type: "check", place: id, device: otherDevice(i), app_version: "1.0.0", consent: true, check: { visited: "2026-11-03", still_there: true, nearby: true } }, net(n));
+    await handle(check(1, 1), e);
+    await handle(check(2, 2), e);
+    expect((await list())[0]!.standing).toBe("shown");
+    await handle(check(3, 3), e);
     expect((await list())[0]!.standing).toBe("confirmed");
   });
 
@@ -862,9 +929,52 @@ describe("send-time decisions", () => {
     expect((await listing()).changes).toEqual([]);
     expect(written()).toHaveLength(6);
     // Each hold goes into the inbox with the item, so the apply never publishes what a check held.
-    expect(written().map((w) => w.intake)).toEqual(
-      ["owner_value", "link_check", "text_check", "ai_check", "unknown_place", "check_unavailable"].map(held),
-    );
+    expect(written().map((w) => w.intake)).toEqual([
+      // The rules held the owner's website, and its link still went through the link rules and URLhaus.
+      { ...held("owner_value"), links: "passed" },
+      ...["link_check", "text_check", "ai_check", "unknown_place", "check_unavailable"].map(held),
+    ]);
+  });
+
+  it("looks up the links of an item the rules hold, and records that they passed, so the apply can tell", async () => {
+    // A new place's id, which the index doesn't have until a release.
+    expect(await send(fact(UNKNOWN, "website", "https://new.example.org/camp"))).toEqual({ id: written()[0]!.id, ...held("unknown_place") });
+    expect(written()[0]!.intake).toEqual({ ...held("unknown_place"), links: "passed" });
+    expect(services.lookups.length).toBeGreaterThan(0);
+    // A link URLhaus lists is held for the link check.
+    services.listed.add("listed.example.org");
+    expect(await send(fact(UNKNOWN, "website", "https://listed.example.org/camp"))).toMatchObject(held("link_check"));
+    expect(written()[1]!.intake).toEqual(held("link_check"));
+    // Without URLhaus the rules hold stays, and nothing says the links passed.
+    const { URLHAUS_KEY: _, ...noUrlhaus } = e;
+    expect(await send(fact(UNKNOWN, "website", "https://other.example.org/camp"), noUrlhaus)).toMatchObject(held("unknown_place"));
+    expect(written()[2]!.intake).toEqual(held("unknown_place"));
+    // An item with no link costs no lookup.
+    const before = services.lookups.length;
+    expect(await send(fact(UNKNOWN, "toilets", true))).toMatchObject(held("unknown_place"));
+    expect(services.lookups).toHaveLength(before);
+    expect((await listing()).changes).toEqual([]);
+  });
+
+  it(`looks up the links of held items at most ${LINK_LOOKUP_ORIGIN_DAILY_LIMIT} times a day for each client network`, async () => {
+    const from = (ip: string, i: number) =>
+      handle(feedback(fact(UNKNOWN, "website", `https://new${i}.example.org/camp`, { device: otherDevice(i % 50), contributor: `acct_${String(i).padStart(16, "0")}` }), { "cf-connecting-ip": ip }), e);
+    for (let i = 0; i < LINK_LOOKUP_ORIGIN_DAILY_LIMIT; i++) expect((await from("203.0.113.7", i)).status).toBe(202);
+    expect(written().every((w) => (w.intake as { links?: string }).links === "passed")).toBe(true);
+    const before = services.lookups.length;
+    // Past the cap the item is still taken and held, with no lookup and nothing saying its links passed.
+    const over = await from("203.0.113.9", LINK_LOOKUP_ORIGIN_DAILY_LIMIT);
+    expect(over.status).toBe(202);
+    expect(await over.json()).toMatchObject(held("unknown_place"));
+    expect(services.lookups).toHaveLength(before);
+    expect(written().at(-1)!.intake).toEqual(held("unknown_place"));
+    // Another network is looked up as before.
+    await from("198.51.100.4", LINK_LOOKUP_ORIGIN_DAILY_LIMIT + 1);
+    expect(written().at(-1)!.intake).toEqual({ ...held("unknown_place"), links: "passed" });
+    // The next day the network is looked up again.
+    clock += 24 * HOUR;
+    await from("203.0.113.9", LINK_LOOKUP_ORIGIN_DAILY_LIMIT + 2);
+    expect(written().at(-1)!.intake).toEqual({ ...held("unknown_place"), links: "passed" });
   });
 
   it("stores no decision on items it doesn't decide, and stores a failed decision as check_unavailable", async () => {

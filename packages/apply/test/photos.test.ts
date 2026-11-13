@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StoredFeedback } from "@opencampingdb/feedback";
 import { applyRules, REPORTS_TO_HIDE } from "../src/rules.js";
 import { run } from "../src/run.js";
-import { dumpPhotoLine, dumpPlace } from "../src/serialise.js";
+import { dumpPhotoLine, dumpPlace, placePath } from "../src/serialise.js";
 import type { Photo, Place } from "../src/types.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
@@ -219,6 +219,35 @@ describe("photo rules", () => {
     expect(out.photos.get(PLACE)?.[0]?.hidden).toBeUndefined();
   });
 
+  it("puts a withheld report from a blocked contributor in front of a person, so the withhold can be released", () => {
+    const target = photoLine(1, "sam");
+    const withheld = { ...report("bad", target.id, "illegal"), withheld: true } as StoredFeedback;
+    const plain = report("bad", target.id, "offensive");
+    const out = rules([withheld, plain], { photos: [target], blocked: [ctr("bad")] });
+    expect(out.outcome(withheld)).toBe("needs_review");
+    expect(out.outcome(plain)).toBe("refused");
+    expect(out.decisions.find((d) => d.id === plain.id)?.reason).toBe("the contributor is blocked");
+    expect(out.changes.filter((c) => !c.automatic && /withheld key/.test(c.summary)).map((c) => c.feedback)).toEqual([[withheld.id]]);
+    expect(out.photos.get(PLACE)?.[0]?.hidden).toBeUndefined();
+  });
+
+  it("hides a photo at once only on a report from an attested install or the photo's own app", () => {
+    const target = photoLine(1, "sam");
+    const otherApp = { ...report("a", target.id, "illegal"), app: "example-app-dev", withheld: true } as StoredFeedback;
+    const out = rules([otherApp], { photos: [target] });
+    expect(out.outcome(otherApp)).toBe("needs_review");
+    expect(out.photos.get(PLACE)?.[0]?.hidden).toBeUndefined();
+    expect(out.changes.some((c) => !c.automatic && /URGENT/.test(c.summary) && /withheld key/.test(c.summary))).toBe(true);
+    const attested = { ...otherApp, id: "fb_01JC9999999999999999999999", attested: "play_integrity" } as StoredFeedback;
+    expect(rules([attested], { photos: [target] }).photos.get(PLACE)?.[0]?.hidden).toBe("reported");
+    const sameAppWithheld = { ...report("b", target.id, "personal_details"), withheld: true } as StoredFeedback;
+    const otherAppWithheld = { ...sameAppWithheld, id: "fb_01JC9999999999999999999998", app: "example-app-dev" } as StoredFeedback;
+    expect(rules([sameAppWithheld], { photos: [target] }).photos.get(PLACE)?.[0]?.hidden).toBe("reported");
+    const held = rules([otherAppWithheld], { photos: [target] });
+    expect(held.outcome(otherAppWithheld)).toBe("needs_review");
+    expect(held.photos.get(PLACE)?.[0]?.hidden).toBeUndefined();
+  });
+
   it("hides a photo at once after one illegal-content report, and flags it urgent", () => {
     const target = photoLine(1, "sam");
     const one = report("a", target.id, "illegal");
@@ -397,6 +426,40 @@ describe("photo run", () => {
     expect(removed.photos.map((p) => [p.photo, p.reason]).sort()).toEqual([[heldId, "removed"], [photoLine(1, "sam").id, "removed"]].sort());
   });
 
+  it("removes a photo at its contributor's request after its place was merged, sent with either id", async () => {
+    const OLD = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZC";
+    for (const tree of [data, review]) await put(join(tree, placePath(OLD)), dumpPlace({ ...place(OLD), status: "merged", merged_into: PLACE }));
+    const a = { ...photoLine(1, "sam"), place: OLD };
+    const b = { ...photoLine(2, "sam"), place: OLD };
+    const c = { ...photoLine(3, "kim"), place: OLD };
+    await put(join(data, "photos", `${OLD}.ndjson`), [a, b, c].map((l) => `${dumpPhotoLine(l)}\n`).join(""));
+    const byOld = removal("sam", a.id, OLD);
+    const byKept = removal("sam", b.id, PLACE);
+    const notMine = removal("sam", c.id, PLACE);
+    for (const item of [byOld, byKept, notMine]) await put(join(inbox, "pending", "2026-11-02", `${item.id}.json`), JSON.stringify(item));
+    const summary = await run({ inbox, data, reviewData: review, now: new Date(NOW) });
+    const outcome = (item: StoredFeedback) => summary.decisions.find((d) => d.id === item.id)?.outcome;
+    expect([byOld, byKept, notMine].map(outcome)).toEqual(["applied", "applied", "refused"]);
+    const left = (await readFile(join(data, "photos", `${OLD}.ndjson`), "utf8")).trim().split("\n");
+    expect(left.map((l) => JSON.parse(l).id)).toEqual([c.id]);
+    const removed = JSON.parse(await readFile(join(data, "moderation", "removed_photos.json"), "utf8")) as { photos: { photo: string }[] };
+    expect(removed.photos.map((p) => p.photo).sort()).toEqual([a.id, b.id].sort());
+  });
+
+  it("removes a held photo whose place was merged from the review checkout", async () => {
+    const OLD = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZC";
+    for (const tree of [data, review]) await put(join(tree, placePath(OLD)), dumpPlace({ ...place(OLD), status: "merged", merged_into: PLACE }));
+    const held = { ...upload("sam", 7, OLD), outcome: { result: "needs_review", reason: "", run: NOW } } as unknown as StoredFeedback;
+    const heldId = held.id.replace("fb_", "pho_");
+    await put(join(inbox, "applied", "2026-11-01", `${held.id}.json`), JSON.stringify(held));
+    await put(join(review, "photos", `${OLD}.ndjson`), `${dumpPhotoLine({ ...photoLine(2, "sam"), id: heldId, place: OLD })}\n`);
+    const r = removal("sam", heldId, PLACE);
+    await put(join(inbox, "pending", "2026-11-02", `${r.id}.json`), JSON.stringify(r));
+    const summary = await run({ inbox, data, reviewData: review, now: new Date(NOW) });
+    expect(summary.decisions.find((d) => d.id === r.id)?.outcome).toBe("applied");
+    await expect(readFile(join(review, "photos", `${OLD}.ndjson`), "utf8")).rejects.toThrow();
+  });
+
   it("removes an erased contributor's photos and lists them in removed_photos.json", async () => {
     await put(join(data, "photos", `${PLACE}.ndjson`), `${dumpPhotoLine(photoLine(1, "sam"))}\n`);
     await put(join(review, "photos", `${PLACE}.ndjson`), `${dumpPhotoLine(photoLine(2, "sam"))}\n`);
@@ -438,6 +501,38 @@ describe("photo run", () => {
       expect(summary.counts).toMatchObject({ waiting: 1, refused: 0 });
       expect(await isPending(p)).toBe(true);
       expect(summary.photo_decisions).toEqual([{ id: p.id, place: NEW, outcome: "waiting", reason: expect.stringContaining("new place not in the data yet") }]);
+    });
+
+    const removedIds = async () =>
+      ((JSON.parse(await readFile(join(photosRepo, "moderation", "removed_photos.json"), "utf8").catch(() => '{"photos":[]}')) as { photos: { photo: string }[] }).photos.map(
+        (p) => p.photo,
+      ));
+
+    it("refuses a waiting photo sent before its contributor's erasure in the same run, and lists its files for removal", async () => {
+      const p = { ...upload("sam", 8, NEW), received: "2026-11-02T09:00:00Z" } as StoredFeedback;
+      const e = erasure("sam");
+      await send(p, e);
+      const summary = await run({ inbox, data: photosRepo, places: ocdb, now: new Date(NOW), recentList: { ids: async () => new Set([NEW]) } });
+      expect(summary.photo_decisions.find((d) => d.id === p.id)).toMatchObject({ outcome: "refused", reason: "the contributor asked for their photos to be removed" });
+      expect(await isPending(p)).toBe(false);
+      expect(await removedIds()).toContain(p.id.replace("fb_", "pho_"));
+    });
+
+    it("refuses a waiting photo sent before an erasure an earlier run applied, even from a trusted contributor", async () => {
+      const earlier = applied({ ...upload("sam", 6), received: "2026-10-20T09:00:00Z" } as StoredFeedback);
+      await put(join(inbox, "applied", "2026-10-20", `${earlier.id}.json`), JSON.stringify(earlier));
+      const e = applied(erasure("sam"));
+      await put(join(inbox, "applied", "2026-11-02", `${e.id}.json`), JSON.stringify(e));
+      const p = { ...upload("sam", 8, NEW), received: "2026-11-02T09:00:00Z" } as StoredFeedback;
+      await send(p);
+      const summary = await run({ inbox, data: photosRepo, places: ocdb, now: new Date(NOW), recentList: { ids: async () => new Set([NEW]) } });
+      expect(summary.photo_decisions.find((d) => d.id === p.id)).toMatchObject({ outcome: "refused" });
+      expect(await removedIds()).toContain(p.id.replace("fb_", "pho_"));
+      // A photo sent after the erasure is decided as usual.
+      const later = { ...upload("sam", 9, NEW), received: "2026-11-02T11:00:00Z" } as StoredFeedback;
+      await send(later);
+      const next = await run({ inbox, data: photosRepo, places: ocdb, now: new Date(NOW), recentList: { ids: async () => new Set([NEW]) } });
+      expect(next.photo_decisions.find((d) => d.id === later.id)?.outcome).toBe("waiting");
     });
 
     it("refuses a photo of a place on neither the data nor the list", async () => {

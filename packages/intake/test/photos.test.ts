@@ -4,6 +4,8 @@ import { jpegSize } from "../src/jpeg.js";
 import { createHandler, hashContributor, withheldKey, type BucketLike, type Env } from "../src/index.js";
 import { signContributorProof } from "@opencampingdb/feedback";
 import type { KVLike } from "../src/ratelimit.js";
+import { setBlockList } from "../src/recent.js";
+import { fakeD1 } from "./fake-d1.js";
 
 const { privateKey } = generateKeyPairSync("rsa", {
   modulusLength: 2048,
@@ -235,7 +237,7 @@ describe("photo reports and erasure", () => {
     const gh = fakeGitHub();
     const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
     const state = fakeKv();
-    const records = `${JSON.stringify({ id: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB", place: PLACE, contributor: "ctr_00000000000000aa" })}\n`;
+    const records = `${JSON.stringify({ id: "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB", place: PLACE, contributor: "ctr_00000000000000aa", app: "example-app" })}\n`;
     const served = { get: async (key: string) => (key === `records/${PLACE}.ndjson` ? { text: async () => records } : null) };
     const e = { ...env(), PHOTO_STATE: state, PHOTOS_SERVED: served };
     const send = (reason: string) =>
@@ -259,11 +261,11 @@ describe("report reasons that withhold a photo at once", () => {
   const PHOTO = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB";
   const OTHER_PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZC";
   /** The serving bucket's records: PHOTO is served for PLACE, sent by `lineContributor`. */
-  const servedBy = (lineContributor: string) => {
-    const records = `${JSON.stringify({ id: PHOTO, place: PLACE, contributor: lineContributor })}\n`;
+  const servedBy = (lineContributor: string, app = "example-app") => {
+    const records = `${JSON.stringify({ id: PHOTO, place: PLACE, contributor: lineContributor, app })}\n`;
     return { get: async (key: string) => (key === `records/${PLACE}.ndjson` ? { text: async () => records } : null) };
   };
-  function setup(reasons?: string, served: Env["PHOTOS_SERVED"] | null = servedBy("ctr_00000000000000aa")) {
+  function setup(reasons?: string, served: Env["PHOTOS_SERVED"] | null = servedBy("ctr_00000000000000aa"), more: Partial<Env> = {}) {
     const gh = fakeGitHub();
     const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
     const state = fakeKv();
@@ -274,6 +276,7 @@ describe("report reasons that withhold a photo at once", () => {
       PHOTO_STATE: recordingState,
       ...(served ? { PHOTOS_SERVED: served } : {}),
       ...(reasons !== undefined ? { PHOTO_WITHHOLD_REASONS: reasons } : {}),
+      ...more,
     };
     const send = (reason: string, place = PLACE) =>
       handle(
@@ -292,6 +295,27 @@ describe("report reasons that withhold a photo at once", () => {
     expect((await t.send("illegal", OTHER_PLACE)).status).toBe(202);
     expect(await t.state.get(withheldKey(PHOTO))).toBeNull();
     expect(t.gh.puts[0]!.content.withheld).toBeUndefined();
+  });
+
+  it("does not withhold at once on a report from another app without attestation", async () => {
+    const t = setup(undefined, servedBy("ctr_00000000000000aa", "example-app-other"));
+    expect((await t.send("illegal")).status).toBe(202);
+    expect(await t.state.get(withheldKey(PHOTO))).toBeNull();
+    expect(t.gh.puts[0]!.content.withheld).toBeUndefined();
+  });
+
+  it("does not withhold at once on a report from a contributor on the block list", async () => {
+    const db = fakeD1();
+    await setBlockList(db, [await hashContributor("pepper", "example-app", CONTRIBUTOR)]);
+    const t = setup(undefined, servedBy("ctr_00000000000000aa"), { RECENT_LIST: db });
+    expect((await t.send("illegal")).status).toBe(202);
+    expect(await t.state.get(withheldKey(PHOTO))).toBeNull();
+    const queued = (db.db.prepare("SELECT content FROM inbox_queue").all() as { content: string }[]).map((r) => JSON.parse(r.content) as Record<string, unknown>);
+    expect([...queued, ...t.gh.puts.map((p) => p.content)].find((i) => i.type === "photo_report")?.withheld).toBeUndefined();
+    // The same report from a contributor not on the list withholds as before.
+    await setBlockList(db, []);
+    expect((await t.send("illegal")).status).toBe(202);
+    expect(await t.state.get(withheldKey(PHOTO))).not.toBeNull();
   });
 
   it("does not withhold a contributor's report of their own photo", async () => {
@@ -531,11 +555,60 @@ describe("minimum app version for photo uploads", () => {
   });
 });
 
+describe("photo metadata", () => {
+  const ascii = (text: string) => [...text].map((c) => c.charCodeAt(0));
+  const segment = (marker: number, payload: number[]) => [0xff, marker, (payload.length + 2) >> 8, (payload.length + 2) & 0xff, ...payload];
+  const EXIF = segment(0xe1, [...ascii("Exif"), 0, 0, ...ascii("position and time")]);
+  /** `jpeg()` with a scan of image data before the end of image marker, as a camera writes it. */
+  const scanned = (width: number, height: number) => {
+    const file = jpeg(width, height, 0);
+    return new Uint8Array([...file.subarray(0, -2), 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x12, 0xff, 0x00, 0x34, 0xff, 0xd9]);
+  };
+  /** A file with a segment after SOI. */
+  const withSegment = (file: Uint8Array, extra: number[]) => new Uint8Array([0xff, 0xd8, ...extra, ...file.subarray(2)]);
+
+  function setup() {
+    const gh = fakeGitHub();
+    const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
+    return { gh, handle };
+  }
+
+  it("stores a file with Exif as it was sent when PHOTO_REFUSE_METADATA is unset", async () => {
+    const { handle } = setup();
+    const bucket = fakeBucket();
+    const full = withSegment(scanned(1600, 1200), EXIF);
+    const res = await handle(upload(full, scanned(400, 300)), env(bucket));
+    expect(res.status).toBe(202);
+    const { id } = (await res.json()) as { id: string };
+    expect(bucket.objects.get(`${id}/full.jpg`)!.bytes).toEqual(full);
+  });
+
+  it("refuses a full size file or a thumbnail that still carries metadata when PHOTO_REFUSE_METADATA is on, and keeps nothing", async () => {
+    for (const [full, thumb, found] of [
+      [withSegment(scanned(1600, 1200), EXIF), scanned(400, 300), ["exif"]],
+      [scanned(1600, 1200), new Uint8Array([...scanned(400, 300), ...withSegment(scanned(8, 8), EXIF)]), ["after_end"]],
+    ] as const) {
+      const { gh, handle } = setup();
+      const bucket = fakeBucket();
+      const res = await handle(upload(full, thumb), { ...env(bucket), PHOTO_REFUSE_METADATA: "on" });
+      expect(res.status).toBe(422);
+      expect(await res.json()).toEqual({ error: "photo_metadata", metadata: found });
+      expect(bucket.objects.size).toBe(0);
+      expect(gh.puts).toHaveLength(0);
+    }
+  });
+
+  it("takes a clean pair when PHOTO_REFUSE_METADATA is on", async () => {
+    const { handle } = setup();
+    expect((await handle(upload(scanned(1600, 1200), scanned(400, 300)), { ...env(), PHOTO_REFUSE_METADATA: "on" })).status).toBe(202);
+  });
+});
+
 describe("SafeSearch on uploads", () => {
   const ACCOUNT = JSON.stringify({ client_email: "intake@example.iam.gserviceaccount.com", private_key: privateKey });
 
   /** GitHub plus Google: a token, then SafeSearch answering with `ratings` (or `status`). */
-  function withVision(ratings: Record<string, string> | undefined, status = 200) {
+  function withVision(ratings: Record<string, string> | undefined | ((image: string) => Record<string, string> | undefined), status = 200) {
     const gh = fakeGitHub();
     const vision: { auth: string | null; image: string }[] = [];
     const fetch = async (url: string, init?: RequestInit) => {
@@ -544,7 +617,8 @@ describe("SafeSearch on uploads", () => {
         const body = JSON.parse(init!.body as string) as { requests: { image: { content: string }; features: { type: string }[] }[] };
         vision.push({ auth: new Headers(init!.headers).get("authorization"), image: body.requests[0]!.image.content });
         expect(body.requests[0]!.features).toEqual([{ type: "SAFE_SEARCH_DETECTION" }]);
-        return new Response(JSON.stringify({ responses: [ratings ? { safeSearchAnnotation: ratings } : {}] }), { status });
+        const rated = typeof ratings === "function" ? ratings(body.requests[0]!.image.content) : ratings;
+        return new Response(JSON.stringify({ responses: [rated ? { safeSearchAnnotation: rated } : {}] }), { status });
       }
       return gh.fetch(url, init);
     };
@@ -555,12 +629,41 @@ describe("SafeSearch on uploads", () => {
   const calm = { adult: "VERY_UNLIKELY", violence: "UNLIKELY", racy: "POSSIBLE", medical: "VERY_UNLIKELY", spoof: "UNLIKELY" };
   const on = (bucket = fakeBucket()) => ({ ...env(bucket), SAFESEARCH: "on", GOOGLE_SERVICE_ACCOUNT: ACCOUNT });
 
-  it("sends the full size file and stores the ratings", async () => {
+  it("sends both files and stores the ratings", async () => {
     const { gh, vision, handle } = withVision(calm);
     const full = jpeg(1600, 1200);
-    expect((await handle(upload(full, jpeg(400, 300, 10)), on())).status).toBe(202);
-    expect(vision).toEqual([{ auth: "Bearer ya29.test", image: Buffer.from(full).toString("base64") }]);
+    const thumb = jpeg(400, 300, 10);
+    expect((await handle(upload(full, thumb), on())).status).toBe(202);
+    expect(vision).toEqual([
+      { auth: "Bearer ya29.test", image: Buffer.from(full).toString("base64") },
+      { auth: "Bearer ya29.test", image: Buffer.from(thumb).toString("base64") },
+    ]);
     expect(gh.puts[0]!.content).toMatchObject({ photo: { safesearch: calm } });
+  });
+
+  it("refuses a calm photo whose thumbnail is very likely adult and keeps nothing", async () => {
+    const thumb = jpeg(400, 300, 10);
+    const { gh, handle } = withVision((image) => (image === Buffer.from(thumb).toString("base64") ? { ...calm, adult: "VERY_LIKELY" } : calm));
+    const bucket = fakeBucket();
+    const res = await handle(upload(jpeg(1600, 1200), thumb), on(bucket));
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: "photo_not_allowed" });
+    expect(bucket.objects.size).toBe(0);
+    expect(gh.puts).toHaveLength(0);
+  });
+
+  it("stores the worse of the two ratings, so a likely adult thumbnail is held", async () => {
+    const thumb = jpeg(400, 300, 10);
+    const { gh, handle } = withVision((image) => (image === Buffer.from(thumb).toString("base64") ? { ...calm, adult: "LIKELY" } : { ...calm, violence: "POSSIBLE" }));
+    expect((await handle(upload(jpeg(1600, 1200), thumb), on())).status).toBe(202);
+    expect(gh.puts[0]!.content).toMatchObject({ photo: { safesearch: { ...calm, adult: "LIKELY", violence: "POSSIBLE" } } });
+  });
+
+  it("stores the photo as unchecked when Google fails on the thumbnail only", async () => {
+    const thumb = jpeg(400, 300, 10);
+    const { gh, handle } = withVision((image) => (image === Buffer.from(thumb).toString("base64") ? undefined : calm));
+    expect((await handle(upload(jpeg(1600, 1200), thumb), on())).status).toBe(202);
+    expect(gh.puts[0]!.content).toMatchObject({ photo: { safesearch: "unchecked" } });
   });
 
   it("refuses a very likely adult or violent photo and keeps nothing", async () => {

@@ -28,6 +28,15 @@ describe("newPlaceStanding", () => {
     expect(newPlaceStanding(place())).toBe("shown");
   });
 
+  it("does not count a check from the adder's own network towards confirming, whatever device id it carries", () => {
+    const adder = { device: ADDER, source: "net-adder", blocked: false, firstPlace: false };
+    const ownNetwork = { ...check("dev-new"), source: "net-adder" };
+    const other = { ...check("dev-other"), source: "net-two" };
+    const third = { ...check("dev-third"), source: "net-three" };
+    expect(newPlaceStanding(place({ contributor: adder, checks: [ownNetwork, other] }))).toBe("shown");
+    expect(newPlaceStanding(place({ contributor: adder, checks: [ownNetwork, other, third] }))).toBe("confirmed");
+  });
+
   describe("the adder's delete", () => {
     it.each([1, 23.9, 24])("withdraws the place when deleted %sh after it was added", (hours) => {
       expect(newPlaceStanding(place({ withdrawnAt: after(hours) }))).toBe("withdrawn");

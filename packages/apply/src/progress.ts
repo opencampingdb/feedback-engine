@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { isFeedbackId, type PhotoHeldReason, type StoredFeedback } from "@opencampingdb/feedback";
 import { DataRepo, readHistory } from "./io.js";
-import type { ReviewPr } from "./owners.js";
+import { isBotAuthor, type ReviewPr } from "./owners.js";
 import { placeOf, type ProgressUpdate } from "./progress-update.js";
 import { inDataOnMain as changeReportOnMain } from "./recent.js";
 import type { DoNotMatchEntry } from "./review.js";
@@ -179,12 +179,11 @@ export interface PrMentions {
  * bot opened from the data repository itself count, as for owner approvals.
  */
 export function idsOnPrs(prs: readonly ReviewPr[], botLogins: readonly string[]): PrMentions {
-  const logins = new Set(botLogins.flatMap((l) => [l, `${l}[bot]`, `app/${l}`]));
   const out = { open: new Set<string>(), merged: new Set<string>(), closed: new Set<string>() };
   for (const pr of prs) {
-    if (pr.isCrossRepository !== false || !pr.author || !logins.has(pr.author.login)) continue;
+    if (pr.isCrossRepository !== false || !isBotAuthor(pr.author, botLogins)) continue;
     const into = pr.state === "OPEN" ? out.open : pr.state === "MERGED" ? out.merged : out.closed;
-    const texts = [pr.body, ...pr.comments.filter((c) => c.author && logins.has(c.author.login)).map((c) => c.body)];
+    const texts = [pr.body, ...pr.comments.filter((c) => isBotAuthor(c.author, botLogins)).map((c) => c.body)];
     for (const text of texts) for (const word of text.split(/[^0-9A-Za-z_]+/)) if (isFeedbackId(word)) into.add(word);
   }
   return out;

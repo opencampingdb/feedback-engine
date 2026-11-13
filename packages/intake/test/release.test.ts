@@ -57,6 +57,17 @@ describe("the newest release", () => {
     expect((await recent(e)).release).toEqual({ data_version: "20261107T120000Z-def5678", published: "2026-11-07T12:01:00Z" });
   });
 
+  it("refuses a release dated more than 7 days ahead of its clock, and keeps the one it has", async () => {
+    const e = env();
+    clock = NOW;
+    await handle(announce({ data_version: "20261107T110000Z-abc1234" }), e);
+    for (const ahead of ["20261114T120001Z-def5678", "20991231T000000Z-fffffff"]) {
+      expect((await handle(announce({ data_version: ahead }), e)).status).toBe(400);
+    }
+    expect((await handle(announce({ data_version: "20261114T115959Z-def5678" }), e)).status).toBe(200);
+    expect((await recent(e)).release).toEqual({ data_version: "20261114T115959Z-def5678", published: "2026-11-07T12:00:00Z" });
+  });
+
   it("serves the release as the SDK's recent list types it", () => {
     expectTypeOf<NonNullable<Awaited<ReturnType<typeof latestRelease>>>>().toEqualTypeOf<NonNullable<RecentList["release"]>>();
   });
@@ -66,7 +77,7 @@ describe("the newest release", () => {
     expect((await handle(announce({ data_version: "20261107T110000Z-abc1234" }, null), e)).status).toBe(401);
     expect((await handle(announce({ data_version: "20261107T110000Z-abc1234" }, "wrong"), e)).status).toBe(401);
     expect(await recent(e)).not.toHaveProperty("release");
-    for (const body of [{}, { data_version: "latest" }, { data_version: "20261340T110000Z-abc1234" }, { data_version: "20261107T110000Z-abc1234", layout_version: 0 }, { data_version: "20261107T110000Z-abc1234", layout_version: "2" }]) {
+    for (const body of [{}, { data_version: "latest" }, { data_version: "20261107T110000Z" }, { data_version: "20261107T110000Z-ABC1234" }, { data_version: "20261107T110000Z-abc1234 x" }, { data_version: "20261340T110000Z-abc1234" }, { data_version: "20261107T110000Z-abc1234", layout_version: 0 }, { data_version: "20261107T110000Z-abc1234", layout_version: "2" }]) {
       expect((await handle(announce(body), e)).status).toBe(400);
     }
     expect((await handle(new Request("https://intake.example/v1/release"), e)).status).toBe(405);

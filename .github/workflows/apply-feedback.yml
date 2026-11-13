@@ -15,7 +15,11 @@
 # feedback/review with an approval box each and the label owner-claim; the next
 # run reads the merged PR and approves the ticked ones. The inbox moves are committed last, rebased
 # onto any files the intake wrote meanwhile, so a failed run is simply
-# repeated: the apply script writes nothing it has already written.
+# repeated: the apply script writes nothing it has already written, and decides
+# a takedown it already wrote as it did then. A PR or PR text GitHub refuses is
+# reported and the other inbox moves are still recorded, with the items that PR
+# was to carry put back in pending/ for a later run. The publish steps share
+# packages/apply/scripts/publish.sh from the engine checkout.
 #
 # Both tokens come from the deployment's bot GitHub App, never GITHUB_TOKEN,
 # so the data PRs trigger the data repository's CI.
@@ -193,15 +197,57 @@ jobs:
           APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
           DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
         run: |
-          # The 100 most recent PRs the bot opened in the data repository from each branch. Owner
-          # approvals read the 30 most recent review PRs. PRs from forks on a branch of the same
-          # name are left out.
+          # The 100 most recent PRs from each branch, with every comment. The apply keeps only the
+          # bot's own (botPrs in packages/apply), so the one author rule decides, and owner
+          # approvals read the 30 most recent of those. Read through GraphQL, which gives each
+          # author's account type, so the bot is known as an account of type Bot and never by its
+          # login alone.
+          query='query($owner: String!, $name: String!, $head: String!) {
+            repository(owner: $owner, name: $name) {
+              pullRequests(headRefName: $head, first: 100, orderBy: {field: CREATED_AT, direction: DESC}) {
+                nodes { number state body isCrossRepository author { __typename login }
+                  comments(first: 100) { pageInfo { hasNextPage endCursor } nodes { author { __typename login } body } } }
+              }
+            }
+          }'
+          more='query($owner: String!, $name: String!, $number: Int!, $after: String!) {
+            repository(owner: $owner, name: $name) {
+              pullRequest(number: $number) {
+                comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { author { __typename login } body } }
+              }
+            }
+          }'
+          # Comments are read 100 at a time, oldest first. A PR with more than this many pages stops
+          # the run, rather than leave its newer approval boxes unread.
+          max_pages=30
           for kind in review auto; do
-            gh pr list --repo "$DATA_REPO" --head "feedback/$kind" --state all --limit 100 \
-              --json number,state,body,comments,author,isCrossRepository |
-              jq --arg slug "$APP_SLUG" '[.[] | select(.isCrossRepository == false and
-                (.author.login as $l | any($slug, "\($slug)[bot]", "app/\($slug)"; . == $l)))]' \
-              > "$RUNNER_TEMP/$kind-prs.json"
+            page="$RUNNER_TEMP/$kind-page.json"
+            extra="$RUNNER_TEMP/$kind-more-comments.json"
+            gh api graphql -f query="$query" -f owner="${DATA_REPO%%/*}" -f name="${DATA_REPO#*/}" -f head="feedback/$kind" < /dev/null > "$page"
+            echo '[]' > "$extra"
+            jq -r '.data.repository.pullRequests.nodes[] | select(.comments.pageInfo.hasNextPage == true)
+              | "\(.number) \(.comments.pageInfo.endCursor)"' "$page" > "$RUNNER_TEMP/$kind-cursors"
+            while read -r number cursor; do
+              pages=1
+              while [ -n "$cursor" ]; do
+                if [ "$pages" -ge "$max_pages" ]; then
+                  echo "::error::PR ${number} on ${DATA_REPO} has more than $((max_pages * 100)) comments, more than the run reads. Move its approval boxes to a new PR, or close it, then run again."
+                  exit 1
+                fi
+                gh api graphql -f query="$more" -f owner="${DATA_REPO%%/*}" -f name="${DATA_REPO#*/}" -F number="$number" -f after="$cursor" \
+                  < /dev/null > "$RUNNER_TEMP/comments.json"
+                jq --argjson n "$number" --slurpfile got "$RUNNER_TEMP/comments.json" \
+                  '. + [{number: $n, nodes: $got[0].data.repository.pullRequest.comments.nodes}]' "$extra" > "$extra.next"
+                mv "$extra.next" "$extra"
+                cursor="$(jq -r '.data.repository.pullRequest.comments.pageInfo | if .hasNextPage == true then .endCursor else "" end' "$RUNNER_TEMP/comments.json")"
+                pages=$((pages + 1))
+              done
+            done < "$RUNNER_TEMP/$kind-cursors"
+            jq --slurpfile extra "$extra" 'def who: if . == null then null else {login, type: .__typename} end;
+              [.data.repository.pullRequests.nodes[] | .number as $n
+                | {number, state, body, isCrossRepository, author: (.author | who),
+                   comments: [(.comments.nodes + [$extra[0][] | select(.number == $n) | .nodes[]])[]
+                     | {author: (.author | who), body}]}]' "$page" > "$RUNNER_TEMP/$kind-prs.json"
           done
 
       - name: Check out data main for the recent places store
@@ -274,11 +320,14 @@ jobs:
             # Only the bot's own PR from the data repository counts, never one
             # from a fork that uses the same branch name. A PR from the data
             # repository by anyone else stops the run before the branch is replaced.
+            # The GitHub CLI gives an author's login alone, so this is isBotAuthor in
+            # packages/apply for an author with no account type (workflow.test.ts pins
+            # the two together).
             prs="$(gh pr list --repo "$DATA_REPO" --head "$branch" --base "$BASE_BRANCH" --state open --limit 100 \
               --json number,isCrossRepository,author)"
             same_repo() {
               jq -r --arg slug "$APP_SLUG" --argjson bot "$1" '[.[] | select(.isCrossRepository == false and
-                ((.author.login as $l | any($slug, "\($slug)[bot]", "app/\($slug)"; . == $l)) == $bot))] | first | .number // empty' <<< "$prs"
+                ((.author.login as $l | any("\($slug)[bot]", "app/\($slug)"; . == $l)) == $bot))] | first | .number // empty' <<< "$prs"
             }
             other="$(same_repo false)"
             if [ -n "$other" ]; then
@@ -339,8 +388,10 @@ jobs:
           PR_OPEN: ${{ steps.branches.outputs.auto_open }}
           PR_NUMBER: ${{ steps.branches.outputs.auto_pr }}
           RUN_ID: ${{ github.run_id }}
+          ENGINE_DIR: ${{ github.workspace }}/engine
         working-directory: data-auto
         run: |
+          . "$ENGINE_DIR/packages/apply/scripts/publish.sh"
           body="$RUNNER_TEMP/auto-pr-body.md"
           # Asks GitHub to merge PR $1 once CI passes. Where it can't (allow_auto_merge off, or
           # no required check on the base branch), says so loudly and returns 1, never failing
@@ -356,10 +407,27 @@ jobs:
             sed -i.orig "s|so this PR merges itself once CI passes\.|but auto-merge is off on ${DATA_REPO}, so this PR needs merging by hand once CI passes.|" "$body"
             rm -f "$body.orig"
           }
+          # The inbox step moves this run's items for the PR back to pending/ unless landed=true:
+          # their changes are on an open PR, or already on the base branch.
           git add -A
+          start="$(git rev-parse HEAD)"
           git commit -m "Apply feedback automatically (run ${RUN_ID})"
+          if [ "$PR_OPEN" = "true" ] && gone "$PR_NUMBER"; then
+            restart "$start" "$PR_NUMBER"
+            PR_OPEN=false
+          fi
           if [ "$PR_OPEN" = "true" ]; then
             git push origin HEAD:refs/heads/feedback/auto
+            # Auto-merge is on for this PR, so it may have merged between the read above and the
+            # push, leaving the pushed commit on a branch with no PR. Read again, and if it went,
+            # move the commit to a new PR.
+            if gone "$PR_NUMBER"; then
+              restart "$start" "$PR_NUMBER"
+              PR_OPEN=false
+            fi
+          fi
+          if [ "$PR_OPEN" = "true" ]; then
+            echo "landed=true" >> "$GITHUB_OUTPUT"
             # Asked again each run while it is not set, in case the setting was turned on since.
             set_already="$(gh pr view "$PR_NUMBER" --repo "$DATA_REPO" --json autoMergeRequest --jq '.autoMergeRequest != null' || echo false)"
             if [ "$set_already" != "true" ] && ! auto_merge "$PR_NUMBER"; then by_hand; fi
@@ -368,20 +436,31 @@ jobs:
             gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$body" ||
               echo "::error title=PR comment refused::could not comment on PR ${PR_NUMBER} on ${DATA_REPO}; the run's changes are on feedback/auto and listed in this run's job summary"
             echo "pr=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          elif [ "$(ahead)" -eq 0 ]; then
+            # The PR merged with this run's commit in it: the base branch holds every change.
+            echo "::notice::the base branch already holds this run's automatic changes"
+            echo "landed=true" >> "$GITHUB_OUTPUT"
+            echo "pr=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           else
             # No open PR uses the branch, so it can be replaced.
             git push --force origin HEAD:refs/heads/feedback/auto
-            url="$(gh pr create --repo "$DATA_REPO" --base "$BASE_BRANCH" --head feedback/auto \
-              --title "Feedback: automatic changes" --body-file "$body")"
-            echo "pr=${url}" >> "$GITHUB_OUTPUT"
-            if ! auto_merge "$url"; then
-              by_hand
-              gh pr edit "$url" --repo "$DATA_REPO" --body-file "$body" ||
-                echo "::warning::could not say on ${url} that it needs merging by hand"
+            if url="$(gh pr create --repo "$DATA_REPO" --base "$BASE_BRANCH" --head feedback/auto \
+              --title "Feedback: automatic changes" --body-file "$body")"; then
+              echo "landed=true" >> "$GITHUB_OUTPUT"
+              echo "pr=${url}" >> "$GITHUB_OUTPUT"
+              if ! auto_merge "$url"; then
+                by_hand
+                gh pr edit "$url" --repo "$DATA_REPO" --body-file "$body" ||
+                  echo "::warning::could not say on ${url} that it needs merging by hand"
+              fi
+            else
+              # Said loudly, and the run goes on: the inbox step puts this run's items back in pending/.
+              echo "::error title=PR refused::could not open the automatic PR on ${DATA_REPO}; this run's automatic items go back to pending/ for a later run"
             fi
           fi
 
       - name: Publish changes for review
+        id: publish-review
         if: steps.apply.outputs.review_changed == 'true'
         env:
           GH_TOKEN: ${{ steps.data-token.outputs.token }}
@@ -391,13 +470,37 @@ jobs:
           PR_NUMBER: ${{ steps.branches.outputs.review_pr }}
           OWNER_CLAIMS: ${{ steps.apply.outputs.owner_claims }}
           RUN_ID: ${{ github.run_id }}
+          ENGINE_DIR: ${{ github.workspace }}/engine
         working-directory: data-review
         run: |
+          . "$ENGINE_DIR/packages/apply/scripts/publish.sh"
+          body="$RUNNER_TEMP/review-pr-body.md"
+          # GitHub may refuse a text (one too long, say, or a PR it will not open). That is said
+          # loudly and the run goes on. The run's items are recorded as decided only when an open
+          # PR carries the text that lists them (claims_listed): otherwise the inbox step puts
+          # them back in pending/, so a later run decides them again.
+          refused() {
+            echo "::error title=PR text refused::could not $1 on ${DATA_REPO}; this run's items for a person go back to pending/ for a later run"
+          }
+          # Held and closed cases the body had no room for, in order: review-pr-body.md.2, .3 and so on.
+          follow_ups() {
+            n=2
+            while [ -e "${body}.${n}" ]; do
+              gh pr comment "$1" --repo "$DATA_REPO" --body-file "${body}.${n}" || refused "add comment ${n} to PR ${1}"
+              n=$((n + 1))
+            done
+          }
           git add -A
+          start="$(git rev-parse HEAD)"
+          if ! git diff --cached --quiet; then
+            git commit -m "Feedback for review (run ${RUN_ID})"
+          fi
+          if [ "$PR_OPEN" = "true" ] && gone "$PR_NUMBER"; then
+            restart "$start" "$PR_NUMBER"
+            PR_OPEN=false
+          fi
           if [ "$PR_OPEN" = "true" ]; then
-            if ! git diff --cached --quiet; then
-              git commit -m "Feedback for review (run ${RUN_ID})"
-            fi
+            local_head="$(git rev-parse HEAD)"
             # The intake's AI reviewer commits to this branch at any time. Rebase
             # onto its commits and retry, keeping the merge of the base branch
             # made above.
@@ -416,23 +519,44 @@ jobs:
               echo "::error::could not push to feedback/review after 5 attempts"
               exit 1
             fi
-            # The changes are pushed already: a refused comment is said loudly, and the run
-            # still records its inbox moves, so the same items are not decided again.
-            gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$RUNNER_TEMP/review-pr-body.md" ||
-              echo "::error title=PR comment refused::could not comment on PR ${PR_NUMBER} on ${DATA_REPO}; the run's items are on feedback/review and listed in this run's job summary"
+            # A person may have merged or closed the PR between the read above and the push. If so,
+            # this run's commits go to a new PR from the base branch.
+            if gone "$PR_NUMBER"; then
+              git reset --hard "$local_head"
+              restart "$start" "$PR_NUMBER"
+              PR_OPEN=false
+            fi
+          fi
+          if [ "$PR_OPEN" = "true" ]; then
+            if gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$body"; then
+              echo "claims_listed=true" >> "$GITHUB_OUTPUT"
+              follow_ups "$PR_NUMBER"
+            else
+              refused "comment on PR ${PR_NUMBER}"
+            fi
             if [ "$OWNER_CLAIMS" = "true" ]; then
-              gh pr edit "$PR_NUMBER" --repo "$DATA_REPO" --add-label owner-claim
+              gh pr edit "$PR_NUMBER" --repo "$DATA_REPO" --add-label owner-claim ||
+                echo "::warning::could not label PR ${PR_NUMBER} on ${DATA_REPO} owner-claim"
             fi
           else
-            # A run whose only items are reports to read changes no file. The
-            # empty commit still lets a PR carry them.
-            git commit --allow-empty -m "Feedback for review (run ${RUN_ID})"
+            # A run whose only items are reports to read changes no file, and the base branch may
+            # already hold a merged PR's changes. The empty commit still lets a PR carry them.
+            if [ "$(ahead)" -eq 0 ]; then
+              git commit --allow-empty -m "Feedback for review (run ${RUN_ID})"
+            fi
             git push --force origin HEAD:refs/heads/feedback/review
-            labels="needs-review"
-            if [ "$OWNER_CLAIMS" = "true" ]; then labels="needs-review,owner-claim"; fi
-            gh pr create --repo "$DATA_REPO" --base "$BASE_BRANCH" --head feedback/review \
-              --title "Feedback: for a person to check" --label "$labels" \
-              --body-file "$RUNNER_TEMP/review-pr-body.md"
+            if url="$(gh pr create --repo "$DATA_REPO" --base "$BASE_BRANCH" --head feedback/review \
+              --title "Feedback: for a person to check" --body-file "$body")"; then
+              echo "claims_listed=true" >> "$GITHUB_OUTPUT"
+              follow_ups "$url"
+              # Labels go on in their own call, so a missing label never stops the PR.
+              labels="needs-review"
+              if [ "$OWNER_CLAIMS" = "true" ]; then labels="needs-review,owner-claim"; fi
+              gh pr edit "$url" --repo "$DATA_REPO" --add-label "$labels" ||
+                echo "::warning::could not label ${url} on ${DATA_REPO} ${labels}"
+            else
+              refused "open the review PR"
+            fi
           fi
 
       - name: Commit the inbox moves
@@ -441,11 +565,37 @@ jobs:
           APP_SLUG: ${{ steps.inbox-token.outputs.app-slug }}
           BOT_EMAIL: ${{ steps.branches.outputs.bot_email }}
           RUN_ID: ${{ github.run_id }}
+          AUTO_CHANGED: ${{ steps.apply.outputs.auto_changed }}
+          AUTO_LANDED: ${{ steps.publish-auto.outputs.landed }}
+          REVIEW_CHANGED: ${{ steps.apply.outputs.review_changed }}
+          CLAIMS_LISTED: ${{ steps.publish-review.outputs.claims_listed }}
         working-directory: inbox
         run: |
           git config user.name "${APP_SLUG}[bot]"
           git config user.email "$BOT_EMAIL"
+          # Undoes the moves listed under $1 in the run summary: each item goes back to pending/,
+          # so a later run decides it again.
+          put_back() {
+            jq -r --arg key "$1" '(.[$key] // [])[] | .from, .to' "$RUNNER_TEMP/summary.json" > "$RUNNER_TEMP/put-back"
+            while read -r from && read -r to; do
+              rm -f -- "$to"
+              git checkout HEAD -- "$from"
+            done < "$RUNNER_TEMP/put-back"
+          }
+          if [ "$REVIEW_CHANGED" = "true" ] && [ "$CLAIMS_LISTED" != "true" ]; then
+            # No open PR lists this run's owner claims and items for a person.
+            put_back claim_moves
+            put_back review_moves
+          fi
+          if [ "$AUTO_CHANGED" = "true" ] && [ "$AUTO_LANDED" != "true" ]; then
+            # No open PR carries this run's automatic changes, and the base branch does not hold them.
+            put_back auto_moves
+          fi
           git add -A
+          if git diff --cached --quiet; then
+            echo "No inbox moves to record."
+            exit 0
+          fi
           git commit -m "Move applied and refused feedback (run ${RUN_ID})"
           # The intake may have added pending files since the checkout. Rebase
           # onto them and retry. Rename detection stays off because whole day

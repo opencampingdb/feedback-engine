@@ -7,7 +7,7 @@ import { dumpPlace, placePath } from "../../apply/src/serialise.js";
 import type { Place } from "../../apply/src/types.js";
 import type { AiLike } from "../src/checks.js";
 import { createReviewer, createScheduled, type Env } from "../src/index.js";
-import { decidedKeys, DEFAULT_REVIEW_MODEL, MAX_MODEL_CASES, REVIEW_BRANCH } from "../src/reviewer.js";
+import { decidedKeys, DEFAULT_REVIEW_MODEL, MAX_MODEL_CASES, MAX_MODEL_FAILURES, REVIEW_BRANCH } from "../src/reviewer.js";
 import { REVIEW_EVERY_MS } from "../src/runs.js";
 import { fakeD1 } from "./fake-d1.js";
 
@@ -632,7 +632,7 @@ describe("the AI reviewer", () => {
     expect(await run(gh, ai)).toEqual({ outcome: "no_pr" });
   });
 
-  it("stops when the model fails, records what it decided, and asks about the failed case next run", async () => {
+  it("records what it decided when the model fails, and asks about the failed case next run", async () => {
     const cases = [0, 1].map((n) => heldCase(n, { case: "duplicate", standing: "held", duplicate_of: id(9), distance_m: 30 }));
     const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
     gh.put(place(0));
@@ -650,6 +650,109 @@ describe("the AI reviewer", () => {
     await run(gh, ai);
     expect(caseOf(asked[2]!.input).place).toMatchObject({ id: id(1) });
     expect(gh.read(1).standing).toBe("shown");
+  });
+
+  it("goes on past a case whose model call fails, and leaves it to a person after MAX_MODEL_FAILURES runs in which other cases were answered", async () => {
+    const dup = (n: number) => heldCase(n, { case: "duplicate", standing: "held", duplicate_of: id(9), distance_m: 30 });
+    // Case 1's model call fails on every run. Case 3 is one the rules settle.
+    const cases = [dup(0), dup(1), dup(2), heldCase(3, { case: "contacts", standing: "shown", contacts: ["website"] })];
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+    for (const n of [0, 1, 2]) gh.put(place(n));
+    gh.put(place(3, { standing: "shown" }));
+    const { ai, asked } = fakeAi((input) => {
+      if ((caseOf(input).place as { id: string }).id === id(1)) throw new Error("AI unavailable");
+      return reply("approve", "Separate.");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const askedAbout = () => asked.map((a) => (caseOf(a.input).place as { id: string }).id);
+    try {
+      const first = await run(gh, ai);
+      if (first === "off" || first === "failed" || first.outcome !== "reviewed") throw new Error("expected a review");
+      expect(first.decisions.map((d) => [d.place, d.decision])).toEqual([
+        [id(0), "approve"],
+        [id(2), "approve"],
+        [id(3), "leave"],
+      ]);
+      expect(gh.read(2).standing).toBe("shown");
+      expect(askedAbout()).toEqual([id(0), id(1), id(2)]);
+
+      // Each later run has a new case the model answers, beside case 1, until case 1 has failed MAX_MODEL_FAILURES runs.
+      let last: Awaited<ReturnType<typeof run>> = first;
+      for (let run_ = 2; run_ <= MAX_MODEL_FAILURES; run_++) {
+        const n = run_ + 2;
+        gh.put(place(n));
+        gh.comments.push({ body: reviewPrBody(AT, [], new Map(), [], [dup(n)]), user: { type: "Bot", login: APPLY_BOT }, author_association: "NONE" });
+        clock += REVIEW_EVERY_MS;
+        last = await run(gh, ai);
+      }
+      expect(askedAbout().slice(3)).toEqual(Array.from({ length: MAX_MODEL_FAILURES - 1 }, (_, i) => [id(1), id(i + 4)]).flat());
+      expect(last).toMatchObject({
+        outcome: "reviewed",
+        decisions: [
+          { place: id(MAX_MODEL_FAILURES + 2), decision: "approve" },
+          { place: id(1), decision: "leave", committed: false },
+        ],
+      });
+      expect((last as { decisions: { reason: string }[] }).decisions[1]!.reason).toContain(`${MAX_MODEL_FAILURES} runs`);
+      expect(gh.read(1).standing).toBe("held");
+
+      // The case has a decision now, so the next run asks nothing.
+      clock += REVIEW_EVERY_MS;
+      const count = asked.length;
+      expect(await run(gh, ai)).toMatchObject({ outcome: "reviewed", decisions: [] });
+      expect(asked).toHaveLength(count);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("counts nothing in a run where every model call fails, so an outage leaves no case decided", async () => {
+    const cases = [0, 1].map((n) => heldCase(n, { case: "duplicate", standing: "held", duplicate_of: id(9), distance_m: 30 }));
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+    gh.put(place(0));
+    gh.put(place(1));
+    let down = true;
+    const { ai, asked } = fakeAi(() => {
+      if (down) throw new Error("AI unavailable");
+      return reply("approve", "Separate.");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      for (let n = 1; n <= MAX_MODEL_FAILURES + 1; n++) {
+        expect(await run(gh, ai)).toMatchObject({ outcome: "reviewed", decisions: [] });
+        clock += REVIEW_EVERY_MS;
+      }
+      expect(asked).toHaveLength(2 * (MAX_MODEL_FAILURES + 1));
+      expect(gh.posted()).toHaveLength(0);
+      expect([gh.read(0).standing, gh.read(1).standing]).toEqual(["held", "held"]);
+      // The model is back: both cases are decided by the model, not left for their failed runs.
+      down = false;
+      expect(await run(gh, ai)).toMatchObject({ outcome: "reviewed", decisions: [{ decision: "approve" }, { decision: "approve" }] });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("leaves a lone case whose model call keeps failing to a person only once its failed runs span an hour", async () => {
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [heldCase(0, { case: "duplicate", standing: "held", duplicate_of: id(9), distance_m: 30 })]));
+    gh.put(place(0));
+    const { ai } = fakeAi(() => {
+      throw new Error("AI unavailable");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const start = clock;
+      let result = await run(gh, ai);
+      while (clock - start < 60 * 60 * 1000) {
+        expect(result).toMatchObject({ outcome: "reviewed", decisions: [] });
+        clock += REVIEW_EVERY_MS;
+        result = await run(gh, ai);
+      }
+      expect(result).toMatchObject({ outcome: "reviewed", decisions: [{ place: id(0), decision: "leave", committed: false }] });
+      expect(gh.read(0).standing).toBe("held");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("skips a commit that loses to a newer version of the place, to try again next run", async () => {

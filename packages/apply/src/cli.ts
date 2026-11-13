@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import type { ReviewPr } from "./owners.js";
-import { intakeRecentList, intakeRecentStore, sendBlockList, sendDoubtCases, sendOverruled, settleRecentChanges, settleRecentPlaces } from "./recent.js";
+import { botPrs, type ReviewPr } from "./owners.js";
+import { intakeRecentList, intakeRecentStore, tellIntake } from "./recent.js";
 import { sendPhotoProgress } from "./photo-progress.js";
 import { sendProgress } from "./progress.js";
 import { run } from "./run.js";
@@ -18,10 +18,16 @@ const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>
 Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
 tree when left out). Decided items move to <inbox>/applied or <inbox>/refused.
---review-prs is JSON from \`gh pr list --head feedback/review --state all
---json number,state,body,comments,author,isCrossRepository\`; ticked owner
-claim boxes in merged PRs approve those claims. Only PRs opened by --bot-login
-from the data repository itself, and only comments by --bot-login, count.
+--review-prs is a JSON array of the review PRs, newest first, each with
+number, state, body, isCrossRepository, author and comments (author and body),
+where an author is {login, type} with the account type GitHub's GraphQL API
+gives as __typename; ticked owner claim boxes in merged PRs approve those
+claims. Only PRs opened by the --bot-login App from the data repository
+itself, and only comments by it, count: an author of type Bot with that login
+or <login>[bot], or app/<login> as the GitHub CLI writes it, never the bare
+login alone. Held and closed cases the review PR body has no room for are
+written to <file>.2, <file>.3 and so on beside --review-pr-body, to post as
+comments in that order.
 --places makes it a photo repository run for an app's own photo service:
 <data> holds only photos and moderation files, place records are read from the
 Open Camping DB data checkout in <dir>, and anything but photos is refused.
@@ -113,10 +119,11 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const reviewPrs = values["review-prs"]
-    ? (JSON.parse(await readFile(values["review-prs"], "utf8")) as ReviewPr[])
-    : undefined;
-  const autoPrs = values["auto-prs"] ? (JSON.parse(await readFile(values["auto-prs"], "utf8")) as ReviewPr[]) : undefined;
+  // Only the bot's own PRs count, by the one author rule (botPrs), before the 30 most recent are taken.
+  const botLogins = values["bot-login"] ?? [];
+  const readPrs = async (file: string | undefined) => (file ? botPrs(JSON.parse(await readFile(file, "utf8")) as ReviewPr[], botLogins) : undefined);
+  const reviewPrs = await readPrs(values["review-prs"]);
+  const autoPrs = await readPrs(values["auto-prs"]);
   const summary = await run({
     inbox: values.inbox,
     data: values.data,
@@ -133,7 +140,11 @@ async function main(): Promise<number> {
   });
 
   if (values["auto-pr-body"]) await writeFile(values["auto-pr-body"], summary.auto_pr_body, "utf8");
-  if (values["review-pr-body"]) await writeFile(values["review-pr-body"], summary.review_pr_body, "utf8");
+  if (values["review-pr-body"]) {
+    await writeFile(values["review-pr-body"], summary.review_pr_body, "utf8");
+    // Follow-up comments, posted in order after the body: <file>.2, <file>.3 and so on.
+    for (const [i, comment] of summary.review_pr_comments.entries()) await writeFile(`${values["review-pr-body"]}.${i + 2}`, comment, "utf8");
+  }
   // Appended: GitHub's job summary file may hold other steps' summaries.
   if (values["job-summary"] && summary.job_summary) await appendFile(values["job-summary"], summary.job_summary, "utf8");
   if (values.summary) await writeFile(values.summary, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
@@ -158,16 +169,8 @@ async function main(): Promise<number> {
     console.log(`progress of ${progress.sent} photo(s) sent to the photo intake${progress.failed > 0 ? `, ${progress.failed} not sent` : ""}`);
   } else if (values.main && values.intake && token) {
     const store = intakeRecentStore(values.intake, token);
-    const settled = await settleRecentPlaces({ inbox: values.inbox, main: values.main, store, ...(now ? { now } : {}) });
-    console.log(`${settled.length} new place(s) taken out of the recent places store`);
-    const blocked = await sendBlockList({ main: values.main, store });
-    console.log(`block list of ${blocked.length} contributor(s) sent to the intake`);
-    const overruled = await sendOverruled({ ids: summary.not_applied, refused: summary.refused, store });
-    console.log(`${overruled.length} item(s) decided other than applied sent to the intake`);
-    const inData = await settleRecentChanges({ inbox: values.inbox, main: values.main, store, ...(now ? { now } : {}) });
-    console.log(`${inData.length} applied report(s) in the data on main sent to the intake`);
-    const cases = await sendDoubtCases({ inbox: values.inbox, store, ...(now ? { now } : {}) });
-    console.log(`${cases.length} fact(s) taken down after doubts sent to the intake`);
+    // A refused call is logged and sent again next run: the run still writes its outputs and records its inbox moves.
+    const told = await tellIntake({ inbox: values.inbox, main: values.main, store, notApplied: summary.not_applied, refused: summary.refused, ...(now ? { now } : {}) });
     // Failures are logged inside and never fail the run.
     const progress = await sendProgress({
       inbox: values.inbox,
@@ -182,7 +185,7 @@ async function main(): Promise<number> {
       console.warn(`working out the progress of items failed, trying again next run: ${String(error)}`);
       return { sent: 0, failed: 0, recorded: false };
     });
-    progressRecorded = progress.recorded;
+    progressRecorded = progress.recorded || told.recorded;
     console.log(`progress of ${progress.sent} item(s) sent to the intake${progress.failed > 0 ? `, ${progress.failed} not sent` : ""}`);
   }
   const output = process.env.GITHUB_OUTPUT;

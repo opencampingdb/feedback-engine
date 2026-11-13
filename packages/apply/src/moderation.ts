@@ -1,9 +1,12 @@
-import { findContactDetails, MAX_TEXT_LENGTH } from "@opencampingdb/feedback";
+import { findContactDetails, MAX_TEXT_LENGTH, textProblem, tidyText } from "@opencampingdb/feedback";
+import { textProblems } from "./data-check.js";
 
 /**
- * Review moderation. A review is refused for any reason this returns. The
- * patterns include every check the data repository's validator runs on review
- * text, so an accepted review never fails the data CI.
+ * Review moderation. A review is refused for any reason this returns. It
+ * starts from the SDK's text rules (`textProblem`), which every other piece
+ * of traveller free text passes, and adds every check the data repository's
+ * validator runs on review text, with Python's character classes
+ * (`textProblems`), so an accepted review never fails the data CI.
  */
 
 const RULES: [RegExp, string][] = [
@@ -120,11 +123,17 @@ const CONTACT_REASON = { email: "an email address", phone: "a phone number", lin
 export function moderateReview(text: string): string[] {
   const reasons = new Set<string>();
   if (text.length > MAX_TEXT_LENGTH) reasons.add(`longer than ${MAX_TEXT_LENGTH.toLocaleString("en-AU")} characters`);
+  else {
+    const problem = textProblem(tidyText(text));
+    if (problem === "rude") reasons.add("offensive language");
+    if (problem === "spam") reasons.add("spam");
+  }
   // Dates such as 2026-10-30 or a visit month such as 2026-10 are not phone
   // numbers. Swap them for a letter before the digit-run check.
   const withoutDates = text.replace(ISO_DATE, "x");
   for (const [pattern, reason] of RULES) if (pattern.test(withoutDates)) reasons.add(reason);
   for (const kind of findContactDetails(text)) reasons.add(CONTACT_REASON[kind]);
+  for (const reason of textProblems(text)) reasons.add(reason);
   const signOff = SIGN_OFF.exec(text);
   if (signOff && /^[A-Z][a-z]+$/.test(signOff[2] ?? "")) reasons.add("a personal name");
   if (hasProfanity(text)) reasons.add("offensive language");

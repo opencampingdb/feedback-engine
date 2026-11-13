@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HELD_REASONS, REPORT_KINDS, validateSubmission } from "../src/index.js";
+import { HELD_REASONS, isCommonsFileName, REPORT_KINDS, validateSubmission } from "../src/index.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const base = { device: "3b241101-e2bb-4255-8caf-4136c566a962", app_version: "1.0.0", consent: true };
@@ -18,6 +18,39 @@ describe("commons_mismatch reports", () => {
     const errors = ["report.file must be the Commons file name, 1 to 255 characters on one line"];
     for (const file of [undefined, "", " ", "a".repeat(256), "Two\nlines.jpg", 7]) expect(report({ kind: "commons_mismatch", file })).toEqual({ ok: false, errors });
     expect(report({ kind: "commons_mismatch", file: "Pool.jpg" }, null)).toEqual({ ok: false, errors: ["place is required unless report.kind is new_place"] });
+  });
+
+  it("needs the shape of a Commons file name: no File: prefix, markup, line separator, link or email address", () => {
+    const errors = ["report.file must be a Commons file name with its extension, without a File: prefix, markup, a link or an email address"];
+    for (const file of [
+      "File:Pool.jpg",
+      "x.jpg [Look here](https://example.org/x)",
+      "Pool|x.jpg",
+      "Pool<b>.jpg",
+      "Pool\u2028x.jpg",
+      "Pool\u0085x.jpg",
+      "https://example.org/Pool.jpg",
+      "write to someone@example.com.jpg",
+      "Pool",
+    ]) {
+      expect(report({ kind: "commons_mismatch", file })).toEqual({ ok: false, errors });
+    }
+    for (const file of ["IMG_20230101_123456789.jpg", "Lake (Victoria) 2019.JPG", "Pool 0412 345 678.jpeg", "Camp, Example Shire.tif"]) {
+      expect(report({ kind: "commons_mismatch", file }).ok).toBe(true);
+    }
+  });
+
+  it("counts a file name's length in characters, as the data repository's validator does, not in UTF-16 units", () => {
+    // 127 characters outside the Basic Multilingual Plane are 254 UTF-16 units, plus ".jpg".
+    const wide = `${"\u{1F3D5}".repeat(127)}.jpg`;
+    expect(wide.length).toBeGreaterThan(255);
+    expect(isCommonsFileName(wide)).toBe(true);
+    expect(report({ kind: "commons_mismatch", file: wide }).ok).toBe(true);
+    const over = `${"\u{1F3D5}".repeat(252)}.jpg`;
+    expect(isCommonsFileName(over)).toBe(false);
+    expect(report({ kind: "commons_mismatch", file: over }).ok).toBe(false);
+    expect(isCommonsFileName(`${"a".repeat(251)}.jpg`)).toBe(true);
+    expect(isCommonsFileName(`${"a".repeat(252)}.jpg`)).toBe(false);
   });
 
   it("refuses a file on any other kind, and a fact, value or reason on this one", () => {

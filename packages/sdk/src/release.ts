@@ -1,5 +1,5 @@
 import { sha256HexBytes } from "./sha256.js";
-import { dataVersionTime } from "./recent.js";
+import { dataVersionProblem, dataVersionTime } from "./recent.js";
 import type { StorageAdapter } from "./client.js";
 
 /** Where the data repository publishes the newest release's manifest. */
@@ -104,7 +104,8 @@ export type ReleaseUpdateStatus = "up_to_date" | "updated" | "replaced" | "older
  * whole database, names another release than the manifest's. The same
  * manifest is then answered `mismatch` without a download until it changes.
  * A manifest also fails as `manifest` when its database url is not https, or
- * when its `data_version` has no readable time while the app's has one.
+ * when its `data_version` is not a release name (`<yyyymmdd>T<hhmmss>Z-<short
+ * sha>`) or is dated more than 7 days ahead of the device clock.
  */
 export type ReleaseUpdateReason = "network" | "manifest" | "checksum" | "gunzip" | "read" | "apply" | "replace" | "mismatch";
 
@@ -450,19 +451,19 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
         throw new UpdateStopped("manifest", causeOf(error));
       }
       const manifest = readManifest(body);
+      const versionProblem = dataVersionProblem(manifest.data_version);
+      if (versionProblem) throw stopped("manifest", "ManifestInvalid", `the manifest's data_version ${manifest.data_version}: ${versionProblem}`);
       if (manifest.format_version > newestFormat) return { status: "format_unsupported", dataVersion };
       if (!readableLayouts.includes(manifest.layout_version)) return { status: "layout_unsupported", dataVersion };
       const layout = dataVersion === null ? null : await orStop("read", () => adapter.currentLayoutVersion());
       if (manifest.data_version === dataVersion && manifest.layout_version === layout) return { status: "up_to_date", dataVersion };
       // A manifest older than the database the app has (an older release marked latest) is never applied:
-      // rolling back would bring back everything later releases took out.
-      const manifestTime = dataVersionTime(manifest.data_version);
-      const localTime = dataVersion === null ? undefined : dataVersionTime(dataVersion);
-      if (manifestTime !== undefined && localTime !== undefined && manifestTime < localTime) return { status: "older_release", dataVersion };
-      // A release with no readable time can't be shown to be newer than a dated database, so it is not applied.
-      if (manifestTime === undefined && localTime !== undefined) {
-        throw stopped("manifest", "ManifestInvalid", `the manifest's data_version ${manifest.data_version} has no readable time`);
-      }
+      // rolling back would bring back everything later releases took out. A database whose own
+      // data_version is not a release name, or is dated more than 7 days ahead of the clock, gives
+      // no time to keep: it is moved onto the manifest's release.
+      const manifestTime = dataVersionTime(manifest.data_version)!;
+      const localTime = dataVersion === null || dataVersionProblem(dataVersion) ? undefined : dataVersionTime(dataVersion);
+      if (localTime !== undefined && manifestTime < localTime) return { status: "older_release", dataVersion };
       const failedKey = failedKeyOf(manifest);
       if ((await readFailed()) === failedKey) {
         const cause = { name: "ReleaseMismatch", message: shorten(`an earlier update found this manifest's database does not hold ${manifest.data_version}, so it is not downloaded again until the manifest changes`) };
