@@ -48,7 +48,7 @@ Reviews carry an opaque contributor id from the app's signed-in account. One rev
 
 ## Photos
 
-Open Camping DB holds no photos. The photo kit lets an app run its own photo service on its own Cloudflare account and GitHub repositories: `createPhotoClient` in the SDK, the intake with a photo bucket for uploads and photo passes, the photo server, the apply rules in photos-only mode for the app's records repository, and `ocdb-photos` to sync its buckets and check its records. A contributor's first photo goes to a person, three reports hide a photo, a report of illegal content stops it being served at once, SafeSearch can refuse adult or violent uploads, and a traveller's photos are removed when they delete their account. Photos of a place the traveller has just added wait in the SDK until it has its id, while the app keeps the files. [docs/photos.md](docs/photos.md) walks through running it.
+Open Camping DB holds no photos. The photo kit lets an app run its own photo service on its own Cloudflare account and GitHub repositories: `createPhotoClient` in the SDK, the intake with a photo bucket for uploads and photo passes, the photo server, the apply rules in photos-only mode for the app's records repository, and `ocdb-photos` to sync its buckets and check its records. A contributor's first photo goes to a person unless the app publishes first photos SafeSearch passed, three reports hide a photo, a report of illegal content stops it being served at once, SafeSearch can refuse adult or violent uploads, and a traveller's photos are removed when they delete their account. Photos of a place the traveller has just added wait in the SDK until it has its id, while the app keeps the files. [docs/photos.md](docs/photos.md) walks through running it.
 
 ## Owners
 

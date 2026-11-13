@@ -7,7 +7,7 @@ Open Camping DB holds no photos. This kit lets an app run its own photo service,
 | `createPhotoClient` in the SDK | Uploads photos, gets photo passes, reports photos, removes one of a traveller's photos and erases all of them. Kept apart from the feedback client. |
 | The intake (`packages/intake`) with a photo bucket | `POST /v1/photos` takes uploads into a private pending bucket, and `POST /v1/photos/pass` gives attested installs an hour-long photo pass. Optional SafeSearch checks. |
 | The photo server (`packages/photos`) | Serves published photos and each place's photo records to installs with a pass and servers with a key, behind the edge cache, with daily caps and an off switch. |
-| The apply rules, photos only (`ocdb-apply --places`) | Turn the inbox into photo lines in the app's records repository. A contributor's first photo goes to a person on a review PR. |
+| The apply rules, photos only (`ocdb-apply --places`) | Turn the inbox into photo lines in the app's records repository. A contributor's first photo goes to a person on a review PR, unless the app turns that hold off. |
 | `ocdb-photos` and the Photo sync workflow | Check the records repository's photo lines, keep the two buckets and the per-place records in step with them, and replace a photo's files. |
 
 The app's photo service runs separately from the Open Camping DB intake. The app keeps using `createFeedbackClient` with Open Camping DB's intake for reports, reviews and checks.
@@ -15,7 +15,7 @@ The app's photo service runs separately from the Open Camping DB intake. The app
 ## How a photo travels
 
 1. The app sends the photo to its own intake at `POST /v1/photos`. The intake checks the app key, the attestation, the contributor, the rate limits and the files (and SafeSearch, when on), puts the files in the pending bucket and writes the item to the app's private inbox repository.
-2. The hourly apply run adds a line to `photos/<place id>.ndjson` in the app's records repository. A contributor's first photo, a file also sent for another place, and anything SafeSearch flags go to a person on the review PR. Once a contributor has a visible photo, their later photos are published at the next run.
+2. The hourly apply run adds a line to `photos/<place id>.ndjson` in the app's records repository. A contributor's first photo, a file also sent for another place, and anything SafeSearch flags go to a person on the review PR. Once a contributor has a visible photo, their later photos are published at the next run. An app that relies on reports to catch a bad photo can publish first photos too: see "Publishing first photos" below.
 3. When the PR merges, the Photo sync workflow copies the files to the serving bucket and writes `records/<place id>.ndjson`.
 4. The photo server serves the photo and lists it in the place's records.
 
@@ -120,6 +120,10 @@ The worse of the two files decides: a refused thumbnail refuses the upload, and 
 
 Each upload costs two SafeSearch requests. Google processes these requests in memory, doesn't keep the images, and doesn't train on them ([Cloud Vision data usage](https://cloud.google.com/vision/docs/data-usage)). Name Google Cloud Vision as a processor in your privacy policy before turning it on. The [pricing page](https://cloud.google.com/vision/pricing) lists SafeSearch at the first 1,000 images a month free, then $1.50 per 1,000.
 
+### Publishing first photos
+
+A contributor's first photo waits for a person by default. To publish it at the next run instead, as a trusted contributor's photo is, set the Apply feedback workflow's `hold-first-photo` input to `false` (`ocdb-apply --publish-first-photo`, or `holdFirstPhoto: false` for `run`). This takes effect only for a photo SafeSearch rated and passed, so it needs `SAFESEARCH = "on"` on the photo intake. A first photo with no SafeSearch rating still waits as `first_photo`, so turning the hold off never publishes a photo nobody checked. A file also sent for another place, a photo SafeSearch flags or could not check, and a photo hidden by reports still wait for a person. SafeSearch has no self-harm rating, so with the hold off, reports are what catch such a photo.
+
 ## What became of a photo
 
 Each upload gets a progress record under the photo id it answered, so the app can show a traveller's photos with where each one is. Ask with `photos.progress(ids)`, which calls the photo intake's public `GET /v1/photos/progress?ids=pho_...,pho_...` at once, in calls of up to 100 ids, and answers one `Progress` per id in the order given, the same shape `feedback.progress` answers. An id that is not a photo id is answered `unknown` without asking. It throws `ProgressRequestError` when the photo intake cannot be reached or refuses the call.
@@ -138,7 +142,7 @@ for (const p of progress) {
 | `received` | The photo intake has it, and the apply has not decided it yet. |
 | `waiting` | Its place is a new place not in the data yet. |
 | `accepted` | The rules accepted it, and it is on the automatic PR, which has not merged yet. |
-| `held` | A person decides it, with `held_reason`: `first_photo` (a contributor's first photo), `same_file` (the same file was sent for another place), `safesearch` (SafeSearch rated it likely adult or violent, or very likely racy), `check_unavailable` (SafeSearch could not check it) or `reported` (hidden after reports, until a person decides). A photo SafeSearch flags is `held` from the moment it is uploaded. |
+| `held` | A person decides it, with `held_reason`: `first_photo` (a contributor's first photo, while the first photo hold is on or SafeSearch did not rate it), `same_file` (the same file was sent for another place), `safesearch` (SafeSearch rated it likely adult or violent, or very likely racy), `check_unavailable` (SafeSearch could not check it) or `reported` (hidden after reports, until a person decides). A photo SafeSearch flags is `held` from the moment it is uploaded. |
 | `refused` | Not published, or no longer, with `reason`. `by` is `rules` when the rules refused it or the contributor asked for their photos to be removed, and `reviewer` when a person merged or closed its PR without it, hid it, removed it or blocked the contributor. |
 | `in_data` | Published: its line is in the photo records on the records repository's `main`, as of `in_data_at`, the time of the commit that put it there. The Photo sync workflow serves it a few minutes later. |
 | `unknown` | The photo intake has no record of it: not uploaded to it, or more than 90 days without a change. |

@@ -386,7 +386,7 @@ The workflow reads the 100 most recent `feedback/review` and `feedback/auto` PRs
 
 - `recent-places-url`: an intake's base URL. Each run passes `--recent-places <url>` and reads that intake's public `GET /v1/places/recent`. Feedback about a new place on that list that is not in the data yet waits in `pending/` instead of being refused, and while the list can't be read, all feedback about places not in the data waits. An app's own photo inbox needs this ([photos.md](photos.md)).
 - `release-workflow`: the data repository's release workflow file (`release.yml`), which must run on `workflow_dispatch`. A run that opened or added to `feedback/auto` waits up to 10 minutes for it to merge, then starts the release on `data-base-branch`. A PR without auto-merge, one still waiting after 10 minutes, a missing Actions permission or a failed start leaves the change to the release's schedule, with a notice or warning, and never fails the run.
-- `places-repository`, `photo-licence`, `review-preview-url` and the `review-preview-secret` secret: for an app's photo service ([photos.md](photos.md)).
+- `places-repository`, `photo-licence`, `hold-first-photo`, `review-preview-url` and the `review-preview-secret` secret: for an app's photo service ([photos.md](photos.md)).
 - `data-repository-name` (default `data`) and `data-base-branch` (default `main`).
 
 ### Running the apply script locally

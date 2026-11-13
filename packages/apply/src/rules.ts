@@ -153,6 +153,12 @@ export interface RulesInput {
   photos?: readonly Photo[];
   /** Licence id written on new photo lines. Defaults to CC-BY-4.0. */
   photoLicence?: string;
+  /**
+   * Hold a contributor's first photo for a person. Defaults to true. False
+   * publishes it like a trusted contributor's, but only when the intake rated
+   * it with SafeSearch and it passed: a photo with no rating still waits.
+   */
+  holdFirstPhoto?: boolean;
   /** Every record in the data, for the duplicates check on new places. None when left out. */
   everyPlace?: readonly Place[];
   /** Pairs on `moderation/commons-do-not-match.json`: a Commons photo that is not of the place. None when left out. */
@@ -909,7 +915,9 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       // or violent photo, or one it couldn't check, waits for a person.
       const rated = item.photo.safesearch;
       const flagged = rated !== undefined && safeSearchVerdict(rated) !== "pass";
-      if (repeated || flagged || !trusted.has(item.contributor)) {
+      // A first photo waits for a person, unless the app turned that off and SafeSearch passed it.
+      const firstHeld = !trusted.has(item.contributor) && (input.holdFirstPhoto !== false || rated === undefined);
+      if (repeated || flagged || firstHeld) {
         const held: keyof typeof PHOTO_HELD_WHY = repeated ? "same_file" : flagged ? (rated === "unchecked" ? "check_unavailable" : "safesearch") : "first_photo";
         const why =
           held === "safesearch" && rated !== undefined && rated !== "unchecked"
