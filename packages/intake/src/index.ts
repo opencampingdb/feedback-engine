@@ -1216,7 +1216,10 @@ export function createHandler(deps: Deps) {
     if (!limit.allowed) return limited(limit.retryAfter, cors);
 
     const expires = Math.floor(nowMs / 1000) + PASS_TTL_SECONDS;
-    const pass = await signPass(env.PHOTO_PASS_SECRET, app.app, expires);
+    // The install the pass names, for the photo server's per-install limit: a salted hash of the device id the
+    // app keeps, so it stays the same across renewals, and unlike the hash the counters above use.
+    const install = await hashDevice(env.DEVICE_SALT, `pass-install:${body.device}`);
+    const pass = await signPass(env.PHOTO_PASS_SECRET, app.app, expires, install);
     return json(200, { pass, expires: new Date(expires * 1000).toISOString().replace(/\.\d{3}Z$/, "Z") }, cors);
   }
 

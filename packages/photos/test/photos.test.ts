@@ -172,6 +172,74 @@ describe("photo server", () => {
     expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(429);
   });
 
+  describe("per-install limit", () => {
+    const counting = (allow: number) => {
+      const counts = new Map<string, number>();
+      return {
+        counts,
+        limit: async ({ key }: { key: string }) => {
+          counts.set(key, (counts.get(key) ?? 0) + 1);
+          return { success: counts.get(key)! <= allow };
+        },
+      };
+    };
+    const withPass = (pass: string, address = "203.0.113.5") =>
+      new Request(`https://photos.example/v1/photos/${PHOTO}/thumb.jpg`, { headers: { "x-photo-pass": pass, "cf-connecting-ip": address } });
+    const INSTALL_A = "0123456789abcdef";
+    const INSTALL_B = "fedcba9876543210";
+
+    beforeEach(() => {
+      env.PHOTO_PASS_SECRET = "pass-secret";
+    });
+
+    it("counts a pass that names its install per install, with the ceiling per address, and not on PER_IP", async () => {
+      const perIp = counting(2);
+      const perInstall = counting(3);
+      const ceiling = counting(100);
+      Object.assign(env, { PER_IP: perIp, PER_INSTALL: perInstall, PER_IP_CEILING: ceiling });
+      const a = await signPass("pass-secret", "example-app", NOW / 1000 + 3600, INSTALL_A);
+      const b = await signPass("pass-secret", "example-app", NOW / 1000 + 3600, INSTALL_B);
+      // Two phones behind one address each get their own 3, past PER_IP's 2 for the address.
+      for (let i = 0; i < 3; i++) {
+        expect((await handle(withPass(a), env, ctx())).status).toBe(200);
+        expect((await handle(withPass(b), env, ctx())).status).toBe(200);
+      }
+      expect((await handle(withPass(a), env, ctx())).status).toBe(429);
+      expect(perIp.counts.size).toBe(0);
+      expect([...perInstall.counts.keys()].sort()).toEqual([`example-app:${INSTALL_A}`, `example-app:${INSTALL_B}`]);
+      expect(ceiling.counts.get("203.0.113.5")).toBe(6);
+    });
+
+    it("stops at the per-address ceiling however many installs share the address", async () => {
+      Object.assign(env, { PER_IP: counting(1000), PER_INSTALL: counting(1000), PER_IP_CEILING: counting(2) });
+      const pass = (n: number) => signPass("pass-secret", "example-app", NOW / 1000 + 3600, n.toString(16).padStart(16, "0"));
+      expect((await handle(withPass(await pass(1)), env, ctx())).status).toBe(200);
+      expect((await handle(withPass(await pass(2)), env, ctx())).status).toBe(200);
+      expect((await handle(withPass(await pass(3)), env, ctx())).status).toBe(429);
+    });
+
+    it("counts a pass from before installs were named, and an app key, per address as before", async () => {
+      const perIp = counting(1);
+      const perInstall = counting(1000);
+      Object.assign(env, { PER_IP: perIp, PER_INSTALL: perInstall, PER_IP_CEILING: counting(1000) });
+      const old = await signPass("pass-secret", "example-app", NOW / 1000 + 3600);
+      expect((await handle(withPass(old), env, ctx())).status).toBe(200);
+      expect((await handle(withPass(old), env, ctx())).status).toBe(429);
+      expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`, KEY), env, ctx())).status).toBe(429);
+      expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`, KEY).clone(), { ...env, PER_IP: counting(1) }, ctx())).status).toBe(200);
+      expect(perInstall.counts.size).toBe(0);
+    });
+
+    it("holds per-install passes to PER_IP when the ceiling is not bound", async () => {
+      const perIp = counting(1);
+      Object.assign(env, { PER_IP: perIp, PER_INSTALL: counting(1000) });
+      const pass = await signPass("pass-secret", "example-app", NOW / 1000 + 3600, INSTALL_A);
+      expect((await handle(withPass(pass), env, ctx())).status).toBe(200);
+      expect((await handle(withPass(pass), env, ctx())).status).toBe(429);
+      expect(perIp.counts.get("203.0.113.5")).toBe(2);
+    });
+  });
+
   it("stops serving within a minute of the off switch", async () => {
     expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(200);
     env.STATE.data.set("off", "1");

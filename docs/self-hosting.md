@@ -205,6 +205,15 @@ The OSM notes workflow (`osm-notes.yml`) is retired, so don't add it. [osm.md](o
 
 Secrets stay in Cloudflare and need no change. The intake validates every submission, so a release that adds facts or report kinds needs this redeploy before apps send them. Until then the intake refuses them with `400`.
 
+### Photo passes that name the install
+
+For an app's photo service, this release has passes name the install they went to, and the photo server counts its rate limit per install instead of per address ([photos.md](photos.md#rate-limits)). Neither the SDK nor the apps change. In this order:
+
+1. In the photo server's deploy copy, add the rate limiting bindings `PER_INSTALL` (the template has 120 a minute) and `PER_IP_CEILING` (3,000 a minute), each with a `namespace_id` unique in your Cloudflare account, and keep `PER_IP` (300 a minute) for photo keys and older passes. Deploy the photo server.
+2. Then deploy the photo intake at the same commit. It needs no new setting. An older photo server answers `401 invalid_pass` to the new passes, so the photo server goes first.
+
+Passes issued before the intake moved keep working until they expire, within an hour, and are counted per address meanwhile.
+
 ### Moving to SDK 0.32.0
 
 The release with SDK 0.32.0 asks this of a running deployment, in this order:

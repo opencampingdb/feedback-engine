@@ -79,7 +79,15 @@ export interface Env {
   /** Secret, the same as the intake's. Checks photo passes. */
   PHOTO_PASS_SECRET?: string;
   STATE: KVLike;
+  /** Requests per client address, for requests whose pass names no install (app keys, passes from before installs were named). */
   PER_IP?: RateLimiterLike;
+  /** Requests per install, for requests whose pass names the install. Bind it with PER_IP_CEILING. */
+  PER_INSTALL?: RateLimiterLike;
+  /**
+   * Requests per client address for requests counted per install: a much higher ceiling, since many phones can
+   * share one address (carrier NAT, a caravan park's Wi-Fi). Without it those requests are held to PER_IP as well.
+   */
+  PER_IP_CEILING?: RateLimiterLike;
   /** Most R2 reads a day across every app. */
   DAILY_READ_CAP?: string;
 }
@@ -235,15 +243,28 @@ export function createHandler(deps: Deps) {
     const nowMs = deps.now();
     let key = keys.get(request.headers.get("x-app-key") ?? "");
     const pass = request.headers.get("x-photo-pass");
+    let install: string | undefined;
     if (!key && pass && env.PHOTO_PASS_SECRET) {
       const checked = await verifyPass(env.PHOTO_PASS_SECRET, pass, nowMs);
       if (!checked) return answer(401, "invalid_pass");
       key = [...keys.values()].find((k) => k.app === checked.app);
+      install = checked.install;
     }
     if (!key) return answer(401, "invalid_app_key");
 
+    // A pass that names its install is counted per install, with a much higher per-address ceiling behind it.
+    // Anything else (an app key, a pass from before installs were named) is counted per address, as before.
     const address = request.headers.get("cf-connecting-ip") ?? "";
-    if (env.PER_IP && address && !(await env.PER_IP.limit({ key: address })).success) return answer(429, "rate_limited", { "retry-after": "60" });
+    const perInstall = install !== undefined && env.PER_INSTALL !== undefined && env.PER_IP_CEILING !== undefined;
+    const limits: { limiter: RateLimiterLike | undefined; key: string }[] = perInstall
+      ? [
+          { limiter: env.PER_INSTALL, key: `${key.app}:${install}` },
+          { limiter: env.PER_IP_CEILING, key: address },
+        ]
+      : [{ limiter: env.PER_IP, key: address }];
+    for (const { limiter, key: limitKey } of limits) {
+      if (limiter && limitKey && !(await limiter.limit({ key: limitKey })).success) return answer(429, "rate_limited", { "retry-after": "60" });
+    }
 
     const apps = [...keys.values()].map((k) => k.app);
     await refresh(env, apps, nowMs);
