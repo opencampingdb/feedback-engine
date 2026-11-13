@@ -30,6 +30,22 @@ describe("signPass and verifyPass", () => {
     expect(await verifyPass("another-secret", pass, NOW)).toBeUndefined();
     expect(await verifyPass(SECRET, "nonsense", NOW)).toBeUndefined();
   });
+
+  it("names the install, and refuses a pass whose install was changed", async () => {
+    const expires = NOW / 1000 + 60;
+    const pass = await signPass(SECRET, "example-app", expires, "0123456789abcdef");
+    expect(pass).toMatch(/^p2\.example-app\.0123456789abcdef\.\d{10}\.[A-Za-z0-9_-]{43}$/);
+    expect(await verifyPass(SECRET, pass, NOW)).toEqual({ app: "example-app", expires, install: "0123456789abcdef" });
+    expect(await verifyPass(SECRET, pass.replace("0123456789abcdef", "fedcba9876543210"), NOW)).toBeUndefined();
+    expect(await verifyPass(SECRET, pass, NOW + 60_000)).toBeUndefined();
+    await expect(signPass(SECRET, "example-app", expires, "NOT-HEX")).rejects.toThrow();
+  });
+
+  it("keeps verifying a pass signed before installs were named, without an install", async () => {
+    const expires = NOW / 1000 + 60;
+    const old = await signPass(SECRET, "example-app", expires);
+    expect(await verifyPass(SECRET, old, NOW)).toEqual({ app: "example-app", expires });
+  });
 });
 
 describe("photo pass route", () => {
@@ -77,6 +93,22 @@ describe("photo pass route", () => {
     expect(res.status).toBe(200);
     const { pass } = (await res.json()) as { pass: string };
     expect((await verifyPass(SECRET, pass, NOW))?.app).toBe("example-app-dev");
+  });
+
+  it("names the same install across renewals, and a different one for another device", async () => {
+    const e = env();
+    e.APP_KEYS = JSON.stringify({ [APP_KEY]: { app: "example-app-dev", daily_limit: 100, photo_pass_unattested: true } });
+    const installOf = async (device: string) => {
+      const res = await handle(post({ ...good, device }), e);
+      expect(res.status).toBe(200);
+      const { pass } = (await res.json()) as { pass: string };
+      return (await verifyPass(SECRET, pass, NOW))?.install;
+    };
+    const first = await installOf(DEVICE);
+    expect(first).toMatch(/^[0-9a-f]{16}$/);
+    expect(await installOf(DEVICE)).toBe(first);
+    expect(await installOf(DEVICE.toUpperCase())).toBe(first);
+    expect(await installOf("9f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f")).not.toBe(first);
   });
 
   it("answers 404 when the intake has no pass secret", async () => {

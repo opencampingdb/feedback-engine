@@ -186,7 +186,7 @@ describe("App Attest", () => {
     expect(res.status).toBe(200);
     const { pass, expires } = (await res.json()) as { pass: string; expires: string };
     expect(expires).toBe("2026-11-02T10:00:00Z");
-    expect(await verifyPass("pass-secret", pass, NOW)).toEqual({ app: "example-app", expires: NOW / 1000 + 3600 });
+    expect(await verifyPass("pass-secret", pass, NOW)).toEqual({ app: "example-app", expires: NOW / 1000 + 3600, install: expect.stringMatching(/^[0-9a-f]{16}$/) });
   });
 
   it("asks for attestation when the headers are missing, with no reason", async () => {
