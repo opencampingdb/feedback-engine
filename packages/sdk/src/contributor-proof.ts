@@ -1,10 +1,14 @@
 /**
  * Contributor proofs: a short-lived token the app's own server signs to say
- * that the signed-in account may remove one of its photos, or erase all of
- * its photos or all of its reviews. An app key with `contributor_proof_key`
- * (an Ed25519 public key) makes the intake accept `photo_removal`,
- * `photo_erasure` and `review_erasure` only with a valid proof, so knowing a
- * traveller's contributor value is not enough to delete what they sent.
+ * that the signed-in account may remove one of its photos, erase all of its
+ * photos or all of its reviews, or send a review. An app key with
+ * `contributor_proof_key` (an Ed25519 public key) makes the intake accept
+ * `photo_removal`, `photo_erasure` and `review_erasure` only with a valid
+ * proof, so knowing a traveller's contributor value is not enough to delete
+ * what they sent. A review is taken with or without one, and a review with a
+ * valid one is marked `proved`: the apply run replaces the contributor's
+ * earlier review on the place automatically only for a proved review, or one
+ * from the same install as the earlier one.
  *
  * The token is `<payload>.<signature>`: the payload is base64url JSON of the
  * claims below, and the signature is Ed25519 over the payload's characters,
@@ -19,7 +23,7 @@ const CLOCK_SKEW_SECONDS = 60;
 /** Longest token the intake reads. */
 export const MAX_PROOF_LENGTH = 2048;
 
-export type ProofAction = "photo_removal" | "photo_erasure" | "review_erasure";
+export type ProofAction = "photo_removal" | "photo_erasure" | "review_erasure" | "review";
 
 /** The app server's Ed25519 private key, a WebCrypto CryptoKey (`crypto.subtle.generateKey({ name: "Ed25519" }, ...)` or `importKey`). */
 export type ProofSigningKey = Parameters<typeof crypto.subtle.sign>[1];
@@ -30,7 +34,7 @@ export interface ContributorProofClaims {
   /** The contributor value the app sends, before the intake hashes it. */
   contributor: string;
   action: ProofAction;
-  /** The photo id for a `photo_removal`, `"*"` for a `photo_erasure` or `review_erasure`. */
+  /** The photo id for a `photo_removal`, `"*"` for a `photo_erasure`, `review_erasure` or `review`. */
   photo: string;
   /** Unix seconds the proof was made. */
   issued: number;
@@ -72,8 +76,9 @@ function fromBase64(text: string, url: boolean): Uint8Array<ArrayBuffer> | undef
 
 /**
  * Signs a proof with the app server's Ed25519 private key. Make one right
- * before the app removes a photo or erases an account's photos, for the
- * signed-in account only, and pass it as `contributorProof`.
+ * before the app removes a photo, erases an account's photos or reviews, or
+ * sends a review, for the signed-in account only, and pass it as
+ * `contributorProof`.
  */
 export async function signContributorProof(privateKey: ProofSigningKey, claims: ContributorProofClaims): Promise<string> {
   const payload = toBase64Url(new TextEncoder().encode(JSON.stringify(claims)));

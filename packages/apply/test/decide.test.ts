@@ -59,6 +59,27 @@ describe("decideFact", () => {
     expect(decideFact({ item: fine, place: state(), earlier: [] })).toMatchObject({ verdict: "live" });
   });
 
+  it("holds an operator, a conditional charge's condition or a charge's unit that fails the text checks", () => {
+    const held = { verdict: "held", reason: "text_check" };
+    for (const [name, value] of [
+      ["operator", "the owner is a wanker"],
+      ["operator", "Best crypto tips on whatsapp"],
+      ["charge_conditional", "10 AUD @ (the owner is a wanker)"],
+      ["charge_conditional", "10 AUD/wanker @ (Dec-Jan)"],
+      ["charge", "10 AUD/wanker"],
+      ["charge_powered", "10 AUD/wanker/night"],
+    ] as const) {
+      expect(decideFact({ item: attested(fact(0, "dev-a", name, value)), place: state(), earlier: [] })).toMatchObject(held);
+    }
+    for (const [name, value] of [
+      ["operator", "Example Shire Council"],
+      ["charge_conditional", "10 AUD/person @ (Dec-Jan)"],
+      ["charge", "15 AUD/vehicle/night"],
+    ] as const) {
+      expect(decideFact({ item: attested(fact(0, "dev-a", name, value)), place: state(), earlier: [] })).toMatchObject({ verdict: "live" });
+    }
+  });
+
   it("makes an attested contact that passes the link checks live", () => {
     const item = attested(fact(0, "dev-a", "phone", "03 5555 0100"));
     expect(decideFact({ item, place: state(), earlier: [] })).toMatchObject({ verdict: "live", changes: [{ place: PLACE, fact: "phone", value: "03 5555 0100" }] });

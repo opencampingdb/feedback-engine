@@ -23,6 +23,8 @@ describe("moderateReview", () => {
     ["Lovely spot. Cheers, Sam", "a personal name"],
     ["Text me for the gate code", "a request for contact"],
     ["Total shit hole", "offensive language"],
+    ["The ranger is a tosser", "offensive language"],
+    ["Best crypto tips on whatsapp", "spam"],
   ])("refuses %j for %s", (text, reason) => {
     expect(moderateReview(text)).toContain(reason);
   });
@@ -67,5 +69,15 @@ describe("disguised offensive language and advertising", () => {
     "Grassy sites, about 50% shaded",
   ])("passes %j", (text) => {
     expect(moderateReview(text)).toEqual([]);
+  });
+
+  // Texts the data validator refuses because Python's \d, \s and case-insensitive matching are wider than JavaScript's.
+  it.each([
+    ["Site \u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668 by the water was the best one.", "a phone number"],
+    ["Quiet and flat with good shade. Thank\u017f, Sam", "a personal name"],
+    ["Lovely spot, ema\u0131l me for the track notes.", "a request for contact"],
+    ["Gate code on the sign 1234\u00855678 near the entry.", "a phone number"],
+  ])("refuses %j for %s, as the data validator does", (text, reason) => {
+    expect(moderateReview(text)).toContain(reason);
   });
 });

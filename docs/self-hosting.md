@@ -28,6 +28,7 @@ Note each `id` and the `database_id` they print. Never commit them to this repos
 - `RATE_LIMIT` (KV) is a required binding. With `RECENT_LIST` bound it is never read or written, because the daily counters live in D1. Without `RECENT_LIST` the counters live here.
 - `ATTEST` (KV) holds registered App Attest keys and their challenges. It is needed only when an app key has `ios`. Without one, skip it and delete the `ATTEST` block from your deploy copy in step 3.
 - `RECENT_LIST` (D1) holds the recent list, the place index, the daily counters, the idempotency keys, the inbox queue and each item's progress. Any intake that serves a public app needs it.
+- `PER_IP` (a rate limiting binding, optional) limits the public reads per client network (the IPv4 /24 or IPv6 /48 the daily budgets count, so one network cannot spread its reads over many addresses): `GET /v1/places/recent`, `GET /v1/feedback/progress` and `GET /v1/photos/progress`. These need no app key, and the recent list is read from the same database the daily counters and the queue use. Past the limit a read answers `429` with `retry-after: 60`, before the edge cache or the database is read. Uncomment the `[[ratelimits]]` block in your deploy copy to turn it on. Without it, the reads are not limited per network, so put a Cloudflare rate limiting rule in front of them instead.
 
 Without `RECENT_LIST`, the recent-list routes and `POST /v1/feedback/batch` answer `404`, idempotency keys are ignored, every item is a commit of its own and the counters fall back to KV. KV takes one write a second to a key, and every submission writes the app's counter, so a KV-only intake takes about one submission a second across every user of every app. On the free plan KV also allows 1,000 writes a day, and each accepted submission makes three or more (device, network and app, plus contributor and attested key), so about 200 to 330 submissions a day. Keep KV-only intakes for tests.
 
@@ -115,7 +116,7 @@ Keys must be at least 16 characters: make them with `openssl rand -hex 16`. App 
 | `requires_attestation` | `true` takes feedback only from genuine copies of the app. Needs `ios`, `android` or both. |
 | `ios` | `app_id` (your team id, a dot and the bundle id) and optionally `environment` (`production` or `development`). |
 | `android` | `package`, and optionally `certificate_sha256`, the signing certificate digests Play reports. |
-| `contributor_proof_key` | Your app server's Ed25519 public key, the raw 32 bytes in base64. With it, review erasures, photo removals and photo erasures need a proof your server signed for the account ([photos.md](photos.md), "Prove the account for removal and erasure"). Export it with `Buffer.from(await crypto.subtle.exportKey("raw", publicKey)).toString("base64")`. |
+| `contributor_proof_key` | Your app server's Ed25519 public key, the raw 32 bytes in base64. With it, review erasures, photo removals and photo erasures need a proof your server signed for the account, and a review that carries a valid proof is marked proved, so it may replace the contributor's earlier review without waiting for a person ([photos.md](photos.md), "Prove the account for removal and erasure"). Export it with `Buffer.from(await crypto.subtle.exportKey("raw", publicKey)).toString("base64")`. |
 | `photo_pass_unattested` | Photo services only: lets a development key get photo passes without attestation ([photos.md](photos.md)). |
 
 ```json
@@ -153,7 +154,7 @@ Install it on `inbox` and `data` only. The workflow asks for a token with `conte
 ## 9. Prepare the data repository
 
 - In Settings, General, turn on **Allow auto-merge**.
-- Create the labels `needs-review` and `owner-claim`.
+- Create the labels `needs-review` and `owner-claim`. The run opens the review PR without them when they are missing, with a warning.
 - Protect `main` with the required check the data repository's CI reports, so auto-merge waits for it.
 - Set the Actions variable `INTAKE_URL` to the intake's base URL and the secret `INTAKE_PLACES_TOKEN` to the Worker's `PLACES_TOKEN`. The release workflow then loads the place index into the intake after each release, which the intake needs to decide items at send time, and tells it the new release.
 
@@ -192,7 +193,7 @@ The OSM notes workflow (`osm-notes.yml`) is retired, so don't add it. [osm.md](o
    ```
 
 2. If the diff adds a binding or variable to `wrangler.toml`, add it to your deploy copy by hand. Don't regenerate the copy.
-3. Apply any new migrations, then deploy. Code newer than its schema answers `500`: without `0010` and `0011` to every submission, without `0012` to a photo service's progress calls, and without `0013` to every request with an idempotency key, which every SDK from 0.21.0 sends.
+3. Apply any new migrations, then deploy. Code newer than its schema answers `500`: without `0010` and `0011` to every submission, without `0012` to a photo service's progress calls, and without `0013` to every request with an idempotency key, which every SDK from 0.21.0 sends. Without `0014` the AI reviewer still goes on past a case whose model call fails, but never counts its failed runs, so it never leaves that case to a person. Without `0015` a new place report the intake would put on the recent list answers `500`, because the intake keeps the adder's client network with the place.
 
    ```sh
    cd packages/intake
@@ -203,6 +204,17 @@ The OSM notes workflow (`osm-notes.yml`) is retired, so don't add it. [osm.md](o
 4. Move both SHAs in the inbox's `apply-feedback.yml` to the same new commit.
 
 Secrets stay in Cloudflare and need no change. The intake validates every submission, so a release that adds facts or report kinds needs this redeploy before apps send them. Until then the intake refuses them with `400`.
+
+### Moving to SDK 0.32.0
+
+The release with SDK 0.32.0 asks this of a running deployment, in this order:
+
+1. Apply migrations `0014` and `0015` to `RECENT_LIST` (step 3 above says what each one is for). Without `0015`, new place reports that go live answer `500`.
+2. To limit the public reads per client network, add the `PER_IP` rate limiting binding to your deploy copy ([section 2](#2-create-the-cloudflare-resources)). It is optional: without it, put a Cloudflare rate limiting rule in front of those reads.
+3. To refuse photos that still carry metadata, set `PHOTO_REFUSE_METADATA = "on"` on your photo intake once every app build that uploads photos uses SDK 0.32.0 or later ([photos.md](photos.md)). Unset, photos are stored as they were sent. Each upload now costs two SafeSearch requests, one for each file.
+4. Deploy the intake at the new commit, and only then move both SHAs in `apply-feedback.yml` to it. The new apply run reads records only the new intake writes: an item held for a reason of the rules that sets a link goes to a person unless the intake recorded that its links passed the link checks, and a review that replaces an earlier one from another install is published only when the intake marked it `proved`. Items the old intake stored keep working, and go to a person where those records are missing.
+
+Apps on earlier SDK versions keep working against this intake. It refuses only input a genuine app does not send: one-line texts holding a line separator, text holding a lone surrogate, and a `commons_mismatch` file that is not a Commons file name. An App Attest key registered under a non-standard spelling of its key id answers `unknown_key` once, and an app that drops the keys `keyIsUnusable` names registers a new one. The data release's `POST /v1/release` refuses a release name dated more than 7 days ahead of the intake's clock.
 
 ## How the intake works
 
@@ -221,13 +233,14 @@ The intake counts submissions per UTC day. A network is the client address from 
 | New places per contributor (per device without one) | 10 |
 | Reports about one place from one device | 100 |
 | App Attest key registrations per network | 500 |
+| App Attest challenges and refused Play Integrity tokens per network | 500 |
 | Photo passes per device, and per network | 48, and 500 |
 | Photo uploads per contributor | 10 |
 | Per app key | `daily_limit`, and `owner_daily_limit` for owner submissions |
 
 A device's first report about a place in a day counts against every limit. The rest of the same edit counts against the app's, the network's and the attested key's limits but not the device's or the contributor's, so a full edit of a place costs the traveller one submission.
 
-With `RECENT_LIST` the counters are rows in `rate_counts`, one per counter and day. A request reads all of its counters in one query and refuses with `429` and `retry-after` (seconds to midnight UTC) when any is at its limit. Otherwise its counts go in the same transaction that queues the item, so only stored items count. Photo uploads, photo passes and key registrations count straight after the check, so a refused or failed upload still counts. The check and the count are separate steps, so requests that arrive together can pass a limit by a few: the limits stop floods, and the apply rules count distinct networks. The scheduled job deletes counters from before yesterday.
+With `RECENT_LIST` the counters are rows in `rate_counts`, one per counter and day. Each counter is counted and checked in one statement that adds one and returns the new count, so a limit holds however requests are timed. When any count is over its limit, the intake takes back what it added for the item and refuses it with `429` and `retry-after` (seconds to midnight UTC). An item is counted on its own device, contributor, key and network counters first and on the app's counter last, so an item refused for its own limits never adds to the count every sender of the app shares. A batch counts the network's and then the app's counters for all its items at once, keeps what fits under each limit for its items, and gives back what they do not use. A network at its limit holds nothing of the app's count, and its items are refused one by one. While a batch is in flight, a `held:` row beside each counter it reserved records what it holds, so a request refused only because batches in flight hold the app's count is asked to wait 60 seconds, not until midnight. When a counter cannot be written, the intake gives back exactly the additions that landed and answers `503` with `retry-after: 60`. Each URLhaus lookup for the links of an item the rules hold counts against a daily cap of 100 for the client network ([limits](limits.md#urlhaus)). An item that is counted but then not stored, because storage failed, has its counts given back. Photo uploads, photo passes and key registrations keep their counts once checked, so a refused or failed upload still counts. A challenge is counted before it is stored. A Play Integrity token is counted before it is sent to Google and given back when Google accepts it or cannot answer, so only refused tokens use up the network's budget, and past it the intake answers `429` without asking Google. Without `RECENT_LIST` the counters are in KV, which reads and then writes each counter, so requests that arrive together can pass a limit by a few. The scheduled job deletes counters from before yesterday.
 
 ### Idempotency keys
 
@@ -284,7 +297,7 @@ The intake writes the first record itself, in the batch that queues an accepted 
 
 ### The newest release
 
-After loading the place index, the data release tells the intake its `data_version` with `POST /v1/release`, `{"data_version": "<yyyymmdd>T<hhmmss>Z-<short sha>", "layout_version": <number>?}`, and the same token. The intake keeps the newest it is told in `latest_release`, never going back to an older one, and answers `{"release": {"data_version", "published", "layout_version"?}}`, where `published` is when it was first told. `GET /v1/places/recent` carries the same `release`, so an app with an older release can fetch the new one. It answers `400` for a `data_version` it can't read.
+After loading the place index, the data release tells the intake its `data_version` with `POST /v1/release`, `{"data_version": "<yyyymmdd>T<hhmmss>Z-<short sha>", "layout_version": <number>?}`, and the same token. The intake keeps the newest it is told in `latest_release`, never going back to an older one, and answers `{"release": {"data_version", "published", "layout_version"?}}`, where `published` is when it was first told. `GET /v1/places/recent` carries the same `release`, so an app with an older release can fetch the new one. It answers `400` for a `data_version` that is not a release name (the short sha in lower-case hex) or is dated more than 7 days ahead of the intake's clock.
 
 ### The place index
 
@@ -297,7 +310,7 @@ The first load writes about two rows per place, so on the D1 free plan a large i
 
 ### Deciding at send time
 
-With the place index loaded, the intake decides `fact`, `contact` and `doubt` reports about a released place, and `new_place` reports, while the app waits. It uses the apply's own rules and then its checks: text checks, link rules, at most 50 live changes a day for each contributor, client network and App Attest key, URLhaus for links, and Llama Guard for free text from a contributor without a track record. A `commons_mismatch` report is always held. The answer adds `"state": "live"` or `"state": "held"` with a `held_reason`.
+With the place index loaded, the intake decides `fact`, `contact` and `doubt` reports about a released place, and `new_place` reports, while the app waits. It uses the apply's own rules and then its checks: text checks, link rules, at most 50 live changes a day for each contributor, client network and App Attest key, URLhaus for links, and Llama Guard for free text from a contributor without a track record. When the rules hold an item that would set a link (a place the index does not have yet, an owner's value, a disagreement), its links still go through the link rules and URLhaus: a link that fails is held as `link_check`, and the inbox item records `"links": "passed"` when they pass. The apply sends a held item that sets a link without that record to a person. A `commons_mismatch` report is always held. The answer adds `"state": "live"` or `"state": "held"` with a `held_reason`.
 
 A live fact, contact takedown or doubt takedown is a recent change, listed under `changes` (a takedown has a null `value`). A live new place is listed with its description, fee and contacts. The inbox item records the decision as `intake`, and the apply still writes the data. It decides each item again with its own rules, but an item the intake held for a check (`text_check`, `link_check`, `ai_check`, `daily_cap` or `check_unavailable`) goes to a person on the review PR, never into the data on its own.
 
@@ -326,7 +339,7 @@ It asks the model (`REVIEW_MODEL`, by default `@cf/meta/llama-3.3-70b-instruct-f
 | `commons_mismatch` | `confirm`, `dismiss`, `leave` |
 | any other | `leave` |
 
-An answer the model isn't sure of, or one that can't be read, is `leave`. The decisions that change a place go to `feedback/review` as one commit at the end of the run, through the Git Data API, with the reviewer (`ai:<model>`) and each reason in the message. A file another writer changed on the branch since the run read it is left out with its decisions, which are decided again next run. Each run adds one comment with a `review-decision` line per decision that landed. A case with a decision is not asked about again. A person can reverse any decision on the PR before merging it.
+An answer the model isn't sure of, or one that can't be read, is `leave`. A model call that fails or takes longer than 30 seconds is logged, and the run goes on to the next case. The case is asked about again next run. Its failure counts in the `review_failures` table only when another model call in the same run answered, so an outage counts nothing, or when it was the run's only model call and its last counted failure was at least 30 minutes earlier. Once a case has 3 counted failures it is `leave`, for a person, so a lone case is left only after its failures span at least an hour. The decisions that change a place go to `feedback/review` as one commit at the end of the run, through the Git Data API, with the reviewer (`ai:<model>`) and each reason in the message. A file another writer changed on the branch since the run read it is left out with its decisions, which are decided again next run. Each run adds one comment with a `review-decision` line per decision that landed. A case with a decision is not asked about again. A person can reverse any decision on the PR before merging it.
 
 ## The apply workflow
 
@@ -337,7 +350,13 @@ Each run keeps up to two PRs open on `data`:
 - `feedback/auto`: changes from the automatic rules, new places included. It merges itself once CI passes. Without **Allow auto-merge** or a required check, the run says on the PR that it needs merging by hand and shows an error annotation, without failing.
 - `feedback/review`: held cases, location changes, contact changes that need a person, owner claims and other reports, labelled `needs-review`. Edit the files on the branch if needed, then merge it, or close it to refuse them.
 
-When a PR from either branch is already open, later runs add a commit and a comment to it. Once it is merged or closed, the next run starts the branch again from `main`. With nothing to do the workflow ends without changes.
+When a PR from either branch is already open, later runs add a commit and a comment to it. Each run reads the PR's state again just before and just after it pushes: when the PR was merged or closed during the run, the run's commit goes on `main` as it is then, for a new PR, or is left out when `main` already holds it. Once it is merged or closed, the next run starts the branch again from `main`. With nothing to do the workflow ends without changes.
+
+The review PR text stays under GitHub's limit for a body or comment. Each run sends at most 20 owner claims and listings, oldest first, and the rest wait in `pending/` for the next run. Held and closed case lines that do not fit in the body or comment follow, in order, in more comments from the bot. Change lines that still do not fit are counted, and every change is in the run's job summary. When GitHub refuses a PR or a PR text anyway, the run shows an error annotation and still records its other inbox moves, but the items that PR was to carry go back to `pending/` for a later run: for the review PR the owner claims and every item for a person, and for the automatic PR the items behind its changes. The run reads every comment on a PR, 100 at a time, and stops with an error on a PR with more than 3,000.
+
+A run that stops after it published its automatic changes, before it recorded its inbox moves, is repeated by the next run with the same items. A doubt or contact takedown that run made is found in the data's history and decided the same way again, with its held case listed again, never refused.
+
+The workflow reads the recent bot PRs and their comments through GitHub's GraphQL API, which gives each author's account type. A PR or comment counts as the bot's only when its author is an account of type Bot with the bot App's login: a person's account with the same name never counts.
 
 The review PR body lists every held case under "Held cases", one line each: `- held-case` and a JSON object with `case` (`duplicate`, `hidden`, `contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted` or `commons_mismatch`), `place`, `standing` (left out for a place travellers did not add), `location`, `kind`, the case's details (`duplicate_of` and `distance_m`, `reports` and `reasons` or `blocked`, the facts left off in `contacts`, which may include `address`, the text check a description failed in `problem`, the `contributor`) and the `feedback` ids to read in the inbox. A triage agent, a bot or the AI reviewer can read these lines instead of the prose.
 

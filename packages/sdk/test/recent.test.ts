@@ -1,5 +1,5 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { dataVersionTime, withRecentChanges, type RecentChange, type RecentPlace } from "../src/index.js";
+import { dataVersionProblem, dataVersionTime, withRecentChanges, type RecentChange, type RecentPlace } from "../src/index.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const OTHER = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZB";
@@ -32,6 +32,27 @@ describe("dataVersionTime", () => {
     for (const bad of ["", "data-20261030T160000Z", "2026-10-30T16:00:00Z", "20261030T160000-abc1234", "20261330T160000Z-abc1234", "20261030T250000Z-abc1234", "20261031T160000Zabc"]) {
       expect(dataVersionTime(bad), bad).toBeUndefined();
     }
+  });
+});
+
+describe("dataVersionProblem", () => {
+  const NOW = Date.parse("2026-11-12T12:00:00Z");
+
+  it("takes a release name dated up to 7 days ahead of the clock", () => {
+    for (const good of ["20261030T160000Z-abc1234", "20261030T160000Z-0123456789abcdef0123456789abcdef01234567", "20261119T115959Z-abc1234"]) {
+      expect(dataVersionProblem(good, NOW), good).toBeUndefined();
+    }
+  });
+
+  it("refuses anything that is not a release name", () => {
+    for (const bad of [undefined, 7, "", "20261030T160000Z", "20261030T160000Z-abc123", "20261030T160000Z-ABC1234", "20261030T160000Z-abc1234\n", "20261030T160000Z-abc1234-x", "20261330T160000Z-abc1234", "20261030T160000Z-0123456789abcdef0123456789abcdef012345678"]) {
+      expect(dataVersionProblem(bad, NOW), String(bad)).toMatch(/release name/);
+    }
+  });
+
+  it("refuses a release dated more than 7 days ahead of the clock", () => {
+    expect(dataVersionProblem("20261119T120001Z-abc1234", NOW)).toMatch(/more than 7 days ahead/);
+    expect(dataVersionProblem("20991231T000000Z-fffffff", NOW)).toMatch(/ahead/);
   });
 });
 

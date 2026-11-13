@@ -284,6 +284,22 @@ describe("idsOnPrs and turnedDown", () => {
     expect([...ids.open]).toEqual([id(5)]);
   });
 
+  it("reads a comment only from an account of type Bot, never from a login equal to the bare slug", () => {
+    const prs = [
+      pr("MERGED", "", {
+        comments: [
+          { author: { login: "ocdb-bot" }, body: id(1) },
+          { author: { login: "ocdb-bot", type: "User" }, body: id(2) },
+          { author: { login: "ocdb-bot", type: "Bot" }, body: id(3) },
+        ],
+      }),
+      pr("CLOSED", `(${id(4)})`, { author: { login: "ocdb-bot" } }),
+    ];
+    const ids = idsOnPrs(prs, ["ocdb-bot"]);
+    expect([...ids.merged]).toEqual([id(3)]);
+    expect([...ids.closed]).toEqual([]);
+  });
+
   it("an item on a closed review PR and then listed again on an open one is not turned down", () => {
     const review = idsOnPrs([pr("OPEN", `held case (${id(1)})`), pr("CLOSED", `(${id(1)}, ${id(2)})`)], ["ocdb-bot"]);
     expect([...turnedDown(review, none).review]).toEqual([id(2)]);

@@ -95,6 +95,16 @@ migrations_dir = "migrations"
 # binding = "PHOTO_STATE"
 # id = "REPLACE_ME_PHOTO_STATE_KV_NAMESPACE_ID"
 
+# Optional: limits the public reads (GET /v1/places/recent and both progress
+# routes), which need no app key, per client network (IPv4 /24, IPv6 /48).
+# Past the limit a read answers 429. Without it they are not limited per
+# network. Uncomment in your
+# deploy copy, with a namespace_id unique in your account.
+# [[ratelimits]]
+# name = "PER_IP"
+# namespace_id = "1002"
+# simple = { limit = 120, period = 60 }
+
 # Workers AI, for the Llama Guard check on free text (src/checks.ts), which
 # the send-time decision runs with RECENT_LIST (src/decide.ts), and for the AI
 # reviewer (src/reviewer.ts) when AI_REVIEWER is on. The account needs Workers

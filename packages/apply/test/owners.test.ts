@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { StoredOwnerSubmission } from "@opencampingdb/feedback";
 import {
   applyOwnerRules,
+  botPrs,
   parseApprovals,
   type AwaitingClaim,
   type OwnerInput,
@@ -114,6 +115,45 @@ describe("owner updates", () => {
       owner_verified: true,
       updated: NOW,
     });
+  });
+
+  it("takes pets_months off when the owner sets pets to anything but seasonal", () => {
+    const seasonal = place({ facts: { pets: "seasonal", pets_months: "May-Sep" }, fact_sources: { pets: "osm", pets_months: "osm" } });
+    const item = updateItem({ facts: { pets: "no" } });
+    const out = run({ pending: [item], places: [seasonal] });
+    expect(out.decision(item)?.outcome).toBe("applied");
+    expect(out.after()?.facts).toEqual({ pets: "no" });
+    expect(out.after()?.fact_sources).toEqual({ pets: "owner" });
+  });
+
+  // Updates that would leave a record the data validator refuses: a person decides, and nothing is written.
+  const farmStay = place({
+    kind: "farm_stay",
+    osm: null,
+    facts: { entry: "private", booking_required: true, booking_url: "https://farm.example/book" },
+    fact_sources: { entry: "owner", booking_required: "owner", booking_url: "owner", name: "owner", location: "owner" },
+    fact_dates: { entry: ago(30), booking_required: ago(30), booking_url: ago(30), name: ago(30), location: ago(30) },
+    owner_verified: true,
+    updated: ago(30),
+  });
+  it.each([
+    ["pets_months on a place whose pets is not seasonal", place({ facts: { pets: "yes" }, fact_sources: { pets: "osm" } }), { pets_months: "May-Sep" }, "pets_months is only for a place whose pets fact is seasonal"],
+    ["entry public on an owner-listed farm stay", farmStay, { entry: "public" }, "a farm_stay must have the fact entry private"],
+    ["booking_required false on an owner-listed farm stay", farmStay, { booking_required: false }, "a farm_stay must have the fact booking_required true"],
+  ])("sends %s to a person with the reason", (_, current, facts, reason) => {
+    const item = updateItem({ facts });
+    const out = run({ pending: [item], places: [current as Place] });
+    expect(out.decision(item)).toMatchObject({ outcome: "needs_review", reason: expect.stringContaining(reason) });
+    expect(out.after()).toBeUndefined();
+    expect(out.edits).toEqual([{ kind: "note", place: PLACE, feedback: item.id }]);
+    expect(out.changes).toEqual([expect.objectContaining({ automatic: false, summary: expect.stringContaining(reason) })]);
+  });
+
+  it("still applies seasonal pets with its months", () => {
+    const item = updateItem({ facts: { pets: "seasonal", pets_months: "May-Sep" } });
+    const out = run({ pending: [item] });
+    expect(out.decision(item)?.outcome).toBe("applied");
+    expect(out.after()?.facts).toMatchObject({ pets: "seasonal", pets_months: "May-Sep" });
   });
 
   it("refuses a wrong token", () => {
@@ -253,6 +293,14 @@ describe("claims and listings before review", () => {
     expect(out.forReview[0]?.replaces).toEqual({ claim: "fb_01JA0000000000000000000001", approved: "2026-10-01" });
   });
 
+  it("refuses a listing whose farm stay the data validator would refuse", () => {
+    const base = listingItem() as Extract<StoredOwnerSubmission, { type: "owner_listing" }>;
+    const item = { ...base, listing: { ...base.listing, facts: { ...base.listing.facts, pets: "yes", pets_months: "May-Sep" } } } as StoredOwnerSubmission;
+    const out = run({ pending: [item], proofs: new Map([[item.id, found]]) });
+    expect(out.decision(item)).toMatchObject({ outcome: "refused", reason: expect.stringContaining("pets_months is only for a place whose pets fact is seasonal") });
+    expect(out.forReview).toHaveLength(0);
+  });
+
   it("refuses a claim on a place that is not in the data", () => {
     const item = claimItem(ago(0), "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZZ");
     expect(run({ pending: [item], proofs: new Map([[item.id, found]]) }).decision(item)?.outcome).toBe("refused");
@@ -272,7 +320,8 @@ describe("claims and listings before review", () => {
   });
 });
 
-const BOT = { login: "opencampingdb-bot" };
+// The bot as GitHub's GraphQL API names a comment's author: its slug, with the account type.
+const BOT = { login: "opencampingdb-bot", type: "Bot" };
 
 function awaitingOf(item: StoredOwnerSubmission, sent = ago(1)): AwaitingClaim {
   const placeId = item.type === "owner_listing" ? `ocdb_${item.id.slice(3)}` : (item.place as string);
@@ -301,6 +350,43 @@ describe("approval by merging the review PR", () => {
       listed: ["fb_01JC0000000000000000000001", "fb_01JC0000000000000000000002", "fb_01JC0000000000000000000003"],
     });
   });
+
+  it("reads comments only from an account of type Bot with the bot's login", () => {
+    const tick = (n: number) => `- [x] Approve owner claim fb_01JC000000000000000000000${n}: x`;
+    const pr = merged("intro", [
+      { author: { login: "opencampingdb-bot" }, body: tick(1) },
+      { author: { login: "opencampingdb-bot", type: "User" }, body: tick(2) },
+      { author: { login: "opencampingdb-bot", type: "Organization" }, body: tick(3) },
+      { author: { login: "other-bot", type: "Bot" }, body: tick(4) },
+      { author: { login: "opencampingdb-bot", type: "Bot" }, body: tick(5) },
+      { author: { login: "opencampingdb-bot[bot]" }, body: tick(6) },
+      { author: { login: "app/opencampingdb-bot" }, body: tick(7) },
+    ]);
+    expect(parseApprovals(pr, ["opencampingdb-bot"]).ticked).toEqual([
+      "fb_01JC0000000000000000000005",
+      "fb_01JC0000000000000000000006",
+      "fb_01JC0000000000000000000007",
+    ]);
+  });
+
+  it("does not count a PR opened by an account whose login is the bare bot slug", () => {
+    const body = "- [x] Approve owner claim fb_01JC0000000000000000000001: x";
+    expect(parseApprovals({ ...merged(body), author: { login: "opencampingdb-bot" } }, ["opencampingdb-bot"]).ticked).toEqual([]);
+    expect(parseApprovals({ ...merged(body), author: { login: "opencampingdb-bot", type: "User" } }, ["opencampingdb-bot"]).ticked).toEqual([]);
+    expect(parseApprovals({ ...merged(body), author: { login: "opencampingdb-bot", type: "Bot" } }, ["opencampingdb-bot"]).ticked).toEqual([
+      "fb_01JC0000000000000000000001",
+    ]);
+  });
+
+  for (const ch of ["\u2028", "\u2029", "\u0085", "\r"]) {
+    it(`reads a box only at the start of a newline, not after ${JSON.stringify(ch)}`, () => {
+      const claim = "fb_01JC0000000000000000000001";
+      const pr = merged(`- [ ] Approve owner claim ${claim}: x`, [
+        { author: BOT, body: `- held-case {"file":"a${ch}- [x] Approve owner claim ${claim}"}` },
+      ]);
+      expect(parseApprovals(pr, ["opencampingdb-bot"])).toEqual({ ticked: [], listed: [claim] });
+    });
+  }
 
   it("ignores PRs from a fork and PRs the bot did not open", () => {
     const body = "- [x] Approve owner claim fb_01JC0000000000000000000001: x";
@@ -430,5 +516,29 @@ describe("merged places", () => {
     const item = claimItem(ago(0), OTHER);
     const out = run({ pending: [item], proofs: new Map([[item.id, found]]), places: [tombstone, place()], ownerList: [] });
     expect(out.forReview[0]?.place).toBe(PLACE);
+  });
+});
+
+describe("the bot's own PRs", () => {
+  const pr = (number: number, login: string, type: string | undefined, isCrossRepository = false): ReviewPr => ({
+    number,
+    state: "MERGED",
+    body: "",
+    isCrossRepository,
+    author: { login, ...(type ? { type } : {}) } as ReviewPr["author"],
+    comments: [],
+  });
+
+  it("keeps only PRs from the data repository that the bot opened, in order, by the one author rule", () => {
+    const prs = [
+      pr(9, "opencampingdb-bot", "Bot"),
+      pr(8, "opencampingdb-bot", "User"),
+      pr(7, "opencampingdb-bot[bot]", undefined),
+      pr(6, "app/opencampingdb-bot", undefined),
+      pr(5, "opencampingdb-bot", undefined),
+      pr(4, "opencampingdb-bot", "Bot", true),
+      pr(3, "someone", "User"),
+    ];
+    expect(botPrs(prs, ["opencampingdb-bot"]).map((p) => p.number)).toEqual([9, 7, 6]);
   });
 });

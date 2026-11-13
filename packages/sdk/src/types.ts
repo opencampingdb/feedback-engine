@@ -471,6 +471,14 @@ export interface ReviewSubmission extends SubmissionBase {
   type: "review";
   place: string;
   review: ReviewBody;
+  /**
+   * A proof from the app's server (`signContributorProof` with action
+   * `review` and photo `"*"`). Optional: a review without one is taken as
+   * before. With a valid one the stored item is marked `proved`, so a review
+   * that replaces the contributor's earlier review applies without waiting
+   * for a person. Never stored.
+   */
+  contributor_proof?: string;
 }
 
 export interface CheckSubmission extends SubmissionBase {
@@ -686,6 +694,12 @@ interface StoredFields {
   /** `ak_` and 16 hex characters of the salted App Attest key id: a second signal beside the contributor. */
   attest_key?: string;
   /**
+   * The review carried a contributor proof that the intake checked against
+   * the app key's `contributor_proof_key`: the app's server said the
+   * signed-in account is this contributor. Absent otherwise.
+   */
+  proved?: true;
+  /**
    * What the intake decided at send time, on the fact reports, contact
    * reports and new places it decides. An item it held for a check
    * (`text_check`, `link_check`, `ai_check`, `daily_cap` or
@@ -708,8 +722,13 @@ interface StoredFields {
   operator?: true;
 }
 
-/** The intake's send-time decision, as the inbox stores it. */
-export type StoredIntakeDecision = { state: "live" } | { state: "held"; held_reason: HeldReason };
+/**
+ * The intake's send-time decision, as the inbox stores it. On an item held
+ * for a reason of the rules, `links: "passed"` says the links it would set
+ * passed the link rules and URLhaus at send time. A held item that sets a
+ * link without it goes to a person.
+ */
+export type StoredIntakeDecision = { state: "live" } | { state: "held"; held_reason: HeldReason; links?: "passed" };
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 

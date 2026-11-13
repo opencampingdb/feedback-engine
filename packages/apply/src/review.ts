@@ -1,4 +1,5 @@
-import { contactProblem, isContactFact, isDoubtFact, isFactName, isValidFactValue, tidyName, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
+import { contactProblem, isCommonsFileName, isContactFact, isDoubtFact, isFactName, isValidFactValue, tidyName, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
+import { byCodePoint } from "./data-check.js";
 import type { Settles } from "./decide.js";
 import { distanceM, majorRoads, type MajorRoads } from "./roads.js";
 import { dumpPlace, placePath } from "./serialise.js";
@@ -393,18 +394,21 @@ export interface DoNotMatchEntry {
 
 /**
  * `moderation/commons-do-not-match.json` as it should be with `entries`
- * added: `{"pairs": [...]}`, sorted by place and file, keys in sorted order
+ * added: `{"pairs": [...]}`, sorted by place and file by code point, keys in sorted order
  * as Python's json.dumps(sort_keys=True) writes them, two spaces, a trailing
- * newline. A pair already there keeps its entry. `text` is the file as it
- * is, or undefined when there is none.
+ * newline. A pair already there keeps its entry, and a pair whose file is
+ * not a Commons file name (`isCommonsFileName`) is left out. `text` is the
+ * file as it is, or undefined when there is none.
  */
 export function withDoNotMatch(text: string | undefined, entries: readonly DoNotMatchEntry[]): string {
   const current = text === undefined ? [] : ((JSON.parse(text) as { pairs?: DoNotMatchEntry[] }).pairs ?? []);
   const key = (e: Pick<DoNotMatchEntry, "place" | "file">) => `${e.place}\u0000${e.file}`;
   const byKey = new Map(current.map((e) => [key(e), e]));
-  for (const e of entries) if (!byKey.has(key(e))) byKey.set(key(e), e);
+  // Only a file with the shape of a Commons file name is ever written, whoever adds it.
+  for (const e of entries) if (isCommonsFileName(e.file) && !byKey.has(key(e))) byKey.set(key(e), e);
   const pairs = [...byKey.values()]
-    .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0))
+    // By code point, as Python's sorted() orders the pairs the validator checks.
+    .sort((a, b) => byCodePoint(a.place, b.place) || byCodePoint(a.file, b.file))
     .map((e) => ({ added: e.added, file: e.file, place: e.place, source: e.source }));
   return `${JSON.stringify({ pairs }, null, 2)}\n`;
 }

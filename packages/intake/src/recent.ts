@@ -31,6 +31,8 @@ export interface StoredPlace extends Omit<RecentPlace, "standing" | "in_data_at"
   device: string;
   /** The adder's hashed App Attest key, when the report was attested with one. */
   attest_key?: string;
+  /** The adder's hashed client network, when known. Never listed. */
+  origin?: string;
 }
 
 /** A check, removal report or withdraw on a new place. */
@@ -74,7 +76,7 @@ export function insertPlace(db: D1Like, place: StoredPlace): Promise<unknown> {
 export function placeStatement(db: D1Like, place: StoredPlace): D1Statement {
   return db
     .prepare(
-      "INSERT OR IGNORE INTO new_places (id, lat, lon, kind, name, added, contributor, device, attest_key, description, fee, contacts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO new_places (id, lat, lon, kind, name, added, contributor, device, attest_key, description, fee, contacts, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       place.id,
@@ -89,6 +91,7 @@ export function placeStatement(db: D1Like, place: StoredPlace): D1Statement {
       place.description ?? null,
       place.fee === undefined ? null : JSON.stringify(place.fee),
       place.contacts === undefined ? null : JSON.stringify(place.contacts),
+      place.origin ?? null,
     );
 }
 
@@ -115,6 +118,12 @@ export async function setBlockList(db: D1Like, contributors: readonly string[]):
   await db.batch([db.prepare("DELETE FROM blocked_contributors"), ...blockStatements(db, contributors)]);
 }
 
+/** Whether a contributor (the stored, hashed id) is on the block list. */
+export async function isBlocked(db: D1Like, contributor: string): Promise<boolean> {
+  const row = await db.prepare("SELECT 1 AS blocked FROM blocked_contributors WHERE contributor = ?").bind(contributor).first<{ blocked: number }>();
+  return row !== null && row !== undefined;
+}
+
 /** Statements adding contributors to the block list. One already on it is left as it is. */
 export function blockStatements(db: D1Like, contributors: readonly string[]): D1Statement[] {
   return chunks([...new Set(contributors)], MAX_BOUND).map((part) =>
@@ -135,6 +144,7 @@ interface PlaceRow {
   description: string | null;
   fee: string | null;
   contacts: string | null;
+  origin: string | null;
   in_data_at: string | null;
 }
 
@@ -150,6 +160,7 @@ const fromRow = (row: PlaceRow): StoredPlace => ({
   ...(row.description === null ? {} : { description: row.description }),
   ...(row.fee === null ? {} : { fee: JSON.parse(row.fee) as FeeValue }),
   ...(row.contacts === null ? {} : { contacts: JSON.parse(row.contacts) as Partial<Record<ContactFactName, FactValue>> }),
+  ...(row.origin === null || row.origin === undefined ? {} : { origin: row.origin }),
 });
 
 export async function getPlace(db: D1Like, id: string): Promise<StoredPlace | undefined> {
@@ -245,8 +256,9 @@ export async function listPlaces(db: D1Like, now: string, bbox?: Bbox): Promise<
   for (const { place, inDataAt, blocked, checks, reports, withdrawn } of places.values()) {
     const standing = newPlaceStanding({
       added: place.added,
-      // The intake has no place history: the apply run settles first places.
-      contributor: { device: place.device, blocked, firstPlace: false },
+      // The intake has no place history: the apply run settles first places. The adder's network,
+      // when known, never counts towards confirming their own place.
+      contributor: { device: place.device, ...(place.origin !== undefined ? { source: place.origin } : {}), blocked, firstPlace: false },
       checks,
       reports,
       withdrawnAt: withdrawn.sort()[0] ?? null,

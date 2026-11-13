@@ -63,14 +63,16 @@ export interface ServedBucketLike {
 }
 
 /**
- * Who sent a served photo, from the place's records file in the serving
- * bucket (`records/<place id>.ndjson`, written by the photo sync):
- * `mine` when its line names this contributor, `theirs` when it names
- * another, `unknown` when the photo is not served for that place, and
- * `unreadable` when the file can't be read. A photo that is not served needs
- * no withholding.
+ * A served photo's line, from the place's records file in the serving bucket
+ * (`records/<place id>.ndjson`, written by the photo sync): its contributor
+ * and the app it was sent with, `unknown` when the photo is not served for
+ * that place, and `unreadable` when the file can't be read.
  */
-export async function photoOwner(bucket: ServedBucketLike, place: string, photo: string, contributor: string): Promise<"mine" | "theirs" | "unknown" | "unreadable"> {
+export async function servedPhoto(
+  bucket: ServedBucketLike,
+  place: string,
+  photo: string,
+): Promise<{ contributor: unknown; app: unknown } | "unknown" | "unreadable"> {
   let text: string;
   try {
     const object = await bucket.get(`records/${place}.ndjson`);
@@ -81,15 +83,27 @@ export async function photoOwner(bucket: ServedBucketLike, place: string, photo:
   }
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
-    let record: { id?: unknown; contributor?: unknown };
+    let record: { id?: unknown; contributor?: unknown; app?: unknown };
     try {
       record = JSON.parse(line) as typeof record;
     } catch {
       continue;
     }
-    if (record.id === photo) return record.contributor === contributor ? "mine" : "theirs";
+    if (record.id === photo) return { contributor: record.contributor, app: record.app };
   }
   return "unknown";
+}
+
+/**
+ * Who sent a served photo: `mine` when its line names this contributor,
+ * `theirs` when it names another, `unknown` when the photo is not served for
+ * that place, and `unreadable` when the records can't be read. A photo that
+ * is not served needs no withholding.
+ */
+export async function photoOwner(bucket: ServedBucketLike, place: string, photo: string, contributor: string): Promise<"mine" | "theirs" | "unknown" | "unreadable"> {
+  const served = await servedPhoto(bucket, place, photo);
+  if (typeof served === "string") return served;
+  return served.contributor === contributor ? "mine" : "theirs";
 }
 
 /**

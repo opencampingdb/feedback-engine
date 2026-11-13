@@ -1,24 +1,51 @@
-import { moderateReview } from "./moderation.js";
+import { textProblem, tidyText } from "@opencampingdb/feedback";
+import { hasProfanity, isAdvertising, moderateReview } from "./moderation.js";
 import { approvalLine, type ClaimForReview } from "./owners.js";
 import type { Change, ClosedCase, Decision, HeldCase } from "./rules.js";
 import type { Place } from "./types.js";
 
 /**
  * Markdown body for the data PR. It names places and changes but never a
- * device hash, and quotes a note only when the note passes review moderation,
- * so nothing personal or abusive reaches the public repository and no one is
+ * device hash. It quotes a note only when the note passes review moderation,
+ * and any other quoted traveller value only when it passes the text rules,
+ * with markdown punctuation escaped, so nothing personal or abusive reaches
+ * the public repository, no traveller text makes a link, and no one is
  * mentioned with an @.
  */
 
 const QUOTED = /: "([\s\S]*)"/;
+/** A JSON string literal, as a summary quotes a value with `JSON.stringify`. */
+const LITERAL = /"(?:[^"\\]|\\.)*"/g;
+const WITHHELD = "(withheld, read it in the inbox)";
+
+/** `text` with markdown punctuation escaped, so it reads as written and never as a link, image, table or heading. */
+const escapeMarkdown = (text: string) => text.replace(/[\\[\]()!*_#|~&]/g, "\\$&");
+
+/** Whether a quoted traveller value is kept out of the PR: the text rules call it rude or spam, or it reads as abuse or advertising. */
+function valueWithheld(value: string): boolean {
+  if (!/\p{L}/u.test(value)) return false;
+  const problem = textProblem(tidyText(value));
+  return problem === "rude" || problem === "spam" || hasProfanity(value) || isAdvertising(value);
+}
 
 function safeSummary(summary: string): string {
   const match = QUOTED.exec(summary);
-  let text = summary;
-  if (match && moderateReview(match[1] ?? "").length > 0) {
-    text = summary.replace(QUOTED, ": (note withheld, read it in the inbox)");
+  const head = match ? summary.slice(0, match.index) : summary;
+  let tail = match ? summary.slice(match.index) : "";
+  if (match) {
+    const note = match[1] ?? "";
+    tail = tail.replace(QUOTED, () => (moderateReview(note).length > 0 ? ": (note withheld, read it in the inbox)" : `: "${escapeMarkdown(note)}"`));
   }
-  return text.replace(/[<>`]/g, "").replace(/@/g, "@​").replace(/\s+/g, " ");
+  const values = head.replace(LITERAL, (literal) => {
+    let value: unknown;
+    try {
+      value = JSON.parse(literal);
+    } catch {
+      return escapeMarkdown(literal);
+    }
+    return typeof value === "string" && valueWithheld(value) ? WITHHELD : escapeMarkdown(literal);
+  });
+  return `${values}${tail}`.replace(/[<>`]/g, "").replace(/@/g, "@​").replace(/\s+/g, " ");
 }
 
 function label(placeId: string, places: ReadonlyMap<string, Place>): string {
@@ -122,33 +149,67 @@ function coarse(degrees: number): string {
   return (Math.round(degrees * 10) / 10).toFixed(1);
 }
 
+/** Longest proof address a claim line shows. The full address is in the claim's file in the inbox. */
+const SHOWN_ADDRESS_CHARS = 120;
+
+/** `text` cut to `max` characters (code points, so a pair of surrogates is never split), ending with `...` when it was longer. */
+const shortened = (text: string, max: number) => {
+  const chars = [...text];
+  return chars.length <= max ? text : `${chars.slice(0, max - 3).join("")}...`;
+};
+
+/** Plain text with all markdown punctuation escaped, on one line, mentioning no one. */
+const plainText = (text: string) => escapeMarkdown(text).replace(/[<>`]/g, "").replace(/@/g, "@​").replace(/\s+/g, " ");
+
+/**
+ * A web address a stranger chose, shortened and written as code, so it never
+ * makes a link, an image or a mention. A backtick or space in it is
+ * percent-encoded, so it cannot end the code span.
+ */
+const shownAddress = (address: string) =>
+  `\`${shortened(address, SHOWN_ADDRESS_CHARS).replace(/[`\s]/gu, (ch) => encodeURIComponent(ch))}\``;
+
 function claimSummary(c: ClaimForReview, places: ReadonlyMap<string, Place>): string {
   // The code may have been found after a redirect. Show where, and flag another site.
   const foundAt = c.proof.url ?? c.proofUrl;
+  const submitted = shownAddress(c.proofUrl);
+  const code = plainText(c.code);
   const proof = !c.proof.found
-    ? `code ${c.code} NOT found at ${c.proofUrl} (${safeSummary(c.proof.detail)})`
+    ? `code ${code} NOT found at ${submitted} (${plainText(shortened(c.proof.detail, SHOWN_ADDRESS_CHARS * 2))})`
     : siteOf(foundAt) === siteOf(c.proofUrl)
-      ? `code ${c.code} found at ${foundAt}`
-      : `code ${c.code} found at ${foundAt}, ON A DIFFERENT SITE from the submitted ${c.proofUrl}: check both belong to the place`;
+      ? `code ${code} found at ${shownAddress(foundAt)}`
+      : `code ${code} found at ${shownAddress(foundAt)}, ON A DIFFERENT SITE from the submitted ${submitted}: check both belong to the place`;
   const replaces = c.replaces ? ` Replaces the current owner (claim ${c.replaces.claim}, approved ${c.replaces.approved}).` : "";
   if (c.type === "owner_listing" && c.listing) {
     // Nobody has approved the listing yet, and this PR is public: its name, description,
     // fact values and exact location stay in the inbox until a person approves it.
     const facts = Object.keys(c.listing.facts).sort().join(", ");
     const description = c.listing.description ? ", description sent" : "";
-    return safeSummary(
+    return (
       `new private farm stay \`${c.place}\` near ${coarse(c.listing.location.lat)}, ${coarse(c.listing.location.lon)}. ` +
-        `Facts sent: ${facts || "none"}${description}. Read the listing in inbox/owner-claims/${c.claim}.json before ticking. Proof: ${proof}.`,
+      `Facts sent: ${facts || "none"}${description}. Read the listing in inbox/owner-claims/${c.claim}.json before ticking. Proof: ${proof}.`
     );
   }
-  return `${label(c.place, places)}. Proof: ${safeSummary(proof)}.${replaces}`;
+  return `${label(c.place, places)}. Proof: ${proof}.${replaces}`;
+}
+
+/**
+ * Room kept in a body or comment for the case sections' headings, blank lines
+ * and the line that says more cases follow, which the case lines' budget does
+ * not count.
+ */
+const SECTION_ROOM_CHARS = 400;
+
+/** What a run posts on the `feedback/review` PR: the body (or first comment), and follow-up comments for held and closed cases that did not fit. */
+export interface ReviewPrTexts {
+  body: string;
+  /** Posted in order after the body. Empty when everything fits in the body. */
+  comments: string[];
 }
 
 /**
  * Body for the `feedback/review` PR, or for a comment on it when the PR is
- * already open. Lists the changes and reports a person has to decide on, and
- * an approval box for each owner claim or listing. Owner names and emails
- * never appear.
+ * already open. See `reviewPrTexts`.
  */
 export function reviewPrBody(
   runAt: string,
@@ -159,7 +220,49 @@ export function reviewPrBody(
   previews: ReadonlyMap<string, string> = new Map(),
   closed: readonly ClosedCase[] = [],
 ): string {
-  return fitted(changes.map((c) => line(c, places, previews)), (changeLines) => {
+  return reviewPrTexts(runAt, changes, places, claims, held, previews, closed).body;
+}
+
+const HELD_INTRO =
+  "Cases a person, a bot or an AI reviewer should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
+  "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate` or `commons_mismatch`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
+  "set its `standing` to `shown` in this PR. `contacts` and `description` name what was left off a published new place: " +
+  "contact details, addresses and descriptions travellers sent are in the inbox items, never here. " +
+  "`contact_withdrawn` is a contact taken off a place after reports from two sources: its `value` is the place's own published contact, " +
+  "not something a traveller sent, so it is shown here. To restore it, set `facts.<fact>` back to `value` on the place in this PR. " +
+  "`fact_doubted` is a fact travellers say is wrong without giving the right value: with `taken_down` doubts from two sources took it off the place, " +
+  "otherwise one traveller doubts it and it stays. `value` is what the place published, and `doubts` and `confirmations` name the reports weighed. " +
+  "To restore it, set `facts.<fact>` back to `value`. Doubt notes are in the inbox, never here. " +
+  "`vehicle_access_candidate` lines come from older runs and are always left: a name alone never sets a fact, so tag the place in OpenStreetMap instead. " +
+  "It comes from the data, so its `feedback` is empty, and each place is listed once. " +
+  "`commons_mismatch` is a Commons photo `file` travellers say is not of the place: to confirm it, add the place and file to `moderation/commons-do-not-match.json`.";
+
+const CLOSED_INTRO =
+  "Held cases the rules settled, one per line: `closed-case` and a JSON object. Each closes the `fact_doubted` cases for its place and fact listed before it: " +
+  "travellers `restored` the value by confirming it again, or `replaced` it with another value, in the reports `feedback` names.";
+
+/**
+ * The texts for the `feedback/review` PR. The body lists the changes and
+ * reports a person has to decide on, an approval box for each owner claim or
+ * listing (at most MAX_CLAIMS_PER_RUN, so they always fit), the held cases
+ * and the closed cases. Owner names and emails never appear. Every part is
+ * budgeted against MAX_BODY_CHARS: held and closed case lines that do not fit
+ * after the claims go, in order, to follow-up comments of the same size, and
+ * change lines that do not fit after that are counted and listed in the run's
+ * job summary.
+ */
+export function reviewPrTexts(
+  runAt: string,
+  changes: readonly Change[],
+  places: ReadonlyMap<string, Place>,
+  claims: readonly ClaimForReview[] = [],
+  held: readonly HeldCase[] = [],
+  previews: ReadonlyMap<string, string> = new Map(),
+  closed: readonly ClosedCase[] = [],
+): ReviewPrTexts {
+  // Held lines first and closed lines after them, as a closed case closes the cases listed before it.
+  const caseLines = [...held.map(heldLine), ...closed.map((c) => `- closed-case ${lineJson(c)}`)];
+  const build = (changeLines: readonly string[], inBody: number): string => {
     const lines = [`Feedback from ${runAt}.`, ""];
     if (changes.length > 0) {
       const plural = changes.length === 1 ? "" : "s";
@@ -190,41 +293,51 @@ export function reviewPrBody(
         "",
       );
     }
-    if (held.length > 0) {
-      lines.push(
-        "## Held cases",
-        "",
-        "Cases a person, a bot or an AI reviewer should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
-          "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate` or `commons_mismatch`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
-          "set its `standing` to `shown` in this PR. `contacts` and `description` name what was left off a published new place: " +
-          "contact details, addresses and descriptions travellers sent are in the inbox items, never here. " +
-          "`contact_withdrawn` is a contact taken off a place after reports from two sources: its `value` is the place's own published contact, " +
-          "not something a traveller sent, so it is shown here. To restore it, set `facts.<fact>` back to `value` on the place in this PR. " +
-          "`fact_doubted` is a fact travellers say is wrong without giving the right value: with `taken_down` doubts from two sources took it off the place, " +
-          "otherwise one traveller doubts it and it stays. `value` is what the place published, and `doubts` and `confirmations` name the reports weighed. " +
-          "To restore it, set `facts.<fact>` back to `value`. Doubt notes are in the inbox, never here. " +
-          "`vehicle_access_candidate` lines come from older runs and are always left: a name alone never sets a fact, so tag the place in OpenStreetMap instead. " +
-          "It comes from the data, so its `feedback` is empty, and each place is listed once. " +
-          "`commons_mismatch` is a Commons photo `file` travellers say is not of the place: to confirm it, add the place and file to `moderation/commons-do-not-match.json`.",
-        "",
-        ...held.map(heldLine),
-        "",
-      );
-    }
-    if (closed.length > 0) {
-      lines.push(
-        "## Closed cases",
-        "",
-        "Held cases the rules settled, one per line: `closed-case` and a JSON object. Each closes the `fact_doubted` cases for its place and fact listed before it: " +
-          "travellers `restored` the value by confirming it again, or `replaced` it with another value, in the reports `feedback` names.",
-        "",
-        ...closed.map((c) => `- closed-case ${lineJson(c)}`),
-        "",
-      );
-    }
+    lines.push(...caseSections(caseLines.slice(0, inBody), held.length, inBody < caseLines.length));
     lines.push(FOOTER);
     return `${lines.join("\n")}\n`;
-  });
+  };
+  // As many case lines as fit in the body with no change lines, then change lines in what is left.
+  const inBody = fitting(caseLines, MAX_BODY_CHARS - build([], 0).length - HELD_INTRO.length - CLOSED_INTRO.length - SECTION_ROOM_CHARS);
+  const body = fitted(changes.map((c) => line(c, places, previews)), (changeLines) => build(changeLines, inBody));
+  return { body, comments: followUps(runAt, caseLines.slice(inBody), held.length - inBody) };
+}
+
+/** How many of `lines`, from the start, fit in `budget` characters with a newline each. */
+function fitting(lines: readonly string[], budget: number): number {
+  let used = 0;
+  let n = 0;
+  for (const l of lines) {
+    if (used + l.length + 1 > budget) break;
+    used += l.length + 1;
+    n += 1;
+  }
+  return n;
+}
+
+/** The held and closed case sections for `lines`, of which the first `heldCount` are held cases. */
+function caseSections(lines: readonly string[], heldCount: number, more: boolean): string[] {
+  const held = lines.slice(0, Math.max(0, heldCount));
+  const closed = lines.slice(Math.max(0, heldCount));
+  const out: string[] = [];
+  if (held.length > 0) out.push("## Held cases", "", HELD_INTRO, "", ...held, "");
+  if (closed.length > 0) out.push("## Closed cases", "", CLOSED_INTRO, "", ...closed, "");
+  if (more) out.push("More cases follow in the next comments.", "");
+  return out;
+}
+
+/** Follow-up comments for case lines the body had no room for, each under MAX_BODY_CHARS. `heldCount` of them are held cases. */
+function followUps(runAt: string, lines: readonly string[], heldCount: number): string[] {
+  const comments: string[] = [];
+  let done = 0;
+  while (done < lines.length) {
+    const head = `Cases from ${runAt}, continued.`;
+    const n = Math.max(1, fitting(lines.slice(done), MAX_BODY_CHARS - head.length - HELD_INTRO.length - CLOSED_INTRO.length - SECTION_ROOM_CHARS));
+    const page = caseSections(lines.slice(done, done + n), heldCount - done, done + n < lines.length);
+    comments.push(`${[head, "", ...page, FOOTER].join("\n")}\n`);
+    done += n;
+  }
+  return comments;
 }
 
 /**
@@ -236,4 +349,8 @@ function heldLine(c: HeldCase): string {
   return `- held-case ${lineJson(c)}`;
 }
 
-const lineJson = (value: unknown) => JSON.stringify(value).replace(/[<>`@&]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+// Inside each string: every character outside printable ASCII, and those markdown or GitHub read as markup, a link or a mention.
+const lineJson = (value: unknown) =>
+  JSON.stringify(value).replace(LITERAL, (literal) =>
+    literal.replace(/[^\x20-\x7e]|[<>`@&[\]()]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`),
+  );

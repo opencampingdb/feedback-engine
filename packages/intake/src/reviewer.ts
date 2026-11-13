@@ -64,8 +64,17 @@ export const DO_NOT_MATCH_PATH = "moderation/commons-do-not-match.json";
 export const REVIEW_BRANCH = "feedback/review";
 /** Cases the model is asked about in one run. The rest wait for the next. */
 export const MAX_MODEL_CASES = 5;
-/** How long one model answer may take before the run stops, to try again next time. */
+/** How long one model answer may take before it counts as a failed call. */
 export const REVIEW_TIMEOUT_MS = 30_000;
+/** Runs in which the model call for one case may fail before the case is left to a person. */
+export const MAX_MODEL_FAILURES = 3;
+/**
+ * The least time between two counted failures of a case that was the run's
+ * only model call, so MAX_MODEL_FAILURES of them span at least an hour.
+ */
+export const LONE_FAILURE_GAP_MS = 30 * 60 * 1000;
+/** How long a case's count of failed runs is kept after its last failure. */
+export const MODEL_FAILURE_KEEP_MS = 14 * 24 * 60 * 60 * 1000;
 /** Longest reason written to the PR. */
 export const MAX_REASON_CHARS = 200;
 /** Times a run's commit starts again from a branch that moved on before the run gives up until the next. */
@@ -78,12 +87,14 @@ export interface ReviewerDeps {
   branch: string;
   ai: AiLike;
   model: string;
-  /** The intake's D1 database, with the `runs` table. */
+  /** The intake's D1 database, with the `runs` and `review_failures` tables. */
   db: D1Like;
   /** Bot logins (`<app slug>[bot]`) whose comments on the PR count, beside people who can write to the repository. */
   botLogins: readonly string[];
   now: () => number;
   onError?: (error: unknown) => void;
+  /** Called when the model call for the case `key` failed, with the runs it has failed so far. The run goes on. */
+  onModelFailure?: (key: string, failures: number, error: unknown) => void;
   /**
    * The major roads from the data repository's geometry sidecar, when the
    * deployment has them. With them a merge across a major road is refused;
@@ -363,10 +374,15 @@ interface Pending {
  * read at the branch's head when the run starts, and a decision builds on
  * the decisions before it in the same run. The decisions that change a place
  * are committed together at the end, as one Git Data API commit (see
- * `commitRun`), and the PR gets one comment. A model that fails stops the
- * run: what it decided until then is still committed and recorded, and the
- * failed case is asked about again next run. A decision whose file changed
- * on the branch meanwhile is left out, to try again next run.
+ * `commitRun`), and the PR gets one comment. A model call that fails is
+ * skipped and the run goes on to the next case, which is asked about again
+ * next run. The failure counts for its case in `review_failures` only when
+ * another model call in the same run answered, so an outage counts nothing,
+ * or when the case was the run's only model call and its last counted
+ * failure was at least LONE_FAILURE_GAP_MS ago. A case with
+ * MAX_MODEL_FAILURES counted failures is `leave`, for a person. A decision
+ * whose file changed on the branch meanwhile is left out, to try again next
+ * run.
  */
 export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult> {
   const { github, data, branch } = deps;
@@ -419,6 +435,11 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
     distinct = new Set(pairs.filter((p) => typeof p.a === "string" && typeof p.b === "string").map((p) => pairKey(p.a as string, p.b as string)));
     return distinct;
   };
+  const failures = await modelFailures(deps.db);
+  const failedReason = (n: number) => `the model call failed in ${n} runs, so a person decides this case`;
+  // The cases whose model call failed in this run, and how many model calls answered.
+  const failedNow: { key: string; c: HeldCase; error: unknown }[] = [];
+  let answered = 0;
   let asked = 0;
   try {
     for (const [key, c] of cases) {
@@ -434,8 +455,13 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       let reason: string;
       let otherFile: { text: string } | null = null;
       let other: Place | undefined;
+      const failed = failures.get(key)?.failures ?? 0;
       if (settled) {
         ({ decision, reason } = settled);
+      } else if (failed >= MAX_MODEL_FAILURES) {
+        // Its decision was not recorded in an earlier run: leave it again, without asking.
+        decision = "leave";
+        reason = failedReason(failed);
       } else {
         if (asked >= MAX_MODEL_CASES) continue;
         asked++;
@@ -444,7 +470,14 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         // A merge only where the rules allow one: never into an owner's place or a pair a person found separate.
         const pairs = c.case === "duplicate" ? await distinctPairs() : undefined;
         const allowed = allowedDecisions(c).filter((d) => d !== "merge" || reviewerMergeProblem(place!, other, pairs, deps.roads) === null);
-        ({ decision, reason } = await askModel(deps.ai, deps.model, c, place!, other, allowed));
+        try {
+          ({ decision, reason } = await askModel(deps.ai, deps.model, c, place!, other, allowed));
+          answered++;
+        } catch (error) {
+          if (!(error instanceof ModelUnavailable)) throw error;
+          failedNow.push({ key, c, error });
+          continue;
+        }
       }
       reason = safeReason(reason);
       const at = new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -474,6 +507,21 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
   } catch (error) {
     (deps.onError ?? (() => undefined))(error);
   }
+  const lone = answered === 0 && asked === 1 && failedNow.length === 1;
+  for (const { key, c, error } of failedNow) {
+    const before = failures.get(key);
+    const counts = answered > 0 || (lone && (!before || deps.now() - before.failed >= LONE_FAILURE_GAP_MS));
+    const count = counts ? await recordModelFailure(deps.db, key, deps.now(), before?.failures ?? 0) : (before?.failures ?? 0);
+    (deps.onModelFailure ?? (() => undefined))(key, count, error);
+    if (count < MAX_MODEL_FAILURES) continue;
+    const reason = safeReason(failedReason(count));
+    decisions.push({
+      record: { key, case: c.case, place: c.place, decision: "leave", reviewer, reason, by_rules: false, committed: false },
+      paths: [],
+      title: `${reviewer}: leave held case ${c.case} on ${c.place}`,
+      reason,
+    });
+  }
   let kept: Pending[];
   try {
     kept = await commitRun(deps, base, decisions, staged, reviewer);
@@ -484,7 +532,43 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
   }
   const records = kept.map((d) => d.record);
   if (records.length > 0) await github.commentOnPullRequest(data, pr.number, decisionComment(reviewer, records));
+  await forgetModelFailures(deps.db, records.map((r) => r.key), deps.now());
   return { outcome: "reviewed", pr: pr.number, decisions: records };
+}
+
+/** Each case's counted failed runs and the time of the last one, by key. None when the table can't be read. */
+async function modelFailures(db: D1Like): Promise<Map<string, { failures: number; failed: number }>> {
+  try {
+    const rows = await db.prepare("SELECT key, failures, failed FROM review_failures").all<{ key: string; failures: number; failed: number }>();
+    return new Map((rows.results ?? []).map((r) => [r.key, { failures: r.failures, failed: r.failed }]));
+  } catch {
+    return new Map();
+  }
+}
+
+/** Counts a failed model call for the case `key` at `nowMs`, and returns its counted runs. `before` when the count can't be written. */
+async function recordModelFailure(db: D1Like, key: string, nowMs: number, before: number): Promise<number> {
+  try {
+    const count = await db
+      .prepare(
+        "INSERT INTO review_failures (key, failures, failed) VALUES (?, 1, ?) ON CONFLICT (key) DO UPDATE SET failures = review_failures.failures + 1, failed = excluded.failed RETURNING failures",
+      )
+      .bind(key, nowMs)
+      .first<number>("failures");
+    return typeof count === "number" ? count : before;
+  } catch {
+    return before;
+  }
+}
+
+/** Drops the counts of the cases whose decisions were recorded, and every count older than MODEL_FAILURE_KEEP_MS. */
+async function forgetModelFailures(db: D1Like, keys: readonly string[], nowMs: number): Promise<void> {
+  try {
+    await db.prepare("DELETE FROM review_failures WHERE failed < ?").bind(nowMs - MODEL_FAILURE_KEEP_MS).run();
+    for (const key of keys) await db.prepare("DELETE FROM review_failures WHERE key = ?").bind(key).run();
+  } catch {
+    // The counts are kept until the next run.
+  }
 }
 
 /**

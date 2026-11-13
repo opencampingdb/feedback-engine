@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createHandler, MAX_BATCH_BODY_BYTES, MAX_BATCH_ITEMS, type Env } from "../src/index.js";
 import { NEW_PLACE_DAILY_LIMIT, type D1Like } from "../src/recent.js";
+import { ORIGIN_DAILY_LIMIT } from "../src/ratelimit.js";
 import { fakeD1 } from "./fake-d1.js";
 import { listableKv } from "./fake-kv.js";
 import { signContributorProof } from "@opencampingdb/feedback";
@@ -336,5 +337,119 @@ describe("a contributor proof on batch items (audit run-2 OCDB-NV-06)", () => {
     const answers = ((await res.json()) as { items: { status: number; error?: string }[] }).items;
     expect(answers.map((a) => a.status)).toEqual([401, 202]);
     expect(answers[0]).toMatchObject({ status: 401, error: "proof_required" });
+  });
+});
+
+describe("POST /v1/feedback/batch with requests in flight together", () => {
+  const unattested = (store: D1Like, daily_limit: number) => env(store, { requires_attestation: false, daily_limit });
+  const sender = (i: number) => ({
+    device: `${String(i).padStart(8, "0")}-e2bb-4255-8caf-4136c566a962`,
+    contributor: `acct_${String(i).padStart(16, "0")}`,
+    ip: `198.51.${i}.20`,
+  });
+  const post = (path: string, body: unknown, ip: string) =>
+    new Request(`https://intake.example${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-app-key": APP_KEY, "cf-connecting-ip": ip },
+      body: JSON.stringify(body),
+    });
+  const itemsOf = (from: ReturnType<typeof sender>, start: number) =>
+    Array.from({ length: MAX_BATCH_ITEMS }, (_, i) => review(placeOf(start + i), { device: from.device, contributor: from.contributor }));
+  const accepted = async (res: Response) => (res.status === 200 ? ((await res.json()) as { items: ItemAnswer[] }).items.filter((a) => a.status === 202).length : 0);
+
+  function setup(daily: number) {
+    const store = fakeD1();
+    const handle = createHandler({ fetch: fakeServices().fetch, now: () => NOW, randomBytes: () => crypto.getRandomValues(new Uint8Array(16)) });
+    const counts = () => store.db.prepare("SELECT key, count FROM rate_counts").all() as { key: string; count: number }[];
+    return { store, handle, e: unattested(store, daily), counts };
+  }
+
+  it("holds one sender to its device and contributor limits, and still serves another", async () => {
+    const { handle, e, counts } = setup(5000);
+    const a = sender(1);
+    const sent = await Promise.all(Array.from({ length: 10 }, (_, b) => handle(post("/v1/feedback/batch", { items: itemsOf(a, b * MAX_BATCH_ITEMS) }, a.ip), e)));
+    let total = 0;
+    for (const res of sent) total += await accepted(res);
+    expect(total).toBe(200);
+    for (const row of counts()) {
+      if (row.key.startsWith("d:") || row.key.startsWith("c:")) expect(row.count).toBeLessThanOrEqual(200);
+    }
+    const b = sender(2);
+    const other = await handle(post("/v1/feedback", review(placeOf(9999), { device: b.device, contributor: b.contributor }), b.ip), e);
+    expect(other.status).toBe(202);
+  });
+
+  it("holds an app to its daily limit when batches from many senders arrive together", async () => {
+    const { handle, e, counts } = setup(120);
+    const sent = await Promise.all(
+      Array.from({ length: 6 }, (_, i) => {
+        const from = sender(10 + i);
+        return handle(post("/v1/feedback/batch", { items: itemsOf(from, i * MAX_BATCH_ITEMS) }, from.ip), e);
+      }),
+    );
+    let total = 0;
+    for (const res of sent) total += await accepted(res);
+    expect(total).toBe(120);
+    // What the refused items reserved is given back.
+    expect(counts().find((r) => r.key === `a:${DAY}:example-app`)?.count).toBe(120);
+    for (const row of counts().filter((r) => r.key.startsWith("n:"))) expect(row.count).toBeLessThanOrEqual(MAX_BATCH_ITEMS);
+  });
+
+  it("serves a second sender while batches from a network at its daily limit arrive together", async () => {
+    const { handle, e, counts } = setup(ORIGIN_DAILY_LIMIT + 100);
+    const busy = sender(20);
+    // The busy network uses its whole day, from several devices.
+    for (let b = 0; b < ORIGIN_DAILY_LIMIT / MAX_BATCH_ITEMS; b++) {
+      const from = { ...sender(100 + b), ip: busy.ip };
+      expect(await accepted(await handle(post("/v1/feedback/batch", { items: itemsOf(from, b * MAX_BATCH_ITEMS) }, busy.ip), e))).toBe(MAX_BATCH_ITEMS);
+    }
+    const other = sender(21);
+    const sent = await Promise.all([
+      ...Array.from({ length: 6 }, (_, b) => handle(post("/v1/feedback/batch", { items: itemsOf({ ...sender(200 + b), ip: busy.ip }, 1000 + b * MAX_BATCH_ITEMS) }, busy.ip), e)),
+      handle(post("/v1/feedback/batch", { items: itemsOf(other, 2000) }, other.ip), e),
+    ]);
+    const second = sent.at(-1)!;
+    expect(second.status).toBe(200);
+    expect(await accepted(second)).toBe(MAX_BATCH_ITEMS);
+    for (const res of sent.slice(0, -1)) {
+      expect(res.status).toBe(200);
+      expect(await accepted(res)).toBe(0);
+    }
+    expect(counts().find((r) => r.key === `a:${DAY}:example-app`)?.count).toBe(ORIGIN_DAILY_LIMIT + MAX_BATCH_ITEMS);
+  });
+
+  it("asks a sender refused while another batch holds the app's counter to wait a minute, not until midnight", async () => {
+    const { handle, e } = setup(250);
+    const full = sender(22);
+    // One device uses its whole day: 200 of the app's 250.
+    for (let b = 0; b < 4; b++) expect(await accepted(await handle(post("/v1/feedback/batch", { items: itemsOf(full, b * MAX_BATCH_ITEMS) }, full.ip), e))).toBe(MAX_BATCH_ITEMS);
+    const other = sender(23);
+    const [held, refused] = await Promise.all([
+      handle(post("/v1/feedback/batch", { items: itemsOf(full, 1000) }, full.ip), e),
+      handle(post("/v1/feedback/batch", { items: itemsOf(other, 2000) }, other.ip), e),
+    ]);
+    expect(await accepted(held)).toBe(0);
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).toBe("60");
+    // Once the other batch has given back what it held, the sender's batch is taken.
+    expect(await accepted(await handle(post("/v1/feedback/batch", { items: itemsOf(other, 2000) }, other.ip), e))).toBe(MAX_BATCH_ITEMS);
+  });
+
+  it("asks a sender to wait until midnight when the app's day is really used up", async () => {
+    const { handle, e } = setup(MAX_BATCH_ITEMS);
+    const a = sender(24);
+    expect(await accepted(await handle(post("/v1/feedback/batch", { items: itemsOf(a, 0) }, a.ip), e))).toBe(MAX_BATCH_ITEMS);
+    const b = sender(25);
+    const res = await handle(post("/v1/feedback/batch", { items: itemsOf(b, 1000) }, b.ip), e);
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe(String(15 * 3600));
+  });
+
+  it("holds a device to its limit when single items arrive together", async () => {
+    const { handle, e } = setup(5000);
+    const a = sender(3);
+    const sent = await Promise.all(Array.from({ length: 260 }, (_, i) => handle(post("/v1/feedback", review(placeOf(i), { device: a.device, contributor: a.contributor }), a.ip), e)));
+    expect(sent.filter((r) => r.status === 202)).toHaveLength(200);
+    expect(sent.filter((r) => r.status === 429)).toHaveLength(60);
   });
 });

@@ -81,8 +81,12 @@ export function newPlaceStanding(input: NewPlaceStandingInput): NewPlaceStanding
   for (const c of checks) if (!c.stillThere && counts(c.day)) against.add(sourceOf(c));
   if (withdrawnAt !== null && counts(withdrawnAt)) against.add(sourceOf(contributor));
 
+  // The adder never confirms their own place, by device or by source.
+  const adder = sourceOf(contributor);
   const confirming = new Set(
-    checks.filter((c) => c.stillThere && c.nearby && c.device !== contributor.device && !against.has(sourceOf(c))).map(sourceOf),
+    checks
+      .filter((c) => c.stillThere && c.nearby && c.device !== contributor.device && sourceOf(c) !== adder && !against.has(sourceOf(c)))
+      .map(sourceOf),
   );
   const confirmed = confirming.size >= NEW_PLACE_CHECKS_TO_CONFIRM;
 

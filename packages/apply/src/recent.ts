@@ -1,4 +1,6 @@
-import type { FactName, FactValue, StoredFeedback } from "@opencampingdb/feedback";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { isDoubtFact, isValidFactValue, type FactName, type FactValue, type StoredFeedback } from "@opencampingdb/feedback";
 import { sameValue } from "./decide.js";
 import { DataRepo, readHistory } from "./io.js";
 import { newPlaceIdOf, WINDOW_DAYS, WITHDRAWN, type DoubtedRecord } from "./rules.js";
@@ -287,9 +289,95 @@ export async function sendDoubtCases(options: { inbox: string; store: RecentChan
     const outcome = (item as { outcome?: { result?: string; doubted?: DoubtedRecord } }).outcome;
     const down = outcome?.doubted;
     if (outcome?.result !== "applied" || down === undefined || typeof item.place !== "string" || Date.parse(down.at) < since) continue;
+    // The intake refuses the whole call for one value its checks refuse, so such a case is left out on its own.
+    if (!isDoubtFact(down.fact) || !isValidFactValue(down.fact, down.value)) {
+      console.warn(`doubt case ${item.id} left out: the intake does not take ${down.fact} ${JSON.stringify(down.value)}`);
+      continue;
+    }
     cases.push({ place: item.place, fact: down.fact, value: down.value, taken_down_at: down.at, feedback_id: item.id });
   }
   cases.sort((a, b) => (a.taken_down_at < b.taken_down_at ? -1 : a.taken_down_at > b.taken_down_at ? 1 : a.feedback_id < b.feedback_id ? -1 : 1));
   if (cases.length > 0) await options.store.doubtCases(cases);
   return cases;
+}
+
+/**
+ * Everything a run tells the intake about the data, in order: new places now
+ * on main, the block list, the items decided other than applied, applied
+ * reports now on main and the doubt cases. Each call is safe to repeat, so a
+ * refused or failed call is logged and sent again next run, and never stops
+ * the others or the run. The items decided other than applied are this run's
+ * alone, so when that call fails they are kept in the inbox
+ * (`UNSENT_OVERRULED_FILE`) and sent with the next run's. Returns the calls
+ * that failed, in words, and whether the inbox file changed.
+ */
+export async function tellIntake(options: {
+  inbox: string;
+  main: string;
+  store: RecentStore & RecentChangeStore;
+  /** The run's `not_applied` and `refused`. */
+  notApplied: readonly string[];
+  refused: readonly string[];
+  now?: Date;
+}): Promise<{ failed: string[]; recorded: boolean }> {
+  const { inbox, main, store } = options;
+  const unsent = await readUnsentOverruled(inbox);
+  const notApplied = [...new Set([...unsent.ids, ...options.notApplied])].sort();
+  const refused = [...new Set([...unsent.refused, ...options.refused])].sort();
+  const now = options.now ? { now: options.now } : {};
+  const failed: string[] = [];
+  const tell = async <T>(what: string, call: () => Promise<T[]>, done: (sent: T[]) => string) => {
+    try {
+      console.log(done(await call()));
+    } catch (error: unknown) {
+      console.warn(`${what} failed, trying again next run: ${String(error)}`);
+      failed.push(what);
+    }
+  };
+  await tell("settling the recent places", () => settleRecentPlaces({ inbox, main, store, ...now }), (s) => `${s.length} new place(s) taken out of the recent places store`);
+  await tell("sending the block list", () => sendBlockList({ main, store }), (s) => `block list of ${s.length} contributor(s) sent to the intake`);
+  await tell(
+    "sending the items decided other than applied",
+    () => sendOverruled({ ids: notApplied, refused, store }),
+    (s) => `${s.length} item(s) decided other than applied sent to the intake`,
+  );
+  const keep = failed.includes("sending the items decided other than applied") ? { ids: notApplied, refused } : { ids: [], refused: [] };
+  const recorded = await writeUnsentOverruled(inbox, keep);
+  await tell("settling the recent changes", () => settleRecentChanges({ inbox, main, store, ...now }), (s) => `${s.length} applied report(s) in the data on main sent to the intake`);
+  await tell("sending the doubt cases", () => sendDoubtCases({ inbox, store, ...now }), (s) => `${s.length} fact(s) taken down after doubts sent to the intake`);
+  return { failed, recorded };
+}
+
+/** Items decided other than applied that the intake has not taken yet, kept in the inbox for the next run. */
+export const UNSENT_OVERRULED_FILE = "progress/overruled-unsent.json";
+
+interface UnsentOverruled {
+  ids: string[];
+  refused: string[];
+}
+
+async function readUnsentOverruled(inbox: string): Promise<UnsentOverruled> {
+  try {
+    const parsed = JSON.parse(await readFile(join(inbox, UNSENT_OVERRULED_FILE), "utf8")) as Partial<UnsentOverruled>;
+    const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+    return { ids: strings(parsed.ids), refused: strings(parsed.refused) };
+  } catch {
+    return { ids: [], refused: [] };
+  }
+}
+
+/** Writes the unsent items, or removes the file when none are left. Returns whether the file changed. */
+async function writeUnsentOverruled(inbox: string, unsent: UnsentOverruled): Promise<boolean> {
+  const path = join(inbox, UNSENT_OVERRULED_FILE);
+  const before = await readFile(path, "utf8").catch(() => undefined);
+  if (unsent.ids.length === 0) {
+    if (before === undefined) return false;
+    await rm(path);
+    return true;
+  }
+  const text = `${JSON.stringify(unsent, null, 2)}\n`;
+  if (text === before) return false;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, text, "utf8");
+  return true;
 }

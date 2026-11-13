@@ -48,3 +48,27 @@ describe("review erasure", () => {
     expect("eraseReviews" in photos).toBe(false);
   });
 });
+
+describe("a contributor proof with a review", () => {
+  const review = { stars: 4 as const, text: "Quiet spot by the river with shade.", visited: "2026-10" };
+
+  it("validates: a review may carry a proof, and other types still may not", () => {
+    expect(validateSubmission({ ...base, contributor: CONTRIBUTOR, type: "review", place: PLACE, review, contributor_proof: "abc.def" })).toMatchObject({
+      ok: true,
+      value: { type: "review", contributor_proof: "abc.def" },
+    });
+    expect((validateSubmission({ ...base, type: "check", place: PLACE, check: { visited: "2026-10-01", still_there: true }, contributor_proof: "abc.def" }) as { errors: string[] }).errors).toContain(
+      "contributor_proof is not allowed when type is check",
+    );
+  });
+
+  it("sends the proof with a review when given, and nothing new without one", async () => {
+    const { client, posts } = setup();
+    await client.review({ place: PLACE, review, contributor: CONTRIBUTOR, consent: true });
+    await client.review({ place: PLACE, review, contributor: CONTRIBUTOR, contributorProof: "abc.def", consent: true });
+    expect(JSON.parse(posts[0]!.body)).not.toHaveProperty("contributor_proof");
+    expect(JSON.parse(posts[0]!.body)).not.toHaveProperty("contributorProof");
+    expect(JSON.parse(posts[1]!.body)).toMatchObject({ type: "review", contributor_proof: "abc.def" });
+    expect(JSON.parse(posts[1]!.body)).not.toHaveProperty("contributorProof");
+  });
+});

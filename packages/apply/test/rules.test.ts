@@ -107,6 +107,21 @@ function run(
 describe("attested fact reports", () => {
   const attested = (item: StoredFeedback) => ({ ...item, attested: "app_attest", contributor: ctr(item.device) }) as StoredFeedback;
 
+  it("sends a link the intake held for one of these rules to a person, unless the intake says its links passed the checks", () => {
+    const heldByRule = { ...attested(fact(0, "dev-a", "website", "https://new.example.org/camp")), intake: { state: "held", held_reason: "unknown_place" } } as StoredFeedback;
+    const unchecked = run([heldByRule]);
+    expect(unchecked.outcome(heldByRule)).toBe("needs_review");
+    expect(unchecked.after()?.facts.website).toBeUndefined();
+    expect(unchecked.changes).toEqual([expect.objectContaining({ automatic: false })]);
+    const checked = { ...heldByRule, intake: { state: "held", held_reason: "unknown_place", links: "passed" } } as StoredFeedback;
+    const out = run([checked]);
+    expect(out.outcome(checked)).toBe("applied");
+    expect(out.after()?.facts.website).toBe("https://new.example.org/camp");
+    // A fact with no link is decided as before.
+    const toilets = { ...attested(fact(0, "dev-a", "toilets", true)), intake: { state: "held", held_reason: "unknown_place" } } as StoredFeedback;
+    expect(run([toilets]).outcome(toilets)).toBe("applied");
+  });
+
   it("one attested report changes a fact at once", () => {
     const r = attested(fact(0, "dev-a", "power", true));
     const out = run([r]);
@@ -272,8 +287,9 @@ describe("contact reports", () => {
     expect(out.outcome(a)).toBe("applied");
     expect(out.outcome(b)).toBe("applied");
     expect(out.after()?.facts).toEqual({ phone: "03 5555 0100" });
-    expect(out.after()?.fact_sources.website).toBe("feedback");
-    expect(out.after()?.fact_dates?.website).toBe(at(2));
+    // The source and date go with the value, as the data validator requires.
+    expect(out.after()?.fact_sources.website).toBeUndefined();
+    expect(out.after()?.fact_dates?.website).toBeUndefined();
     expect(out.changes).toEqual([expect.objectContaining({ automatic: true, feedback: [a.id, b.id], summary: expect.stringContaining("website taken down") })]);
     expect(out.held).toEqual([
       {
@@ -407,13 +423,29 @@ describe("doubts", () => {
     ]);
   });
 
+  it("sends doubts to a reviewer instead of taking down a value the intake's checks refuse, and the fact stays", () => {
+    const hours = place({
+      facts: { power: false, fee: true, opening_hours: "Mon-Sun  06:00 - 22:00" },
+      fact_sources: { power: "osm", fee: "osm", opening_hours: "feedback" },
+      fact_dates: { opening_hours: at(-30) },
+    });
+    const a = doubt(0, "dev-a", "opening_hours");
+    const b = attested(doubt(1, "dev-b", "opening_hours"));
+    const out = run([a, b], { now: 2, places: [hours] });
+    expect(out.outcome(a)).toBe("needs_review");
+    expect(out.outcome(b)).toBe("needs_review");
+    expect(out.decisions.some((d) => d.doubted !== undefined)).toBe(false);
+    expect(out.after()).toBeUndefined();
+    expect(out.held).toEqual([expect.objectContaining({ case: "fact_doubted", fact: "opening_hours", value: "Mon-Sun  06:00 - 22:00", taken_down: false, sources: 2 })]);
+  });
+
   it("never writes a doubt's note to the PR", () => {
     const out = run([attested(doubt(0, "dev-a"))], { places: [withToilets()] });
     expect(JSON.stringify(out.changes)).not.toContain("none I could find");
     expect(JSON.stringify(out.held)).not.toContain("none I could find");
   });
 
-  it("takes a fact down on doubts from two sources, one attested, with the doubters' source and date, and lists the case", () => {
+  it("takes a fact down on doubts from two sources, one attested, with its source and date, and lists the case", () => {
     const confirm = fact(-5, "dev-c", "toilets", true);
     const a = attested(doubt(0, "dev-a"));
     const b = doubt(1, "dev-b");
@@ -423,8 +455,8 @@ describe("doubts", () => {
     expect(out.outcome(b)).toBe("applied");
     expect(out.decisions[1]?.doubted).toEqual({ fact: "toilets", value: true, at: at(1) });
     expect(out.after()?.facts).toEqual({ power: false, fee: true });
-    expect(out.after()?.fact_sources.toilets).toBe("feedback");
-    expect(out.after()?.fact_dates?.toilets).toBe(at(1));
+    expect(out.after()?.fact_sources.toilets).toBeUndefined();
+    expect(out.after()?.fact_dates?.toilets).toBeUndefined();
     expect(out.edits).toEqual([]);
     expect(out.changes).toEqual([
       expect.objectContaining({ automatic: true, feedback: [a.id, b.id], summary: "toilets taken down after doubts from 2 sources within 90 days" }),
@@ -513,10 +545,25 @@ describe("doubts", () => {
     expect(out.changes.at(-1)?.summary).toBe("toilets doubted, held by the intake for text_check (decide: keep it or remove it)");
   });
 
+  it("takes pets_months off with a seasonal pets fact doubts took down", () => {
+    const seasonal = place({
+      facts: { power: false, pets: "seasonal", pets_months: "May-Sep" },
+      fact_sources: { power: "osm", pets: "feedback", pets_months: "feedback" },
+      fact_dates: { pets: at(-30), pets_months: at(-30) },
+    });
+    const a = attested(doubt(0, "dev-a", "pets"));
+    const b = doubt(1, "dev-b", "pets");
+    const out = run([a, b], { now: 2, places: [seasonal] });
+    expect(out.outcome(b)).toBe("applied");
+    expect(out.after()).toMatchObject({ facts: { power: false }, fact_sources: { power: "osm" } });
+    expect(out.after()?.facts).toEqual({ power: false });
+    expect(out.after()?.fact_dates).toBeUndefined();
+  });
+
   describe("a fact doubts took down", () => {
     // Taken down at day 1 in an earlier run: the inbox keeps the value on the doubt that did it.
     const down = (extra: Partial<Place> = {}) =>
-      place({ facts: { power: false, fee: true }, fact_sources: { power: "osm", fee: "osm", toilets: "feedback" }, fact_dates: { toilets: at(1) }, ...extra });
+      place({ facts: { power: false, fee: true }, fact_sources: { power: "osm", fee: "osm" }, ...extra });
     const takedown = () =>
       ({ ...attested(doubt(1, "dev-b")), outcome: { result: "applied", reason: "", run: at(1), doubted: { fact: "toilets", value: true, at: at(1) } } }) as unknown as StoredFeedback;
     const history = () => [applied(doubt(0, "dev-a")), takedown()];
@@ -578,9 +625,10 @@ describe("doubts", () => {
       expect(out.closed).toEqual([{ case: "fact_doubted", place: PLACE, fact: "toilets", settles: "replaced", feedback: [a.id, b.id] }]);
     });
 
-    it("has no open case once the fact was set again, or something else changed it", () => {
+    it("has no open case once the fact was set again, or a later report set it before it went again", () => {
       const c1 = attested(fact(3, "dev-c", "toilets", true));
-      const elsewhere = run([c1], { now: 5, history: history(), places: [down({ fact_dates: { toilets: at(2) } })] });
+      const setAgain = applied(attested(fact(2, "dev-e", "toilets", true)));
+      const elsewhere = run([c1], { now: 5, history: [...history(), setAgain], places: [down()] });
       expect(elsewhere.outcome(c1)).toBe("applied");
       expect(elsewhere.after()?.facts.toilets).toBe(true);
       expect(elsewhere.closed).toEqual([]);
@@ -976,6 +1024,15 @@ describe("reviews", () => {
     expect(out.after()?.rating).toEqual({ count: 3, mean: 4 });
   });
 
+  it("refuses a trusted contributor's review that fails the SDK text rules", () => {
+    for (const text of ["Flat sites. The ranger is a spaz and a poofter.", "Flat sites and clean toilets. Best crypto tips on whatsapp"]) {
+      const r = review(0, "sam", 1, text);
+      const out = run([r], { reviewers: [ctr("sam")] });
+      expect(out.outcome(r)).toBe("refused");
+      expect(out.reviews.size).toBe(0);
+    }
+  });
+
   it("holds a contributor's first review for a person", () => {
     const r = review(0, "sam", 4, "Quiet and level");
     const out = run([r]);
@@ -985,14 +1042,42 @@ describe("reviews", () => {
     expect(out.edits).toEqual([{ kind: "review", place: PLACE, review: expect.objectContaining({ contributor: ctr("sam"), stars: 4 }), feedback: r.id }]);
   });
 
-  it("trusts a contributor whose feedback was applied before", () => {
-    const earlier = applied({ ...check(-5, "sam", true), contributor: ctr("sam") } as StoredFeedback);
-    const held = applied({ ...check(-5, "kim", true), contributor: ctr("kim") } as StoredFeedback, "needs_review");
+  it("does not quote a held review's text in the change for a person, and names the inbox item", () => {
+    const first = review(0, "sam", 4, "Quiet and level, ask Jo Bloggs at number 12 for the gate");
+    const repeatedText = "Best camp in the state, everyone should stay here at least once!";
+    const other = applied(review(-3, "kim", 5, repeatedText, OTHER));
+    const repeated = review(0, "lee", 5, repeatedText);
+    const out = run([first, repeated], { history: [other], reviewers: [ctr("lee")] });
+    expect(out.outcome(first)).toBe("needs_review");
+    expect(out.outcome(repeated)).toBe("needs_review");
+    const held = out.changes.filter((c) => !c.automatic);
+    expect(held.map((c) => c.feedback)).toEqual([[first.id], [repeated.id]]);
+    for (const c of held) {
+      expect(c.summary).not.toMatch(/Jo Bloggs|Best camp/);
+      expect(c.summary).toContain("inbox");
+    }
+  });
+
+  it("trusts a contributor whose review was applied before", () => {
+    const earlier = applied(review(-5, "sam", 5, "Shady", OTHER));
+    const held = applied(review(-5, "kim", 5, "Shady", OTHER), "needs_review");
     const a = review(0, "sam", 4, "Quiet");
     const b = review(0, "kim", 4, "Quiet");
-    const out = run([a, b], { history: [earlier, held] });
+    const out = run([a, b], { history: [earlier, held], places: [place(), place({ id: OTHER })] });
     expect(out.outcome(a)).toBe("applied");
     expect(out.outcome(b)).toBe("needs_review");
+  });
+
+  it("does not trust a contributor whose only applied feedback is of another type", () => {
+    const earlier = [
+      applied({ ...check(-5, "sam", true), contributor: ctr("sam") } as StoredFeedback),
+      applied({ ...base(-4, "sam", null), contributor: ctr("sam"), type: "review_erasure" } as StoredFeedback),
+      applied({ ...base(-3, "sam", null), contributor: ctr("sam"), type: "photo_erasure" } as StoredFeedback),
+    ];
+    const r = review(0, "sam", 1, "Quiet");
+    const out = run([r], { history: earlier });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.reviews.size).toBe(0);
   });
 
   it("keeps visited_nearby on the published line", () => {
@@ -1001,13 +1086,60 @@ describe("reviews", () => {
     expect(out.reviews.get(PLACE)?.[0]?.visited_nearby).toBe(true);
   });
 
-  it("replaces a contributor's earlier review of the place", () => {
+  it("replaces a contributor's earlier review of the place sent from the same device", () => {
+    const earlier = applied(review(-5, "sam", 5, "Lovely"));
     const r = review(0, "sam", 2, "Gone downhill");
-    const out = run([r], { reviews: [line(1, "sam", 5), line(2, "kim", 4)], reviewers: [ctr("sam")], places: [place({ rating: { count: 2, mean: 4.5 } })] });
+    const existing = [{ ...line(1, "sam", 5), id: reviewIdOf(earlier) }, line(2, "kim", 4)];
+    const out = run([r], { history: [earlier], reviews: existing, reviewers: [ctr("sam")], places: [place({ rating: { count: 2, mean: 4.5 } })] });
     expect(out.outcome(r)).toBe("applied");
     expect(out.reviews.get(PLACE)?.map((l) => l.contributor)).toEqual([ctr("kim"), ctr("sam")]);
     expect(out.reviews.get(PLACE)?.map((l) => l.stars)).toEqual([4, 2]);
     expect(out.after()?.rating).toEqual({ count: 2, mean: 3 });
+  });
+
+  describe("a review that replaces the contributor's earlier review", () => {
+    /** The earlier review in the history and its line in the data, then a new review from `device`. */
+    function replacing(device: string, extra: Record<string, unknown> = {}, earlierExtra: Record<string, unknown> = {}) {
+      const earlier = applied({ ...review(-5, "sam", 5, "Lovely"), ...earlierExtra } as StoredFeedback);
+      const r = { ...review(0, "sam", 1, "Gone downhill"), device, ...extra } as StoredFeedback;
+      const existing = [{ ...line(1, "sam", 5), id: reviewIdOf(earlier) }];
+      return { r, earlier, existing };
+    }
+
+    it("is held for a person when it comes from another device and is not proved, and the earlier review stays", () => {
+      const { r, earlier, existing } = replacing("other-phone");
+      const out = run([r], { history: [earlier], reviews: existing, reviewers: [ctr("sam")], places: [place({ rating: { count: 1, mean: 5 } })] });
+      expect(out.outcome(r)).toBe("needs_review");
+      expect(out.decisions.find((d) => d.id === r.id)?.reason).toMatch(/earlier review/);
+      expect(out.reviews.get(PLACE) ?? existing).toEqual(existing);
+      expect(out.after()).toBeUndefined();
+      expect(out.edits).toEqual([{ kind: "review", place: PLACE, review: expect.objectContaining({ contributor: ctr("sam"), stars: 1 }), feedback: r.id }]);
+    });
+
+    it("is held when the earlier review's item is no longer in the history", () => {
+      const { r, existing } = replacing("sam");
+      const out = run([r], { reviews: existing, reviewers: [ctr("sam")] });
+      expect(out.outcome(r)).toBe("needs_review");
+    });
+
+    it("applies when the intake recorded the contributor as proved", () => {
+      const { r, existing } = replacing("other-phone", { proved: true });
+      const out = run([r], { reviews: existing, reviewers: [ctr("sam")] });
+      expect(out.outcome(r)).toBe("applied");
+      expect(out.reviews.get(PLACE)?.map((l) => l.stars)).toEqual([1]);
+    });
+
+    it("applies when it comes from the same attested key on another device id", () => {
+      const { r, earlier, existing } = replacing("other-phone", { attest_key: "ak_0123456789abcdef" }, { attest_key: "ak_0123456789abcdef" });
+      const out = run([r], { history: [earlier], reviews: existing, reviewers: [ctr("sam")] });
+      expect(out.outcome(r)).toBe("applied");
+    });
+
+    it("is held when it comes from another attested key", () => {
+      const { r, earlier, existing } = replacing("other-phone", { attest_key: "ak_fedcba9876543210" }, { attest_key: "ak_0123456789abcdef" });
+      const out = run([r], { history: [earlier], reviews: existing, reviewers: [ctr("sam")] });
+      expect(out.outcome(r)).toBe("needs_review");
+    });
   });
 
   it("refuses everything from a blocked contributor", () => {
@@ -1261,6 +1393,18 @@ describe("name, description and kind reports", () => {
       { kind: "description", place: PLACE, description: "Shady sites by the river.", feedback: text.id },
       { kind: "kind", place: PLACE, placeKind: "free_camp", group: "overnight", feedback: kind.id },
     ]);
+  });
+
+  it("sends a name or description that fails the text rules to a person as a note, with no edit and no value in the summary", () => {
+    const name = rep({ kind: "name", value: "Dummyname is a wanker" });
+    const text = rep({ kind: "description", value: "Dummyname is a wanker and a thief" });
+    const out = run([name, text]);
+    expect([name, text].map(out.outcome)).toEqual(["needs_review", "needs_review"]);
+    expect(out.edits).toEqual([
+      { kind: "note", place: PLACE, feedback: name.id },
+      { kind: "note", place: PLACE, feedback: text.id },
+    ]);
+    expect(out.changes.map((c) => c.summary).join("\n")).not.toContain("wanker");
   });
 
   it("refuses a kind the data does not know", () => {
@@ -1743,6 +1887,17 @@ describe("new places", () => {
     expect(JSON.stringify(out.held)).not.toContain("hole");
   });
 
+  it("leaves a description the data validator refuses off the place, for a person", () => {
+    for (const description of ["Flat grassy spot by the creek, room for three vans. Cheers, Dave", "Shady sites near the river, drop toilet only. Thanks, Sarah"]) {
+      const item = added(0, "dev-a", { description });
+      const history = [applied(added(-5, "dev-a", {}, { lat: -30, lon: 140 }))];
+      const out = run([item], { history });
+      expect(out.outcome(item)).toBe("applied");
+      expect(out.after(idOf(item))?.description).toBeUndefined();
+      expect(out.held).toEqual([expect.objectContaining({ case: "description", place: idOf(item), problem: "contact" })]);
+    }
+  });
+
   it("drafts a held place for a person with every contact, as before", () => {
     const item = added(0, "dev-a", { contacts: { website: "https://bit.ly/camp", phone: "03 5555 0100" } });
     const out = run([item, remove(0.1, "dev-b", item), remove(0.2, "dev-c", item)]);
@@ -1963,5 +2118,43 @@ describe("items the intake held for a check", () => {
   it("reads a malformed intake field as no decision", () => {
     const r = { ...attested(fact(0, "dev-a", "power", true)), intake: "held" } as unknown as StoredFeedback;
     expect(run([r]).outcome(r)).toBe("applied");
+  });
+});
+
+describe("results the data validator would refuse", () => {
+  const attested = (item: StoredFeedback) => ({ ...item, attested: "app_attest", contributor: ctr(item.device) }) as StoredFeedback;
+
+  it("sends a fact whose record would fail the data checks to a person, and still applies the rest of the place's changes", () => {
+    const broken = attested(fact(0, "dev-a", "operator", "Parks \ud83d Board"));
+    const fine = attested(fact(0.5, "dev-b", "power", true));
+    const out = run([broken, fine]);
+    expect(out.outcome(broken)).toBe("needs_review");
+    expect(out.decisions.find((d) => d.id === broken.id)?.reason).toBe(
+      "the change would fail the data checks (facts/operator is not well formed text, so the file cannot be in canonical form), so a person decides",
+    );
+    expect(out.outcome(fine)).toBe("applied");
+    expect(out.after()?.facts).toEqual({ power: true, fee: true });
+    expect(out.edits).toEqual([{ kind: "note", place: PLACE, feedback: broken.id }]);
+    expect(out.changes).toEqual([
+      expect.objectContaining({ automatic: false, feedback: [broken.id], summary: expect.stringContaining("would fail the data checks") }),
+      expect.objectContaining({ automatic: true, feedback: [fine.id] }),
+    ]);
+    expect(JSON.stringify(out.changes)).not.toContain("Parks");
+  });
+
+  it("sends a trusted contributor's review whose line would fail the data checks to a person, and writes no line", () => {
+    const r = review(0, "sam", 4, "Great camp \ud83d by the lake.");
+    const out = run([r], { reviewers: [ctr("sam")] });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.reviews.size).toBe(0);
+    expect(out.after()).toBeUndefined();
+    expect(out.edits).toEqual([{ kind: "note", place: PLACE, feedback: r.id }]);
+  });
+
+  it("leaves a run whose results pass the data checks as it was", () => {
+    const r = review(0, "sam", 4, "Great camp 😀 by the lake.");
+    const out = run([r], { reviewers: [ctr("sam")] });
+    expect(out.outcome(r)).toBe("applied");
+    expect(out.reviews.get(PLACE)).toHaveLength(1);
   });
 });

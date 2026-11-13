@@ -1,13 +1,16 @@
-import { dataVersionTime, type RecentRelease } from "@opencampingdb/feedback";
+import { dataVersionProblem, type RecentRelease } from "@opencampingdb/feedback";
 import type { D1Like } from "./recent.js";
 
-/** The body of `POST /v1/release`, or the problems with it. */
-export function parseRelease(body: Record<string, unknown>): { data_version: string; layout_version?: number } | { problems: string[] } {
+/**
+ * The body of `POST /v1/release`, or the problems with it. `data_version`
+ * must be a release name dated no more than 7 days ahead of `now`
+ * (milliseconds since 1970), the same rule the SDK's release updater keeps.
+ */
+export function parseRelease(body: Record<string, unknown>, now: number): { data_version: string; layout_version?: number } | { problems: string[] } {
   const { data_version: version, layout_version: layout } = body;
   const problems: string[] = [];
-  if (typeof version !== "string" || version.length > 64 || dataVersionTime(version) === undefined) {
-    problems.push("data_version must be a release's <yyyymmdd>T<hhmmss>Z-<short sha>");
-  }
+  const versionProblem = dataVersionProblem(version, now);
+  if (versionProblem) problems.push(versionProblem);
   if (layout !== undefined && !(Number.isInteger(layout) && (layout as number) > 0 && (layout as number) < 1_000_000)) {
     problems.push("layout_version must be a positive whole number");
   }

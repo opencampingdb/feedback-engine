@@ -1,14 +1,16 @@
+import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
+import { promisify } from "node:util";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { FIRST_HAND, FIRST_HAND_KINDS, isFeedbackId, isOwnerSubmission, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
+import { FIRST_HAND, FIRST_HAND_KINDS, hasLoneSurrogate, isFeedbackId, isOwnerSubmission, type FactValue, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
 import type { AwaitingClaim, OwnerRecord } from "./owners.js";
 import { pairKey, withDoNotMatch, type DoNotMatchEntry } from "./review.js";
 import { majorRoads, type MajorRoads } from "./roads.js";
 import type { Decision } from "./rules.js";
 import { dumpPhotoLine, dumpPlace, dumpReviewLine, photoPath, placePath, reviewPath } from "./serialise.js";
-import type { BlockedList, Photo, Place, RemovedPhotos, Review } from "./types.js";
+import type { BlockedList, Photo, Place, RemovedPhotos, Review, Source } from "./types.js";
 
 export interface PendingFile {
   path: string;
@@ -25,7 +27,7 @@ const RECEIVED = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
 
 /**
  * Why `item` cannot be used, or undefined when it has a feedback id (equal to
- * `expectedId` when given), an ISO 8601 UTC `received` and, on a report that
+ * `expectedId` when given), an ISO 8601 UTC `received`, only well formed text and, on a report that
  * has one, a `first_hand` the SDK allows on a kind in `FIRST_HAND_KINDS`, so
  * applied items carry only those.
  */
@@ -37,6 +39,7 @@ function storedProblem(item: StoredSubmission, expectedId?: string): string | un
   if (typeof item.received !== "string" || !RECEIVED.test(item.received) || Number.isNaN(Date.parse(item.received))) {
     return "received is not an ISO 8601 UTC time";
   }
+  if (holdsIllFormedText(item)) return "it holds text that is not well formed (a lone surrogate), which no data file can hold";
   const report = (item as { report?: unknown }).report;
   if (typeof report === "object" && report !== null && "first_hand" in report) {
     const { kind, first_hand } = report as { kind?: unknown; first_hand?: unknown };
@@ -45,6 +48,14 @@ function storedProblem(item: StoredSubmission, expectedId?: string): string | un
     }
   }
   return undefined;
+}
+
+/** Whether any string in `value`, key or value, holds a surrogate with no partner. */
+function holdsIllFormedText(value: unknown): boolean {
+  if (typeof value === "string") return hasLoneSurrogate(value);
+  if (Array.isArray(value)) return value.some(holdsIllFormedText);
+  if (typeof value === "object" && value !== null) return Object.entries(value).some(([k, v]) => hasLoneSurrogate(k) || holdsIllFormedText(v));
+  return false;
 }
 
 /** A file in a day folder whose content cannot be used. `day` and `name` come from the checked folder and file names. */
@@ -323,6 +334,17 @@ export async function moveDecided(
   return moved;
 }
 
+const git = promisify(execFile);
+/** How many commits that touched a record `earlierFact` reads, newest first. */
+const EARLIER_VERSIONS = 20;
+
+/** A fact's value on an earlier version of a place record, with its source and date. */
+export interface EarlierFact {
+  value: FactValue;
+  source?: Source;
+  date?: string;
+}
+
 /** Read access to a checkout of the data repository. */
 export class DataRepo {
   #index: Map<string, string> | undefined;
@@ -369,6 +391,34 @@ export class DataRepo {
       if (path) out.set(id, JSON.parse(await readFile(path, "utf8")) as Place);
     }
     return out;
+  }
+
+  /**
+   * The latest value `fact` had on a place in the checkout's git history, with
+   * its source and date, from the newest of the last EARLIER_VERSIONS commits
+   * that touched the record and gave it the fact. Undefined when no such
+   * version is found or the checkout has no git history.
+   */
+  async earlierFact(placeId: string, fact: string): Promise<EarlierFact | undefined> {
+    const path = (await this.#placeIndex()).get(placeId);
+    if (!path) return undefined;
+    const file = relative(this.root, path).split(sep).join("/");
+    try {
+      const { stdout } = await git("git", ["-C", this.root, "log", `-n${EARLIER_VERSIONS}`, "--format=%H", "--", file]);
+      for (const commit of stdout.split("\n").filter(Boolean)) {
+        const shown = await git("git", ["-C", this.root, "show", `${commit}:${file}`], { maxBuffer: 16 * 1024 * 1024 }).catch(() => undefined);
+        if (!shown) continue;
+        const record = JSON.parse(shown.stdout) as Place;
+        const value = (record.facts as Record<string, unknown>)[fact];
+        if (value === undefined) continue;
+        const source = (record.fact_sources as Record<string, Source | undefined>)[fact];
+        const date = record.fact_dates?.[fact as keyof NonNullable<Place["fact_dates"]>];
+        return { value: value as EarlierFact["value"], ...(source ? { source } : {}), ...(date ? { date } : {}) };
+      }
+    } catch {
+      return undefined;
+    }
+    return undefined;
   }
 
   /** Every place record in the checkout, for the duplicates check on new places. */

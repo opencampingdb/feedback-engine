@@ -23,6 +23,7 @@
 
 import {
   contactProblem,
+  factFreeText,
   firstProblem,
   isContactFact,
   stripContactDetails,
@@ -31,6 +32,7 @@ import {
   type ContactFactName,
   type FeedbackSubmission,
 } from "@opencampingdb/feedback";
+import { LINK_FACTS } from "@opencampingdb/apply/decide";
 import type { Fetch } from "./github.js";
 import type { D1Like } from "./recent.js";
 
@@ -87,10 +89,13 @@ export interface CheckDeps {
   /** The Workers AI binding. Without it free text from a contributor without a track record is held. */
   ai?: AiLike | undefined;
   now: () => number;
+  /**
+   * Counts one URLhaus lookup for the links of an item the rules hold, and
+   * answers whether it is under the daily cap. Without it there is no cap.
+   */
+  linkLookup?: (() => Promise<boolean>) | undefined;
 }
 
-/** Contact facts that are links. */
-const LINK_FACTS: readonly ContactFactName[] = ["website", "facebook", "instagram", "tiktok", "x"];
 
 /** The free text on an item, as the text checks read it: the name, description and note. */
 export function freeText(item: FeedbackSubmission): string[] {
@@ -107,19 +112,14 @@ export function freeText(item: FeedbackSubmission): string[] {
 }
 
 /**
- * The quoted comments in an opening_hours value an item would set (OSM
- * opening_hours allows free text between double quotes). The cheap text rules
- * read them; Llama Guard never reads fact values (ADR 0002).
+ * The free words in the fact value an item would set (`factFreeText`): the
+ * quoted comments of opening hours, the operator, a conditional charge's
+ * conditions and a charge's unit. The cheap text rules read them, and Llama Guard
+ * never reads fact values (ADR 0002).
  */
 export function factComments(item: FeedbackSubmission): string[] {
-  if (item.type !== "report") return [];
-  const report = item.report;
-  const values: unknown[] = [];
-  if (report.kind === "fact" && report.fact === "opening_hours") values.push(report.value);
-  return values
-    .filter((v): v is string => typeof v === "string")
-    .flatMap((v) => [...v.matchAll(/"([^"]*)"/g)].map((m) => tidyText(m[1]!)))
-    .filter((text) => text.length > 0);
+  if (item.type !== "report" || item.report.kind !== "fact" || typeof item.report.fact !== "string") return [];
+  return factFreeText(item.report.fact, item.report.value);
 }
 
 /** The contact facts and the address an item would set. */
@@ -296,11 +296,47 @@ export interface Checks {
    * recorded after all.
    */
   check(item: FeedbackSubmission, contributor: CheckContributor): Promise<CheckResult>;
+  /**
+   * The link rules and URLhaus on the links an item would set, for an item
+   * the rules hold, which `check` never reaches: `none` when it sets no link,
+   * `passed`, `link_check` when a link fails, or `check_unavailable` when
+   * URLhaus could not answer. Counts nothing against the daily cap.
+   */
+  links(item: FeedbackSubmission): Promise<LinkResult>;
 }
+
+/** What `Checks.links` found. */
+export type LinkResult = "none" | "passed" | "link_check" | "check_unavailable";
 
 /** The checks, with the services they call. */
 export function createChecks(deps: CheckDeps): Checks {
-  return { check: (item, contributor) => check(deps, item, contributor) };
+  return { check: (item, contributor) => check(deps, item, contributor), links: (item) => links(deps, item) };
+}
+
+/** The links among `contacts`, as URLhaus looks them up. */
+const linksIn = (contacts: [ContactFactName, unknown][]) => contacts.filter(([fact]) => LINK_FACTS.includes(fact)) as [ContactFactName, string][];
+
+/** URLhaus on `links`: null when none is listed, or the hold. */
+async function urlhausHold(deps: CheckDeps, links: [ContactFactName, string][]): Promise<"link_check" | "check_unavailable" | null> {
+  if (links.length === 0) return null;
+  if (!deps.urlhausKey) return "check_unavailable";
+  const key = deps.urlhausKey;
+  const lookups = links.flatMap(([fact, link]) => [
+    urlListed(deps, key, link),
+    ...(fact === "website" ? [hostListed(deps, key, new URL(link).hostname.toLowerCase())] : []),
+  ]);
+  const answers = await Promise.allSettled(lookups);
+  if (answers.some((a) => a.status === "fulfilled" && a.value)) return "link_check";
+  if (answers.some((a) => a.status === "rejected")) return "check_unavailable";
+  return null;
+}
+
+async function links(deps: CheckDeps, item: FeedbackSubmission): Promise<LinkResult> {
+  const found = linksIn(contactsOf(item));
+  if (found.length === 0) return "none";
+  if (found.some(([fact, value]) => contactProblem(fact, value) !== null)) return "link_check";
+  if (deps.urlhausKey && deps.linkLookup && !(await deps.linkLookup())) return "check_unavailable";
+  return (await urlhausHold(deps, found)) ?? "passed";
 }
 
 async function check(deps: CheckDeps, item: FeedbackSubmission, contributor: CheckContributor): Promise<CheckResult> {
@@ -320,18 +356,8 @@ async function check(deps: CheckDeps, item: FeedbackSubmission, contributor: Che
   }
 
   // 2. URLhaus, for the links.
-  const links = contacts.filter(([fact]) => LINK_FACTS.includes(fact)) as [ContactFactName, string][];
-  if (links.length > 0) {
-    if (!deps.urlhausKey) return unavailable;
-    const key = deps.urlhausKey;
-    const lookups = links.flatMap(([fact, link]) => [
-      urlListed(deps, key, link),
-      ...(fact === "website" ? [hostListed(deps, key, new URL(link).hostname.toLowerCase())] : []),
-    ]);
-    const answers = await Promise.allSettled(lookups);
-    if (answers.some((a) => a.status === "fulfilled" && a.value)) return { held: "link_check" };
-    if (answers.some((a) => a.status === "rejected")) return unavailable;
-  }
+  const listed = await urlhausHold(deps, linksIn(contacts));
+  if (listed !== null) return { held: listed };
 
   // 3. Llama Guard, for free text from a contributor without a track record.
   if (texts.length > 0 && !hasTrackRecord(contributor)) {

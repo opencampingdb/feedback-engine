@@ -277,6 +277,16 @@ export interface ReviewInput {
   review: ReviewBody;
   /** The signed-in traveller's opaque account id (a keyed hash, never a name or email). */
   contributor?: string;
+  /**
+   * A proof from your app's server that the signed-in account is this
+   * contributor (`signContributorProof` with action `review` and photo
+   * `"*"`). Optional: a review without one is taken as before. When the app
+   * key has `contributor_proof_key` and the proof checks out, a review that
+   * replaces the contributor's earlier review on the place applies without
+   * waiting for a person. Make it right before the call: it lives at most an
+   * hour, and one that has expired when the review is sent counts as none.
+   */
+  contributorProof?: string;
   consent: boolean;
   /**
    * The caller's own id for this submission, 1 to 100 characters. Kept with
@@ -1952,7 +1962,8 @@ function createClient(
       const results = await submitAll(calls, "report", submitOptions?.wait !== false);
       return set.map(([fact], i) => ({ fact, result: results[i]! }));
     },
-    review: (input, submitOptions) => submit({ ...input }, "review", submitOptions),
+    review: ({ contributorProof, ...input }, submitOptions) =>
+      submit({ ...input, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}) }, "review", submitOptions),
     check: (input, submitOptions) => submit({ ...input }, "check", submitOptions),
     reportReview: ({ place, review, reason, contributor, consent, ref }) =>
       submit(

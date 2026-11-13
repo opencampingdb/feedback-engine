@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createPhotoClient, sha256HexBytes, stripJpegMetadata, type PhotoFetchLike, type PhotoSettled, type StorageAdapter } from "../src/index.js";
+import { createPhotoClient, jpegMetadata, sha256HexBytes, stripJpegMetadata, type PhotoFetchLike, type PhotoSettled, type StorageAdapter } from "../src/index.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const CONTRIBUTOR = "contributor_0123456789";
@@ -18,6 +18,10 @@ const ascii = (text: string) => [...text].map((c) => c.charCodeAt(0));
 const segment = (marker: number, payload: number[]) => [0xff, marker, (payload.length + 2) >> 8, (payload.length + 2) & 0xff, ...payload];
 const EXIF = segment(0xe1, [...ascii("Exif"), 0, 0, 0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08]);
 const XMP = segment(0xe1, [...ascii("http://ns.adobe.com/xap/1.0/"), 0, ...ascii("<x:xmpmeta/>")]);
+const IPTC = segment(0xed, [...ascii("Photoshop 3.0"), 0, ...ascii("8BIM byline")]);
+const COMMENT = segment(0xfe, ascii("a comment"));
+const ICC = segment(0xe2, [...ascii("ICC_PROFILE"), 0, 1, 1, 9, 9]);
+const MPF = segment(0xe2, [...ascii("MPF"), 0, 9, 9]);
 const JFIF = segment(0xe0, [...ascii("JFIF"), 0, 1, 1, 0, 0, 1, 0, 1, 0, 0]);
 /** A frame header, whose last byte the file number fills. */
 const FRAME = [0xff, 0xc0, 0x00, 0x0c, 0x08, 0x00, 0x10, 0x00, 0x10, 0x01, 0x01, 0x11, 0x00];
@@ -61,17 +65,66 @@ describe("stripJpegMetadata", () => {
     expect(stripJpegMetadata(plain)).toBe(plain);
   });
 
-  it("leaves the image data after the start of scan alone, even where it looks like a marker", () => {
-    const tail = [0xff, 0xe1, 0x00, 0x04, 0x00, 0x00];
-    const bytes = new Uint8Array([...jpeg(1, EXIF).slice(0, -2), ...tail, 0xff, 0xd9]);
-    const stripped = stripJpegMetadata(bytes);
-    expect([...stripped.slice(-8)]).toEqual([...tail, 0xff, 0xd9]);
-    expect(stripped.length).toBe(bytes.length - EXIF.length);
+  it("removes IPTC, comment and multi-picture segments and keeps the colour profile", () => {
+    expect(stripJpegMetadata(jpeg(1, JFIF, IPTC, COMMENT, ICC, MPF))).toEqual(jpeg(1, JFIF, ICC));
+  });
+
+  it("keeps stuffed bytes and restart markers in the image data", () => {
+    const data = [0x12, 0xff, 0x00, 0x34, 0xff, 0xd0, 0x56, 0xff, 0xff, 0xd7, 0x78];
+    const bytes = new Uint8Array([...jpeg(1, EXIF).slice(0, -2), ...data, 0xff, 0xd9]);
+    expect(stripJpegMetadata(bytes)).toEqual(new Uint8Array([...jpeg(1).slice(0, -2), ...data, 0xff, 0xd9]));
+  });
+
+  it("removes a metadata segment between two scans", () => {
+    const bytes = new Uint8Array([...jpeg(1).slice(0, -2), ...COMMENT, ...SCAN, 0xff, 0xd9]);
+    expect(stripJpegMetadata(bytes)).toEqual(new Uint8Array([...jpeg(1).slice(0, -2), ...SCAN, 0xff, 0xd9]));
+  });
+
+  it("drops whatever follows the end of the image, such as a second picture with its own Exif", () => {
+    const bytes = new Uint8Array([...jpeg(1, EXIF), ...jpeg(2, EXIF)]);
+    expect(stripJpegMetadata(bytes)).toEqual(jpeg(1));
+  });
+
+  it("removes the metadata it read before a segment it cannot read, and keeps the rest", () => {
+    const bad = [0xff, 0xdb, 0xff, 0xf0, 1, 2, 3];
+    const bytes = new Uint8Array([0xff, 0xd8, ...EXIF, ...FRAME, 1, ...bad]);
+    expect(stripJpegMetadata(bytes)).toEqual(new Uint8Array([0xff, 0xd8, ...FRAME, 1, ...bad]));
   });
 
   it("leaves bytes it cannot read as JPEG segments alone", () => {
     const odd = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x01, 0x01, 1, 1, 1]);
     expect(stripJpegMetadata(odd)).toBe(odd);
+  });
+});
+
+describe("jpegMetadata", () => {
+  it("names the metadata a file carries", () => {
+    expect(jpegMetadata(jpeg(1, JFIF, ICC))).toEqual([]);
+    expect(jpegMetadata(jpeg(1, EXIF, XMP, IPTC, COMMENT))).toEqual(["exif", "xmp", "iptc", "comment"]);
+    expect(jpegMetadata(new Uint8Array([...jpeg(1), ...jpeg(2)]))).toEqual(["after_end"]);
+    expect(jpegMetadata(new Uint8Array([0xff, 0xd8, ...FRAME, 1, 0xff, 0xdb, 0xff, 0xf0, 1]))).toEqual(["unreadable"]);
+  });
+
+  it("finds nothing in a file the SDK has cleaned", () => {
+    expect(jpegMetadata(stripJpegMetadata(new Uint8Array([...jpeg(1, JFIF, EXIF, IPTC, COMMENT, MPF), ...jpeg(2, EXIF)])))).toEqual([]);
+  });
+
+  it("finds nothing in any file a camera or picker makes once the SDK has cleaned it", () => {
+    const data = [0x12, 0xff, 0x00, 0x34, 0xff, 0xd0, 0x56, 0xff, 0xff, 0xd7, 0x78];
+    const files = [
+      jpeg(1),
+      jpeg(1, JFIF, ICC),
+      jpeg(1, JFIF, EXIF, XMP),
+      jpeg(1, EXIF, XMP, IPTC, COMMENT, MPF, ICC),
+      new Uint8Array([...jpeg(1, EXIF).slice(0, -2), ...data, 0xff, 0xd9]),
+      new Uint8Array([...jpeg(1, EXIF).slice(0, -2), ...COMMENT, ...SCAN, 0xff, 0xd9]),
+      new Uint8Array([...jpeg(1, EXIF, MPF), ...jpeg(2, EXIF)]),
+      new Uint8Array([...jpeg(1, EXIF), 0, 0, 0]),
+      // The image data runs to the end of the file, with no end of image marker.
+      jpeg(1, JFIF, EXIF).slice(0, -2),
+      new Uint8Array([...jpeg(1, EXIF).slice(0, -2), ...data]),
+    ];
+    for (const file of files) expect(jpegMetadata(stripJpegMetadata(file))).toEqual([]);
   });
 });
 

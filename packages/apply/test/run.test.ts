@@ -256,7 +256,8 @@ describe("run", () => {
     const first = await run({ inbox, data, now: NOW });
     const down = JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
     expect(down.facts).toEqual({ power: false });
-    expect(down.fact_dates?.toilets).toBe("2026-10-29T00:00:00Z");
+    expect(down.fact_dates?.toilets).toBeUndefined();
+    expect(down.fact_sources.toilets).toBeUndefined();
     expect(heldCases(first.review_pr_body)).toEqual([expect.objectContaining({ case: "fact_doubted", fact: "toilets", value: true, taken_down: true, doubts: [id(1), id(2)] })]);
     expect(first.review_pr_body).not.toContain("none I could find");
     const kept = JSON.parse(await readFile(join(inbox, "applied", "2026-10-29", `${id(2)}.json`), "utf8")) as { outcome: Record<string, unknown> };
@@ -485,6 +486,18 @@ describe("run", () => {
     expect(badTime.outcome.reason).toMatch(/received is not an ISO 8601 UTC time/);
   });
 
+  it("refuses a pending item holding text that is not well formed, and writes nothing for it", async () => {
+    await trustContributor();
+    // The inbox file carries the lone surrogate as a JSON escape, as the intake stored it.
+    await pending(34, "2026-10-29T01:00:00Z", "aaaa", { type: "review", contributor: TRUSTED, review: { stars: 4, text: "Great camp \ud83d by the lake.", visited: "2026-10" } });
+    await pending(35, "2026-10-29T02:00:00Z", "bbbb", { type: "review", contributor: TRUSTED, review: { stars: 4, text: "Great camp \ud83d\ude00 by the lake.", visited: "2026-10" } });
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.counts).toMatchObject({ applied: 1, refused: 1 });
+    const refused = JSON.parse(await readFile(join(inbox, "refused", "2026-10-29", `${id(34)}.json`), "utf8"));
+    expect(refused.outcome.reason).toMatch(/not well formed/);
+    expect(await readFile(join(data, "reviews", `${PLACE}.ndjson`), "utf8")).not.toContain("\\ud83d by");
+  });
+
   it("skips and logs a malformed file in applied/ history", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
@@ -522,6 +535,19 @@ describe("run", () => {
     const applied = async (n: number) => JSON.parse(await readFile(join(inbox, "applied", day, `${id(n)}.json`), "utf8")) as Record<string, unknown>;
     expect(await applied(41)).toMatchObject({ report: { kind: "fact", fact: "power", value: true, first_hand: "seen_nearby" }, outcome: { result: "applied" } });
     expect(await applied(42)).toMatchObject({ report: { first_hand: "says_so" }, outcome: { result: "applied" } });
+  });
+
+  it("lists the inbox moves of the items behind each PR, so a PR GitHub refuses can put them back", async () => {
+    const day = "2026-10-29";
+    const power = { type: "report", report: { kind: "fact", fact: "power", value: true } };
+    await pending(1, `${day}T01:00:00Z`, "aaaa", power);
+    await pending(2, `${day}T02:00:00Z`, "bbbb", power);
+    await pending(3, `${day}T03:00:00Z`, "cccc", { type: "report", report: { kind: "name", value: "Lake Camp" } });
+    await pending(4, `${day}T04:00:00Z`, "dddd", { type: "report", report: { kind: "fact", fact: "power", value: true, first_hand: "-36.85,144.55" } });
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.counts).toMatchObject({ applied: 2, needs_review: 1, refused: 1 });
+    expect(summary.auto_moves).toEqual([1, 2].map((n) => ({ from: `pending/${day}/${id(n)}.json`, to: `applied/${day}/${id(n)}.json` })));
+    expect(summary.review_moves).toEqual([{ from: `pending/${day}/${id(3)}.json`, to: `applied/${day}/${id(3)}.json` }]);
   });
 
   it("refuses an inbox item whose first_hand is not one of its values", async () => {

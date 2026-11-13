@@ -204,12 +204,44 @@ describe("photo server", () => {
     expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx())).status).toBe(200);
   });
 
-  it("does not serve or cache a photo whose contributor it cannot tell, so an erasure can never miss it", async () => {
-    env.PHOTOS = fakeBucket([`${PHOTO}/full.jpg`], [`${PHOTO}/full.jpg`]);
-    const res = await handle(get(`/v1/photos/${PHOTO}/full.jpg`), env, ctx());
-    expect(res.status).toBe(404);
-    expect(res.headers.get("cache-control")).toBe("no-store");
-    expect(cache.store.size).toBe(0);
+  it("does not serve a photo whose contributor it cannot tell, and answers it without counting from a brief cache", async () => {
+    env.PHOTOS = fakeBucket([`${PHOTO}/full.jpg`, `${PHOTO}/thumb.jpg`], [`${PHOTO}/full.jpg`]);
+    for (let i = 0; i < 100; i++) {
+      const res = await handle(get(`/v1/photos/${PHOTO}/full.jpg`, OTHER_KEY), env, ctx());
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "not_found" });
+      expect(res.headers.get("x-photo-contributor")).toBeNull();
+    }
+    expect(env.PHOTOS.reads).toBe(1);
+    expect(cache.store.get(`https://photos.example/v1/photos/${PHOTO}/full.jpg`)?.headers.get("cache-control")).toBe("public, max-age=300");
+    // The other app's limit of 2 reads is untouched.
+    expect((await handle(get(`/v1/photos/${PHOTO}/thumb.jpg`, OTHER_KEY), env, ctx())).status).toBe(200);
+  });
+
+  it("answers a place without a records file with an empty list that costs no read", async () => {
+    env.PHOTO_PASS_SECRET = "pass-secret";
+    env.PHOTO_KEYS = JSON.stringify({ [KEY]: { app: "example-app", daily_limit: 50 }, [OTHER_KEY]: { app: "other", daily_limit: 2 } });
+    const pass = await signPass("pass-secret", "example-app", NOW / 1000 + 3600);
+    const A = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    const placeId = (n: number) => `ocdb_${Array.from({ length: 26 }, (_, i) => A[Math.floor(n / 32 ** (25 - i)) % 32]).join("")}`;
+    for (let n = 0; n < 1000; n++) {
+      const c = ctx();
+      const res = await handle(
+        new Request(`https://photos.example/v1/places/${placeId(n)}/photos.ndjson`, { headers: { "x-photo-pass": pass, "cf-connecting-ip": "203.0.113.5" } }),
+        env,
+        c,
+      );
+      await c.done();
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe("");
+    }
+    expect([...env.STATE.data.keys()].filter((k) => k.startsWith("reads:"))).toEqual([]);
+    // Another app's uncached photo is still served under the server's cap of 100.
+    expect((await handle(get(`/v1/photos/${PHOTO}/full.jpg`, OTHER_KEY), env, ctx())).status).toBe(200);
+    // Another holder of the same app is still within its daily limit of 50.
+    const other = await signPass("pass-secret", "example-app", NOW / 1000 + 1800);
+    const res = await handle(new Request(`https://photos.example/v1/photos/${PHOTO}/thumb.jpg`, { headers: { "x-photo-pass": other } }), env, ctx());
+    expect(res.status).toBe(200);
   });
 
   it("answers a photo that does not exist without counting it, and caches the answer briefly", async () => {

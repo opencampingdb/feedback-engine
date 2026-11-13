@@ -4,7 +4,7 @@
  * photo records at `GET /v1/places/<place id>/photos.ndjson`. A request carries a
  * photo pass from the intake in `x-photo-pass` (apps on phones), or a photo
  * key in `x-app-key` (servers, which can keep a key secret). Answers come from the edge cache when they can.
- * Reads that reach R2 are counted per app per day, and above the app's
+ * Reads of files it serves from R2 are counted per app per day, and above the app's
  * `daily_limit` or the server's `DAILY_READ_CAP` the server answers 503 until
  * midnight UTC. Putting `off` in STATE stops all serving within a minute, and
  * a `withheld:<photo id>` key stops one photo, cache or not, and a
@@ -276,9 +276,11 @@ export function createHandler(deps: Deps) {
     }
 
     const object = await env.PHOTOS.get(photo ? `${photo[1]}/${photo[2]}.jpg` : `records/${records![1]}.ndjson`);
-    if (!object && photo) {
-      // A photo that is not there costs no read and is cached briefly, so asking for it again and
-      // again can't use up the app's daily reads or the cap other apps rely on.
+    const contributor = object?.customMetadata?.contributor;
+    // A photo that is not there, or one without its contributor (the server can't tell whether an
+    // erasure covers it), is not served. It costs no read and the answer is cached briefly, so asking
+    // for it again and again can't use up the app's daily reads or the cap other apps rely on.
+    if (photo && (!object || !contributor)) {
       const missing = new Response(JSON.stringify({ error: "not_found" }), {
         status: 404,
         headers: { "content-type": "application/json; charset=utf-8", "cache-control": `public, max-age=${MISSING_MAX_AGE_SECONDS}`, "x-content-type-options": "nosniff" },
@@ -286,13 +288,13 @@ export function createHandler(deps: Deps) {
       ctx.waitUntil(cache.put(cacheKey, missing.clone()));
       return send(missing, request.method);
     }
-    unsent.set(key.app, (unsent.get(key.app) ?? 0) + 1);
-    since.set(key.app, (since.get(key.app) ?? 0) + 1);
-    const pendingReads = [...unsent.values()].reduce((n, c) => n + c, 0);
-    if (pendingReads >= FLUSH_EVERY || nowMs - lastFlush >= STATE_TTL_MS) ctx.waitUntil(flush(env, nowMs));
-    const contributor = object?.customMetadata?.contributor;
-    // Without its contributor the server can't tell whether an erasure covers the photo: it is not served.
-    if (photo && !contributor) return answer(404, "not_found");
+    // Only a file the server serves is counted: a place without a records file costs no read.
+    if (object) {
+      unsent.set(key.app, (unsent.get(key.app) ?? 0) + 1);
+      since.set(key.app, (since.get(key.app) ?? 0) + 1);
+      const pendingReads = [...unsent.values()].reduce((n, c) => n + c, 0);
+      if (pendingReads >= FLUSH_EVERY || nowMs - lastFlush >= STATE_TTL_MS) ctx.waitUntil(flush(env, nowMs));
+    }
 
     // A place without a records file has no visible photos: an empty list, cached like any other.
     const response = new Response(object ? object.body : "", {

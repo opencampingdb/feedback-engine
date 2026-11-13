@@ -96,6 +96,31 @@ export function dataVersionTime(dataVersion: string): number | undefined {
   return ms;
 }
 
+const RELEASE_NAME = /^\d{8}T\d{6}Z-[0-9a-f]{7,40}$/;
+
+/**
+ * How far ahead of the clock a release's commit time may be: 7 days, so a
+ * device whose clock is a few days slow still takes genuine releases.
+ */
+const DATA_VERSION_LEEWAY_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Why `dataVersion` is not a release's `data_version`, or undefined when it
+ * is one. A release name is the commit time in UTC, a dash and the short
+ * commit id in lower-case hex (7 to 40 characters), such as
+ * `20261030T160000Z-abc1234`, with a real date and time no more than 7 days
+ * ahead of `now` (milliseconds since 1970, `Date.now()` by default). The
+ * release updater and the intake's release announcement both refuse a
+ * version this answers a problem for.
+ */
+export function dataVersionProblem(dataVersion: unknown, now: number = Date.now()): string | undefined {
+  if (typeof dataVersion !== "string" || !RELEASE_NAME.test(dataVersion)) return "data_version must be a release name, <yyyymmdd>T<hhmmss>Z-<short sha>";
+  const time = dataVersionTime(dataVersion);
+  if (time === undefined) return "data_version must be a release name with a real date and time";
+  if (time > now + DATA_VERSION_LEEWAY_MS) return "data_version is dated more than 7 days ahead of the clock";
+  return undefined;
+}
+
 /**
  * A release place with the recent changes to it laid over, in the order they
  * were accepted. A change sets the fact, its `fact_sources` entry to

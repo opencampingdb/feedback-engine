@@ -1,8 +1,9 @@
 import { MAX_PROOF_LENGTH } from "./contributor-proof.js";
 import { openingHoursProblem } from "./hours.js";
-import { isCharge, isChargeConditional } from "./charge.js";
+import { chargeConditions, isCharge, isChargeConditional, parseCharge } from "./charge.js";
 import { findContactDetails, findContactDetailsInHours } from "./text.js";
-import { textProblem, tidyName } from "./tidy.js";
+import { textProblem, tidyName, tidyText } from "./tidy.js";
+import { PYTHON_SPACE } from "./python-space.js";
 import type {
   AddressState,
   BrandValue,
@@ -208,6 +209,35 @@ const KIND_CODE = /^[a-z][a-z_]{1,39}$/;
 export const MAX_TEXT_LENGTH = 2000;
 /** Longest Commons file name a `commons_mismatch` report may name, as `commons.ndjson.gz` allows. */
 export const MAX_COMMONS_FILE_LENGTH = 255;
+/** How many characters `text` holds, counted as code points, as Python's `len` counts a str. */
+const codePoints = (text: string) => {
+  let n = 0;
+  for (const _ of text) n++;
+  return n;
+};
+
+/**
+ * Whether `file` has the shape of a Commons file name, as a `commons_mismatch`
+ * report and the do-not-match list name it: 1 to 255 characters (counted as
+ * code points, as the data repository's Python validator counts) with no space
+ * at either end and an extension, no `File:` prefix, none of the characters a
+ * Commons title cannot hold or markdown reads as markup (`# < > [ ] { } |` and
+ * the backtick), no control character or line separator, and no link or email
+ * address. Runs of digits are allowed, as camera file names hold them.
+ */
+export function isCommonsFileName(file: unknown): file is string {
+  return (
+    typeof file === "string" &&
+    file.length > 0 &&
+    codePoints(file) <= MAX_COMMONS_FILE_LENGTH &&
+    file === file.trim() &&
+    !/^(?:file|image)\s*:/i.test(file) &&
+    !/[\u0000-\u001f\u007f-\u009f\u2028\u2029#<>[\]{}|`]/.test(file) &&
+    !hasLoneSurrogate(file) &&
+    /\.[A-Za-z0-9]{2,5}$/.test(file) &&
+    !findContactDetails(file).some((kind) => kind === "link" || kind === "email")
+  );
+}
 export const MAX_DESCRIPTION_LENGTH = 500;
 export const MAX_APP_VERSION_LENGTH = 32;
 
@@ -293,7 +323,10 @@ const isHttpsPage = (max: number) => (v: unknown): boolean =>
   typeof v === "string" && v.length <= max && /^https:\/\/[^\s]+$/.test(v);
 /** A phone number: digits and spaces after an optional `+`, 6 to 20 characters, with at least 6 digits. */
 const isPhone = (v: unknown): boolean => typeof v === "string" && /^\+?[\d ]{6,20}$/.test(v) && (v.match(/\d/g)?.length ?? 0) >= 6;
-const EMAIL = /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
+// \s here and the extra characters together are every character the data repository's schema reads as space.
+/** One character of an email address: not `@`, and not a space by JavaScript's \s or by the data validator's Python \s. */
+const EMAIL_CHAR = `[^\\s@${PYTHON_SPACE}]`;
+const EMAIL = new RegExp(`^${EMAIL_CHAR}{1,64}@${EMAIL_CHAR}+\\.${EMAIL_CHAR}{2,}$`, "u");
 
 /**
  * Facts the data no longer takes from travellers or owners. A released value
@@ -353,6 +386,43 @@ export const FACTS: Readonly<Record<ReportFactName, (value: unknown) => boolean>
   tiktok: isHttpsPage(500),
   x: isHttpsPage(500),
 };
+
+/** The unit a charge names, such as `person`, when it names one. */
+const chargeUnit = (v: string): string[] => {
+  const unit = parseCharge(v)?.unit;
+  return unit === undefined ? [] : [unit];
+};
+
+/**
+ * Facts whose value can hold free words, with the words each holds: the
+ * quoted comments of `opening_hours`, the `operator`, each condition of a
+ * `charge_conditional`, and the unit a charge names. These words get the same
+ * text checks as a note, wherever a fact is decided. A new fact that takes
+ * free words goes on this list.
+ */
+const FREE_WORDS: Readonly<Partial<Record<ReportFactName, (value: string) => string[]>>> = {
+  opening_hours: (v) => [...v.matchAll(/"([^"]*)"/g)].map((m) => m[1]!),
+  operator: (v) => [v],
+  charge: chargeUnit,
+  charge_powered: chargeUnit,
+  charge_conditional: (v) => (chargeConditions(v) ?? []).flatMap((c) => [c.condition, ...(c.charge.unit === undefined ? [] : [c.charge.unit])]),
+};
+
+/** The facts whose value can hold free words (`factFreeText`). */
+export const FREE_TEXT_FACTS: readonly ReportFactName[] = Object.keys(FREE_WORDS) as ReportFactName[];
+
+/**
+ * The free words in a fact value, tidied as the text checks read them, for
+ * `firstProblem`. Empty for a fact not in `FREE_TEXT_FACTS` and for a value
+ * that is not a string.
+ */
+export function factFreeText(fact: string, value: unknown): string[] {
+  const words = Object.hasOwn(FREE_WORDS, fact) ? FREE_WORDS[fact as ReportFactName] : undefined;
+  if (words === undefined || typeof value !== "string") return [];
+  return words(value)
+    .map(tidyText)
+    .filter((text) => text.length > 0);
+}
 
 const isHttpsUrl = (v: unknown): boolean => typeof v === "string" && v.length <= 300 && /^https:\/\/[^\s]+$/.test(v);
 
@@ -564,8 +634,10 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
   }
   if (kind === "commons_mismatch") {
     const file = value.file;
-    if (typeof file !== "string" || file.trim().length === 0 || file.length > MAX_COMMONS_FILE_LENGTH || /[\u0000-\u001f\u007f]/.test(file)) {
+    if (typeof file !== "string" || file.trim().length === 0 || codePoints(file) > MAX_COMMONS_FILE_LENGTH || /[\u0000-\u001f\u007f]/.test(file)) {
       errors.push(`report.file must be the Commons file name, 1 to ${MAX_COMMONS_FILE_LENGTH} characters on one line`);
+    } else if (!isCommonsFileName(file.trim())) {
+      errors.push("report.file must be a Commons file name with its extension, without a File: prefix, markup, a link or an email address");
     } else out.file = file.trim();
   } else if (value.file !== undefined) {
     errors.push("report.file is only allowed when report.kind is commons_mismatch");
@@ -794,6 +866,39 @@ function checkCheck(value: unknown, errors: string[], now: Date): CheckBody | un
  * check's `visited` must not be after the day already started somewhere
  * (UTC+14) at `now`.
  */
+/** Characters some readers take as the end of a line, though JSON and the control character checks let them through. */
+const LINE_BREAKS = /[\u0085\u2028\u2029]/;
+/** A surrogate code unit with no partner. In unicode mode a pair is one code point above U+FFFF, so only a lone one matches. */
+const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
+
+/** Whether `text` holds a surrogate with no partner, which is not text and has no UTF-8 form. */
+export function hasLoneSurrogate(text: string): boolean {
+  return LONE_SURROGATE.test(text);
+}
+/** Fields that may run over several lines. Every other text in a submission must be on one line. */
+const MULTI_LINE_FIELDS = new Set(["note", "text", "description"]);
+
+/**
+ * A problem for each text in `value` that is not well formed (it holds a
+ * surrogate with no partner), and for each text that holds U+0085, U+2028 or
+ * U+2029 and must be on one line: everything but notes, review text and
+ * descriptions (a description report's value among them).
+ */
+function lineBreakProblems(value: unknown, path: string, out: string[] = [], multiLine = false): string[] {
+  if (typeof value === "string") {
+    if (hasLoneSurrogate(value)) out.push(`${path} must be well formed text`);
+    else if (!multiLine && LINE_BREAKS.test(value)) out.push(`${path} must be on one line`);
+  } else if (Array.isArray(value)) {
+    value.forEach((v, i) => lineBreakProblems(v, `${path}[${i}]`, out));
+  } else if (isObject(value)) {
+    const descriptionReport = path === "report" && value.kind === "description";
+    for (const [key, v] of Object.entries(value)) {
+      lineBreakProblems(v, path === "" ? key : `${path}.${key}`, out, MULTI_LINE_FIELDS.has(key) || (descriptionReport && key === "value"));
+    }
+  }
+  return out;
+}
+
 export function validateSubmission(input: unknown, now: Date = new Date()): ValidationResult {
   const errors: string[] = [];
   if (!isObject(input)) return { ok: false, errors: ["body must be a JSON object"] };
@@ -848,7 +953,7 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
   }
   const contributorProof = input.contributor_proof;
   if (contributorProof !== undefined) {
-    if (type !== "photo_erasure" && type !== "photo_removal" && type !== "review_erasure") errors.push(`contributor_proof is not allowed when type is ${type}`);
+    if (type !== "photo_erasure" && type !== "photo_removal" && type !== "review_erasure" && type !== "review") errors.push(`contributor_proof is not allowed when type is ${type}`);
     else if (typeof contributorProof !== "string" || contributorProof.length > MAX_PROOF_LENGTH || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(contributorProof)) {
       errors.push("contributor_proof must be a proof token from the app's server (<payload>.<signature>, base64url)");
     }
@@ -879,7 +984,7 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     if (input.location !== undefined) errors.push(`location is not allowed on a ${type}`);
     if (type === "review") {
       const review = checkReview(input.review, errors, now);
-      if (review) value = { ...base, place: place as string, type: "review", review };
+      if (review) value = { ...base, place: place as string, type: "review", review, ...proofField };
     } else if (type === "review_report") {
       const reviewReport = checkReviewReport(input.review_report, errors);
       if (reviewReport) value = { ...base, place: place as string, type: "review_report", review_report: reviewReport };
@@ -900,6 +1005,7 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     }
   }
 
+  if (value) errors.push(...lineBreakProblems(value, ""));
   if (errors.length > 0 || !value) return { ok: false, errors };
   return { ok: true, value };
 }
@@ -1103,6 +1209,7 @@ function validateOwner(input: Record<string, unknown>, type: OwnerSubmission["ty
       }
     }
   }
+  if (value) errors.push(...lineBreakProblems(value, ""));
   if (errors.length > 0 || !value) return { ok: false, errors };
   return { ok: true, value };
 }

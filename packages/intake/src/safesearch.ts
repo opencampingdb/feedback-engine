@@ -1,7 +1,7 @@
 /**
  * Google Cloud Vision SafeSearch for uploaded photos. The intake sends the full
- * size JPEG to `images:annotate` as the service account, with the cloud-vision
- * scope. Google processes online requests in memory and does not keep or train
+ * size JPEG and the thumbnail to `images:annotate` as the service account, with
+ * the cloud-vision scope. Google processes online requests in memory and does not keep or train
  * on them (cloud.google.com/vision/docs/data-usage).
  */
 
@@ -17,6 +17,23 @@ const ENDPOINT = "https://vision.googleapis.com/v1/images:annotate";
 const LIKELIHOODS: readonly Likelihood[] = ["UNKNOWN", "VERY_UNLIKELY", "UNLIKELY", "POSSIBLE", "LIKELY", "VERY_LIKELY"];
 
 const likelihood = (value: unknown): Likelihood => (LIKELIHOODS as readonly unknown[]).includes(value) ? (value as Likelihood) : "UNKNOWN";
+
+/**
+ * The worse of two sets of ratings: each kind at the more likely of the two,
+ * and `"unchecked"` when either file could not be checked. Its verdict is the
+ * worse of the two files' verdicts.
+ */
+export function worseRatings(a: SafeSearchRatings | "unchecked", b: SafeSearchRatings | "unchecked"): SafeSearchRatings | "unchecked" {
+  if (a === "unchecked" || b === "unchecked") return "unchecked";
+  const more = (x: Likelihood, y: Likelihood): Likelihood => (LIKELIHOODS.indexOf(x) >= LIKELIHOODS.indexOf(y) ? x : y);
+  return {
+    adult: more(a.adult, b.adult),
+    violence: more(a.violence, b.violence),
+    racy: more(a.racy, b.racy),
+    medical: more(a.medical, b.medical),
+    spoof: more(a.spoof, b.spoof),
+  };
+}
 
 export class SafeSearch {
   readonly #token: GoogleToken;

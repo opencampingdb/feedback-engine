@@ -2,7 +2,7 @@ import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { intakeRecentList, intakeRecentStore, sendBlockList, sendDoubtCases, sendOverruled, settleRecentChanges, settleRecentPlaces } from "../src/recent.js";
+import { intakeRecentList, intakeRecentStore, sendBlockList, sendDoubtCases, sendOverruled, settleRecentChanges, settleRecentPlaces, tellIntake } from "../src/recent.js";
 import { run } from "../src/run.js";
 import { dumpPlace } from "../src/serialise.js";
 import type { Place } from "../src/types.js";
@@ -226,6 +226,15 @@ describe("sendDoubtCases", () => {
     expect(doubtCases).toHaveBeenCalledWith(expected);
   });
 
+  it("leaves out a case whose value the intake's checks refuse, so the others still go", async () => {
+    await doubt(1, "2026-10-28T00:00:00Z", "applied", { fact: "toilets", value: true, at: "2026-10-28T00:00:00Z" });
+    await doubt(2, "2026-10-27T00:00:00Z", "applied", { fact: "opening_hours", value: "Mon-Sun  06:00 - 22:00", at: "2026-10-27T00:00:00Z" });
+    const doubtCases = vi.fn(async (_cases: readonly unknown[]) => {});
+    const expected = [{ place: PLACE, fact: "toilets", value: true, taken_down_at: "2026-10-28T00:00:00Z", feedback_id: id(1) }];
+    expect(await sendDoubtCases({ inbox, store: { inData: async () => {}, overruled: async () => {}, doubtCases }, now: NOW })).toEqual(expected);
+    expect(doubtCases).toHaveBeenCalledWith(expected);
+  });
+
   it("calls nothing when no doubt took a fact down", async () => {
     const doubtCases = vi.fn(async (_cases: readonly unknown[]) => {});
     expect(await sendDoubtCases({ inbox, store: { inData: async () => {}, overruled: async () => {}, doubtCases }, now: NOW })).toEqual([]);
@@ -366,5 +375,53 @@ describe("intakeRecentList", () => {
   it("throws when the answer is not a list of places", async () => {
     const list = intakeRecentList("https://intake.example.org", answer(200, { nope: true }) as unknown as typeof fetch);
     await expect(list.ids()).rejects.toThrow();
+  });
+});
+
+describe("tellIntake", () => {
+  it("goes on with every other call when the intake refuses one, so a run is never stopped by its bookkeeping", async () => {
+    await mkdir(join(main, "moderation"), { recursive: true });
+    await put(join(inbox, "applied", "2026-10-28", `${id(1)}.json`), {
+      id: id(1),
+      received: "2026-10-28T00:00:00Z",
+      app: "example-app",
+      device: "aaaa",
+      app_version: "1.0.0",
+      consent: true,
+      type: "report",
+      place: placeOf(9),
+      report: { kind: "doubt", fact: "toilets" },
+      outcome: { result: "applied", reason: "", run: "2026-10-28T00:00:00Z", doubted: { fact: "toilets", value: true, at: "2026-10-28T00:00:00Z" } },
+    });
+    const refuse = async () => {
+      throw new Error("the intake refused the doubt cases: 400");
+    };
+    const block = vi.fn(async (_contributors: readonly string[]) => {});
+    const overruled = vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {});
+    const store = { remove: refuse, block, inData: async () => {}, overruled, doubtCases: refuse };
+    const told = await tellIntake({ inbox, main, store, notApplied: [id(2)], refused: [id(2)], now: NOW });
+    expect(block).toHaveBeenCalled();
+    expect(overruled).toHaveBeenCalledWith([id(2)], [id(2)]);
+    expect(told.failed).toEqual(["sending the doubt cases"]);
+  });
+
+  it("keeps the items decided other than applied when the intake refuses them, and sends them with the next run's", async () => {
+    await mkdir(join(main, "moderation"), { recursive: true });
+    const refuse = async () => {
+      throw new Error("the intake refused: 503");
+    };
+    const ok = async () => {};
+    const first = await tellIntake({ inbox, main, store: { remove: ok, block: ok, inData: ok, overruled: refuse, doubtCases: ok }, notApplied: [id(2), id(3)], refused: [id(3)], now: NOW });
+    expect(first.failed).toEqual(["sending the items decided other than applied"]);
+    expect(first.recorded).toBe(true);
+    const overruled = vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {});
+    const second = await tellIntake({ inbox, main, store: { remove: ok, block: ok, inData: ok, overruled, doubtCases: ok }, notApplied: [id(4)], refused: [], now: NOW });
+    expect(overruled).toHaveBeenCalledWith([id(2), id(3), id(4)], [id(3)]);
+    expect(second).toEqual({ failed: [], recorded: true });
+    // Sent, so a third run sends only its own.
+    const third = vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {});
+    const again = await tellIntake({ inbox, main, store: { remove: ok, block: ok, inData: ok, overruled: third, doubtCases: ok }, notApplied: [id(5)], refused: [], now: NOW });
+    expect(third).toHaveBeenCalledWith([id(5)], []);
+    expect(again.recorded).toBe(false);
   });
 });

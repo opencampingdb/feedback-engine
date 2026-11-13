@@ -1,5 +1,5 @@
 import { gunzipSync, gzipSync } from "node:zlib";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createReleaseUpdater, sha256HexBytes, type ReleaseDatabaseAdapter, type ReleaseFetchLike, type ReleaseUpdaterOptions, type StorageAdapter } from "../src/index.js";
 
 const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
@@ -217,5 +217,56 @@ describe("release updater: calls at the same moment", () => {
     });
     // Once the run is over, the next call starts its own.
     expect(await u.update()).toEqual({ status: "up_to_date", dataVersion: V3 });
+  });
+});
+
+describe("release updater: the data versions it takes", () => {
+  // The device clock reads 12:00 UTC on 12 November 2026, two days after V3.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.parse("2026-11-12T12:00:00Z"));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  const AHEAD = "20991231T000000Z-fffffff";
+
+  it("refuses a manifest dated more than 7 days ahead of the clock, before any download", async () => {
+    const db = file(`${HOME}far/opencampingdb.sqlite.gz`, { data_version: AHEAD });
+    const manifest = { data_version: AHEAD, format_version: 1, layout_version: 1, database: db.entry, changesets: [] };
+    const { adapter, state } = fakeDatabase(V1, { candidate: true });
+    const { fetch, fetched } = serve(manifest, new Map([[db.entry.url, db.gz]]));
+    expect(await updater(adapter, fetch).update()).toMatchObject({ status: "failed", reason: "manifest", dataVersion: V1 });
+    expect(fetched).not.toContain(db.entry.url);
+    expect(state.dataVersion).toBe(V1);
+  });
+
+  it("takes a manifest dated less than 7 days ahead of the clock, as a slow device clock reads it", async () => {
+    const soon = "20261119T060000Z-abc1234";
+    const db = file(`${HOME}soon/opencampingdb.sqlite.gz`, { data_version: soon });
+    const manifest = { data_version: soon, format_version: 1, layout_version: 1, database: db.entry, changesets: [] };
+    const { adapter } = fakeDatabase(V1, { candidate: true });
+    const { fetch } = serve(manifest, new Map([[db.entry.url, db.gz]]));
+    expect(await updater(adapter, fetch).update()).toEqual({ status: "replaced", dataVersion: soon });
+  });
+
+  for (const name of ["20261105T000000Z", "20261105T000000Z-abc", "20261105T000000Z-ABC1234", "20261105T000000Z-abc1234 ", "20261105T000000Z-abc1234-x", "20261105T000000Z-xyz1234"]) {
+    it(`refuses a manifest whose data_version is not a release name, even with no database yet: ${JSON.stringify(name)}`, async () => {
+      const db = file(`${HOME}odd/opencampingdb.sqlite.gz`, { data_version: name });
+      const manifest = { data_version: name, format_version: 1, layout_version: 1, database: db.entry, changesets: [] };
+      const { adapter, state } = fakeDatabase(null, { candidate: true });
+      const { fetch, fetched } = serve(manifest, new Map([[db.entry.url, db.gz]]));
+      expect(await updater(adapter, fetch).update()).toMatchObject({ status: "failed", reason: "manifest", dataVersion: null });
+      expect(fetched).not.toContain(db.entry.url);
+      expect(state.replaced).toEqual([]);
+    });
+  }
+
+  it("moves a database dated far ahead of the clock onto the current release", async () => {
+    const db = file(`${HOME}v3/opencampingdb.sqlite.gz`, { data_version: V3 });
+    const manifest = { data_version: V3, format_version: 1, layout_version: 1, database: db.entry, changesets: [] };
+    const { adapter, state } = fakeDatabase(AHEAD, { candidate: true });
+    const { fetch } = serve(manifest, new Map([[db.entry.url, db.gz]]));
+    expect(await updater(adapter, fetch).update()).toEqual({ status: "replaced", dataVersion: V3 });
+    expect(state.replaced).toEqual([V3]);
   });
 });

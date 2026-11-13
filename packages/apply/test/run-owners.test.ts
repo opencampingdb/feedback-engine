@@ -194,7 +194,7 @@ describe("owner claims end to end", () => {
     expect(await readdir(join(inbox, "owner-claims"))).toEqual([`${id(8)}.json`]);
   });
 
-  it("does not fetch the proof page for a claim on a missing place or one past the wait", async () => {
+  it("does not fetch the proof page for a claim on a missing place, and checks one past the wait afresh", async () => {
     await pending(10, {
       type: "owner_claim",
       place: "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZB",
@@ -213,9 +213,9 @@ describe("owner claims end to end", () => {
       token_sha256: sha(TOKEN),
     });
     const summary = await run({ inbox, data, reviewData: review, now: NOW, checkProof });
-    expect(proofCalls).toEqual([]);
+    expect(proofCalls).toEqual(["https://old.example/ OCDB-7KQ2"]);
     expect(summary.counts).toMatchObject({ refused: 1, awaiting_approval: 1 });
-    expect(summary.review_pr_body).toContain("NOT found");
+    expect(summary.review_pr_body).toContain("code OCDB-7KQ2 found at `https://old.example/`");
   });
 
   it("shows in the review PR where the code was found, and flags a different site", async () => {
@@ -225,7 +225,7 @@ describe("owner claims end to end", () => {
       return { found: true, checked: NOW.toISOString(), detail: "code found at https://elsewhere.example/page", url: "https://elsewhere.example/page" };
     };
     const summary = await run({ inbox, data, reviewData: review, now: NOW, checkProof: redirected });
-    expect(summary.review_pr_body).toContain("found at https://elsewhere.example/page, ON A DIFFERENT SITE from the submitted https://riverbend.example/about");
+    expect(summary.review_pr_body).toContain("found at `https://elsewhere.example/page`, ON A DIFFERENT SITE from the submitted `https://riverbend.example/about`");
   });
 
   it("does not flag a redirect between the www and bare names of one site", async () => {
@@ -237,7 +237,7 @@ describe("owner claims end to end", () => {
       url: "https://www.riverbend.example/about",
     });
     const summary = await run({ inbox, data, reviewData: review, now: NOW, checkProof: www });
-    expect(summary.review_pr_body).toContain("code OCDB-7KQ2 found at https://www.riverbend.example/about.");
+    expect(summary.review_pr_body).toContain("code OCDB-7KQ2 found at `https://www.riverbend.example/about`.");
     expect(summary.review_pr_body).not.toContain("DIFFERENT SITE");
   });
 
@@ -261,5 +261,57 @@ describe("owner claims end to end", () => {
     const again = await run({ inbox, data, reviewData: review, now: LATER, checkProof, reviewPrs: [open] });
     expect(again).toMatchObject({ auto_changed: false, review_changed: false, inbox_changed: false, owner_claims: false });
     expect(await readdir(join(inbox, "owner-claims"))).toEqual([`${id(4)}.json`]);
+  });
+});
+
+describe("many owner claims in one run", () => {
+  const address = `https://proof.example/${"a".repeat(500 - "https://proof.example/".length)}`;
+  async function claims(count: number) {
+    for (let n = 1; n <= count; n++) {
+      // A minute apart, so the oldest are known.
+      const received = new Date(Date.parse("2026-10-30T00:00:00Z") + n * 60_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+      const item = {
+        id: id(n), received, app: "owner-page", device: `dev${n}`, app_version: "1.0.0", terms_accepted: true,
+        type: "owner_claim", place: PLACE, owner, claim: { proof_url: address }, code: "OCDB-7KQ2", token_sha256: sha(`t${n}`),
+      };
+      await put(join(inbox, "pending", "2026-10-30", `${id(n)}.json`), item);
+    }
+  }
+
+  it("sends the oldest claims to a person, as many as fit, and leaves the rest pending with their boxes still to come", async () => {
+    await claims(110);
+    const out = await run({ inbox, data, reviewData: review, now: NOW, checkProof });
+    expect(out.review_pr_body.length).toBeLessThanOrEqual(60_000);
+    const boxes = out.review_pr_body.split("\n").filter((l) => l.startsWith("- [ ] Approve owner claim "));
+    expect(boxes).toHaveLength(20);
+    expect(boxes.map((l) => l.split(" ")[6]!.replace(/:$/, ""))).toEqual(Array.from({ length: 20 }, (_, n) => id(n + 1)));
+    expect((await readdir(join(inbox, "owner-claims"))).sort()).toEqual(Array.from({ length: 20 }, (_, n) => `${id(n + 1)}.json`));
+    expect(await readdir(join(inbox, "pending", "2026-10-30"))).toHaveLength(90);
+    expect(out.counts).toMatchObject({ awaiting_approval: 20, waiting: 90 });
+    expect(out.claim_moves).toEqual(Array.from({ length: 20 }, (_, n) => ({ from: `pending/2026-10-30/${id(n + 1)}.json`, to: `owner-claims/${id(n + 1)}.json` })));
+
+    // The next run sends the next 20.
+    const next = await run({ inbox, data, reviewData: review, now: LATER, checkProof });
+    expect(next.review_pr_body.split("\n").filter((l) => l.startsWith("- [ ] Approve owner claim "))[0]).toContain(id(21));
+  });
+
+  it("checks the proof of a claim that waited for room past its proof wait before a person sees it", async () => {
+    await claims(25);
+    await run({ inbox, data, reviewData: review, now: NOW, checkProof });
+    const weekOn = new Date(NOW.getTime() + 8 * 24 * 60 * 60 * 1000);
+    const out = await run({ inbox, data, reviewData: review, now: weekOn, checkProof });
+    const boxes = out.review_pr_body.split("\n").filter((l) => l.startsWith("- [ ] Approve owner claim "));
+    expect(boxes).toHaveLength(5);
+    expect(out.review_pr_body).not.toContain("NOT found");
+    expect(out.review_pr_body).toContain("code OCDB-7KQ2 found at");
+  });
+
+  it("keeps a claim past its proof wait pending when the run had no time to check its proof", async () => {
+    await claims(1);
+    const weekOn = new Date(NOW.getTime() + 8 * 24 * 60 * 60 * 1000);
+    const out = await run({ inbox, data, reviewData: review, now: weekOn, checkProof, proofBudget: { ms: 0, concurrency: 1 } });
+    expect(out.counts).toMatchObject({ awaiting_approval: 0, waiting: 1 });
+    expect(out.review_pr_body).toBe("");
+    expect(await readdir(join(inbox, "pending", "2026-10-30"))).toEqual([`${id(1)}.json`]);
   });
 });

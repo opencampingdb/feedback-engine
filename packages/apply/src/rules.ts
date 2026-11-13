@@ -1,14 +1,19 @@
 import {
   FEE_RETIRED,
+  firstProblem,
+  isCommonsFileName,
+  isValidFactValue,
   newPlaceStanding,
   safeSearchVerdict,
   tidyName,
+  tidyText,
   type ContactFactName,
   type ContactReportReason,
   type FactName,
   type FactValue,
   type NewPlaceReportReason,
   type PhotoHeldReason,
+  type ReportFactName,
   type StoredFeedback,
 } from "@opencampingdb/feedback";
 import {
@@ -35,8 +40,10 @@ import {
 } from "./decide.js";
 import { moderateReview } from "./moderation.js";
 import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase } from "./review.js";
+import type { EarlierFact } from "./io.js";
 import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
+import { doNotMatchProblems, newProblems, placeProblems, reviewProblems } from "./data-check.js";
 import { dropSource, setSource } from "./sources.js";
 import type { Photo, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
 
@@ -165,6 +172,14 @@ export interface RulesInput {
    * about places not in the data waits. Left out, that feedback is refused.
    */
   recent?: ReadonlySet<string> | "unreadable";
+  /**
+   * Earlier values, from the data's history, of facts that pending doubts and
+   * contact reports name and their place no longer has, by place id and fact.
+   * When those reports take the earlier value down again, the takedown is
+   * theirs: a run published it and stopped before it recorded its inbox
+   * moves. They are decided as that run decided them. None when left out.
+   */
+  earlierFacts?: ReadonlyMap<string, ReadonlyMap<string, EarlierFact>>;
 }
 
 /**
@@ -221,6 +236,8 @@ export interface RulesOutput {
   held: HeldCase[];
   /** Held cases the rules closed: a doubted fact restored or replaced. */
   closed: ClosedCase[];
+  /** Held cases of takedowns already in the data (see `earlierFacts`), to list again although no file changes. */
+  replayed: HeldCase[];
   /** New places withdrawn by their adder whose records are to be deleted from the data. */
   removed: string[];
   /** Place and Commons file pairs to add to `moderation/commons-do-not-match.json`. */
@@ -338,15 +355,113 @@ function distanceM(a: { lat: number; lon: number }, b: { lat: number; lon: numbe
   return 2 * 6_371_008.8 * Math.asin(Math.sqrt(h));
 }
 
+/**
+ * Takes a fact off a place, with its source and date, as the data validator
+ * requires, and `pets_months` with a `pets` fact. The inbox keeps what was
+ * taken down on the item that did it.
+ */
+function takeDown(place: Place, fact: FactName): void {
+  for (const gone of [fact, ...factsClearedBy(place.facts, fact, null)]) {
+    delete (place.facts as Record<string, FactValue | undefined>)[gone];
+    dropSource(place, gone);
+  }
+}
+
 /** One key for a fact on a place. */
 const factKey = (place: string, fact: string) => `${place}\u0000${fact}`;
+
+/** `place` with `fact` set back to an earlier value, its source and its date, keeping the order of keys already there. */
+function withEarlierFact(place: Place, fact: string, earlier: EarlierFact): Place {
+  (place.facts as Record<string, FactValue>)[fact] = earlier.value;
+  const sources = place.fact_sources as Record<string, Source>;
+  if (earlier.source !== undefined) sources[fact] = earlier.source;
+  else delete sources[fact];
+  if (earlier.date !== undefined) place.fact_dates = Object.assign(place.fact_dates ?? {}, { [fact]: earlier.date });
+  else if (place.fact_dates) delete (place.fact_dates as Record<string, string>)[fact];
+  return place;
+}
+
+/** The text check a name or description report's value fails, or null when it passes. */
+const textRulesFail = (kind: "name" | "description", value: string) => firstProblem(kind === "name" ? tidyName(value) : tidyText(value));
 
 const quote = (text: string | undefined) => (text ? `: "${text}"` : "");
 
 /** What a change that settles a `fact_doubted` case adds to its summary. */
 const CLOSES_CASE = " (closes the fact_doubted case)";
 
+/**
+ * Decides every pending item and returns what the run writes. Every record,
+ * review line and do-not-match pair bound for the automatic branch is checked
+ * against the data repository's validator (`data-check.ts`). An item whose
+ * result would fail it is set aside: decided `needs_review` with the reason,
+ * listed for a person, and nothing is written for it. The items are decided
+ * again without it, so one item never holds back the rest of the run.
+ */
 export function applyRules(input: RulesInput): RulesOutput {
+  const setAside = new Map<string, string>();
+  let out = rulesOnce(input, setAside);
+  // Set aside every item behind a failing result, until none is left.
+  for (let failing = dataCheckFailures(input, out); failing.size > 0; failing = dataCheckFailures(input, out)) {
+    const before = setAside.size;
+    for (const [id, reason] of failing) if (!setAside.has(id)) setAside.set(id, reason);
+    if (setAside.size === before) break;
+    out = rulesOnce(input, setAside);
+  }
+  if (setAside.size === 0) return out;
+  // Then decide again each item that fails nothing on its own: only the items that cause a failure stay with a person.
+  for (const id of [...setAside.keys()]) {
+    const without = new Map(setAside);
+    without.delete(id);
+    const trial = rulesOnce(input, without);
+    if (dataCheckFailures(input, trial).size === 0) {
+      setAside.delete(id);
+      out = trial;
+    }
+  }
+  return rulesOnce(input, setAside);
+}
+
+/** Items deletion requests come from: always honoured, never set aside. */
+const DELETIONS = new Set(["review_erasure", "photo_erasure", "photo_removal"]);
+
+/**
+ * The items behind each result in `out` that the data validator would refuse,
+ * with the reason. Only problems the change brings count: a record that
+ * already fails a check on main does not stop changes to it.
+ */
+function dataCheckFailures(input: RulesInput, out: RulesOutput): Map<string, string> {
+  const failing = new Map<string, string>();
+  const applied = new Set(out.decisions.filter((d) => d.outcome === "applied").map((d) => d.id));
+  const pending = input.pending.filter((i) => applied.has(i.id) && !DELETIONS.has(i.type));
+  const why = (problems: readonly string[]) => `the change would fail the data checks (${problems.join("; ")})`;
+  const blame = (ids: Iterable<string>, problems: readonly string[]) => {
+    for (const id of ids) if (!failing.has(id)) failing.set(id, why(problems));
+  };
+  const check = { now: input.now, ...(input.kinds ? { kinds: input.kinds } : {}) };
+  for (const [id, place] of out.places) {
+    const original = input.places.get(id);
+    const problems = newProblems(original ? placeProblems(original, check) : [], placeProblems(place, check));
+    if (problems.length === 0) continue;
+    const behind = new Set(out.changes.filter((c) => c.automatic && c.place === id).flatMap((c) => c.feedback));
+    blame(pending.filter((i) => behind.has(i.id) || out.decisions.some((d) => d.id === i.id && d.place === id)).map((i) => i.id), problems);
+  }
+  for (const [placeId, lines] of out.reviews) {
+    const before = new Map(input.reviews(placeId).map((r) => [r.id, JSON.stringify(r)]));
+    for (const line of lines) {
+      if (before.get(line.id) === JSON.stringify(line)) continue;
+      const problems = reviewProblems(line);
+      if (problems.length > 0) blame(pending.filter((i) => i.type === "review" && reviewIdOf(i) === line.id).map((i) => i.id), problems);
+    }
+  }
+  for (const entry of out.doNotMatch) {
+    const problems = doNotMatchProblems(entry);
+    if (problems.length === 0) continue;
+    blame(pending.filter((i) => i.type === "report" && i.report.kind === "commons_mismatch" && i.place === entry.place && i.report.file === entry.file).map((i) => i.id), problems);
+  }
+  return failing;
+}
+
+function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): RulesOutput {
   const now = Date.parse(input.now);
   const nowIso = new Date(now).toISOString().replace(/\.\d{3}Z$/, "Z");
   const decisions = new Map<string, Decision>();
@@ -356,6 +471,7 @@ export function applyRules(input: RulesInput): RulesOutput {
   const edits: ReviewEdit[] = [];
   const held: HeldCase[] = [];
   const closed: ClosedCase[] = [];
+  const replayed: HeldCase[] = [];
   const removed: string[] = [];
   let everyPlaceById: Map<string, Place> | undefined;
   const doNotMatch: DoNotMatchEntry[] = [];
@@ -391,6 +507,17 @@ export function applyRules(input: RulesInput): RulesOutput {
   for (const item of [...input.history, ...pending]) {
     if (isNewPlaceReport(item) && item.location) origins.set(newPlaceIdOf(item), item);
   }
+  // An erasure stands for the history window: each contributor's latest review
+  // and photo erasure, from this run and from applied erasures in the history.
+  const erasedUpTo = (type: "review_erasure" | "photo_erasure") => {
+    const at = new Map<string, number>();
+    for (const i of [...input.history.filter(wasApplied), ...pending]) {
+      if (i.type === type && i.contributor !== undefined) at.set(i.contributor, Math.max(at.get(i.contributor) ?? 0, time(i)));
+    }
+    return at;
+  };
+  const reviewsErasedUpTo = erasedUpTo("review_erasure");
+  const photosErasedUpTo = erasedUpTo("photo_erasure");
   const newPlaceEvidence: StoredFeedback[] = [];
   const known: StoredFeedback[] = [];
   // Items about a place that is not in the data yet, left waiting for it.
@@ -401,14 +528,49 @@ export function applyRules(input: RulesInput): RulesOutput {
       decide(item, "refused", FEE_RETIRED);
       continue;
     }
+    // An item whose result would fail the data checks waits for a person, and nothing is written for it.
+    const asideFor = setAside.get(item.id);
+    if (asideFor !== undefined) {
+      const placeId = isNewPlaceReport(item) ? newPlaceIdOf(item) : (item.place ?? "(none)");
+      edits.push({ kind: "note", place: placeId, feedback: item.id });
+      note(placeId, `${item.type} ${asideFor}: decide it by hand`, false, [item]);
+      decide(item, "needs_review", `${asideFor}, so a person decides`);
+      continue;
+    }
     // A deletion request about the contributor's own photos or reviews is honoured even when they are blocked.
-    const deletion = item.type === "photo_erasure" || item.type === "photo_removal" || item.type === "review_erasure";
-    if (item.contributor !== undefined && blocked.has(item.contributor) && !deletion) {
+    if (item.contributor !== undefined && blocked.has(item.contributor) && !DELETIONS.has(item.type)) {
+      if (item.type === "photo_report" && item.withheld === true && item.place !== null) {
+        // The intake withheld the photo on this report, so a person releases it rather than nobody.
+        edits.push({ kind: "note", place: item.place, feedback: item.id });
+        note(
+          item.place,
+          `photo ${item.photo_report.photo} was withheld at once by a report from a blocked contributor: ` +
+            "delete its withheld key to release it, unless it should stay down",
+          false,
+          [item],
+        );
+        decide(item, "needs_review", "a withheld report from a blocked contributor");
+        continue;
+      }
       decide(item, "refused", "the contributor is blocked");
       continue;
     }
     if (item.type === "review" && input.removedReviews?.has(reviewIdOf(item))) {
       decide(item, "refused", "the review was removed by a moderator");
+      continue;
+    }
+    // A review or photo sent at or before the contributor's erasure is refused whichever run decides it,
+    // before it can be left waiting. A refused upload's files go on the removed list below.
+    const erasedAt =
+      item.contributor === undefined
+        ? undefined
+        : item.type === "review"
+          ? reviewsErasedUpTo.get(item.contributor)
+          : item.type === "photo"
+            ? photosErasedUpTo.get(item.contributor)
+            : undefined;
+    if (erasedAt !== undefined && time(item) <= erasedAt) {
+      decide(item, "refused", item.type === "review" ? "the contributor's reviews were erased at their request" : "the contributor asked for their photos to be removed");
       continue;
     }
     if (isNewPlaceEvidence(item) && item.place !== null && origins.has(item.place)) {
@@ -459,16 +621,9 @@ export function applyRules(input: RulesInput): RulesOutput {
   const changedReviews = new Set<string>();
 
   // Erasures first, so a review the contributor sent before erasing is refused in this run too.
-  const reviewsErased = applyReviewErasures(known.filter((i): i is ReviewErasureItem => i.type === "review_erasure"));
-  applyReviews(
-    known.filter((i): i is ReviewItem => {
-      if (i.type !== "review") return false;
-      const erasedAt = i.contributor === undefined ? undefined : reviewsErased.get(i.contributor);
-      if (erasedAt === undefined || time(i) > erasedAt) return true;
-      decide(i, "refused", "the contributor's reviews were erased at their request");
-      return false;
-    }),
-  );
+  // A review sent at or before an erasure was refused above (reviewsErasedUpTo), this run's erasures included.
+  applyReviewErasures(known.filter((i): i is ReviewErasureItem => i.type === "review_erasure"));
+  applyReviews(known.filter((i): i is ReviewItem => i.type === "review"));
   applyReviewReports(known.filter((i): i is ReviewReportItem => i.type === "review_report"));
   for (const placeId of changedReviews) {
     const lines = linesOf(placeId).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -540,6 +695,7 @@ export function applyRules(input: RulesInput): RulesOutput {
     changes,
     held,
     closed,
+    replayed,
     removed,
     needsReview: ordered.some((d) => d.outcome === "needs_review"),
   };
@@ -549,15 +705,13 @@ export function applyRules(input: RulesInput): RulesOutput {
    * and their held reviews from the review checkout. Answers, by contributor,
    * the time of their latest erasure: reviews they sent before it are refused.
    */
-  function applyReviewErasures(items: ReviewErasureItem[]): Map<string, number> {
-    const erasedAt = new Map<string, number>();
+  function applyReviewErasures(items: ReviewErasureItem[]): void {
     for (const item of items) {
       const contributor = item.contributor;
       if (contributor === undefined) {
         decide(item, "refused", "erasure has no contributor");
         continue;
       }
-      erasedAt.set(contributor, Math.max(erasedAt.get(contributor) ?? 0, time(item)));
       let count = 0;
       const placesWith = new Set((input.allReviews ?? []).filter((r) => r.contributor === contributor).map((r) => r.place));
       for (const placeId of placesWith) {
@@ -573,13 +727,21 @@ export function applyRules(input: RulesInput): RulesOutput {
       note("(all places)", `reviews from ${contributor} removed at their request (${count} published)`, true, [item]);
       decide(item, "applied", `reviews removed at the contributor's request, ${count} published`);
     }
-    return erasedAt;
   }
 
   function applyReviews(items: ReviewItem[]): void {
+    // Trust comes from a visible review in the data or an applied review, and from no other kind of feedback.
     const trusted = new Set(input.reviewers ?? []);
-    for (const h of input.history) if (h.contributor !== undefined && wasApplied(h)) trusted.add(h.contributor);
+    for (const h of input.history) if (h.type === "review" && h.contributor !== undefined && wasApplied(h)) trusted.add(h.contributor);
     const reviewsSent = [...input.history, ...items].filter((i): i is ReviewItem => i.type === "review");
+    // The item each review line came from, while it is in the history or this run.
+    const senderOf = new Map(reviewsSent.map((i) => [reviewIdOf(i), i]));
+    // A review replaces the contributor's earlier one by itself only when the app's server proved the
+    // contributor, or when it comes from the device or attested key that sent each review it replaces.
+    const sameSender = (item: ReviewItem, line: Review) => {
+      const from = senderOf.get(line.id);
+      return from !== undefined && (from.device === item.device || (from.attest_key !== undefined && from.attest_key === item.attest_key));
+    };
 
     for (const item of items) {
       const reasons = moderateReview(item.review.text);
@@ -612,10 +774,12 @@ export function applyRules(input: RulesInput): RulesOutput {
       const repeated =
         text.length >= REPEATED_TEXT_LENGTH &&
         reviewsSent.some((other) => other.place !== item.place && other.id !== item.id && sameText(other.review.text) === text);
-      if (repeated || !trusted.has(item.contributor)) {
-        const why = repeated ? "the same text was sent for another place" : "first review from this contributor";
+      const unproved = item.proved !== true && lines.some((r) => r.contributor === item.contributor && !sameSender(item, r));
+      if (repeated || !trusted.has(item.contributor) || unproved) {
+        const why = repeated ? "the same text was sent for another place" : !trusted.has(item.contributor) ? "first review from this contributor" : "it replaces the contributor's earlier review from another device";
         edits.push({ kind: "review", place: item.place, review, feedback: item.id });
-        note(item.place, `${item.review.stars} star review, ${why}${quote(item.review.text.slice(0, 300))} (check before merging)`, false, [item]);
+        // The public PR names the inbox item and never quotes the text, so an erasure or removal leaves no copy there.
+        note(item.place, `${item.review.stars} star review, ${why} (read its text in the inbox item before merging)`, false, [item]);
         decide(item, "needs_review", `${why}, so a person checks it`);
         continue;
       }
@@ -681,12 +845,16 @@ export function applyRules(input: RulesInput): RulesOutput {
   function applyPhotoRemovals(items: RemovalItem[]): void {
     for (const item of items) {
       const photoId = item.photo_removal.photo;
-      const lines = photoLinesOf(item.place);
+      // The line stays filed under the place it was sent for, which may since have been merged into this one.
+      const filedUnder = (input.photos ?? []).find((p) => p.id === photoId)?.place ?? item.place;
+      const lines = photoLinesOf(filedUnder);
       const line = lines.find((p) => p.id === photoId);
       // A photo not in the lines may be held for a person, or sent in this run.
       const upload = [...input.history, ...pending].find((h): h is PhotoItem => h.type === "photo" && photoIdOf(h) === photoId);
       const owner = line?.contributor ?? upload?.contributor;
-      if (owner === undefined || (line === undefined && upload?.place !== item.place)) {
+      const sentFor = line ? filedUnder : upload?.place;
+      const at = sentFor === undefined || sentFor === null ? undefined : (resolvePlace(sentFor, input.places) ?? sentFor);
+      if (owner === undefined || at !== item.place) {
         decide(item, "refused", `photo ${photoId} is not in the data for this place`);
         continue;
       }
@@ -787,7 +955,11 @@ export function applyRules(input: RulesInput): RulesOutput {
       }
       reportsSent.push(item);
       edits.push({ kind: "note", place: item.place, feedback: item.id });
-      if (reason === "illegal") {
+      // One report hides a photo at once only from an attested install or from the photo's own app.
+      const vouched = item.attested !== undefined || item.app === target.app;
+      const release = item.withheld === true ? ": delete its withheld key to release it, unless it should stay down" : "";
+      const unvouched = !vouched && (reason === "illegal" || item.withheld === true);
+      if (!unvouched && reason === "illegal") {
         // One report is enough: the intake has already withheld the photo at the photo server.
         if (target.hidden === undefined) target.hidden = "reported";
         note(
@@ -800,7 +972,7 @@ export function applyRules(input: RulesInput): RulesOutput {
         decide(item, "needs_review", "an illegal-content report hides the photo at once and is read by a person");
         continue;
       }
-      if (item.withheld === true) {
+      if (!unvouched && item.withheld === true) {
         // A reason on the photo service's withhold list: the intake withheld the photo on this first report.
         if (target.hidden === undefined) target.hidden = "reported";
         note(
@@ -813,8 +985,19 @@ export function applyRules(input: RulesInput): RulesOutput {
         decide(item, "needs_review", `a ${reason} report withholds the photo at once and is read by a person`);
         continue;
       }
-      note(item.place, `photo ${photoId} reported as ${reason} (decide: keep, hide, remove or block the contributor)`, false, [item]);
-      decide(item, "needs_review", "photo reports are read by a person");
+      if (unvouched) {
+        note(
+          item.place,
+          `${reason === "illegal" ? "URGENT: " : ""}photo ${photoId} reported as ${reason} from another app without attestation, so not hidden at once` +
+            `${release} (decide: keep, hide, remove or block the contributor)`,
+          false,
+          [item],
+        );
+        decide(item, "needs_review", `a ${reason} report from another app without attestation is read by a person`);
+      } else {
+        note(item.place, `photo ${photoId} reported as ${reason} (decide: keep, hide, remove or block the contributor)`, false, [item]);
+        decide(item, "needs_review", "photo reports are read by a person");
+      }
       const reporters = independentReporters(reportsSent.filter((r) => r.photo_report.photo === photoId));
       if (target.hidden === undefined && reporters >= REPORTS_TO_HIDE) {
         target.hidden = "reported";
@@ -987,8 +1170,8 @@ export function applyRules(input: RulesInput): RulesOutput {
   /**
    * The open `fact_doubted` case for a fact, when doubts took it down and
    * nothing has set or removed it since: the takedown in this run, or the
-   * latest one the inbox keeps on a doubt applied in the last 90 days, whose
-   * date is still the fact's date. The inbox is the apply's own record, read
+   * latest one the inbox keeps on a doubt applied in the last 90 days, with no
+   * fact or contact report about the fact applied after it. The inbox is the apply's own record, read
    * every run over the same 90 days the doubts count for; the review PR can
    * be edited, merged or closed, and lists a case only until it is.
    */
@@ -1002,8 +1185,12 @@ export function applyRules(input: RulesInput): RulesOutput {
         if (found === undefined || kept.at > found.at) found = kept;
       }
     }
-    if (found === undefined || place.fact_dates?.[fact] !== found.at) return undefined;
-    return { value: found.value, at: found.at };
+    if (found === undefined) return undefined;
+    // A report applied after the takedown set the fact again, so a later change took it off: that takedown's case is over.
+    const setSince = input.history.some(
+      (h) => h.type === "report" && h.place === placeId && h.report.fact === fact && (h.report.kind === "fact" || h.report.kind === "contact") && wasApplied(h) && h.received > found!.at,
+    );
+    return setSince ? undefined : { value: found.value, at: found.at };
   }
 
   /** Fact reports about a place applied in earlier runs. */
@@ -1390,6 +1577,11 @@ export function applyRules(input: RulesInput): RulesOutput {
    */
   function applyContactReports(items: ReportItem[]): void {
     const takenDown = new Map<string, HeldCase>();
+    const again = replayTakedowns(items, (item, place) => {
+      const earlier = [...input.history, ...items].filter((r) => r === item || decisions.get(r.id)?.outcome !== "refused");
+      const decision = decideContactReport({ item, place, earlier });
+      return decision.verdict === "live" && decision.takedown !== undefined && heldForCheck(item) === null;
+    });
     // What a single report sent to a person, to take back if a later report in this run takes the contact down.
     const sentToPerson = new Map<string, { edit: ReviewEdit; change: Change }>();
     for (const item of items) {
@@ -1424,8 +1616,7 @@ export function applyRules(input: RulesInput): RulesOutput {
       if (decision.verdict === "live" && decision.takedown && check === null) {
         const { value, sources, reasons, feedback } = decision.takedown;
         const reports = earlier.filter((r) => feedback.includes(r.id));
-        delete (place.facts as Record<string, FactValue | undefined>)[fact];
-        setSource(place, fact, "feedback", nowIso);
+        takeDown(place, fact);
         note(placeId, `${fact} taken down after reports from ${sources} sources within ${WINDOW_DAYS} days (${reasons.join(", ")})`, true, reports);
         for (const r of reports) {
           if (!items.includes(r as ReportItem) || heldForCheck(r) !== null) continue;
@@ -1448,6 +1639,7 @@ export function applyRules(input: RulesInput): RulesOutput {
           feedback: [...feedback],
         };
         held.push(heldCase);
+        if (again.has(key)) replayed.push(heldCase);
         takenDown.set(key, heldCase);
         continue;
       }
@@ -1464,7 +1656,7 @@ export function applyRules(input: RulesInput): RulesOutput {
    * Doubts that a fact on a place is right, from travellers who don't know the
    * right value. Doubts from two sources within 90 days, at least one attested
    * and more than the sources confirming the value, take the fact off the place
-   * at once, with the doubt's source and date on it, and list a `fact_doubted`
+   * at once, with its source and date (and `pets_months` with `pets`), and list a `fact_doubted`
    * case. Doubts that leave the fact on the place (one source, none attested,
    * as many confirmations or more, or a fact from OSM or the owner) go to a
    * reviewer as one `fact_doubted` case for the place and fact. A doubt about
@@ -1486,6 +1678,16 @@ export function applyRules(input: RulesInput): RulesOutput {
       [...input.history, ...known].filter(
         (r) => r === item || (r.type === "report" && (r.report.kind === "doubt" || r.report.kind === "fact") && decisions.get(r.id)?.outcome !== "refused"),
       );
+    const takesDown = (item: ReportItem, place: Place) => {
+      const decision = decideDoubt({ item, place, earlier: evidence(item) });
+      return (
+        decision.verdict === "live" &&
+        decision.doubtTakedown !== undefined &&
+        heldForCheck(item) === null &&
+        isValidFactValue(decision.doubtTakedown.fact as ReportFactName, decision.doubtTakedown.value)
+      );
+    };
+    const again = replayTakedowns(items, takesDown);
     for (const item of items) {
       const placeId = item.place as string;
       const fact = item.report.fact as FactName;
@@ -1499,7 +1701,12 @@ export function applyRules(input: RulesInput): RulesOutput {
       }
       const place = record(placeId);
       const earlier = evidence(item);
-      const decision = decideDoubt({ item, place, earlier });
+      const weighed = decideDoubt({ item, place, earlier });
+      // The intake takes a doubt case only for a value its checks accept, so a reviewer decides on any other value.
+      const decision: ItemDecision =
+        weighed.verdict === "live" && weighed.doubtTakedown && !isValidFactValue(fact as ReportFactName, weighed.doubtTakedown.value)
+          ? { verdict: "held", reason: "disagreement", why: `${fact} holds a value the intake's checks refuse, so a reviewer decides` }
+          : weighed;
       if (decision.verdict === "refused") {
         decide(item, "refused", decision.why);
         continue;
@@ -1508,8 +1715,7 @@ export function applyRules(input: RulesInput): RulesOutput {
       const check = heldForCheck(item);
       if (decision.verdict === "live" && decision.doubtTakedown && check === null) {
         const { value, sources, doubts, confirmations } = decision.doubtTakedown;
-        delete (place.facts as Record<string, FactValue | undefined>)[fact];
-        setSource(place, fact, "feedback", item.received);
+        takeDown(place, fact);
         const counted = earlier.filter((r) => doubts.includes(r.id));
         note(placeId, `${fact} taken down after doubts from ${sources} sources within ${WINDOW_DAYS} days`, true, counted);
         for (const r of counted) {
@@ -1528,6 +1734,7 @@ export function applyRules(input: RulesInput): RulesOutput {
         downInRun.set(key, kept);
         const heldCase = doubtCase(placeId, place, fact, value, true, sources, doubts, confirmations);
         held.push(heldCase);
+        if (again.has(key)) replayed.push(heldCase);
         takenDown.set(key, heldCase);
         continue;
       }
@@ -1546,6 +1753,40 @@ export function applyRules(input: RulesInput): RulesOutput {
       sentToPerson.set(item.id, { edit, change: changes[changes.length - 1]! });
       decide(item, "needs_review", check === null ? decision.why : `the intake held it for ${check}, so a person checks it`);
     }
+  }
+
+  /**
+   * Takedowns already in the data that reports in `items` made in a run that
+   * stopped before it recorded its inbox moves. For each place and fact the
+   * place no longer has, with an earlier value in `earlierFacts` and no
+   * applied report about it in the history since that value was set, the
+   * earlier value is put back on the working record when `takesDown` says one
+   * of the reports takes it down. The takedown then runs again as it did then
+   * and leaves the record as the data holds it. Returns the keys put back.
+   */
+  function replayTakedowns(items: readonly ReportItem[], takesDown: (item: ReportItem, place: Place) => boolean): Set<string> {
+    const keys = new Set<string>();
+    for (const item of items) {
+      const placeId = item.place as string;
+      const fact = item.report.fact as string;
+      const key = factKey(placeId, fact);
+      const earlier = input.earlierFacts?.get(placeId)?.get(fact);
+      if (keys.has(key) || earlier === undefined || !input.places.has(placeId)) continue;
+      const current = input.places.get(placeId)!;
+      if ((current.facts as Record<string, unknown>)[fact] !== undefined) continue;
+      // A takedown the inbox recorded is not this run's to repeat.
+      const recorded = input.history.some(
+        (h) =>
+          h.type === "report" && h.place === placeId && h.report.fact === fact && (h.report.kind === "doubt" || h.report.kind === "contact") &&
+          wasApplied(h) && (earlier.date === undefined || h.received >= earlier.date),
+      );
+      if (recorded) continue;
+      const restored = withEarlierFact(structuredClone(record(placeId)), fact, earlier);
+      if (!items.some((i) => i.place === placeId && i.report.fact === fact && takesDown(i, restored))) continue;
+      withEarlierFact(record(placeId), fact, earlier);
+      keys.add(key);
+    }
+    return keys;
   }
 
   /** What the PR says after "<fact> doubted" about doubts that leave the fact on the place. */
@@ -1630,7 +1871,12 @@ export function applyRules(input: RulesInput): RulesOutput {
   function applyCommonsReports(items: ReportItem[]): void {
     const groups = new Map<string, ReportItem[]>();
     for (const item of items) {
-      const key = factKey(item.place as string, item.report.file as string);
+      // The file is written to public files only when it has the shape of a Commons file name.
+      if (!isCommonsFileName(item.report.file)) {
+        decide(item, "refused", "the file is not a Commons file name");
+        continue;
+      }
+      const key = factKey(item.place as string, item.report.file);
       groups.set(key, [...(groups.get(key) ?? []), item]);
     }
     for (const reports of groups.values()) {
@@ -1672,7 +1918,8 @@ export function applyRules(input: RulesInput): RulesOutput {
 
   function routeToPerson(items: ReportItem[]): void {
     for (const item of items) {
-      const { kind, note: text } = item.report;
+      const { kind, note: text, value } = item.report;
+      const problem = (kind === "name" || kind === "description") && typeof value === "string" ? textRulesFail(kind, value) : null;
       if (kind === "wrong_location" && item.place) {
         if (item.location) {
           const location = { lat: roundCoord(item.location.lat), lon: roundCoord(item.location.lon) };
@@ -1684,6 +1931,11 @@ export function applyRules(input: RulesInput): RulesOutput {
           note(item.place, `location reported wrong, no new location given${quote(text)}`, false, [item]);
         }
         decide(item, "needs_review", "location reports are checked by a person");
+      } else if (problem !== null && item.place) {
+        // The value never reaches the review checkout: a person reads it in the inbox.
+        edits.push({ kind: "note", place: item.place, feedback: item.id });
+        note(item.place, `${kind} report fails the text checks (${problem}), read it in the inbox`, false, [item]);
+        decide(item, "needs_review", `the ${kind} fails the text checks, so a person reads it`);
       } else if (kind === "name" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "name", place: item.place, name: item.report.value, feedback: item.id });
         note(item.place, `name changed to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);

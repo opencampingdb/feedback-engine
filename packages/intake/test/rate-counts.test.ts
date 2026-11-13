@@ -272,7 +272,7 @@ describe("daily counters in D1", () => {
   it(`limits key registrations to ${REGISTER_ORIGIN_DAILY_LIMIT} a day for each client network`, async () => {
     const e = env({ requires_attestation: true, ios: { app_id: APP_ID } });
     const register = (ip: string) =>
-      handle(request("/v1/attest/register", JSON.stringify({ key_id: "A".repeat(44), challenge: "unused", attestation: b64(new Uint8Array([1])) }), { "cf-connecting-ip": ip }), e);
+      handle(request("/v1/attest/register", JSON.stringify({ key_id: `${"A".repeat(43)}=`, challenge: "unused", attestation: b64(new Uint8Array([1])) }), { "cf-connecting-ip": ip }), e);
     for (let i = 0; i < REGISTER_ORIGIN_DAILY_LIMIT; i++) expect((await register("203.0.113.7")).status).toBe(401);
     expect((await register("203.0.113.9")).status).toBe(429);
     expect((await register("198.51.100.1")).status).toBe(401);
@@ -285,6 +285,70 @@ describe("daily counters in D1", () => {
     );
     expect(sent.map((r) => r.status)).toEqual(new Array(50).fill(202));
     expect(rows().find((r) => r.key === "a:2026-11-07:example-app")?.count).toBe(50);
+  });
+
+  it("leaves no count behind when one counter cannot be written", async () => {
+    // The database refuses every write to the contributor's counter.
+    const failing = {
+      ...store,
+      prepare: (sql: string) => {
+        const statement = store.prepare(sql);
+        return {
+          ...statement,
+          bind: (...values: unknown[]) => {
+            const bound = statement.bind(...values);
+            if (typeof values[0] !== "string" || !values[0].startsWith("c:")) return bound;
+            const fail = async (): Promise<never> => {
+              throw new Error("D1_ERROR: storage busy");
+            };
+            return { ...bound, first: fail, run: fail, all: fail };
+          },
+        };
+      },
+    };
+    const res = await handle(post(review(), { "cf-connecting-ip": "203.0.113.5" }), { ...env(), RECENT_LIST: failing });
+    expect(res.status).toBe(503);
+    expect(rows().filter((r) => r.count !== 0)).toEqual([]);
+  });
+
+  describe("when the daily counters cannot be reached", () => {
+    /** The database, with every statement on the daily counters failing. */
+    const countsDown = () => ({
+      ...store,
+      prepare: (sql: string) => {
+        if (!sql.includes("rate_counts")) return store.prepare(sql);
+        const fail = async (): Promise<never> => {
+          throw new Error("D1_ERROR: storage busy");
+        };
+        const statement = { bind: () => statement, first: fail, run: fail, all: fail };
+        return statement;
+      },
+    });
+    const ip = { "cf-connecting-ip": "203.0.113.5" };
+
+    it("answers a photo upload 503 with a retry-after", async () => {
+      const sent = upload();
+      sent.headers.set("cf-connecting-ip", ip["cf-connecting-ip"]);
+      const res = await handle(sent, { ...env(), RECENT_LIST: countsDown() });
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("60");
+    });
+
+    it("answers a photo pass 503 with a retry-after", async () => {
+      const e = { ...env({ photo_pass_unattested: true }), RECENT_LIST: countsDown() };
+      const pass = request("/v1/photos/pass", JSON.stringify({ type: "photo_pass", device: DEVICE, app_version: "1.0.0", time: new Date(clock).toISOString() }), ip);
+      const res = await handle(pass, e);
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("60");
+    });
+
+    it("answers a key registration 503 with a retry-after", async () => {
+      const e = { ...env({ requires_attestation: true, ios: { app_id: APP_ID } }), RECENT_LIST: countsDown() };
+      const body = JSON.stringify({ key_id: `${"A".repeat(43)}=`, challenge: "unused", attestation: b64(new Uint8Array([1])) });
+      const res = await handle(request("/v1/attest/register", body, ip), e);
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("60");
+    });
   });
 
   it("deletes the counters from before yesterday in the scheduled job", async () => {
