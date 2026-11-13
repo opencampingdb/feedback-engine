@@ -70,6 +70,13 @@ on:
         description: Licence id written on new photo lines
         type: string
         default: CC-BY-4.0
+      hold-first-photo:
+        description: >-
+          Hold each contributor's first photo for a person. Set it to false to
+          publish a first photo at once when the intake's SafeSearch rating
+          passed it. A photo with no rating still waits.
+        type: boolean
+        default: true
       intake-url:
         description: >-
           Base URL of the intake that serves recent new places, for example
@@ -355,6 +362,7 @@ jobs:
           APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
           PLACES_ARGS: ${{ inputs.places-repository != '' && '--places places' || '' }}
           PHOTO_LICENCE: ${{ inputs.photo-licence }}
+          FIRST_PHOTO_ARGS: ${{ !inputs.hold-first-photo && '--publish-first-photo' || '' }}
           INTAKE_URL: ${{ inputs.intake-url }}
           RECENT_PLACES_URL: ${{ inputs.recent-places-url }}
           PLACES_TOKEN: ${{ secrets.places-token }}
@@ -363,6 +371,7 @@ jobs:
         run: >
           node engine/packages/apply/dist/cli.js
           $PLACES_ARGS
+          $FIRST_PHOTO_ARGS
           ${INTAKE_URL:+--main data-main --intake "$INTAKE_URL"}
           ${RECENT_PLACES_URL:+--recent-places "$RECENT_PLACES_URL"}
           ${REVIEW_PREVIEW_URL:+--review-preview "$REVIEW_PREVIEW_URL"}

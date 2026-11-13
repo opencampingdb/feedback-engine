@@ -72,6 +72,8 @@ export interface RunOptions {
   geometry?: string;
   /** Licence id for new photo lines. Defaults to CC-BY-4.0. */
   photoLicence?: string;
+  /** False publishes a contributor's first photo when SafeSearch passed it. Defaults to true. */
+  holdFirstPhoto?: boolean;
   /**
    * The intake's recent list. Feedback about a new place on it that is not in
    * the data yet stays in `pending/`, and so does all feedback about places
@@ -293,6 +295,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     allReviews,
     photos,
     ...(options.photoLicence ? { photoLicence: options.photoLicence } : {}),
+    ...(options.holdFirstPhoto === false ? { holdFirstPhoto: false } : {}),
     ...(everyPlace ? { everyPlace } : {}),
     ...(distinct ? { distinct } : {}),
     ...(roads ? { roads } : {}),

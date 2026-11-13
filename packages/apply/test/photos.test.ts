@@ -67,7 +67,7 @@ const applied = (item: StoredFeedback) => ({ ...item, outcome: { result: "applie
 
 function rules(
   pending: StoredFeedback[],
-  opts: { photos?: Photo[]; history?: StoredFeedback[]; blocked?: string[]; recent?: ReadonlySet<string> | "unreadable" } = {},
+  opts: { photos?: Photo[]; history?: StoredFeedback[]; blocked?: string[]; recent?: ReadonlySet<string> | "unreadable"; holdFirstPhoto?: boolean } = {},
 ) {
   const out = applyRules({
     now: NOW,
@@ -78,6 +78,7 @@ function rules(
     blocked: new Set(opts.blocked ?? []),
     photos: opts.photos ?? [],
     ...(opts.recent !== undefined ? { recent: opts.recent } : {}),
+    ...(opts.holdFirstPhoto !== undefined ? { holdFirstPhoto: opts.holdFirstPhoto } : {}),
   });
   return { ...out, outcome: (item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.outcome };
 }
@@ -175,6 +176,44 @@ describe("photo rules", () => {
     const out = rules([first, flagged, unchecked, copy, trusted], { photos: [photoLine(1, "sam"), photoLine(9, "sam", { sha256: sha(5) })] });
     const heldReason = (item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.held_reason;
     expect([first, flagged, unchecked, copy, trusted].map(heldReason)).toEqual(["first_photo", "safesearch", "check_unavailable", "same_file", undefined]);
+  });
+
+  describe("with the first photo hold off", () => {
+    const calm = { adult: "VERY_UNLIKELY", violence: "VERY_UNLIKELY", racy: "UNLIKELY", medical: "VERY_UNLIKELY", spoof: "VERY_UNLIKELY" } as const;
+    const rated = (who: string, n: number, safesearch: unknown, placeId = PLACE) => {
+      const item = upload(who, n, placeId) as StoredFeedback & { photo: Record<string, unknown> };
+      return { ...item, photo: { ...item.photo, safesearch } } as StoredFeedback;
+    };
+
+    it("still holds a first photo by default, even when SafeSearch passed it", () => {
+      const p = rated("kim", 2, calm);
+      const out = rules([p]);
+      expect(out.decisions.find((d) => d.id === p.id)).toMatchObject({ outcome: "needs_review", held_reason: "first_photo" });
+    });
+
+    it("publishes a first photo SafeSearch passed, like a trusted contributor's", () => {
+      const p = rated("kim", 2, calm);
+      const out = rules([p], { holdFirstPhoto: false });
+      expect(out.outcome(p)).toBe("applied");
+      expect(out.decisions.find((d) => d.id === p.id)?.held_reason).toBeUndefined();
+      expect(out.photos.get(PLACE)!.map((l) => l.id)).toEqual([p.id.replace("fb_", "pho_")]);
+      expect(out.changes.every((c) => c.automatic)).toBe(true);
+    });
+
+    it("still holds a first photo with no SafeSearch rating, so an unchecked photo never publishes", () => {
+      const p = upload("kim", 2);
+      const out = rules([p], { holdFirstPhoto: false });
+      expect(out.decisions.find((d) => d.id === p.id)).toMatchObject({ outcome: "needs_review", held_reason: "first_photo" });
+    });
+
+    it("still holds a first photo SafeSearch flags, couldn't check, or that was sent for another place", () => {
+      const flagged = rated("kim", 3, { ...calm, adult: "LIKELY" });
+      const unchecked = rated("lee", 4, "unchecked");
+      const copy = rated("max", 5, calm, OTHER);
+      const out = rules([flagged, unchecked, copy], { holdFirstPhoto: false, photos: [photoLine(9, "sam", { sha256: sha(5) })] });
+      const heldReason = (item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.held_reason;
+      expect([flagged, unchecked, copy].map(heldReason)).toEqual(["safesearch", "check_unavailable", "same_file"]);
+    });
   });
 
   it("holds a file already sent for another place, even from a trusted contributor", () => {
@@ -391,6 +430,16 @@ describe("photo run", () => {
     expect(auto.map((l) => JSON.parse(l).id)).toEqual([photoLine(1, "sam").id, trusted.id.replace("fb_", "pho_")]);
     const reviewLines = (await readFile(join(review, "photos", `${PLACE}.ndjson`), "utf8")).trim().split("\n");
     expect(reviewLines.map((l) => JSON.parse(l).id)).toEqual([held.id.replace("fb_", "pho_")]);
+  });
+
+  it("writes a first photo SafeSearch passed to the data when the run turns the first photo hold off", async () => {
+    const calm = { adult: "VERY_UNLIKELY", violence: "VERY_UNLIKELY", racy: "UNLIKELY", medical: "VERY_UNLIKELY", spoof: "VERY_UNLIKELY" };
+    const first = { ...upload("kim", 4), photo: { ...(upload("kim", 4) as unknown as { photo: object }).photo, safesearch: calm } } as unknown as StoredFeedback;
+    await put(join(inbox, "pending", "2026-11-02", `${first.id}.json`), JSON.stringify(first));
+    const summary = await run({ inbox, data, reviewData: review, now: new Date(NOW), holdFirstPhoto: false });
+    expect(summary.auto_files).toEqual([`photos/${PLACE}.ndjson`]);
+    expect(summary.review_files).toEqual([]);
+    expect(summary.photo_decisions).toEqual([{ id: first.id, place: PLACE, outcome: "applied", reason: "photo accepted" }]);
   });
 
   it("leaves photos out of the decisions it lists for progress, as apps know a photo by its pho_ id", async () => {

@@ -9,6 +9,8 @@ import { AUTO_PR_CLOSED, REVIEWER_DECLINED } from "../src/progress.js";
 import { PHOTO_SENT_FILE, sendPhotoProgress, type PhotoProgressUpdate } from "../src/photo-progress.js";
 import type { ReviewPr } from "../src/owners.js";
 import { intakeRecentStore } from "../src/recent.js";
+import { run } from "../src/run.js";
+import { dumpPlace } from "../src/serialise.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const RUN = "2026-11-01T00:00:00Z";
@@ -117,6 +119,31 @@ describe("sendPhotoProgress", () => {
     expect(sent[pho(4)]).toMatchObject({ state: "held", held_reason: "safesearch" });
     expect(sent[pho(5)]).toMatchObject({ state: "held", held_reason: "check_unavailable" });
     expect(sent[pho(6)]).toMatchObject({ state: "held", held_reason: "first_photo" });
+  });
+
+  it("is accepted, not held, when a run with the first photo hold off publishes a first photo SafeSearch passed", async () => {
+    const calm = { adult: "VERY_UNLIKELY", violence: "VERY_UNLIKELY", racy: "UNLIKELY", medical: "VERY_UNLIKELY", spoof: "VERY_UNLIKELY" };
+    const fresh = (n: number, safesearch?: object) => {
+      const { outcome: _outcome, ...item } = photo(n, "", "") as unknown as Record<string, unknown> & { photo: object };
+      return { ...item, photo: { ...item.photo, full_sha256: String(n).repeat(64), ...(safesearch ? { safesearch } : {}) } } as unknown as StoredFeedback;
+    };
+    const passed = fresh(1, calm);
+    const unrated = fresh(2);
+    for (const item of [passed, unrated]) {
+      const path = join(inbox, "pending", item.received.slice(0, 10), `${item.id}.json`);
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, JSON.stringify(item));
+    }
+    const data = join(root, "data");
+    await mkdir(join(data, "places", "za"), { recursive: true });
+    const place = { id: PLACE, name: "Lake Camp", kind: "free_camp", group: "overnight", location: { lat: -36.85, lon: 144.55 }, osm: { type: "node", id: 1, version: 1 }, facts: {}, status: "open", rating: null, fact_sources: {}, updated: "2026-06-01T00:00:00Z" };
+    await writeFile(join(data, "places", "za", `${PLACE}.json`), dumpPlace(place as Parameters<typeof dumpPlace>[0]));
+    const summary = await run({ inbox, data, now: NOW, holdFirstPhoto: false });
+    const s = store();
+    await send(s, { autoPrs: [pr("OPEN", [fb(1)])], reviewPrs: [pr("OPEN", [fb(2)])], decisions: summary.photo_decisions });
+    const sent = byId(s);
+    expect(sent[pho(1)]).toMatchObject({ state: "accepted" });
+    expect(sent[pho(2)]).toMatchObject({ state: "held", held_reason: "first_photo" });
   });
 
   it("takes the held reason from the decision, never from the words of its reason", async () => {

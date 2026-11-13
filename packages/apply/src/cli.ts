@@ -11,7 +11,8 @@ const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>
                   [--auto-pr-body <file>] [--review-pr-body <file>] [--job-summary <file>]
                   [--review-prs <file>] [--auto-prs <file>] [--bot-login <login>]
                   [--summary <file>] [--now <ISO time>] [--places <dir>]
-                  [--photo-licence <id>] [--main <dir> --intake <url>]
+                  [--photo-licence <id>] [--publish-first-photo]
+                  [--main <dir> --intake <url>]
                   [--recent-places <url>] [--review-preview <url>]
                   [--geometry <file>]
 
@@ -28,6 +29,8 @@ or <login>[bot], or app/<login> as the GitHub CLI writes it, never the bare
 login alone. Held and closed cases the review PR body has no room for are
 written to <file>.2, <file>.3 and so on beside --review-pr-body, to post as
 comments in that order.
+--publish-first-photo publishes a contributor's first photo without a person
+when the intake's SafeSearch rating passed it. A photo with no rating still waits.
 --places makes it a photo repository run for an app's own photo service:
 <data> holds only photos and moderation files, place records are read from the
 Open Camping DB data checkout in <dir>, and anything but photos is refused.
@@ -86,6 +89,7 @@ async function main(): Promise<number> {
       now: { type: "string" },
       places: { type: "string" },
       "photo-licence": { type: "string" },
+      "publish-first-photo": { type: "boolean" },
       main: { type: "string" },
       intake: { type: "string" },
       "recent-places": { type: "string" },
@@ -134,6 +138,7 @@ async function main(): Promise<number> {
     ...(now ? { now } : {}),
     ...(values.places ? { places: values.places } : {}),
     ...(values["photo-licence"] ? { photoLicence: values["photo-licence"] } : {}),
+    ...(values["publish-first-photo"] ? { holdFirstPhoto: false } : {}),
     ...(values.geometry ? { geometry: values.geometry } : {}),
     ...(values["recent-places"] ? { recentList: intakeRecentList(values["recent-places"]) } : {}),
     ...(values["review-preview"] && previewSecret ? { reviewPreview: { url: values["review-preview"], secret: previewSecret } } : {}),
