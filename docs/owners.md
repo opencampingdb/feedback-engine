@@ -16,6 +16,8 @@ The page fills in the place id, shows the owner terms and takes the owner throug
 
 ## How a claim works
 
+[owner-claim-walkthrough.md](owner-claim-walkthrough.md) follows one claim through every system, with what each checks and where each record ends up.
+
 1. The owner sends a claim (`owner_claim`) for a place in the data, or a listing (`owner_listing`) for private land that is not. The intake answers with an id, a short code such as `OCDB-7KQ2`, and a token. The token is shown once and never stored: the intake keeps only its SHA-256.
 2. The owner puts the code on their own website or public Facebook page, at the address they gave as `proof_url`.
 3. Each apply run fetches that page and looks for the code. Once it is there, the claim goes to the `feedback/review` PR on the data repository with an approval box and the label `owner-claim`. After 7 days without it, the claim goes there marked as not found, with that run's fetch. A claim the run had no time to fetch waits for the next run, so the box always shows a fresh check. Each run sends at most 20 claims and listings to a person, oldest first, so every approval box fits in the PR text. The rest wait for the next run. A claim is recorded as sent only once GitHub has accepted the PR text with its box: if GitHub refuses it, the claim waits in the inbox and goes with a later run.
