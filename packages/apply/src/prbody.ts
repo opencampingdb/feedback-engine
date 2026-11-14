@@ -244,6 +244,7 @@ function claimSummary(c: ClaimForReview, places: ReadonlyMap<string, Place>): st
       ? `code ${code} found at ${shownAddress(foundAt)}${where}`
       : `code ${code} found at ${shownAddress(foundAt)}${where}, ON A DIFFERENT SITE from the submitted ${submitted}: check both belong to the place`;
   const replaces = c.replaces ? ` Replaces the current owner (claim ${c.replaces.claim}, approved ${c.replaces.approved}).` : "";
+  const again = c.again !== undefined ? ` Listed again: review PR #${c.again} was merged or closed with no decision on it.` : "";
   if (c.type === "owner_listing" && c.listing) {
     // Nobody has approved the listing yet, and this PR is public: its name, description,
     // fact values and exact location stay in the inbox until a person approves it.
@@ -251,10 +252,10 @@ function claimSummary(c: ClaimForReview, places: ReadonlyMap<string, Place>): st
     const description = c.listing.description ? ", description sent" : "";
     return (
       `new private farm stay \`${c.place}\` near ${coarse(c.listing.location.lat)}, ${coarse(c.listing.location.lon)}. ` +
-      `Facts sent: ${facts || "none"}${description}. Read the listing in inbox/owner-claims/${c.claim}.json before ticking. Proof: ${proof}.`
+      `Facts sent: ${facts || "none"}${description}. Read the listing in inbox/owner-claims/${c.claim}.json before ticking. Proof: ${proof}.${again}`
     );
   }
-  return `${label(c.place, places)}. Proof: ${proof}. ${ownPages(foundAt, places.get(c.place))}${replaces}`;
+  return `${label(c.place, places)}. Proof: ${proof}. ${ownPages(foundAt, places.get(c.place))}${replaces}${again}`;
 }
 
 /**
@@ -348,10 +349,11 @@ export function reviewPrTexts(
       lines.push(
         "## Owner claims",
         "",
-        "Tick the box for each claim or listing you approve, then merge this PR. Unticked boxes in a merged PR are refused, " +
-          "and closing the PR without merging refuses every claim in it. Nothing about an owner is published until you approve: " +
+        "Each claim or listing has two boxes. Tick **Approve** or **Refuse** for each one, then merge this PR. " +
+          "Tick before you merge: a box ticked after the merge does not count. A claim with neither box ticked, or both, " +
+          "comes back on the next review PR. Nothing about an owner is published until you approve: " +
           "the next apply run then writes the owner record and adds `owner_verified` or the farm stay through the automatic PR. " +
-          "Check that the proof page belongs to the place before ticking.",
+          "Check that the proof page belongs to the place before ticking Approve.",
         "",
         ...claims.map((c) => approvalLine(c, claimSummary(c, places))),
         "",

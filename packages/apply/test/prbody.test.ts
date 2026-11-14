@@ -335,3 +335,13 @@ describe("a claim line and how far the code can be trusted", () => {
     expect(line(claim(lookalike, { found: true, checked: "2026-11-04T00:00:00Z", detail: "found" }))).toContain("found at `https://xn--rverbend-thh.example/about`");
   });
 });
+
+describe("the two boxes of a claim", () => {
+  it("writes an Approve and a Refuse box, and says when the claim was listed before", () => {
+    const c: ClaimForReview = { claim: "fb_01JJ0000000000000000000001", type: "owner_claim", place: PLACE, proof: { found: true, checked: "2026-11-04T00:00:00Z", detail: "found" }, proofUrl: "https://riverbend.example/about", code: "OCDB-7KQ2-M4XP", replaces: undefined, again: 12 };
+    const lines = reviewPrBody("2026-11-04T00:00:00Z", [], new Map(), [c]).split("\n");
+    const at = lines.findIndex((l) => l.startsWith("- [ ] Approve owner claim fb_01JJ0000000000000000000001: "));
+    expect(lines[at]).toContain("Listed again: review PR #12 was merged or closed with no decision on it.");
+    expect(lines[at + 1]).toBe("- [ ] Refuse owner claim fb_01JJ0000000000000000000001");
+  });
+});

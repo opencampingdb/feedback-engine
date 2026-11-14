@@ -216,19 +216,20 @@ jobs:
           # bot's own (botPrs in packages/apply), so the one author rule decides, and owner
           # approvals read the 30 most recent of those. Read through GraphQL, which gives each
           # author's account type, so the bot is known as an account of type Bot and never by its
-          # login alone.
+          # login alone. It also gives when the PR merged and when each text was last edited,
+          # so a box ticked after the merge is not counted.
           query='query($owner: String!, $name: String!, $head: String!) {
             repository(owner: $owner, name: $name) {
               pullRequests(headRefName: $head, first: 100, orderBy: {field: CREATED_AT, direction: DESC}) {
-                nodes { number state body isCrossRepository author { __typename login }
-                  comments(first: 100) { pageInfo { hasNextPage endCursor } nodes { author { __typename login } body } } }
+                nodes { number state body mergedAt lastEditedAt isCrossRepository author { __typename login }
+                  comments(first: 100) { pageInfo { hasNextPage endCursor } nodes { author { __typename login } body lastEditedAt } } }
               }
             }
           }'
           more='query($owner: String!, $name: String!, $number: Int!, $after: String!) {
             repository(owner: $owner, name: $name) {
               pullRequest(number: $number) {
-                comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { author { __typename login } body } }
+                comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { author { __typename login } body lastEditedAt } }
               }
             }
           }'
@@ -260,9 +261,9 @@ jobs:
             done < "$RUNNER_TEMP/$kind-cursors"
             jq --slurpfile extra "$extra" 'def who: if . == null then null else {login, type: .__typename} end;
               [.data.repository.pullRequests.nodes[] | .number as $n
-                | {number, state, body, isCrossRepository, author: (.author | who),
+                | {number, state, body, mergedAt, bodyEditedAt: .lastEditedAt, isCrossRepository, author: (.author | who),
                    comments: [(.comments.nodes + [$extra[0][] | select(.number == $n) | .nodes[]])[]
-                     | {author: (.author | who), body}]}]' "$page" > "$RUNNER_TEMP/$kind-prs.json"
+                     | {author: (.author | who), body, editedAt: .lastEditedAt}]}]' "$page" > "$RUNNER_TEMP/$kind-prs.json"
           done
 
       - name: Check out data main for the recent places store

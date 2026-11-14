@@ -14,10 +14,12 @@ import type { Place, SourceKey } from "./types.js";
  * - A claim or listing waits in `pending/` until its code is on the proof page
  *   (or 7 days pass), then goes to the `feedback/review` PR with an unticked
  *   "Approve owner claim fb_..." box, and moves to `owner-claims/` in the inbox.
- * - A person approves by ticking the box and merging that PR. The next run
- *   reads the merged PR, writes `owners/<place id>.json` in the inbox and puts
- *   `owner_verified` (or the new farm stay) on the `feedback/auto` branch. An
- *   unticked box in a merged PR, or a PR closed without merging, refuses it.
+ * - A person decides by ticking the claim's "Approve" or "Refuse" box and
+ *   merging that PR. The next run reads the merged PR. For an approval it
+ *   writes `owners/<place id>.json` in the inbox and puts `owner_verified` (or
+ *   the new farm stay) on the `feedback/auto` branch. A claim with neither box
+ *   ticked, or both, when its PR is merged or closed is listed again on the
+ *   next review PR. A box ticked after the PR was merged does not count.
  *   Nothing about an owner reaches `data` before a person approves.
  * - An owner update whose token hash matches `owners/<place id>.json` is
  *   applied at once, except name and location changes, which go to a person.
@@ -74,7 +76,12 @@ export interface ReviewPr {
   number: number;
   state: "OPEN" | "MERGED" | "CLOSED";
   body: string;
-  comments: { author: PrAuthor | null; body: string }[];
+  /** When the PR was merged, ISO 8601. */
+  mergedAt?: string | null;
+  /** When the body was last edited, which ticking a box in it does. */
+  bodyEditedAt?: string | null;
+  /** `editedAt` is when the comment was last edited, which ticking a box in it does. */
+  comments: { author: PrAuthor | null; body: string; editedAt?: string | null }[];
   /** Who opened the PR. Only PRs the bot opened count. */
   author: PrAuthor | null;
   /** True when the PR comes from a fork. Those never count. */
@@ -91,6 +98,8 @@ export interface ClaimForReview {
   code: string;
   /** The approved owner this claim would replace. */
   replaces: { claim: string; approved: string } | undefined;
+  /** Listed before, on review PR `again`, which was merged or closed with no decision on it. */
+  again?: number;
   listing?: { name: string; description?: string; facts: Record<string, FactValue>; location: { lat: number; lon: number } };
 }
 
@@ -127,7 +136,7 @@ export interface OwnerOutput {
   changes: Change[];
 }
 
-const APPROVAL_LINE = /^- \[([ xX])\] Approve owner (?:claim|listing) (fb_[0-9A-HJKMNP-TV-Z]{26})\b/;
+const APPROVAL_LINE = /^- \[([ xX])\] (Approve|Refuse) owner (?:claim|listing) (fb_[0-9A-HJKMNP-TV-Z]{26})\b/;
 
 /**
  * Whether `author` is the bot GitHub App named by one of `botLogins` (its
@@ -150,33 +159,44 @@ export function botPrs<Pr extends Pick<ReviewPr, "isCrossRepository" | "author">
 }
 
 /**
- * The approval boxes in a review PR: in its body, and in comments written by
+ * The decision boxes in a review PR: in its body, and in comments written by
  * the bot. Only a box at the start of a line counts, and lines end only at a
  * newline, so text quoted from a traveller or an owner (always on one line,
  * after the box) cannot add or tick one. A PR from a fork, or one the bot did
- * not open, has none.
+ * not open, has none. In a merged PR, the ticks of a text edited after the
+ * merge do not count, because ticking a box edits the text: its claims are
+ * still `listed`. `ticked` are the claims with "Approve" ticked, `refused`
+ * those with "Refuse" ticked.
  */
-export function parseApprovals(pr: ReviewPr, botLogins: readonly string[]): { ticked: string[]; listed: string[] } {
+export function parseApprovals(pr: ReviewPr, botLogins: readonly string[]): { ticked: string[]; refused: string[]; listed: string[] } {
   const ticked: string[] = [];
+  const refused: string[] = [];
   const listed: string[] = [];
-  if (pr.isCrossRepository !== false || !isBotAuthor(pr.author, botLogins)) return { ticked, listed };
-  const texts = [pr.body, ...pr.comments.filter((c) => isBotAuthor(c.author, botLogins)).map((c) => c.body)];
-  for (const text of texts) {
+  if (pr.isCrossRepository !== false || !isBotAuthor(pr.author, botLogins)) return { ticked, refused, listed };
+  const late = (editedAt: string | null | undefined) =>
+    pr.state === "MERGED" && typeof pr.mergedAt === "string" && typeof editedAt === "string" && Date.parse(editedAt) > Date.parse(pr.mergedAt);
+  const texts = [
+    { text: pr.body, late: late(pr.bodyEditedAt) },
+    ...pr.comments.filter((c) => isBotAuthor(c.author, botLogins)).map((c) => ({ text: c.body, late: late(c.editedAt) })),
+  ];
+  for (const { text, late: ticksIgnored } of texts) {
     for (const line of text.split("\n")) {
       const m = APPROVAL_LINE.exec(line.replace(/\r$/, ""));
       if (!m) continue;
-      const id = m[2]!;
+      const id = m[3]!;
       if (!listed.includes(id)) listed.push(id);
-      if (m[1] !== " " && !ticked.includes(id)) ticked.push(id);
+      if (m[1] === " " || ticksIgnored) continue;
+      const into = m[2] === "Approve" ? ticked : refused;
+      if (!into.includes(id)) into.push(id);
     }
   }
-  return { ticked, listed };
+  return { ticked, refused, listed };
 }
 
-/** Text for a box in the review PR. Keep in step with APPROVAL_LINE. */
+/** The two boxes for a claim in the review PR, as two lines. Keep in step with APPROVAL_LINE. */
 export function approvalLine(claim: ClaimForReview, summary: string): string {
   const what = claim.type === "owner_listing" ? "listing" : "claim";
-  return `- [ ] Approve owner ${what} ${claim.claim}: ${summary}`;
+  return `- [ ] Approve owner ${what} ${claim.claim}: ${summary}\n- [ ] Refuse owner ${what} ${claim.claim}`;
 }
 
 export function applyOwnerRules(input: OwnerInput): OwnerOutput {
@@ -223,23 +243,50 @@ export function applyOwnerRules(input: OwnerInput): OwnerOutput {
   }
   return out;
 
-  /** Decisions on claims waiting in `owner-claims/`, from the review PRs. */
+  /**
+   * Decisions on claims waiting in `owner-claims/`, from the review PRs. Only a
+   * merged PR decides, by one ticked box. A claim no open PR lists and no
+   * merged PR decided is listed again, so merging or closing a PR without
+   * looking at a claim never refuses it.
+   */
   function approve(): void {
     const seen = input.reviewPrs.map((pr) => ({ pr, ...parseApprovals(pr, input.botLogins) }));
     for (const waiting of input.awaiting) {
       const id = waiting.item.id;
       const mine = seen.filter((s) => s.listed.includes(id));
-      const merged = mine.find((s) => s.pr.state === "MERGED" && s.ticked.includes(id));
-      const refusedMerge = mine.find((s) => s.pr.state === "MERGED");
-      const closed = mine.find((s) => s.pr.state === "CLOSED");
-      if (merged) {
-        grant(waiting, merged.pr.number);
-      } else if (refusedMerge) {
-        out.approvals.push({ claim: id, outcome: "refused", reason: `not ticked when review PR #${refusedMerge.pr.number} was merged` });
-      } else if (closed) {
-        out.approvals.push({ claim: id, outcome: "refused", reason: `review PR #${closed.pr.number} was closed without merging` });
+      const merged = mine.filter((s) => s.pr.state === "MERGED");
+      const approved = merged.find((s) => s.ticked.includes(id) && !s.refused.includes(id));
+      const refused = merged.find((s) => s.refused.includes(id) && !s.ticked.includes(id));
+      if (approved) {
+        grant(waiting, approved.pr.number);
+      } else if (refused) {
+        out.approvals.push({ claim: id, outcome: "refused", reason: `refused on review PR #${refused.pr.number}` });
       } else if (now - Date.parse(waiting.sent) > DECISION_DAYS * DAY_MS) {
         out.approvals.push({ claim: id, outcome: "refused", reason: `no decision within ${DECISION_DAYS} days` });
+      } else if (mine.length > 0 && !mine.some((s) => s.pr.state === "OPEN") && out.forReview.length < MAX_CLAIMS_PER_RUN) {
+        const { item } = waiting;
+        const current = owners.get(waiting.place);
+        const last = mine[0]!.pr.number;
+        out.forReview.push({
+          claim: id,
+          type: item.type,
+          place: waiting.place,
+          proof: waiting.proof,
+          proofUrl: item.claim.proof_url,
+          code: item.code,
+          replaces: current && current.claim !== id ? { claim: current.claim, approved: current.approved } : undefined,
+          again: last,
+          ...(item.type === "owner_listing"
+            ? {
+                listing: {
+                  name: item.listing.name,
+                  ...(item.listing.description ? { description: item.listing.description } : {}),
+                  facts: { ...item.listing.facts } as Record<string, FactValue>,
+                  location: { lat: roundCoord(item.location.lat), lon: roundCoord(item.location.lon) },
+                },
+              }
+            : {}),
+        });
       }
     }
   }
