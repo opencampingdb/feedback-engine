@@ -205,6 +205,10 @@ The OSM notes workflow (`osm-notes.yml`) is retired, so don't add it. [osm.md](o
 
 Secrets stay in Cloudflare and need no change. The intake validates every submission, so a release that adds facts or report kinds needs this redeploy before apps send them. Until then the intake refuses them with `400`.
 
+### Moving to SDK 0.34.0: phone numbers formatted
+
+An intake at 0.34.0 formats every phone number it accepts with `formatPhone` before storing it, so nothing an app sends is refused that was accepted before, and no deploy order matters. Apps on 0.34.0 can format the number in the field too, so the traveller sees what will be stored.
+
 ### Moving to SDK 0.33.0: a photo's point of interest
 
 SDK 0.33.0 lets an app send a photo's `focus` ([photos.md](photos.md#a-photos-point-of-interest)). An older photo intake refuses a photo meta that carries it, so in this order:

@@ -6,6 +6,7 @@ import {
   MAX_THUMB_BYTES,
   stripContactDetails,
   validateSubmission,
+  formatSubmissionPhones,
   type FeedbackSubmission,
   type NewPlaceReportReason,
   type OwnerSubmission,
@@ -1616,7 +1617,8 @@ export function createHandler(deps: Deps) {
     }
     const checked = validateSubmission(body, new Date(nowMs));
     if (!checked.ok) return { status: 400, body: { error: "invalid", details: checked.errors } };
-    const submission = checked.value;
+    // Phone numbers are stored the standard way, whichever app sent them.
+    const submission = formatSubmissionPhones(checked.value);
     if ("batch" in intake && (submission.type === "photo" || isOwnerSubmission(submission))) {
       return { status: 400, body: { error: "type_not_allowed_in_batch" } };
     }

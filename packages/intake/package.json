@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@opencampingdb/apply": "0.1.0",
-    "@opencampingdb/feedback": "0.33.0"
+    "@opencampingdb/feedback": "0.34.0"
   },
   "devDependencies": {
     "wrangler": "4.156.2"

@@ -101,7 +101,11 @@ Key registration refusals use the same codes. Registration also answers `malform
 
 A patch version (0.28.1) is a fix or a small change to an existing call. A minor version (0.32.0) adds a call, option, field or type, and before 1.0.0 may also mark a breaking change, which its release notes spell out. [docs/integration.md](../../docs/integration.md#what-changed-by-version), "What changed by version", lists the recent ones.
 
-This is 0.33.0. What an app moving to it needs to know:
+This is 0.34.0. What an app moving to it needs to know:
+
+- `formatPhone(text)` writes a phone number the standard Australian way: landlines `02 6123 4567` or `+61 2 6123 4567`, mobiles `0412 345 678` or `+61 412 345 678`, `1300 123 456`, `1800 123 456` and `13 12 34`. Domestic numbers stay domestic and +61 numbers stay +61, and a trunk 0 after +61 is dropped. Anything else, such as an overseas number, comes back with its spacing tidied and nothing more. Run it on a phone field when it loses focus and before sending. `formatSubmissionPhones(submission)` runs it on every phone number in a submission (a `phone` or `phone_2` fact report, a new place's `contacts.phone`, an owner's listing or update facts), and an intake at 0.34.0 runs it on everything that arrives, so a number from any app is stored the same way.
+
+What an app moving to 0.33.0 needed to know:
 
 - `photo()` takes an optional `focus`, the photo's point of interest (`{ x, y }`, each 0 to 1 from the top left), and published photo records carry it when it was sent. `isPhotoFocus` and the `PhotoFocus` type are new. Deploy the photo intake at 0.33.0 before an app sends `focus`: an older intake refuses it ([docs/photos.md](../../docs/photos.md#a-photos-point-of-interest)).
 
