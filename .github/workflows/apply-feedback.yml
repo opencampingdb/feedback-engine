@@ -316,6 +316,7 @@ jobs:
           APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
           DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
           BASE_BRANCH: ${{ inputs.data-base-branch }}
+          ENGINE_DIR: ${{ github.workspace }}/engine
         run: |
           bot_id="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
           echo "bot_email=${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
@@ -346,8 +347,14 @@ jobs:
             if [ -n "$pr" ]; then
               git -C "$dir" fetch origin "$branch"
               git -C "$dir" switch -c "$branch" "origin/${branch}"
-              # Keep the branch current with the base. On a conflict, carry on
-              # from the branch as it is and leave the conflict to the PR.
+              # Keep the branch current with the base. Place records are merged key by key
+              # (merge-record.mjs), so a fact added on each branch to one place is no
+              # conflict. On a real conflict, where both branches changed one key, carry
+              # on from the branch as it is and leave the conflict to the PR.
+              git -C "$dir" config merge.place-record.name "Place record, merged key by key"
+              git -C "$dir" config merge.place-record.driver "node '${ENGINE_DIR}/packages/apply/scripts/merge-record.mjs' %O %A %B"
+              mkdir -p "$dir/.git/info"
+              echo 'places/**/*.json merge=place-record' > "$dir/.git/info/attributes"
               git -C "$dir" merge --no-edit "origin/${BASE_BRANCH}" || git -C "$dir" merge --abort
               echo "${kind}_open=true" >> "$GITHUB_OUTPUT"
             else
