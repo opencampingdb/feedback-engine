@@ -123,4 +123,4 @@ The item moves to `applied/<day>/` or `refused/<day>/` in the inbox with the out
 ## Ending a claim
 
 - A lost token: the owner claims again. Once approved, the new claim replaces the old token.
-- Removing an owner: delete `owners/<place id>.json` in the inbox. Updates with that token are refused from the next run. The place keeps `owner_verified` and the values the owner set until someone edits the record in the data repository.
+- Removing an owner: delete `owners/<place id>.json` in the inbox. From the next run, updates with that token are refused and the place loses `owner_verified`. The values the owner set stay, with the source `owner`, until someone edits the record in the data repository.
