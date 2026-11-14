@@ -101,7 +101,11 @@ Key registration refusals use the same codes. Registration also answers `malform
 
 A patch version (0.28.1) is a fix or a small change to an existing call. A minor version (0.32.0) adds a call, option, field or type, and before 1.0.0 may also mark a breaking change, which its release notes spell out. [docs/integration.md](../../docs/integration.md#what-changed-by-version), "What changed by version", lists the recent ones.
 
-This is 0.32.0. What an app moving to it needs to know:
+This is 0.33.0. What an app moving to it needs to know:
+
+- `photo()` takes an optional `focus`, the photo's point of interest (`{ x, y }`, each 0 to 1 from the top left), and published photo records carry it when it was sent. `isPhotoFocus` and the `PhotoFocus` type are new. Deploy the photo intake at 0.33.0 before an app sends `focus`: an older intake refuses it ([docs/photos.md](../../docs/photos.md#a-photos-point-of-interest)).
+
+What an app moving to 0.32.0 needed to know:
 
 - A review can carry a contributor proof (`contributorProof`, action `review`). A review that replaces the contributor's earlier review of a place from another install is held for a person unless the intake checked such a proof.
 - `photo()` removes all the metadata listed above, not only Exif and XMP, and `jpegMetadata` is new. A photo service may refuse uploads that still carry metadata, so move every build that uploads photos to this version.

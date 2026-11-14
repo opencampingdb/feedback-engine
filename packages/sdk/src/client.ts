@@ -14,6 +14,7 @@ import type {
   ReviewBody,
   ReviewReportReason,
   PhotoReportReason,
+  PhotoFocus,
   FirstHand,
 } from "./types.js";
 import { isFeedbackId, readProgress, type Progress } from "./progress.js";
@@ -351,6 +352,12 @@ export interface PhotoInput {
   full: ArrayBuffer | Uint8Array;
   /** Thumbnail JPEG, about 400 px on the long side. At most 200 KB. */
   thumb: ArrayBuffer | Uint8Array;
+  /**
+   * The photo's point of interest, each value 0 to 1 from the top left of the
+   * full size photo, so an app showing it cropped can keep that point in view.
+   * Rounded to 3 decimal places. Leave it out when there is none.
+   */
+  focus?: PhotoFocus;
 }
 
 export interface PhotoReportInput {
@@ -965,6 +972,21 @@ function defaultRandomUUID(): string {
 }
 
 /** A JPEG starts with the SOI marker and another marker: FF D8 FF. */
+/**
+ * A photo focus as the client sends it: `x` and `y` rounded to 3 decimal
+ * places, or a problem when either is not a number from 0 to 1.
+ */
+function photoFocusOf(value: PhotoFocus | undefined, problems: string[]): PhotoFocus | undefined {
+  if (value === undefined) return undefined;
+  const { x, y } = (value ?? {}) as Partial<PhotoFocus>;
+  const ok = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1;
+  if (!ok(x) || !ok(y)) {
+    problems.push("focus must have x and y, each a number from 0 to 1");
+    return undefined;
+  }
+  return { x: Math.round(x * 1000) / 1000, y: Math.round(y * 1000) / 1000 };
+}
+
 export function isJpeg(bytes: Uint8Array): boolean {
   return bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
 }
@@ -1591,6 +1613,7 @@ function createClient(
     if (!isJpeg(thumb)) problems.push("thumb is not a JPEG");
     if (full.length > MAX_PHOTO_BYTES) problems.push(`full is over ${MAX_PHOTO_BYTES} bytes`);
     if (thumb.length > MAX_THUMB_BYTES) problems.push(`thumb is over ${MAX_THUMB_BYTES} bytes`);
+    const focus = photoFocusOf(input.focus, problems);
     if (problems.length > 0) throw new FeedbackValidationError(problems);
     const meta = {
       type: "photo",
@@ -1604,6 +1627,7 @@ function createClient(
         full_bytes: full.length,
         thumb_sha256: sha256HexBytes(thumb),
         thumb_bytes: thumb.length,
+        ...(focus ? { focus } : {}),
       },
     };
     const checked = validateSubmission(meta, new Date(now()));
@@ -1714,6 +1738,7 @@ function createClient(
     newPlace: string;
     contributor: string;
     queuedAt: number;
+    focus?: PhotoFocus;
   }
   async function readWaitingPhotos(): Promise<WaitingPhoto[]> {
     try {
@@ -1746,6 +1771,7 @@ function createClient(
     if (typeof ref !== "string" || ref.length < 1 || ref.length > MAX_REF_LENGTH) problems.push(`place.newPlace must be the ref of a new_place report, 1 to ${MAX_REF_LENGTH} characters`);
     if (typeof key !== "string" || key.length < 1 || key.length > 200) problems.push("key must be the app's own key for the files, 1 to 200 characters, for a new place");
     if (typeof input.contributor !== "string" || input.contributor.length === 0) problems.push("contributor is required for photos");
+    const focus = photoFocusOf(input.focus, problems);
     if (problems.length > 0) throw new FeedbackValidationError(problems);
     if (!options.resolveNewPlace || !options.loadPhoto) {
       throw new Error("Photos of a new place need the photo client's resolveNewPlace and loadPhoto options");
@@ -1756,7 +1782,7 @@ function createClient(
     if (status.status === "unknown") throw new FeedbackValidationError([`no new_place report with the ref ${ref} is queued or was sent`]);
     await serial(async () => {
       const list = await readWaitingPhotos();
-      if (!list.some((w) => w.key === key)) list.push({ key: key!, newPlace: ref!, contributor: input.contributor, queuedAt: now() });
+      if (!list.some((w) => w.key === key)) list.push({ key: key!, newPlace: ref!, contributor: input.contributor, queuedAt: now(), ...(focus ? { focus } : {}) });
       await writeWaitingPhotos(list);
     });
     return { status: "waiting" };
@@ -1808,7 +1834,7 @@ function createClient(
       }
       let result: PhotoResult;
       try {
-        result = await uploadPhoto({ place: status.place, contributor: w.contributor, consent: true, full: files.full, thumb: files.thumb });
+        result = await uploadPhoto({ place: status.place, contributor: w.contributor, consent: true, full: files.full, thumb: files.thumb, ...(w.focus ? { focus: w.focus } : {}) });
       } catch {
         await drop("rejected", { httpStatus: 0, error: "invalid_files" });
         continue;

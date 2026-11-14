@@ -105,6 +105,8 @@ export interface Photo {
   /** Pixel size of the full size file. */
   width: number;
   height: number;
+  /** Point of interest the sending app worked out, each value 0 to 1 from the top left. Absent when it sent none. */
+  focus?: { x: number; y: number };
   /** SHA-256 of the full size file, lower case hex, to spot one photo sent for several places. */
   sha256: string;
   /** Left out of the release and not served. As for reviews. */

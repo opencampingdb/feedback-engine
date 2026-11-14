@@ -407,6 +407,18 @@ export interface PhotoFiles {
   thumb_sha256: string;
   /** Size of the thumbnail in bytes, at most 200 KB. */
   thumb_bytes: number;
+  /** The photo's point of interest, when the sending app worked one out. */
+  focus?: PhotoFocus;
+}
+
+/**
+ * A photo's point of interest, so an app that shows the photo cropped can keep
+ * it in view. Each value is 0 to 1 from the top left of the full size photo,
+ * at most 3 decimal places.
+ */
+export interface PhotoFocus {
+  x: number;
+  y: number;
 }
 
 /** A stored photo upload: the files as the intake checked them. */

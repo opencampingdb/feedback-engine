@@ -1092,8 +1092,10 @@ const feedback = createFeedbackClient({
 
 ## What changed by version
 
-What an app moving to 0.32.0 needs to know. A minor version (0.32.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
+What an app moving to 0.33.0 needs to know. A minor version (0.33.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
 
+- **0.33.0.** New fields:
+  - `photo()` takes an optional `focus`, the photo's point of interest (`{ x, y }`, each 0 to 1 from the top left of the full size photo), rounded to 3 decimal places. The intake stores it and the apply run publishes it in the photo's record beside `width` and `height`. `isPhotoFocus` and `PhotoFocus` are exported ([photos.md](photos.md#a-photos-point-of-interest)). An older intake refuses a photo with `focus`, so deploy the photo intake first.
 - **0.32.0.** New calls, options and fields:
   - `review()` takes `contributorProof`, and `signContributorProof` takes the action `review` with `photo: "*"` ([Proving a review](#6-reviews-contributors-reports-and-blocking)). A review that replaces the contributor's earlier review of a place from another install is now held for a person unless it carries a proof the intake checked, which marks the stored item `proved`.
   - `photo()` and `stripJpegMetadata` remove IPTC, comments, the multi-picture index and anything after the end of the image as well as Exif and XMP, and keep the colour profile. `jpegMetadata(bytes)` names what a JPEG still carries ([photos.md](photos.md)). A photo service may refuse uploads that still carry metadata with `422 photo_metadata`, so move every build that uploads photos to this version.

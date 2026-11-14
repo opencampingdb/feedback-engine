@@ -111,6 +111,7 @@ export {
   isFactName,
   isMonthRange,
   isOwnerSubmission,
+  isPhotoFocus,
   isPhotoId,
   isPlaceId,
   isPublicHttpsUrl,

@@ -70,6 +70,20 @@ Photos sent by an older SDK, or by a client that doesn't use it, keep whatever m
 
 Photos are never queued, because the files are too big for the queue's storage. On `offline`, keep the files and call `photo` again later.
 
+### A photo's point of interest
+
+An app that shows photos cropped, in a header or a tile, can keep each photo's subject in view if the photo says where it is. From SDK 0.33.0, `photo()` takes an optional `focus`: the point of interest, `{ x, y }`, each value 0 to 1 from the top left of the full size photo.
+
+```ts
+await photos.photo({ place, contributor, consent: true, full, thumb, focus: { x: 0.42, y: 0.31 } });
+```
+
+Work the point out on the phone once, before sending, for example with Apple Vision's saliency request or ML Kit's object detection. The SDK rounds each value to 3 decimal places and throws `FeedbackValidationError` when either is not a number from 0 to 1. A photo waiting for a new place keeps its focus until it is sent.
+
+`focus` is the sending app's estimate and is optional: leave it out when there is no clear subject. The intake stores it and the apply run publishes it in the photo's record, so every app that reads the record crops the same way. A photo with no `focus` has none in its record, and an app showing it uses its own default, a centred crop or whatever suits its layout. CSS `object-position: <x * 100>% <y * 100>%` and expo-image's `contentPosition` both place the crop on it.
+
+An intake older than this version refuses a photo meta with `focus` as `400 invalid` (`unknown field photo.focus`), so deploy the photo intake at this version before shipping an app that sends it.
+
 ### A photo of a place the traveller has just added
 
 A place the traveller has just added has no id until its `new_place` report is sent. Its photos can wait in the SDK. Give the `new_place` report a `ref` (see the integration guide, section 5), and give the photo client the feedback client's `newPlace`, a loader for your files and a callback:
@@ -97,7 +111,7 @@ const result = await photos.photo({ place: { newPlace: "draft-7" }, key: "photo-
 - If the new place was sent already, `photo` uploads at once. If it was dropped, or the ref names no new place, `photo` throws `FeedbackValidationError`.
 - Waiting photos survive the app restarting. The client checks that both files are JPEGs within the size limits before sending and throws `FeedbackValidationError` if not.
 
-On the wire, the SDK sends the photo's meta (place, contributor, device, app version, consent and the SHA-256 and size of each file) as base64url JSON in the `x-photo-meta` header, and the full size file followed by the thumbnail as the body. Attestation covers the meta text, so the intake can check the files against the hashes it carries.
+On the wire, the SDK sends the photo's meta (place, contributor, device, app version, consent, the SHA-256 and size of each file, and `focus` when there is one) as base64url JSON in the `x-photo-meta` header, and the full size file followed by the thumbnail as the body. Attestation covers the meta text, so the intake can check the files against the hashes it carries.
 
 Each contributor may send 10 photos a day, as well as the usual limits per device, network and app key. An upload sent again after its answer was lost (the same place, contributor, install and files) carries the same idempotency key, and the photo intake answers it with the first photo id, keeping one copy of the files and counting it once. Photo reports, removals and erasures are keyed the same way as feedback. See [self-hosting.md](self-hosting.md), "Idempotency keys".
 
@@ -295,7 +309,7 @@ GET https://photos.example.com/v1/photos/<id>/thumb.jpg
 X-Photo-Pass: <pass>
 ```
 
-A place's records list its visible photos, one JSON line each: `id`, `place`, `contributor`, `created`, `app`, `licence`, `width`, `height` and `sha256`. A place without photos answers an empty list. Records are cached for five minutes and photos for a day, at the edge and on the phone.
+A place's records list its visible photos, one JSON line each: `id`, `place`, `contributor`, `created`, `app`, `licence`, `width`, `height`, `focus` when the sending app gave one (see [A photo's point of interest](#a-photos-point-of-interest)), and `sha256`. A place without photos answers an empty list. Records are cached for five minutes and photos for a day, at the edge and on the phone.
 
 A server that shows photos can use a photo key in `X-App-Key` instead, since it can keep the key secret. Never put a photo key in an app. Credit each photo shown in the way your photo terms say.
 

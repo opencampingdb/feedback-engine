@@ -141,6 +141,17 @@ describe("photo rules", () => {
     expect(out.photos.get(PLACE)!.find((l) => l.id === p.id.replace("fb_", "pho_"))!.licence).toBe("CC-BY-SA-4.0");
   });
 
+  it("publishes the photo's focus beside its size, and none when it has none", () => {
+    const plain = upload("sam", 2) as StoredFeedback & { photo: object };
+    const withFocus = { ...plain, photo: { ...plain.photo, focus: { y: 0.6, x: 0.25 } } } as StoredFeedback;
+    const without = { ...upload("sam", 3), id: "fb_01JBXK3M8Q4R5S6T7V8W9X0Y03" } as StoredFeedback;
+    const out = rules([withFocus, without], { photos: [photoLine(1, "sam")] });
+    const line = (item: StoredFeedback) => out.photos.get(PLACE)!.find((l) => l.id === item.id.replace("fb_", "pho_"))!;
+    expect(line(withFocus)).toMatchObject({ width: 1600, height: 1200, focus: { x: 0.25, y: 0.6 } });
+    expect(dumpPhotoLine(line(withFocus))).toContain('"focus":{"x":0.25,"y":0.6}');
+    expect(line(without)).not.toHaveProperty("focus");
+  });
+
   it("publishes a photo from a contributor with a visible photo", () => {
     const p = upload("sam", 2);
     const out = rules([p], { photos: [photoLine(1, "sam")] });
