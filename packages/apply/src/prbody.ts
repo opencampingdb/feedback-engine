@@ -169,6 +169,53 @@ const plainText = (text: string) => escapeMarkdown(text).replace(/[<>`]/g, "").r
 const shownAddress = (address: string) =>
   `\`${shortened(address, SHOWN_ADDRESS_CHARS).replace(/[`\s]/gu, (ch) => encodeURIComponent(ch))}\``;
 
+/** The facts that hold a place's own web pages, in the order a claim line shows them. */
+const OWN_PAGE_FACTS = ["website", "facebook", "instagram", "tiktok", "x"] as const;
+
+/** A page address reduced to what two addresses of one page share: its site, and its path in lower case without a trailing slash. */
+function pageOf(address: string): { site: string; path: string } | undefined {
+  try {
+    const url = new URL(address);
+    return { site: siteOf(address), path: url.pathname.toLowerCase().replace(/\/+$/, "") };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether `proof` is on the page `own` or under it: the same site, and the
+ * same path or one below it. A site's front page covers the whole site, while
+ * a page on a host many people publish to covers only its own path, so
+ * another page of that host does not count.
+ */
+export function onOwnPage(proof: string, own: string): boolean {
+  const [a, b] = [pageOf(proof), pageOf(own)];
+  if (!a || !b || a.site === "" || a.site !== b.site) return false;
+  return a.path === b.path || a.path.startsWith(`${b.path}/`);
+}
+
+/**
+ * What the data says the place's own pages are, beside the proof address, so
+ * the reviewer compares instead of guessing. A value travellers or an owner
+ * set is shown with its date: one changed just before a claim is no proof.
+ */
+function ownPages(proofAddress: string, place: Place | undefined): string {
+  const pages = OWN_PAGE_FACTS.flatMap((fact) => {
+    const value = (place?.facts as Record<string, unknown> | undefined)?.[fact];
+    if (typeof value !== "string" || !pageOf(value)) return [];
+    const source = place!.fact_sources[fact] ?? "unknown";
+    const date = source === "osm" ? "" : ` on ${plainText((place!.fact_dates?.[fact] ?? "an unknown date").slice(0, 10))}`;
+    return [{ value, from: `${fact}, from ${source}${date}`, checked: source === "osm" }];
+  });
+  if (pages.length === 0) return "The place has no website or social page in the data to compare the proof with.";
+  const match = pages.find((page) => onOwnPage(proofAddress, page.value));
+  if (match) {
+    const caution = match.checked ? "" : ": check that value was not changed for this claim";
+    return `The proof MATCHES the place's page in the data, ${shownAddress(match.value)} (${match.from})${caution}.`;
+  }
+  return `The proof does NOT match the place's pages in the data: ${pages.map((page) => `${shownAddress(page.value)} (${page.from})`).join(", ")}.`;
+}
+
 function claimSummary(c: ClaimForReview, places: ReadonlyMap<string, Place>): string {
   // The code may have been found after a redirect. Show where, and flag another site.
   const foundAt = c.proof.url ?? c.proofUrl;
@@ -190,7 +237,7 @@ function claimSummary(c: ClaimForReview, places: ReadonlyMap<string, Place>): st
       `Facts sent: ${facts || "none"}${description}. Read the listing in inbox/owner-claims/${c.claim}.json before ticking. Proof: ${proof}.`
     );
   }
-  return `${label(c.place, places)}. Proof: ${proof}.${replaces}`;
+  return `${label(c.place, places)}. Proof: ${proof}. ${ownPages(foundAt, places.get(c.place))}${replaces}`;
 }
 
 /**
