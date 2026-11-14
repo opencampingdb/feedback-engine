@@ -216,16 +216,33 @@ function ownPages(proofAddress: string, place: Place | undefined): string {
   return `The proof does NOT match the place's pages in the data: ${pages.map((page) => `${shownAddress(page.value)} (${page.from})`).join(", ")}.`;
 }
 
+/** An address with its host as a browser sends it, so a name written in another alphabet shows as its `xn--` form. The rest is as submitted. */
+function plainAddress(address: string): string {
+  const parts = /^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*(.*)$/is.exec(address);
+  try {
+    return parts ? `${parts[1]}${new URL(address).host}${parts[2]}` : address;
+  } catch {
+    return address;
+  }
+}
+
+/** What finding the code in that part of the page is worth, for the reviewer. */
+const FOUND_WHERE: Record<NonNullable<ClaimForReview["proof"]["where"]>, string> = {
+  head: ", in the page's `opencampingdb-claim` meta tag, which a visitor to the site cannot add",
+  text: ", in the page's text: check it is not in a comment or review a visitor wrote",
+};
+
 function claimSummary(c: ClaimForReview, places: ReadonlyMap<string, Place>): string {
   // The code may have been found after a redirect. Show where, and flag another site.
-  const foundAt = c.proof.url ?? c.proofUrl;
-  const submitted = shownAddress(c.proofUrl);
+  const foundAt = c.proof.url ?? plainAddress(c.proofUrl);
+  const submitted = shownAddress(plainAddress(c.proofUrl));
   const code = plainText(c.code);
+  const where = c.proof.where ? FOUND_WHERE[c.proof.where] : "";
   const proof = !c.proof.found
     ? `code ${code} NOT found at ${submitted} (${plainText(shortened(c.proof.detail, SHOWN_ADDRESS_CHARS * 2))})`
     : siteOf(foundAt) === siteOf(c.proofUrl)
-      ? `code ${code} found at ${shownAddress(foundAt)}`
-      : `code ${code} found at ${shownAddress(foundAt)}, ON A DIFFERENT SITE from the submitted ${submitted}: check both belong to the place`;
+      ? `code ${code} found at ${shownAddress(foundAt)}${where}`
+      : `code ${code} found at ${shownAddress(foundAt)}${where}, ON A DIFFERENT SITE from the submitted ${submitted}: check both belong to the place`;
   const replaces = c.replaces ? ` Replaces the current owner (claim ${c.replaces.claim}, approved ${c.replaces.approved}).` : "";
   if (c.type === "owner_listing" && c.listing) {
     // Nobody has approved the listing yet, and this PR is public: its name, description,

@@ -105,7 +105,7 @@ describe("owner submissions", () => {
     expect(res.status).toBe(202);
     const answer = (await res.json()) as { id: string; code: string; token: string };
     expect(answer.id).toMatch(/^fb_[0-9A-HJKMNP-TV-Z]{26}$/);
-    expect(answer.code).toMatch(/^OCDB-[0-9A-HJKMNP-TV-Z]{4}$/);
+    expect(answer.code).toMatch(/^OCDB-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
     expect(answer.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
 
     const { path, stored, raw } = gh.puts[0]!;

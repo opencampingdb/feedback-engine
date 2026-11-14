@@ -316,3 +316,22 @@ describe("a claim line beside the place's own pages", () => {
     expect(body).not.toMatch(/a`b/);
   });
 });
+
+describe("a claim line and how far the code can be trusted", () => {
+  const claim = (proofUrl: string, proof: ClaimForReview["proof"]): ClaimForReview => ({ claim: "fb_01JH0000000000000000000001", type: "owner_claim", place: PLACE, proof, proofUrl, code: "OCDB-7KQ2-M4XP", replaces: undefined });
+  const line = (c: ClaimForReview) => reviewPrBody("2026-11-04T00:00:00Z", [], new Map(), [c]).split("\n").find((l) => l.startsWith("- [ ] Approve owner claim "))!;
+  const at = "https://riverbend.example/about";
+
+  it("says whether the code was in the claim meta tag or in the page's text", () => {
+    const found = { found: true, checked: "2026-11-04T00:00:00Z", detail: "found", url: at };
+    expect(line(claim(at, { ...found, where: "head" }))).toContain("found at `https://riverbend.example/about`, in the page's `opencampingdb-claim` meta tag, which a visitor to the site cannot add.");
+    expect(line(claim(at, { ...found, where: "text" }))).toContain("in the page's text: check it is not in a comment or review a visitor wrote.");
+    expect(line(claim(at, found))).toContain("found at `https://riverbend.example/about`. ");
+  });
+
+  it("shows a host in another alphabet as its xn-- name, found or not", () => {
+    const lookalike = "https://r\u0456verbend.example/about";
+    expect(line(claim(lookalike, { found: false, checked: "2026-11-04T00:00:00Z", detail: "code not found on the page" }))).toContain("NOT found at `https://xn--rverbend-thh.example/about`");
+    expect(line(claim(lookalike, { found: true, checked: "2026-11-04T00:00:00Z", detail: "found" }))).toContain("found at `https://xn--rverbend-thh.example/about`");
+  });
+});

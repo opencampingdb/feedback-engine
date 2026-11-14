@@ -37,10 +37,25 @@ describe("checkProof", () => {
       checked: "2026-10-31T09:00:00Z",
       detail: "code found at https://farm.example/about",
       url: "https://farm.example/about",
+      where: "text",
     });
     expect(seen[0]!.headers["user-agent"]).toBe(USER_AGENT);
     expect(USER_AGENT).toMatch(/^OpenCampingDB\//);
     expect(seen[0]!.timeoutMs).toBeGreaterThan(0);
+  });
+
+  it("says when the code is in the page's claim meta tag, ahead of the body", async () => {
+    const check = async (html: string) => {
+      const { t } = transport({ "https://farm.example/about": page(200, html) });
+      return (await checkProof("https://farm.example/about", "OCDB-7KQ2-M4XP", { transport: t, now: NOW })).where;
+    };
+    expect(await check('<html><head><meta name="opencampingdb-claim" content="OCDB-7KQ2-M4XP"></head><body>Hi</body></html>')).toBe("head");
+    expect(await check("<head><META content='ocdb-7kq2-m4xp' NAME=opencampingdb-claim /></head><body></body>")).toBe("head");
+    // In the body, in another tag, under another name, or beside other text: only the page's text.
+    expect(await check('<head></head><body><meta name="opencampingdb-claim" content="OCDB-7KQ2-M4XP"></body>')).toBe("text");
+    expect(await check('<head><meta name="description" content="OCDB-7KQ2-M4XP"></head><body></body>')).toBe("text");
+    expect(await check('<head><meta name="opencampingdb-claim" content="x OCDB-7KQ2-M4XP"></head><body></body>')).toBe("text");
+    expect(await check("<head><title>OCDB-7KQ2-M4XP</title></head><body><p>A visitor wrote OCDB-7KQ2-M4XP</p></body>")).toBe("text");
   });
 
   it("reports a page without the code", async () => {
