@@ -367,7 +367,7 @@ An answer the model isn't sure of, or one that can't be read, is `leave`. A mode
 Each run keeps up to two PRs open on `data`:
 
 - `feedback/auto`: changes from the automatic rules, new places included. It merges itself once CI passes. Without **Allow auto-merge** or a required check, the run says on the PR that it needs merging by hand and shows an error annotation, without failing.
-- `feedback/review`: held cases, location changes, contact changes that need a person, owner claims and other reports, labelled `needs-review`. Edit the files on the branch if needed, then merge it, or close it to refuse them.
+- `feedback/review`: held cases, location changes, contact changes that need a person, owner claims and other reports, labelled `needs-review`. Edit the files on the branch if needed, then merge it, or close it to refuse them. Each run merges the base branch into the open PR's branch, and merges place records key by key, so a fact added on each branch to one place is no conflict. When both branches changed one key of a record, the run leaves the branch as it is and the PR shows the conflict: resolve it by hand before merging.
 
 When a PR from either branch is already open, later runs add a commit and a comment to it. Each run reads the PR's state again just before and just after it pushes: when the PR was merged or closed during the run, the run's commit goes on `main` as it is then, for a new PR, or is left out when `main` already holds it. Once it is merged or closed, the next run starts the branch again from `main`. With nothing to do the workflow ends without changes.
 

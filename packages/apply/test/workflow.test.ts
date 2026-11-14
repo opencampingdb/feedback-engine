@@ -448,6 +448,70 @@ describe("the apply workflow's step that starts from the open PR branches", () =
   }
 });
 
+describe("the apply workflow's merge of the base branch into the open review branch", () => {
+  const record = (facts: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    `${JSON.stringify({ facts, id: "ocdb_1", ...extra }, null, 2)}\n`;
+  /** A review PR's branch and main that both changed one place record since the branch began, and the step's result. */
+  async function start(onReview: string, onMain: string) {
+    const remote = join(root, "data.git");
+    git(root, "init", "--bare", "-b", "main", remote);
+    const seed = join(root, "seed");
+    git(root, "clone", "-q", remote, seed);
+    identity(seed);
+    await mkdir(join(seed, "places", "aa"), { recursive: true });
+    const file = join("places", "aa", "ocdb_1.json");
+    await writeFile(join(seed, file), record({ fee: true }));
+    git(seed, "add", "-A");
+    git(seed, "commit", "-q", "-m", "data");
+    git(seed, "push", "-q", "origin", "HEAD:refs/heads/main");
+    await writeFile(join(seed, file), onReview);
+    git(seed, "commit", "-q", "-am", "Feedback for review (run 1)");
+    git(seed, "push", "-q", "origin", "HEAD:refs/heads/feedback/review");
+    git(seed, "switch", "-q", "-c", "next", "origin/main");
+    await writeFile(join(seed, file), onMain);
+    git(seed, "commit", "-q", "-am", "Apply feedback automatically");
+    git(seed, "push", "-q", "origin", "HEAD:refs/heads/main");
+    for (const dir of ["data-auto", "data-review"]) {
+      git(root, "clone", "-q", remote, join(root, dir));
+      git(join(root, dir), "config", "commit.gpgsign", "false");
+    }
+    const temp = join(root, "temp");
+    const bin = join(root, "bin");
+    await mkdir(temp);
+    await mkdir(bin);
+    const prs = JSON.stringify([{ number: 5, isCrossRepository: false, author: { login: "app/example-bot" } }]);
+    await writeFile(
+      join(bin, "gh"),
+      ["#!/bin/sh", 'case "$1 $2" in', '  "api /users/"*) echo 1 ;;', `  "pr list") case "$*" in *feedback/review*) echo '${prs}' ;; *) echo "[]" ;; esac ;;`, "esac", ""].join("\n"),
+    );
+    await chmod(join(bin, "gh"), 0o755);
+    const result = spawnSync("bash", ["-e", "-c", await stepScript("Start from the open PR branches")], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GH_TOKEN: "x", APP_SLUG: "example-bot", DATA_REPO: "example/data", BASE_BRANCH: "main", ENGINE_DIR, GITHUB_OUTPUT: join(temp, "output") },
+    });
+    const checkout = join(root, "data-review");
+    return { result, checkout, text: await readFile(join(checkout, file), "utf8") };
+  }
+
+  it("keeps the facts each branch added to one place, with main merged in", async () => {
+    const { result, checkout, text } = await start(record({ fee: true, toilets: true }), record({ fee: true, power: false }));
+    expect(result.status).toBe(0);
+    expect(text).toBe(record({ fee: true, power: false, toilets: true }));
+    expect(git(checkout, "status", "--porcelain")).toBe("");
+    expect(git(checkout, "merge-base", "--is-ancestor", "origin/main", "HEAD")).toBe("");
+  }, 30_000);
+
+  it("carries on from the branch as it is when both branches changed one fact", async () => {
+    const onReview = record({ fee: false });
+    const { result, checkout, text } = await start(onReview, record({ fee: true }, { name: "Riverbend" }).replace('"fee": true', '"fee": "donation"'));
+    expect(result.status).toBe(0);
+    expect(text).toBe(onReview);
+    expect(git(checkout, "status", "--porcelain")).toBe("");
+    expect(git(checkout, "rev-parse", "HEAD")).toBe(git(checkout, "rev-parse", "origin/feedback/review"));
+  }, 30_000);
+});
+
 describe("the apply workflow when the open PR merged during the run", () => {
   /** A data remote whose PR branch `branch` was squash-merged into main after the run checked it out, and the run's checkout with one new change. */
   async function mergedMidRun(branch: string, options: { change?: boolean; states?: string[] } = {}) {
