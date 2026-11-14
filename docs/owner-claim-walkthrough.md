@@ -24,7 +24,7 @@ The intake checks:
 - that the app key may send owner submissions
 - the daily limits: 5 owner submissions from a device and 10 from a client network
 
-It then makes a **code** (`OCDB-` and 4 characters, such as `OCDB-7KQ2`) and a **token** (43 characters), and writes the claim to `pending/<day>/<claim id>.json` in the inbox with the code and the SHA-256 of the token. The token itself is in the answer only. Nothing has checked yet that the place exists or that the page belongs to it.
+It then makes a **code** (`OCDB-` and two groups of 4 characters, such as `OCDB-7KQ2-M4XP`) and a **token** (43 characters), and writes the claim to `pending/<day>/<claim id>.json` in the inbox with the code and the SHA-256 of the token. The token itself is in the answer only. Nothing has checked yet that the place exists or that the page belongs to it.
 
 The owner sees the code, the token and a reference (`fb_...`, the claim id). They must save the token now. It cannot be shown again.
 
@@ -32,7 +32,14 @@ The owner sees the code, the token and a reference (`fb_...`, the claim id). The
 
 The code goes on the page whose address they gave. The proof check fetches that address and looks for the code in what the server sends, so:
 
-- the code can be anywhere in the page's HTML. It does not have to be visible: a comment or a hidden element counts. Upper and lower case are the same
+- the strongest place for the code is a meta tag in the page's head, because a visitor to the site can never add one:
+
+  ```html
+  <meta name="opencampingdb-claim" content="OCDB-7KQ2-M4XP">
+  ```
+
+  The check tells the reviewer when it found the code there
+- otherwise the code can be anywhere in the page's HTML. It does not have to be visible: a comment or a hidden element counts. The reviewer is told it was in the page's text and checks that a visitor could not have written it. Upper and lower case are the same
 - it must be in the first 1 MB of the response, and in the HTML as served. Text a script adds after the page loads is not seen
 - the page must answer a plain request with `200`, without a login, within 10 seconds. A site that shows automated visitors a challenge page first cannot be checked until it lets the check through. The check sends the User-Agent `OpenCampingDB/1.0 (+https://opencampingdb.github.io/owners/; owner claim check)`
 - up to three redirects are followed, each to an `https` address on a public host. A redirect that ends on another site is still read, and the reviewer is told
@@ -53,7 +60,7 @@ Each run, for every claim still in `pending/`:
 Sending it to a person means two writes. The claim moves to `owner-claims/<claim id>.json` in the inbox, with the result of the check. And the `feedback/review` PR on the data repository gains a line with an unticked box and the label `owner-claim`:
 
 ```
-- [ ] Approve owner claim fb_01JC...: `ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA` Riverbend Camp. Proof: code OCDB-7KQ2 found at `https://riverbend.example/about`.
+- [ ] Approve owner claim fb_01JC...: `ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA` Riverbend Camp. Proof: code OCDB-7KQ2-M4XP found at `https://riverbend.example/about`.
 ```
 
 When that PR is already open, the line arrives in a new comment from the bot instead of the PR's description. Nothing else tells the reviewer, so watch for the label.

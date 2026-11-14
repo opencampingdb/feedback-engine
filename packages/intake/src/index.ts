@@ -548,13 +548,13 @@ export async function hashToken(token: string): Promise<string> {
 }
 
 /**
- * Code and token for a claim or listing. The code (`OCDB-` and 4 Crockford
- * characters) goes on the owner's own page. The token is 32 random bytes,
+ * Code and token for a claim or listing. The code (`OCDB-` and two groups of 4
+ * Crockford characters, 40 random bits) goes on the owner's own page. The token is 32 random bytes,
  * base64url, returned once and stored only as its SHA-256.
  */
 export function newOwnerSecrets(randomBytes: (n: number) => Uint8Array): { code: string; token: string } {
-  const codeBytes = randomBytes(4);
-  const code = `OCDB-${[...codeBytes].map((b) => CROCKFORD[b % 32]).join("")}`;
+  const letters = [...randomBytes(8)].map((b) => CROCKFORD[b % 32]).join("");
+  const code = `OCDB-${letters.slice(0, 4)}-${letters.slice(4)}`;
   return { code, token: base64url(randomBytes(32)) };
 }
 

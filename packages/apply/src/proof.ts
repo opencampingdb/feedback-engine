@@ -23,6 +23,35 @@ export interface ProofResult {
   detail: string;
   /** The address the code was found at, after any redirects. */
   url?: string;
+  /**
+   * Where on the page the code was found: `head` in the page's
+   * `opencampingdb-claim` meta tag, which a visitor's comment or review cannot
+   * add, or `text` anywhere else in what the server sent.
+   */
+  where?: "head" | "text";
+}
+
+/** Name of the meta tag an owner can put the code in: `<meta name="opencampingdb-claim" content="OCDB-...">`. */
+export const CLAIM_META_NAME = "opencampingdb-claim";
+
+/**
+ * Whether `html` has the claim meta tag holding `code` before its body starts.
+ * Only tags ahead of the first `<body` count, so markup a visitor managed to
+ * post into the page's content is never read as the site's own tag.
+ */
+export function codeInHead(html: string, code: string): boolean {
+  const body = html.search(/<body[\s>]/i);
+  const head = body < 0 ? html : html.slice(0, body);
+  const wanted = code.toUpperCase();
+  for (const [tag] of head.matchAll(/<meta\b[^>]*>/gi)) {
+    const attribute = (name: string) => new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'>]+))`, "i").exec(tag);
+    const name = attribute("name");
+    const content = attribute("content");
+    if (!name || !content) continue;
+    const value = (m: RegExpExecArray) => (m[1] ?? m[2] ?? m[3] ?? "").trim();
+    if (value(name).toLowerCase() === CLAIM_META_NAME && value(content).toUpperCase() === wanted) return true;
+  }
+  return false;
 }
 
 export interface TransportResponse {
@@ -195,8 +224,8 @@ export async function checkProof(proofUrl: string, code: string, options: ProofO
       if (e.name === "TimeoutError" || e.name === "AbortError") return result(false, "the page timed out");
       return result(false, "the page could not be read");
     }
-    return text.toUpperCase().includes(code.toUpperCase())
-      ? { ...result(true, `code found at ${url.href}`), url: url.href }
-      : result(false, "code not found on the page");
+    if (!text.toUpperCase().includes(code.toUpperCase())) return result(false, "code not found on the page");
+    const where = codeInHead(text, code) ? "head" : "text";
+    return { ...result(true, `code found at ${url.href}`), url: url.href, where };
   }
 }
