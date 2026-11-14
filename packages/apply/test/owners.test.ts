@@ -552,6 +552,32 @@ describe("approval by merging the review PR", () => {
   });
 });
 
+describe("a place whose owner was removed", () => {
+  it("loses owner_verified when it has no owner record, and keeps the values the owner set", () => {
+    const verified = place({ owner_verified: true, facts: { power: true, fee: true }, fact_sources: { power: "owner", fee: "osm" } });
+    const out = run({ places: [verified, place({ id: OTHER, owner_verified: true })], ownerList: [ownerOf(OTHER, TOKEN)] });
+    expect(out.places.size).toBe(1);
+    expect(out.after()).not.toHaveProperty("owner_verified");
+    expect(out.after()!.facts).toEqual({ power: true, fee: true });
+    expect(out.after()!.fact_sources).toEqual({ power: "owner", fee: "osm" });
+    expect(out.changes).toEqual([{ place: PLACE, summary: "the place has no owner record any more, so it is no longer owner verified", automatic: true, feedback: [] }]);
+  });
+
+  it("refuses an update with the removed owner's token in the same run", () => {
+    const item = updateItem({ facts: { power: true } });
+    const out = run({ places: [place({ owner_verified: true })], ownerList: [], pending: [item] });
+    expect(out.decision(item)).toMatchObject({ outcome: "refused", reason: "the place has no approved owner" });
+    expect(out.after()).not.toHaveProperty("owner_verified");
+    expect(out.after()!.facts.power).toBe(false);
+  });
+
+  it("keeps owner_verified on a place approved in this run", () => {
+    const c = claimItem();
+    const out = run({ ownerList: [], awaiting: [awaitingOf(c)], reviewPrs: [merged(`- [x] Approve owner claim ${c.id}: x`)] });
+    expect(out.after()!.owner_verified).toBe(true);
+  });
+});
+
 describe("merged places", () => {
   const tombstone = place({ id: OTHER, status: "merged", merged_into: PLACE });
 

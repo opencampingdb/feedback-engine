@@ -23,6 +23,7 @@ import type { Place, SourceKey } from "./types.js";
  *   Nothing about an owner reaches `data` before a person approves.
  * - An owner update whose token hash matches `owners/<place id>.json` is
  *   applied at once, except name and location changes, which go to a person.
+ * - A place whose owner record was deleted loses `owner_verified` at the next run.
  * - A temporary closure ends by itself on its `reopens` date.
  */
 
@@ -232,6 +233,7 @@ export function applyOwnerRules(input: OwnerInput): OwnerOutput {
     if (item.type === "owner_update") update(item);
     else intake(item);
   }
+  unverify();
   reopenDue();
 
   for (const [id, place] of working) {
@@ -527,6 +529,20 @@ export function applyOwnerRules(input: OwnerInput): OwnerOutput {
       forPerson ? "owner update applied, with a change for a person to check" : "owner update applied",
       target,
     );
+  }
+
+  /**
+   * Places marked `owner_verified` with no owner record: someone removed the
+   * owner by deleting `owners/<place id>.json`. The mark comes off, so one
+   * step ends a claim. Values the owner set stay until a person edits them.
+   */
+  function unverify(): void {
+    for (const [id, original] of input.places) {
+      const place = working.get(id) ?? original;
+      if (place.owner_verified !== true || owners.has(id)) continue;
+      delete record(id).owner_verified;
+      note(id, "the place has no owner record any more, so it is no longer owner verified", true, []);
+    }
   }
 
   /** Temporary closures whose reopening day has come. */
