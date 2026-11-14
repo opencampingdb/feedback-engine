@@ -9,6 +9,9 @@
 # has merged. It needs Actions: Read and write on the bot App. Remove the line
 # to leave releases to their own schedule.
 #
+# Add claim-reviewers (GitHub logins, separated by commas) under with: to have
+# the run mention those people on the review PR when owner claims arrive.
+#
 # The hourly schedule is a back-up. An intake with APPLY_WORKFLOW set starts
 # this workflow through workflow_dispatch a few minutes after feedback arrives.
 #

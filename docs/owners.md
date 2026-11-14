@@ -140,6 +140,7 @@ Do not store the token in your app unless the owner asks you to, and never send 
 ## For the people who approve claims
 
 - Claims and listings arrive in the `feedback/review` PR under "Owner claims", each with the proof check result. Owner names and emails are not in the PR; they are in `inbox/owner-claims/<claim id>.json`. The PR is public and nobody has approved a listing yet, so a listing's line shows only its id, where it is to 1 decimal place (about 11 km), the names of the facts it sent and whether it has a description. Read its name, description, fact values and exact location in the same inbox file before ticking. They are published only after you approve.
+- To be told when a claim arrives, name yourself in the apply workflow's `claim-reviewers` input ([self-hosting.md](self-hosting.md#other-workflow-inputs)). The run then mentions you in a comment on the PR. Without it, watch for the `owner-claim` label.
 - A claim line shows the proof address cut to 120 characters. The full address is in the same inbox file.
 - Open the proof page and check that it is the place's own site, then tick the box. Leave it unticked to refuse. Merge when done.
 - Only boxes the bot wrote count: in the body of a PR the bot opened, or in a comment by the bot's own account (an account of type Bot, never a person's account with a similar name). A box counts only at the start of a line.
