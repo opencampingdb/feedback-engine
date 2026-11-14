@@ -693,7 +693,7 @@ describe("the apply workflow's review publish step when GitHub refuses the text"
     await chmod(join(bin, "gh"), 0o755);
     return { remote, checkout, temp, bin };
   }
-  async function publish(setup: Awaited<ReturnType<typeof setUp>>, prOpen: boolean) {
+  async function publish(setup: Awaited<ReturnType<typeof setUp>>, prOpen: boolean, extraEnv: Record<string, string> = {}) {
     if (prOpen) git(setup.checkout, "push", "-q", "origin", "HEAD:refs/heads/feedback/review");
     return spawnSync("bash", ["-e", "-c", await stepScript("Publish changes for review")], {
       cwd: setup.checkout,
@@ -711,6 +711,7 @@ describe("the apply workflow's review publish step when GitHub refuses the text"
         RUN_ID: "5",
         RUNNER_TEMP: setup.temp,
         GITHUB_OUTPUT: join(setup.temp, "output"),
+        ...extraEnv,
       },
     });
   }
@@ -732,6 +733,33 @@ describe("the apply workflow's review publish step when GitHub refuses the text"
     const calls = await readFile(join(root, "gh.log"), "utf8");
     expect(calls).toMatch(/^pr create (?!.*--label).*$/m);
     expect(calls).toContain("pr edit https://github.com/example/data/pull/8 --repo example/data --add-label needs-review,owner-claim");
+  }, 30_000);
+
+  for (const prOpen of [false, true]) {
+    it(`mentions the claim reviewers in a comment on ${prOpen ? "the open" : "a new"} PR`, async () => {
+      const setup = await setUp("none");
+      const result = await publish(setup, prOpen, { CLAIM_REVIEWERS: "octocat, hubot" });
+      expect(result.status).toBe(0);
+      const pr = prOpen ? "7" : "https://github.com/example/data/pull/8";
+      expect(await readFile(join(root, "gh.log"), "utf8")).toContain(
+        `pr comment ${pr} --repo example/data --body @octocat @hubot owner claims are waiting for your decision on this PR.`,
+      );
+    }, 30_000);
+  }
+
+  it("mentions nobody without claim reviewers, or when the run sent no owner claims", async () => {
+    const setup = await setUp("none");
+    expect((await publish(setup, false)).status).toBe(0);
+    expect((await publish(setup, true, { CLAIM_REVIEWERS: "octocat", OWNER_CLAIMS: "false" })).status).toBe(0);
+    expect(await readFile(join(root, "gh.log"), "utf8")).not.toContain("--body @");
+  }, 30_000);
+
+  it("skips a claim reviewer that is not a GitHub login, with a warning", async () => {
+    const setup = await setUp("none");
+    const result = await publish(setup, false, { CLAIM_REVIEWERS: "octocat,$(id);x" });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("::warning::claim-reviewers holds a name that is not a GitHub login");
+    expect(await readFile(join(root, "gh.log"), "utf8")).toContain("--body @octocat owner claims");
   }, 30_000);
 
   it("keeps the PR and says the claims are listed when a label is missing", async () => {

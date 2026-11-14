@@ -116,6 +116,14 @@ on:
           on data-base-branch once the automatic PR has merged. Off when empty.
         type: string
         default: ""
+      claim-reviewers:
+        description: >-
+          GitHub logins of the people who approve owner claims, separated by
+          commas, for example octocat,hubot. A run that sends owner claims or
+          listings to the review PR adds a comment that mentions them, so
+          GitHub notifies each one. Off when empty.
+        type: string
+        default: ""
     secrets:
       app-client-id:
         description: Client ID of the bot GitHub App
@@ -485,6 +493,7 @@ jobs:
           PR_OPEN: ${{ steps.branches.outputs.review_open }}
           PR_NUMBER: ${{ steps.branches.outputs.review_pr }}
           OWNER_CLAIMS: ${{ steps.apply.outputs.owner_claims }}
+          CLAIM_REVIEWERS: ${{ inputs.claim-reviewers }}
           RUN_ID: ${{ github.run_id }}
           ENGINE_DIR: ${{ github.workspace }}/engine
         working-directory: data-review
@@ -505,6 +514,22 @@ jobs:
               gh pr comment "$1" --repo "$DATA_REPO" --body-file "${body}.${n}" || refused "add comment ${n} to PR ${1}"
               n=$((n + 1))
             done
+          }
+          # Owner claims wait for a person: a comment that mentions the people named in
+          # claim-reviewers, so GitHub notifies each one. It holds no approval box.
+          tell_reviewers() {
+            [ "$OWNER_CLAIMS" = "true" ] || return 0
+            mentions=""
+            for login in $(printf '%s' "${CLAIM_REVIEWERS:-}" | tr ',' ' '); do
+              case "$login" in
+                *[!A-Za-z0-9-]*) echo "::warning::claim-reviewers holds a name that is not a GitHub login, so nobody is told by it" ;;
+                *) mentions="${mentions}@${login} " ;;
+              esac
+            done
+            [ -n "$mentions" ] || return 0
+            gh pr comment "$1" --repo "$DATA_REPO" \
+              --body "${mentions}owner claims are waiting for your decision on this PR. Tick the box for each one you approve, then merge." ||
+              echo "::warning::could not tell the claim reviewers about PR ${1} on ${DATA_REPO}"
           }
           git add -A
           start="$(git rev-parse HEAD)"
@@ -547,6 +572,7 @@ jobs:
             if gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$body"; then
               echo "claims_listed=true" >> "$GITHUB_OUTPUT"
               follow_ups "$PR_NUMBER"
+              tell_reviewers "$PR_NUMBER"
             else
               refused "comment on PR ${PR_NUMBER}"
             fi
@@ -565,6 +591,7 @@ jobs:
               --title "Feedback: for a person to check" --body-file "$body")"; then
               echo "claims_listed=true" >> "$GITHUB_OUTPUT"
               follow_ups "$url"
+              tell_reviewers "$url"
               # Labels go on in their own call, so a missing label never stops the PR.
               labels="needs-review"
               if [ "$OWNER_CLAIMS" = "true" ]; then labels="needs-review,owner-claim"; fi
