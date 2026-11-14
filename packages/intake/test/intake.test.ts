@@ -257,6 +257,20 @@ describe("intake", () => {
     }
   });
 
+  it("stores a phone or phone_2 fact report formatted the standard way", async () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [{ kind: "fact", fact: "phone", value: "+6174564 2000" }, "+61 7 4564 2000"],
+      [{ kind: "fact", fact: "phone_2", value: "0412345678" }, "0412 345 678"],
+      [{ kind: "fact", fact: "phone", value: "+64 9 123 4567" }, "+64 9 123 4567"],
+    ];
+    for (const [report, stored] of cases) {
+      gh.calls.length = 0;
+      const res = await handle(post({ ...review, type: "report", review: undefined, report }), env());
+      expect(res.status).toBe(202);
+      expect(decodeContent(gh.calls.find((c) => c.method === "PUT")!).report).toEqual({ ...report, value: stored });
+    }
+  });
+
   it("keeps first_hand on a stored closure, reopening, name, kind and wrong location report", async () => {
     const reports: [Record<string, unknown>, Record<string, unknown>][] = [
       [{ kind: "closed", first_hand: "seen_nearby" }, {}],
