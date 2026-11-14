@@ -57,10 +57,11 @@ Each run, for every claim still in `pending/`:
 3. leaves it in `pending/` when the code is not there and the claim is less than 7 days old
 4. otherwise sends it to a person, with the code found or, after 7 days, marked as not found
 
-Sending it to a person means two writes. The claim moves to `owner-claims/<claim id>.json` in the inbox, with the result of the check. And the `feedback/review` PR on the data repository gains a line with an unticked box and the label `owner-claim`:
+Sending it to a person means two writes. The claim moves to `owner-claims/<claim id>.json` in the inbox, with the result of the check. And the `feedback/review` PR on the data repository gains two boxes for the claim, with the label `owner-claim`:
 
 ```
 - [ ] Approve owner claim fb_01JC...: `ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA` Riverbend Camp. Proof: code OCDB-7KQ2-M4XP found at `https://riverbend.example/about`.
+- [ ] Refuse owner claim fb_01JC...
 ```
 
 When that PR is already open, the line arrives in a new comment from the bot instead of the PR's description. Nothing else tells the reviewer, so watch for the label.
@@ -76,7 +77,11 @@ The reviewer opens the proof address and decides whether that page belongs to th
 - where the code sits on the page: in the site's own content, not in a comment, review or guest book a visitor could have written
 - any note that the code was found on a different site from the one submitted
 
-To approve, tick the box, then merge the PR. To refuse, leave the box unticked and merge, or close the PR. Merging also accepts every other change the PR holds, so read those first. A claim with no decision 60 days after it reached the PR is refused.
+Tick **Approve** or **Refuse**, then merge the PR. Merging also accepts every other change the PR holds, so read those first.
+
+- Tick before you merge. Ticking a box edits the text, and a text edited after the merge is not counted.
+- A claim with neither box ticked, or both, when the PR is merged or closed is not decided. The next run lists it again on a new review PR, marked "Listed again".
+- A claim with no decision 60 days after it first reached a PR is refused.
 
 Only a box the bot wrote counts: in the description of a PR the bot opened from the data repository, or in a comment by the bot's own account, at the start of a line.
 
@@ -88,7 +93,7 @@ The run after the merge reads the PR. For an approved claim it:
 - sets `owner_verified: true` on the place, on the `feedback/auto` PR, which merges itself once the data repository's checks pass
 - moves the claim from `owner-claims/` to `applied/<day>/`, with the outcome
 
-A refused claim moves to `refused/<day>/` with the reason, and nothing else changes.
+A refused claim moves to `refused/<day>/` with the reason, and nothing else changes. An undecided claim stays in `owner-claims/` and gets new boxes.
 
 The place carries `owner_verified` in the next data release. With `release-workflow` set, the run starts that release itself.
 
@@ -112,7 +117,7 @@ The item moves to `applied/<day>/` or `refused/<day>/` in the inbox with the out
 | The token | With the owner only | No |
 | The token's SHA-256 | Inbox: the claim file and `owners/<place id>.json` | No |
 | The proof address | The inbox and the review PR | Yes |
-| The approval | A ticked box in a merged review PR | Yes |
+| The decision | A ticked Approve or Refuse box in a merged review PR | Yes |
 | `owner_verified` and the owner's values | The place record in the data repository, and each release | Yes |
 
 ## Ending a claim

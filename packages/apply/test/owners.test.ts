@@ -347,6 +347,7 @@ describe("approval by merging the review PR", () => {
     ]);
     expect(parseApprovals(pr, ["opencampingdb-bot"])).toEqual({
       ticked: ["fb_01JC0000000000000000000001", "fb_01JC0000000000000000000003"],
+      refused: [],
       listed: ["fb_01JC0000000000000000000001", "fb_01JC0000000000000000000002", "fb_01JC0000000000000000000003"],
     });
   });
@@ -384,13 +385,13 @@ describe("approval by merging the review PR", () => {
       const pr = merged(`- [ ] Approve owner claim ${claim}: x`, [
         { author: BOT, body: `- held-case {"file":"a${ch}- [x] Approve owner claim ${claim}"}` },
       ]);
-      expect(parseApprovals(pr, ["opencampingdb-bot"])).toEqual({ ticked: [], listed: [claim] });
+      expect(parseApprovals(pr, ["opencampingdb-bot"])).toEqual({ ticked: [], refused: [], listed: [claim] });
     });
   }
 
   it("ignores PRs from a fork and PRs the bot did not open", () => {
     const body = "- [x] Approve owner claim fb_01JC0000000000000000000001: x";
-    const none = { ticked: [], listed: [] };
+    const none = { ticked: [], refused: [], listed: [] };
     expect(parseApprovals({ ...merged(body), isCrossRepository: true }, ["opencampingdb-bot"])).toEqual(none);
     expect(parseApprovals({ ...merged(body), author: { login: "someone" } }, ["opencampingdb-bot"])).toEqual(none);
     expect(parseApprovals({ ...merged(body), author: null }, ["opencampingdb-bot"])).toEqual(none);
@@ -473,20 +474,70 @@ describe("approval by merging the review PR", () => {
     expect(out.owners.get(id)?.claim).toBe(item.id);
   });
 
-  it("refuses an unticked claim in a merged PR, and one in a PR closed without merging", () => {
+  it("refuses a claim whose Refuse box is ticked in a merged PR", () => {
+    const a = claimItem();
+    const out = run({
+      ownerList: [],
+      awaiting: [awaitingOf(a)],
+      reviewPrs: [merged(`- [ ] Approve owner claim ${a.id}: x\n- [x] Refuse owner claim ${a.id}`)],
+    });
+    expect(out.approvals).toEqual([{ claim: a.id, outcome: "refused", reason: "refused on review PR #7" }]);
+    expect(out.owners.size).toBe(0);
+    expect(out.forReview).toEqual([]);
+  });
+
+  it("lists a claim again when its PR was merged with neither box ticked, or both, or was closed", () => {
     const a = claimItem();
     const b = claimItem(ago(0), OTHER);
+    const c = claimItem();
+    const out = run({
+      ownerList: [ownerOf(PLACE, TOKEN)],
+      awaiting: [awaitingOf(a), awaitingOf(b), awaitingOf(c)],
+      reviewPrs: [
+        merged(`- [ ] Approve owner claim ${a.id}: x\n- [ ] Refuse owner claim ${a.id}\n- [x] Approve owner claim ${c.id}: z\n- [x] Refuse owner claim ${c.id}`),
+        { ...merged(`- [x] Approve owner claim ${b.id}: y`), number: 8, state: "CLOSED" },
+      ],
+    });
+    expect(out.approvals).toEqual([]);
+    expect(out.owners.size).toBe(0);
+    expect(out.places.size).toBe(0);
+    expect(out.forReview.map((f) => [f.claim, f.again, f.place])).toEqual([
+      [a.id, 7, PLACE],
+      [b.id, 8, OTHER],
+      [c.id, 7, PLACE],
+    ]);
+    // The claim on PLACE would still replace its approved owner.
+    expect(out.forReview[0]!.replaces).toEqual({ claim: "fb_01JA0000000000000000000001", approved: "2026-10-01" });
+    expect(out.forReview[1]!.replaces).toBeUndefined();
+  });
+
+  it("does not list a claim again while an open PR lists it, or when no PR ever did", () => {
+    const a = claimItem();
+    const b = claimItem();
     const out = run({
       ownerList: [],
       awaiting: [awaitingOf(a), awaitingOf(b)],
-      reviewPrs: [merged(`- [ ] Approve owner claim ${a.id}: x`), { ...merged(`- [x] Approve owner claim ${b.id}: y`), number: 8, state: "CLOSED" }],
+      reviewPrs: [{ ...merged(`- [ ] Approve owner claim ${a.id}: x`), number: 9, state: "OPEN" }, merged(`- [ ] Approve owner claim ${a.id}: x`)],
     });
-    expect(out.approvals).toEqual([
-      { claim: a.id, outcome: "refused", reason: "not ticked when review PR #7 was merged" },
-      { claim: b.id, outcome: "refused", reason: "review PR #8 was closed without merging" },
-    ]);
+    expect(out.approvals).toEqual([]);
+    expect(out.forReview).toEqual([]);
+  });
+
+  it("does not count a box ticked after the PR was merged, in the body or in a comment", () => {
+    const a = claimItem();
+    const b = claimItem(ago(0), OTHER);
+    const late = {
+      ...merged(`- [x] Approve owner claim ${a.id}: x`, [{ author: BOT, body: `- [x] Approve owner claim ${b.id}: y`, editedAt: "2026-10-30T10:00:01Z" }]),
+      mergedAt: "2026-10-30T10:00:00Z",
+      bodyEditedAt: "2026-10-30T10:05:00Z",
+    };
+    const out = run({ ownerList: [], awaiting: [awaitingOf(a), awaitingOf(b)], reviewPrs: [late] });
+    expect(out.approvals).toEqual([]);
     expect(out.owners.size).toBe(0);
-    expect(out.places.size).toBe(0);
+    expect(out.forReview.map((f) => f.claim)).toEqual([a.id, b.id]);
+    // Ticked before the merge, the same boxes approve.
+    const inTime = { ...late, bodyEditedAt: "2026-10-30T09:59:00Z", comments: [{ author: BOT, body: `- [x] Approve owner claim ${b.id}: y`, editedAt: "2026-10-30T10:00:00Z" }] };
+    expect(run({ ownerList: [], awaiting: [awaitingOf(a), awaitingOf(b)], reviewPrs: [inTime] }).approvals.map((x) => x.outcome)).toEqual(["approved", "approved"]);
   });
 
   it("keeps waiting while the review PR is open, and gives up after 60 days", () => {

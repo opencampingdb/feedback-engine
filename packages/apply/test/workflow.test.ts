@@ -267,11 +267,13 @@ describe("the apply workflow's step that reads recent PRs", () => {
               number: 12,
               state: "MERGED",
               body: "- [ ] Approve owner claim fb_01JC0000000000000000000001: x",
+              mergedAt: "2026-11-01T02:00:00Z",
+              lastEditedAt: "2026-11-01T01:00:00Z",
               isCrossRepository: false,
               author: author("example-bot", "Bot"),
               comments: {
                 nodes: [
-                  { author: author("example-bot", "Bot"), body: "from the bot" },
+                  { author: author("example-bot", "Bot"), body: "from the bot", lastEditedAt: "2026-11-01T03:00:00Z" },
                   { author: author("example-bot", "User"), body: "from a person with the same login" },
                   { author: null, body: "from a deleted account" },
                 ],
@@ -307,16 +309,18 @@ describe("the apply workflow's step that reads recent PRs", () => {
           number: 12,
           state: "MERGED",
           body: "- [ ] Approve owner claim fb_01JC0000000000000000000001: x",
+          mergedAt: "2026-11-01T02:00:00Z",
+          bodyEditedAt: "2026-11-01T01:00:00Z",
           isCrossRepository: false,
           author: { login: "example-bot", type: "Bot" },
           comments: [
-            { author: { login: "example-bot", type: "Bot" }, body: "from the bot" },
-            { author: { login: "example-bot", type: "User" }, body: "from a person with the same login" },
-            { author: null, body: "from a deleted account" },
+            { author: { login: "example-bot", type: "Bot" }, body: "from the bot", editedAt: "2026-11-01T03:00:00Z" },
+            { author: { login: "example-bot", type: "User" }, body: "from a person with the same login", editedAt: null },
+            { author: null, body: "from a deleted account", editedAt: null },
           ],
         },
-        { number: 11, state: "OPEN", body: "", isCrossRepository: false, author: { login: "example-bot", type: "User" }, comments: [] },
-        { number: 10, state: "CLOSED", body: "", isCrossRepository: true, author: { login: "example-bot", type: "Bot" }, comments: [] },
+        { number: 11, state: "OPEN", body: "", mergedAt: null, bodyEditedAt: null, isCrossRepository: false, author: { login: "example-bot", type: "User" }, comments: [] },
+        { number: 10, state: "CLOSED", body: "", mergedAt: null, bodyEditedAt: null, isCrossRepository: true, author: { login: "example-bot", type: "Bot" }, comments: [] },
       ]);
     }
     const calls = await readFile(join(root, "gh.log"), "utf8");
