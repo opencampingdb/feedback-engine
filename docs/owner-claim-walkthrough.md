@@ -1,6 +1,6 @@
 # An owner claim from start to finish
 
-This follows one claim through every system that touches it: what the owner does, what each part checks, and where each record ends up. [owners.md](owners.md) is the reference for the calls and rules. The examples use a place `ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA` and an owner whose website is `https://riverbend.example`.
+This follows one claim through every system that touches it: what the owner does, what each part checks, and where each record ends up. [owners.md](owners.md) is the reference for the calls and rules. The owner's own steps are in [owner-claims-for-owners.md](owner-claims-for-owners.md), and the approver's in [owner-claims-approving.md](owner-claims-approving.md). The examples use a place `ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA` and an owner whose website is `https://riverbend.example`.
 
 ## The parts
 
@@ -60,17 +60,17 @@ Each run, for every claim still in `pending/`:
 Sending it to a person means two writes. The claim moves to `owner-claims/<claim id>.json` in the inbox, with the result of the check. And the `feedback/review` PR on the data repository gains two boxes for the claim, with the label `owner-claim`:
 
 ```
-- [ ] Approve owner claim fb_01JC...: `ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA` Riverbend Camp. Proof: code OCDB-7KQ2-M4XP found at `https://riverbend.example/about`.
+- [ ] Approve owner claim fb_01JC...: `ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA` Riverbend Camp. Proof: code OCDB-7KQ2-M4XP found at `https://riverbend.example/about`, in the page's text: check it is not in a comment or review a visitor wrote. The proof MATCHES the place's page in the data, `https://riverbend.example/` (website, from osm).
 - [ ] Refuse owner claim fb_01JC...
 ```
 
-When that PR is already open, the line arrives in a new comment from the bot instead of the PR's description. Nothing else tells the reviewer, so watch for the label.
+When that PR is already open, the line arrives in a new comment from the bot instead of the PR's description. With `claim-reviewers` set on the workflow, the same run mentions those people in a comment, so GitHub notifies them. Without it nothing else tells the reviewer.
 
 Nothing about the owner is public yet. The PR shows the place, the code and the proof address. The name and email stay in the inbox.
 
 ## 4. A person approves or refuses
 
-The reviewer opens the proof address and decides whether that page belongs to the place. Finding the code proves only that the person who claimed can write to that page. Whether the page is the place's own is the reviewer's call, so check:
+[owner-claims-approving.md](owner-claims-approving.md) is the reviewer's guide. In short: the reviewer opens the proof address and decides whether that page belongs to the place. Finding the code proves only that the person who claimed can write to that page. Whether the page is the place's own is the reviewer's call, so check:
 
 - that the site is the place's own, against what the place's record and other sources give as its website or social page
 - that the address in the line is the site you expect, letter for letter, and is not a page on a host anyone can publish to
