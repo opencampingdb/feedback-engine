@@ -1041,7 +1041,7 @@ export function createHandler(deps: Deps) {
     }
 
     const body = new Uint8Array(await request.arrayBuffer());
-    const { full_bytes, thumb_bytes, full_sha256, thumb_sha256 } = submission.photo;
+    const { full_bytes, thumb_bytes, full_sha256, thumb_sha256, focus } = submission.photo;
     if (body.length > MAX_PHOTO_BODY_BYTES) return json(413, { error: "too_large" }, cors);
     if (body.length !== full_bytes + thumb_bytes) {
       return json(400, { error: "invalid", details: ["body length must be photo.full_bytes plus photo.thumb_bytes"] }, cors);
@@ -1110,7 +1110,16 @@ export function createHandler(deps: Deps) {
       ...(attestKey ? { attest_key: attestKey } : {}),
       app_version: submission.app_version,
       consent: true,
-      photo: { full_sha256, full_bytes, thumb_sha256, thumb_bytes, width: size.width, height: size.height, ...(ratings ? { safesearch: ratings } : {}) },
+      photo: {
+        full_sha256,
+        full_bytes,
+        thumb_sha256,
+        thumb_bytes,
+        width: size.width,
+        height: size.height,
+        ...(focus ? { focus } : {}),
+        ...(ratings ? { safesearch: ratings } : {}),
+      },
     } as StoredFeedback;
     const customMetadata = { place: submission.place, contributor };
     const file = { id, path: `pending/${day}/${id}.json`, content: `${JSON.stringify(stored, null, 2)}\n` };

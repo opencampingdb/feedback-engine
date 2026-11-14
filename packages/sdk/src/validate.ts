@@ -25,6 +25,7 @@ import type {
   OwnerSubmission,
   OwnerUpdate,
   PhotoFiles,
+  PhotoFocus,
   PlaceAddress,
   PhotoReportBody,
   PhotoRemovalBody,
@@ -826,10 +827,11 @@ function checkPhotoFiles(value: unknown, errors: string[]): PhotoFiles | undefin
     errors.push("photo must be an object");
     return undefined;
   }
-  const { full_sha256, full_bytes, thumb_sha256, thumb_bytes } = value;
+  const { full_sha256, full_bytes, thumb_sha256, thumb_bytes, focus } = value;
   for (const key of Object.keys(value)) {
-    if (!["full_sha256", "full_bytes", "thumb_sha256", "thumb_bytes"].includes(key)) errors.push(`unknown field photo.${key}`);
+    if (!["full_sha256", "full_bytes", "thumb_sha256", "thumb_bytes", "focus"].includes(key)) errors.push(`unknown field photo.${key}`);
   }
+  if (focus !== undefined && !isPhotoFocus(focus)) errors.push("photo.focus must be an object with only x and y, each a number from 0 to 1 with at most 3 decimal places");
   if (typeof full_sha256 !== "string" || !SHA256.test(full_sha256)) errors.push("photo.full_sha256 must be a lower case hex SHA-256");
   if (typeof thumb_sha256 !== "string" || !SHA256.test(thumb_sha256)) errors.push("photo.thumb_sha256 must be a lower case hex SHA-256");
   if (!Number.isInteger(full_bytes) || (full_bytes as number) < 1 || (full_bytes as number) > MAX_PHOTO_BYTES) {
@@ -843,7 +845,16 @@ function checkPhotoFiles(value: unknown, errors: string[]): PhotoFiles | undefin
     full_bytes: full_bytes as number,
     thumb_sha256: thumb_sha256 as string,
     thumb_bytes: thumb_bytes as number,
+    ...(isPhotoFocus(focus) ? { focus: { x: focus.x, y: focus.y } } : {}),
   };
+}
+
+/** True for a photo focus: an object with only `x` and `y`, each a number from 0 to 1 with at most 3 decimal places. */
+export function isPhotoFocus(value: unknown): value is PhotoFocus {
+  if (!isObject(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes("x") || !keys.includes("y")) return false;
+  return [value.x, value.y].every((n) => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1 && Math.round(n * 1000) / 1000 === n);
 }
 
 function checkCheck(value: unknown, errors: string[], now: Date): CheckBody | undefined {

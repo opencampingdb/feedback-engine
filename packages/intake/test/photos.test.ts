@@ -143,6 +143,21 @@ describe("photo upload", () => {
     expect(JSON.stringify(gh.puts[0]!.content)).not.toContain(CONTRIBUTOR);
   });
 
+  it("stores the photo's focus with its size, and refuses a bad one", async () => {
+    const full = jpeg(1600, 1200);
+    const res = await handle(upload(full, jpeg(400, 300, 10), (m) => ((m.photo as Record<string, unknown>).focus = { x: 0.25, y: 0.6 })), env(fakeBucket()));
+    expect(res.status).toBe(202);
+    expect(gh.puts[0]!.content).toMatchObject({ photo: { width: 1600, height: 1200, focus: { x: 0.25, y: 0.6 } } });
+    const bad = await handle(upload(full, jpeg(400, 300, 10), (m) => ((m.photo as Record<string, unknown>).focus = { x: 2, y: 0.6 })), env(fakeBucket()));
+    expect(bad.status).toBe(400);
+    expect(gh.puts).toHaveLength(1);
+  });
+
+  it("stores no focus when the photo has none", async () => {
+    await handle(upload(jpeg(1600, 1200), jpeg(400, 300, 10)), env(fakeBucket()));
+    expect((gh.puts[0]!.content as { photo: object }).photo).not.toHaveProperty("focus");
+  });
+
   it("refuses files that are not JPEGs, or do not match their SHA-256 or sizes", async () => {
     const full = jpeg(1600, 1200);
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);

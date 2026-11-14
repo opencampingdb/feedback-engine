@@ -205,6 +205,16 @@ The OSM notes workflow (`osm-notes.yml`) is retired, so don't add it. [osm.md](o
 
 Secrets stay in Cloudflare and need no change. The intake validates every submission, so a release that adds facts or report kinds needs this redeploy before apps send them. Until then the intake refuses them with `400`.
 
+### Moving to SDK 0.33.0: a photo's point of interest
+
+SDK 0.33.0 lets an app send a photo's `focus` ([photos.md](photos.md#a-photos-point-of-interest)). An older photo intake refuses a photo meta that carries it, so in this order:
+
+1. Deploy the photo intake at the new commit. It needs no new setting.
+2. Move the apply workflow's engine pin to the same commit, so the apply run publishes `focus` in photo records. An older apply run publishes the photo without it.
+3. Only then ship app builds on SDK 0.33.0 that send `focus`.
+
+The photo server serves records as the apply run writes them and needs no change.
+
 ### Photo passes that name the install
 
 For an app's photo service, this release has passes name the install they went to, and the photo server counts its rate limit per install instead of per address ([photos.md](photos.md#rate-limits)). Neither the SDK nor the apps change. In this order:

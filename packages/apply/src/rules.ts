@@ -906,6 +906,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         licence: input.photoLicence ?? "CC-BY-4.0",
         width: item.photo.width,
         height: item.photo.height,
+        ...(item.photo.focus ? { focus: { x: item.photo.focus.x, y: item.photo.focus.y } } : {}),
         sha256: item.photo.full_sha256,
       };
       const repeated =
