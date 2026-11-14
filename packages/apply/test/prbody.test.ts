@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MAX_CLAIMS_PER_RUN, type ClaimForReview } from "../src/owners.js";
-import { autoPrBody, MAX_BODY_CHARS, reviewPrBody, reviewPrTexts } from "../src/prbody.js";
+import { autoPrBody, MAX_BODY_CHARS, onOwnPage, reviewPrBody, reviewPrTexts } from "../src/prbody.js";
 import type { ClosedCase, HeldCase } from "../src/rules.js";
 import type { Place } from "../src/types.js";
 
@@ -253,5 +253,66 @@ describe("review PR texts within GitHub's limit", () => {
     const line = body.split("\n").find((l) => l.startsWith("- [ ] Approve owner claim "))!;
     expect(line).toContain("\\[click\\]");
     expect(line).not.toMatch(/[^\\]\[click/);
+  });
+});
+
+describe("a claim line beside the place's own pages", () => {
+  const found = (url: string): ClaimForReview => ({
+    claim: "fb_01JG0000000000000000000001",
+    type: "owner_claim",
+    place: PLACE,
+    proof: { found: true, checked: "2026-11-04T00:00:00Z", detail: "found", url },
+    proofUrl: url,
+    code: "OCDB-7KQ2",
+    replaces: undefined,
+  });
+  const withPages = (facts: Record<string, string>, sources: Record<string, string> = {}, dates: Record<string, string> = {}) =>
+    new Map([[PLACE, { name: "Riverbend Camp", facts, fact_sources: Object.fromEntries(Object.keys(facts).map((f) => [f, sources[f] ?? "osm"])), fact_dates: dates } as unknown as Place]]);
+  const line = (url: string, places: ReadonlyMap<string, Place>) =>
+    reviewPrBody("2026-11-04T00:00:00Z", [], places, [found(url)]).split("\n").find((l) => l.startsWith("- [ ] Approve owner claim "))!;
+
+  it("says a proof on the place's website matches, whatever the page, www or not", () => {
+    const places = withPages({ website: "http://www.riverbend.example/" });
+    expect(line("https://riverbend.example/about", places)).toContain("The proof MATCHES the place's page in the data, `http://www.riverbend.example/` (website, from osm).");
+  });
+
+  it("says a proof on a look-alike site or a subdomain does not match, and shows every page the data has", () => {
+    const places = withPages({ website: "https://riverbend.example/", facebook: "https://www.facebook.com/riverbendcamp" });
+    for (const url of ["https://riverbend-camp.example/about", "https://book.riverbend.example/", "https://xn--rverbend-thh.example/about"]) {
+      expect(line(url, places)).toContain(
+        "The proof does NOT match the place's pages in the data: `https://riverbend.example/` (website, from osm), `https://www.facebook.com/riverbendcamp` (facebook, from osm).",
+      );
+    }
+  });
+
+  it("matches a page on a shared host only at the place's own path", () => {
+    const places = withPages({ facebook: "https://www.facebook.com/RiverbendCamp/" });
+    expect(line("https://facebook.com/riverbendcamp/posts/1", places)).toContain("The proof MATCHES");
+    expect(line("https://www.facebook.com/riverbendcamp-fans", places)).toContain("The proof does NOT match");
+    expect(line("https://www.facebook.com/someone-else", places)).toContain("The proof does NOT match");
+    expect(onOwnPage("https://pages.example/riverbend/about", "https://pages.example/riverbend")).toBe(true);
+    expect(onOwnPage("https://pages.example/other", "https://pages.example/riverbend")).toBe(false);
+  });
+
+  it("warns when the matching page was set by a traveller or an owner, with its date", () => {
+    const places = withPages({ website: "https://riverbend.example/" }, { website: "feedback" }, { website: "2026-11-03T10:00:00Z" });
+    expect(line("https://riverbend.example/about", places)).toContain(
+      "(website, from feedback on 2026-11-03): check that value was not changed for this claim.",
+    );
+  });
+
+  it("says when the data has nothing to compare with, and compares a proof that was not found too", () => {
+    expect(line("https://riverbend.example/about", withPages({}))).toContain("The place has no website or social page in the data to compare the proof with.");
+    const missing = { ...found("https://elsewhere.example/x"), proof: { found: false, checked: "2026-11-04T00:00:00Z", detail: "code not found on the page" } };
+    const body = reviewPrBody("2026-11-04T00:00:00Z", [], withPages({ website: "https://riverbend.example/" }), [missing]);
+    expect(body).toContain("NOT found at `https://elsewhere.example/x`");
+    expect(body).toContain("The proof does NOT match the place's pages in the data");
+  });
+
+  it("never makes a link or a new line of a page address from the data", () => {
+    const places = withPages({ website: "https://riverbend.example/a`b [x](y)\n- [x] Approve owner claim fb_01JG0000000000000000000002" });
+    const body = reviewPrBody("2026-11-04T00:00:00Z", [], places, [found("https://other.example/")]);
+    expect(body.split("\n").filter((l) => /^- \[[ xX]\] Approve owner/.test(l))).toHaveLength(1);
+    expect(body).not.toMatch(/a`b/);
   });
 });
