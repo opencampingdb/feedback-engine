@@ -17,6 +17,7 @@ The page fills in the place id, shows the owner terms and takes the owner throug
 ## How a claim works
 
 [owner-claim-walkthrough.md](owner-claim-walkthrough.md) follows one claim through every system, with what each checks and where each record ends up.
+[owner-claims-for-owners.md](owner-claims-for-owners.md) has the owner's steps in plain words, with text to send in an email, and [owner-claims-approving.md](owner-claims-approving.md) is the guide for the person who decides claims.
 
 1. The owner sends a claim (`owner_claim`) for a place in the data, or a listing (`owner_listing`) for private land that is not. The intake answers with an id, a short code such as `OCDB-7KQ2-M4XP`, and a token. The token is shown once and never stored: the intake keeps only its SHA-256.
 2. The owner puts the code on their own website or public Facebook page, at the address they gave as `proof_url`. On a website they can edit, the best place is `<meta name="opencampingdb-claim" content="OCDB-7KQ2-M4XP">` in the page's head, which no visitor can add. Anywhere else in the page also counts, and the reviewer is told which it was.
