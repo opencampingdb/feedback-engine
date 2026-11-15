@@ -153,6 +153,18 @@ describe("photo upload", () => {
     expect(gh.puts).toHaveLength(1);
   });
 
+  it("stores the caption and the taken month as sent, and refuses a future month", async () => {
+    const full = jpeg(1600, 1200);
+    const set = (caption: string, taken: string) => (m: Record<string, unknown>) => Object.assign(m.photo as Record<string, unknown>, { caption, taken });
+    const res = await handle(upload(full, jpeg(400, 300, 10), set("Morning mist", "2026-10")), env(fakeBucket()));
+    expect(res.status).toBe(202);
+    expect(gh.puts[0]!.content).toMatchObject({ photo: { caption: "Morning mist", taken: "2026-10" } });
+    const future = await handle(upload(full, jpeg(400, 300, 10), set("Morning mist", "2026-12")), env(fakeBucket()));
+    expect(future.status).toBe(400);
+    expect(await future.json()).toEqual({ error: "invalid", details: ["photo.taken must not be in the future"] });
+    expect(gh.puts).toHaveLength(1);
+  });
+
   it("stores no focus when the photo has none", async () => {
     await handle(upload(jpeg(1600, 1200), jpeg(400, 300, 10)), env(fakeBucket()));
     expect((gh.puts[0]!.content as { photo: object }).photo).not.toHaveProperty("focus");
@@ -799,5 +811,66 @@ describe("a contributor proof for removal and erasure (audit run-2 OCDB-NV-06)",
       env(),
     );
     expect(res.status).toBe(202);
+  });
+});
+
+describe("a helpful vote on a photo", () => {
+  const PHOTO = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB";
+  function setup(lineContributor?: string) {
+    const gh = fakeGitHub();
+    const handle = createHandler({ fetch: gh.fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
+    const records = lineContributor === undefined ? "" : `${JSON.stringify({ id: PHOTO, place: PLACE, contributor: lineContributor })}\n`;
+    const served = { get: async (key: string) => (key === `records/${PLACE}.ndjson` && records ? { text: async () => records } : null) };
+    const e: Env = { ...env(), PHOTOS_SERVED: served };
+    const send = (body: Record<string, unknown> = {}, target: Env = e) =>
+      handle(
+        new Request("https://intake.example/v1/feedback", {
+          method: "POST",
+          headers: { "x-app-key": APP_KEY },
+          body: JSON.stringify({ device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true, type: "photo_vote", place: PLACE, photo_vote: { photo: PHOTO, helpful: true }, ...body }),
+        }),
+        target,
+      );
+    return { gh, send, e };
+  }
+
+  it("stores a vote for someone else's photo", async () => {
+    const t = setup("ctr_0123456789abcdef");
+    expect((await t.send()).status).toBe(202);
+    expect(t.gh.puts[0]!.content).toMatchObject({
+      type: "photo_vote",
+      place: PLACE,
+      photo_vote: { photo: PHOTO, helpful: true },
+      contributor: await hashContributor("pepper", "example-app", CONTRIBUTOR),
+    });
+  });
+
+  it("refuses a vote for the voter's own photo, and stores nothing", async () => {
+    const t = setup(await hashContributor("pepper", "example-app", CONTRIBUTOR));
+    const res = await t.send();
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "own_photo" });
+    expect(t.gh.puts).toHaveLength(0);
+  });
+
+  it("stores a vote it can't check against the served records for the apply run", async () => {
+    const t = setup();
+    expect((await t.send({ photo_vote: { photo: PHOTO, helpful: false } })).status).toBe(202);
+    expect(t.gh.puts[0]!.content).toMatchObject({ photo_vote: { photo: PHOTO, helpful: false } });
+  });
+
+  it("needs a contributor and a photo service", async () => {
+    const t = setup("ctr_0123456789abcdef");
+    expect((await t.send({ contributor: undefined })).status).toBe(400);
+    const { PHOTOS_PENDING: _p, ...noPhotos } = t.e;
+    expect(await (await t.send({}, noPhotos as Env)).json()).toEqual({ error: "photos_not_served_here" });
+  });
+
+  it("takes at most 50 votes from a contributor in a day", async () => {
+    const t = setup("ctr_0123456789abcdef");
+    const answers: number[] = [];
+    for (let i = 0; i < 51; i++) answers.push((await t.send({ photo_vote: { photo: PHOTO, helpful: i % 2 === 0 } })).status);
+    expect(answers.slice(0, 50).every((s) => s === 202)).toBe(true);
+    expect(answers[50]).toBe(429);
   });
 });

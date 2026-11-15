@@ -6,6 +6,7 @@ import {
   newPlaceStanding,
   safeSearchVerdict,
   tidyName,
+  tidyCaption,
   tidyText,
   type ContactFactName,
   type ContactReportReason,
@@ -45,9 +46,9 @@ import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type 
 import type { EarlierFact } from "./io.js";
 import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
-import { doNotMatchProblems, newProblems, placeProblems, reviewProblems } from "./data-check.js";
+import { doNotMatchProblems, newProblems, placeProblems, reviewProblems, textProblems } from "./data-check.js";
 import { dropSource, setSource } from "./sources.js";
-import type { Photo, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
+import type { Photo, PhotoVote, PhotoVotes, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
 
 export type { ClosedCase, HeldCase };
 
@@ -153,6 +154,12 @@ export interface RulesInput {
   allReviews?: readonly Review[];
   /** Every photo line in the data. None when left out. */
   photos?: readonly Photo[];
+  /**
+   * The helpful votes that count (`votes/photos.json` in the inbox). Left out,
+   * there are none yet. The rules recount every photo's `helpful` and
+   * `helpful_12m` from it, so pass `photos` whenever it holds a vote.
+   */
+  photoVotes?: PhotoVotes;
   /** Licence id written on new photo lines. Defaults to CC-BY-4.0. */
   photoLicence?: string;
   /**
@@ -237,6 +244,8 @@ export interface RulesOutput {
   photos: Map<string, Photo[]>;
   /** Photos whose files are deleted: refused uploads and erased contributors' photos. */
   removedPhotos: RemovedPhotos["photos"];
+  /** The helpful votes after this run, to write back to the inbox. */
+  photoVotes: PhotoVotes;
   /** Changes for a person, in the order they arrived. */
   edits: ReviewEdit[];
   changes: Change[];
@@ -260,6 +269,7 @@ type ReviewReportItem = Extract<StoredFeedback, { type: "review_report" }>;
 type PhotoItem = Extract<StoredFeedback, { type: "photo" }>;
 type PhotoReportItem = Extract<StoredFeedback, { type: "photo_report" }>;
 type ErasureItem = Extract<StoredFeedback, { type: "photo_erasure" }>;
+type VoteItem = Extract<StoredFeedback, { type: "photo_vote" }>;
 type RemovalItem = Extract<StoredFeedback, { type: "photo_removal" }>;
 type ReviewErasureItem = Extract<StoredFeedback, { type: "review_erasure" }>;
 
@@ -429,6 +439,11 @@ export function applyRules(input: RulesInput): RulesOutput {
   return rulesOnce(input, setAside);
 }
 
+/** Whether a kept vote was sent with any of these ids: the same contributor, install or attested key. */
+function sharesSource(vote: PhotoVote, ids: readonly string[]): boolean {
+  return ids.includes(vote.contributor) || ids.includes(vote.device) || (vote.attest_key !== undefined && ids.includes(vote.attest_key));
+}
+
 /** Items deletion requests come from: always honoured, never set aside. */
 const DELETIONS = new Set(["review_erasure", "photo_erasure", "photo_removal"]);
 
@@ -501,7 +516,9 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   const pending = [...input.pending].sort(byReceived);
   const blocked = input.blocked ?? new Set<string>();
   const newPhotos = new Map<string, Photo[]>();
+  const photoById = new Map((input.photos ?? []).map((p) => [p.id, p]));
   const removedPhotos: RemovedPhotos["photos"] = [];
+  const votes: PhotoVotes = { photos: Object.fromEntries(Object.entries(input.photoVotes?.photos ?? {}).map(([id, list]) => [id, list.map((v) => ({ ...v }))])) };
   const removePhoto = (photo: string, reason: RemovedPhotos["photos"][number]["reason"]) => {
     if (!removedPhotos.some((r) => r.photo === photo)) removedPhotos.push({ photo, removed: nowIso, reason });
   };
@@ -644,6 +661,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   // After photos, so a photo accepted or held in this run can be removed in it too.
   applyPhotoRemovals(known.filter((i): i is RemovalItem => i.type === "photo_removal"));
   applyPhotoReports(known.filter((i): i is PhotoReportItem => i.type === "photo_report"));
+  applyPhotoVotes(known.filter((i): i is VoteItem => i.type === "photo_vote"), erased);
   for (const lines of newPhotos.values()) lines.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   applyStatus(
     known.filter(
@@ -700,6 +718,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     reviews: newReviews,
     photos: newPhotos,
     removedPhotos,
+    photoVotes: votes,
     doNotMatch,
     edits,
     changes,
@@ -901,6 +920,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         decide(item, "applied", "photo is already in the data");
         continue;
       }
+      // A caption is checked as a review's text is: one that fails is left out, and the photo goes on without it.
+      const caption = item.photo.caption === undefined ? undefined : tidyCaption(item.photo.caption);
+      const captionProblem = caption ? (firstProblem(caption) ?? (textProblems(caption).length > 0 ? "contact" : null)) : null;
+      const captionNote = captionProblem ? `, caption left out (${captionProblem})` : "";
       const photo: Photo = {
         id: photoId,
         place: item.place,
@@ -911,6 +934,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         width: item.photo.width,
         height: item.photo.height,
         ...(item.photo.focus ? { focus: { x: item.photo.focus.x, y: item.photo.focus.y } } : {}),
+        ...(caption && captionProblem === null ? { caption } : {}),
+        ...(item.photo.taken !== undefined ? { taken: item.photo.taken } : {}),
         sha256: item.photo.full_sha256,
       };
       const repeated =
@@ -929,14 +954,107 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             ? `${PHOTO_HELD_WHY.safesearch} adult ${rated.adult}, violence ${rated.violence}, racy ${rated.racy}`
             : PHOTO_HELD_WHY[held];
         edits.push({ kind: "photo", place: item.place, photo, feedback: item.id });
-        note(item.place, `photo ${photoId} (${photo.width} x ${photo.height}), ${why} (look at it before merging)`, false, [item], photoId);
-        decide(item, "needs_review", `${why}, so a person checks it`, held);
+        note(item.place, `photo ${photoId} (${photo.width} x ${photo.height}), ${why}${captionNote} (look at it before merging)`, false, [item], photoId);
+        decide(item, "needs_review", `${why}, so a person checks it${captionNote}`, held);
         continue;
       }
       lines.push(photo);
-      note(item.place, `photo ${photoId} added`, true, [item]);
-      decide(item, "applied", "photo accepted");
+      note(item.place, `photo ${photoId} added${captionNote}`, true, [item]);
+      decide(item, "applied", `photo accepted${captionNote}`);
     }
+  }
+
+  /**
+   * Records helpful votes and takes them back, then recounts every photo's
+   * `helpful` and `helpful_12m`. One vote counts per photo per contributor,
+   * install or attested key: a new vote replaces any that shares one of them.
+   * Votes from blocked or erased contributors, and for photos no longer in the
+   * data, stop counting.
+   */
+  function applyPhotoVotes(items: VoteItem[], erased: ReadonlySet<string>): void {
+    const removed = new Set(removedPhotos.map((r) => r.photo));
+    const byPhoto = new Map<string, VoteItem[]>();
+    for (const item of items) {
+      const { photo: photoId, helpful } = item.photo_vote;
+      if (item.contributor === undefined) {
+        decide(item, "refused", "photo vote has no contributor");
+        continue;
+      }
+      if (erased.has(item.contributor)) {
+        decide(item, "refused", "the contributor asked for their photos to be removed");
+        continue;
+      }
+      if (blocked.has(item.contributor)) {
+        decide(item, "refused", "the contributor is blocked");
+        continue;
+      }
+      // A photo stays filed under its place's old id after a merge, so find it by its own id.
+      const filedUnder = photoById.get(photoId)?.place ?? item.place;
+      const target = photoLinesOf(filedUnder).find((p) => p.id === photoId);
+      if (!target || removed.has(photoId) || (resolvePlace(filedUnder, input.places) ?? filedUnder) !== item.place) {
+        decide(item, "refused", `photo ${photoId} is not in the data for this place`);
+        continue;
+      }
+      if (target.contributor === item.contributor) {
+        decide(item, "refused", "a contributor cannot vote for their own photo");
+        continue;
+      }
+      const ids = [item.contributor, item.device, ...(item.attest_key ? [item.attest_key] : [])];
+      const before = votes.photos[photoId] ?? [];
+      const replaced = before.filter((v) => sharesSource(v, ids));
+      // A vote sent before one already kept from the same source (an item put back in pending and run again) changes nothing.
+      if (replaced.some((v) => v.at > item.received || (v.at === item.received && v.feedback > item.id))) {
+        decide(item, "applied", "a later vote from the same traveller already counts");
+        continue;
+      }
+      const vote: PhotoVote = {
+        feedback: item.id,
+        at: item.received,
+        helpful,
+        contributor: item.contributor,
+        device: item.device,
+        ...(item.attest_key ? { attest_key: item.attest_key } : {}),
+      };
+      // A take-back is kept too, so an older vote run again later can't undo it.
+      votes.photos[photoId] = [...before.filter((v) => !sharesSource(v, ids)), vote];
+      byPhoto.set(photoId, [...(byPhoto.get(photoId) ?? []), item]);
+      decide(item, "applied", helpful ? "photo marked helpful" : replaced.some((v) => v.helpful !== false) ? "helpful vote taken back" : "no helpful vote to take back");
+    }
+
+    // Votes that no longer count: an erased or blocked voter's, and those for photos gone from the data.
+    for (const [photoId, list] of Object.entries(votes.photos)) {
+      const line = currentLine(photoId);
+      const left = line === undefined || removed.has(photoId) ? [] : list.filter((v) => !erased.has(v.contributor) && !blocked.has(v.contributor));
+      if (left.length > 0) votes.photos[photoId] = left;
+      else delete votes.photos[photoId];
+    }
+
+    // Recount every photo with votes, or with counts on its line.
+    const recentSince = new Date(now - 365 * DAY_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const counted = new Set([...Object.keys(votes.photos), ...(input.photos ?? []).filter((p) => p.helpful !== undefined || p.helpful_12m !== undefined).map((p) => p.id)]);
+    for (const photoId of [...counted].sort()) {
+      const line = currentLine(photoId);
+      if (line === undefined) continue;
+      const list = (votes.photos[photoId] ?? []).filter((v) => v.helpful !== false);
+      const total = list.length;
+      const recent = list.filter((v) => v.at >= recentSince).length;
+      if ((line.helpful ?? 0) === total && (line.helpful_12m ?? 0) === recent) continue;
+      const editable = photoLinesOf(line.place).find((p) => p.id === photoId)!;
+      if (total > 0) editable.helpful = total;
+      else delete editable.helpful;
+      if (recent > 0) editable.helpful_12m = recent;
+      else delete editable.helpful_12m;
+      note(line.place, `photo ${photoId} marked helpful by ${total} (${recent} in the last 12 months)`, true, byPhoto.get(photoId) ?? []);
+    }
+  }
+
+  /** A photo's line as this run leaves it so far, or undefined when it is not in the data (any more). */
+  function currentLine(photoId: string): Photo | undefined {
+    const original = photoById.get(photoId);
+    // A photo published in this run is only in its place's new lines.
+    if (!original) return [...newPhotos.values()].flat().find((p) => p.id === photoId);
+    const lines = newPhotos.get(original.place);
+    return lines ? lines.find((p) => p.id === photoId) : original;
   }
 
   function applyPhotoReports(items: PhotoReportItem[]): void {

@@ -59,6 +59,7 @@ export function changesData(item: StoredFeedback): boolean {
     item.type === "photo_report" ||
     item.type === "photo_erasure" ||
     item.type === "photo_removal" ||
+    item.type === "photo_vote" ||
     item.type === "photo"
   ) {
     return false;

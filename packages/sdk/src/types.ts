@@ -14,6 +14,7 @@ export type FeedbackType =
   | "photo_report"
   | "photo_erasure"
   | "photo_removal"
+  | "photo_vote"
   | "review_erasure"
   | "withdraw";
 export type OwnerType = "owner_claim" | "owner_listing" | "owner_update";
@@ -404,6 +405,17 @@ export interface PhotoRemovalBody {
 }
 
 /**
+ * A traveller marks a published photo helpful (`helpful: true`) or takes that
+ * back (`helpful: false`). Each source has one vote per photo, and the latest
+ * one counts.
+ */
+export interface PhotoVoteBody {
+  /** Id of the published photo, `pho_<ulid>`. Never the traveller's own. */
+  photo: string;
+  helpful: boolean;
+}
+
+/**
  * The files of a photo upload, as the meta part of `POST /v1/photos` names
  * them. The intake checks the bytes it receives against these.
  */
@@ -418,6 +430,17 @@ export interface PhotoFiles {
   thumb_bytes: number;
   /** The photo's point of interest, when the sending app worked one out. */
   focus?: PhotoFocus;
+  /**
+   * A short caption from the traveller, at most `MAX_PHOTO_CAPTION_LENGTH`
+   * characters on one line. The apply run tidies it and runs the text checks a
+   * review gets: a caption that fails them is left out and the photo goes on.
+   */
+  caption?: string;
+  /**
+   * The month the photo was taken, `YYYY-MM`, read from its Exif before the
+   * metadata was removed (`photoTakenMonth`). Never in the future.
+   */
+  taken?: string;
 }
 
 /**
@@ -530,6 +553,16 @@ export interface PhotoReportSubmission extends SubmissionBase {
   type: "photo_report";
   place: string;
   photo_report: PhotoReportBody;
+}
+
+/**
+ * Marks a published photo helpful, or takes that back. `place` is the photo's
+ * place. Needs a contributor.
+ */
+export interface PhotoVoteSubmission extends SubmissionBase {
+  type: "photo_vote";
+  place: string;
+  photo_vote: PhotoVoteBody;
 }
 
 /**
@@ -657,6 +690,7 @@ export type FeedbackSubmission =
   | PhotoReportSubmission
   | PhotoErasureSubmission
   | PhotoRemovalSubmission
+  | PhotoVoteSubmission
   | ReviewErasureSubmission
   | WithdrawSubmission;
 

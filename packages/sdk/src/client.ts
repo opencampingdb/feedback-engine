@@ -20,7 +20,19 @@ import type {
 import { isFeedbackId, readProgress, type Progress } from "./progress.js";
 import { sha256Hex, sha256HexBytes } from "./sha256.js";
 import { stripJpegMetadata } from "./jpeg.js";
-import { IDEMPOTENCY_HEADER, MAX_PHOTO_BYTES, MAX_THUMB_BYTES, isIdempotencyKey, isPhotoId, isPlaceId, newPlaceId, validateSubmission } from "./validate.js";
+import {
+  IDEMPOTENCY_HEADER,
+  MAX_PHOTO_BYTES,
+  MAX_THUMB_BYTES,
+  isIdempotencyKey,
+  isPhotoId,
+  isPlaceId,
+  newPlaceId,
+  photoCaptionProblem,
+  photoTakenProblem,
+  validateSubmission,
+} from "./validate.js";
+import { tidyCaption } from "./tidy.js";
 
 /** Storage the client keeps its queue and device id in. AsyncStorage matches this shape. */
 export interface StorageAdapter {
@@ -358,6 +370,36 @@ export interface PhotoInput {
    * Rounded to 3 decimal places. Leave it out when there is none.
    */
   focus?: PhotoFocus;
+  /**
+   * A short caption the traveller wrote, at most 200 characters. The client
+   * tidies it onto one line (`tidyCaption`) and leaves it out when nothing is
+   * left. The apply run checks it as it checks a review: a caption that fails
+   * is left out of the record, and the photo is published without it.
+   */
+  caption?: string;
+  /**
+   * The month the photo was taken, `YYYY-MM`. Read it from the original file's
+   * Exif before the metadata is removed, with `photoTakenMonth`. Never in the
+   * future, and not before 1990.
+   */
+  taken?: string;
+}
+
+export interface PhotoVoteInput {
+  /** The photo's place. */
+  place: string;
+  /** Id of the published photo, `pho_<ulid>`. The intake refuses the traveller's own photo. */
+  photo: string;
+  /** True marks the photo helpful, false takes that back. */
+  helpful: boolean;
+  /** The signed-in traveller's account id. Required for votes. */
+  contributor: string;
+  consent: boolean;
+  /**
+   * The caller's own id for this submission, 1 to 100 characters. Kept with
+   * the queued item and passed back to `onAnswered`. Never sent to the intake.
+   */
+  ref?: string;
 }
 
 export interface PhotoReportInput {
@@ -682,6 +724,13 @@ export interface PhotoClient {
   photoPass(options?: { renew?: boolean }): Promise<PhotoPassResult>;
   /** Reports a published photo. Queued and retried, like feedback. */
   reportPhoto(input: PhotoReportInput): Promise<SubmitResult>;
+  /**
+   * Marks a published photo helpful, or takes that back (`helpful: false`).
+   * One vote per traveller per photo counts, the latest one, and the photo's
+   * record carries the count from the next apply run. Keep the traveller's own
+   * votes on the phone to show them. Queued and retried, like feedback.
+   */
+  votePhoto(input: PhotoVoteInput): Promise<SubmitResult>;
   /**
    * Asks for one of the contributor's own photos to be removed. The photo
    * service stops serving it at once when it can confirm the photo is theirs,
@@ -1617,6 +1666,7 @@ function createClient(
     if (full.length > MAX_PHOTO_BYTES) problems.push(`full is over ${MAX_PHOTO_BYTES} bytes`);
     if (thumb.length > MAX_THUMB_BYTES) problems.push(`thumb is over ${MAX_THUMB_BYTES} bytes`);
     const focus = photoFocusOf(input.focus, problems);
+    const caption = input.caption === undefined ? "" : tidyCaption(input.caption);
     if (problems.length > 0) throw new FeedbackValidationError(problems);
     const meta = {
       type: "photo",
@@ -1631,6 +1681,8 @@ function createClient(
         thumb_sha256: sha256HexBytes(thumb),
         thumb_bytes: thumb.length,
         ...(focus ? { focus } : {}),
+        ...(caption ? { caption } : {}),
+        ...(input.taken !== undefined ? { taken: input.taken } : {}),
       },
     };
     const checked = validateSubmission(meta, new Date(now()));
@@ -1742,6 +1794,8 @@ function createClient(
     contributor: string;
     queuedAt: number;
     focus?: PhotoFocus;
+    caption?: string;
+    taken?: string;
   }
   async function readWaitingPhotos(): Promise<WaitingPhoto[]> {
     try {
@@ -1775,6 +1829,11 @@ function createClient(
     if (typeof key !== "string" || key.length < 1 || key.length > 200) problems.push("key must be the app's own key for the files, 1 to 200 characters, for a new place");
     if (typeof input.contributor !== "string" || input.contributor.length === 0) problems.push("contributor is required for photos");
     const focus = photoFocusOf(input.focus, problems);
+    const caption = input.caption === undefined ? "" : tidyCaption(input.caption);
+    const captionProblem = caption ? photoCaptionProblem(caption) : null;
+    if (captionProblem) problems.push(`caption ${captionProblem}`);
+    const takenProblem = input.taken === undefined ? null : photoTakenProblem(input.taken, new Date(now()));
+    if (takenProblem) problems.push(`taken ${takenProblem}`);
     if (problems.length > 0) throw new FeedbackValidationError(problems);
     if (!options.resolveNewPlace || !options.loadPhoto) {
       throw new Error("Photos of a new place need the photo client's resolveNewPlace and loadPhoto options");
@@ -1785,7 +1844,15 @@ function createClient(
     if (status.status === "unknown") throw new FeedbackValidationError([`no new_place report with the ref ${ref} is queued or was sent`]);
     await serial(async () => {
       const list = await readWaitingPhotos();
-      if (!list.some((w) => w.key === key)) list.push({ key: key!, newPlace: ref!, contributor: input.contributor, queuedAt: now(), ...(focus ? { focus } : {}) });
+      if (!list.some((w) => w.key === key)) list.push({
+          key: key!,
+          newPlace: ref!,
+          contributor: input.contributor,
+          queuedAt: now(),
+          ...(focus ? { focus } : {}),
+          ...(caption ? { caption } : {}),
+          ...(input.taken !== undefined ? { taken: input.taken } : {}),
+        });
       await writeWaitingPhotos(list);
     });
     return { status: "waiting" };
@@ -1837,7 +1904,12 @@ function createClient(
       }
       let result: PhotoResult;
       try {
-        result = await uploadPhoto({ place: status.place, contributor: w.contributor, consent: true, full: files.full, thumb: files.thumb, ...(w.focus ? { focus: w.focus } : {}) });
+        result = await uploadPhoto({ place: status.place, contributor: w.contributor, consent: true, full: files.full,
+          thumb: files.thumb,
+          ...(w.focus ? { focus: w.focus } : {}),
+          ...(w.caption ? { caption: w.caption } : {}),
+          ...(w.taken !== undefined ? { taken: w.taken } : {}),
+        });
       } catch {
         await drop("rejected", { httpStatus: 0, error: "invalid_files" });
         continue;
@@ -2008,6 +2080,7 @@ function createClient(
         { place, photo_report: { photo, reason }, ...(contributor !== undefined ? { contributor } : {}), consent, ref },
         "photo_report",
       ),
+    votePhoto: ({ place, photo, helpful, contributor, consent, ref }) => submit({ place, photo_vote: { photo, helpful }, contributor, consent, ref }, "photo_vote"),
     removePhoto: ({ place, photo, contributor, contributorProof, consent, ref }) =>
       submit({ place, photo_removal: { photo }, contributor, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}), consent, ref }, "photo_removal"),
     eraseReviews: ({ contributor, contributorProof, consent, ref }) =>
@@ -2031,7 +2104,7 @@ function createClient(
 
 /** A client for Open Camping DB's feedback intake: reports, reviews, checks and owner requests. */
 export function createFeedbackClient(options: FeedbackClientOptions): FeedbackClient {
-  const { photo: _photo, photoPass: _pass, reportPhoto: _report, removePhoto: _remove, erasePhotos: _erase, photoQueuedRefs: _refs, ...feedback } = createClient(options as PhotoClientOptions);
+  const { photo: _photo, photoPass: _pass, reportPhoto: _report, votePhoto: _vote, removePhoto: _remove, erasePhotos: _erase, photoQueuedRefs: _refs, ...feedback } = createClient(options as PhotoClientOptions);
   return feedback;
 }
 
@@ -2045,6 +2118,7 @@ export function createPhotoClient(options: PhotoClientOptions): PhotoClient {
     photo: client.photo,
     photoPass: client.photoPass,
     reportPhoto: client.reportPhoto,
+    votePhoto: client.votePhoto,
     removePhoto: client.removePhoto,
     erasePhotos: client.erasePhotos,
     flush: client.flush,

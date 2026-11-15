@@ -1103,8 +1103,12 @@ const feedback = createFeedbackClient({
 
 ## What changed by version
 
-What an app moving to 0.35.0 needs to know. A minor version (0.35.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
+What an app moving to 0.36.0 needs to know. A minor version (0.36.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
 
+- **0.36.0.** New fields and a new call for photo services ([photos.md](photos.md)):
+  - `photo()` takes an optional `caption` (at most 200 characters, tidied onto one line with `tidyCaption`) and `taken` (the month the photo was taken, `YYYY-MM`, never in the future or before 1990). `photoTakenMonth(value)` reads the month from Exif text, an ISO date or a `Date`. The apply run publishes both on the photo's record, and leaves out a caption that fails the text checks a review gets, publishing the photo without it.
+  - `votePhoto({ place, photo, helpful, contributor, consent })` marks someone else's photo helpful (`helpful: true`) or takes that back (`false`). It is the new feedback type `photo_vote`, queued like a report. One vote per contributor, install or attested key counts per photo, 50 a day. The photo intake refuses a vote on the voter's own photo with `403 own_photo`. Each apply run recounts and writes `helpful` and `helpful_12m` (votes in the last 12 months) on the photo's record.
+  - `MAX_PHOTO_CAPTION_LENGTH`, `EARLIEST_PHOTO_TAKEN`, `photoCaptionProblem`, `photoTakenProblem` and the `PhotoVoteInput`, `PhotoVoteBody` and `PhotoVoteSubmission` types are exported. Deploy the photo intake and move the photo inbox's apply pin to 0.36.0 before an app sends any of these: an older intake refuses them with `400`.
 - **0.35.0.** A new report kind:
   - A `clear` report takes a value off a place: `{ kind: "clear", fact }`, with no `value`, for any reportable fact, contacts, the address and `brand` among them. When the install that set the place's current value sends it, with attestation, it goes live at once as a correction would: the intake answers `live` and the recent list carries the fact with `value: null`. A clear of a value another traveller set, or one the intake cannot tie to the install, is held for a person with the new held reason `not_own_value`, and a value from OSM, the owner or a data rule is never cleared this way. Deploy the intake and move the inbox's apply pin to 0.35.0 before an app sends a clear: an older intake refuses it with `400`.
 - **0.34.0.** New calls:

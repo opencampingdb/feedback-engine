@@ -29,6 +29,7 @@ import type {
   PlaceAddress,
   PhotoReportBody,
   PhotoRemovalBody,
+  PhotoVoteBody,
   PhotoReportReason,
   FirstHand,
   ReportBody,
@@ -50,6 +51,7 @@ export const FEEDBACK_TYPES = [
   "photo_report",
   "photo_erasure",
   "photo_removal",
+  "photo_vote",
   "review_erasure",
   "withdraw",
 ] as const;
@@ -197,6 +199,10 @@ export const PHOTO_REPORT_REASONS: readonly PhotoReportReason[] = [
 ];
 /** Largest full size photo the intake takes, in bytes. */
 export const MAX_PHOTO_BYTES = 1_500_000;
+/** Most characters in a photo's caption. */
+export const MAX_PHOTO_CAPTION_LENGTH = 200;
+/** The earliest month a photo's `taken` may name. */
+export const EARLIEST_PHOTO_TAKEN = "1990-01";
 /** Largest thumbnail the intake takes, in bytes. */
 export const MAX_THUMB_BYTES = 200_000;
 /**
@@ -458,6 +464,7 @@ const TOP_LEVEL_KEYS = new Set([
   "photo",
   "photo_report",
   "photo_removal",
+  "photo_vote",
   "contributor_proof",
   "terms_accepted",
   "token",
@@ -828,16 +835,69 @@ function checkPhotoRemoval(value: unknown, errors: string[]): PhotoRemovalBody |
   return { photo: value.photo as string };
 }
 
-function checkPhotoFiles(value: unknown, errors: string[]): PhotoFiles | undefined {
+function checkPhotoVote(value: unknown, errors: string[]): PhotoVoteBody | undefined {
+  if (!isObject(value)) {
+    errors.push("photo_vote must be an object");
+    return undefined;
+  }
+  for (const key of Object.keys(value)) if (key !== "photo" && key !== "helpful") errors.push(`unknown field photo_vote.${key}`);
+  if (!isPhotoId(value.photo)) errors.push("photo_vote.photo must be a photo id (pho_<ulid>)");
+  if (typeof value.helpful !== "boolean") errors.push("photo_vote.helpful must be true or false");
+  return { photo: value.photo as string, helpful: value.helpful as boolean };
+}
+
+/** The problem with a photo's caption as sent, or null: a string on one line of at most `MAX_PHOTO_CAPTION_LENGTH` characters. */
+export function photoCaptionProblem(caption: unknown): string | null {
+  if (typeof caption !== "string") return "must be a string";
+  if (caption.trim().length === 0) return "must not be empty";
+  if (caption.length > MAX_PHOTO_CAPTION_LENGTH) return `must be at most ${MAX_PHOTO_CAPTION_LENGTH} characters`;
+  if (/[\r\n\u2028\u2029]/.test(caption)) return "must be one line";
+  return null;
+}
+
+/**
+ * The problem with a photo's `taken` month as sent, or null: `YYYY-MM`, from
+ * `EARLIEST_PHOTO_TAKEN` to the month already started somewhere (UTC+14).
+ */
+export function photoTakenProblem(taken: unknown, now: Date): string | null {
+  if (typeof taken !== "string" || !YEAR_MONTH.test(taken)) return "must be YYYY-MM";
+  if (taken > latestLocalDate(now).slice(0, 7)) return "must not be in the future";
+  if (taken < EARLIEST_PHOTO_TAKEN) return `must not be before ${EARLIEST_PHOTO_TAKEN}`;
+  return null;
+}
+
+/**
+ * The month a photo was taken, `YYYY-MM`, for a photo's `taken`. Takes the
+ * Exif `DateTimeOriginal` text (`2026:11:03 14:22:01`), an ISO date or a
+ * `Date`. Undefined when the value is missing, can't be read, or names a month
+ * `photoTakenProblem` refuses (before 1990 or in the future), so the photo is
+ * sent without one.
+ */
+export function photoTakenMonth(value: string | Date | null | undefined, now: Date = new Date()): string | undefined {
+  let month: string | undefined;
+  // A Date is read in the phone's own time zone, as Exif text is.
+  if (value instanceof Date) month = Number.isNaN(value.getTime()) ? undefined : `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}`;
+  else if (typeof value === "string") {
+    const match = /^\s*(\d{4})[:-](\d{2})/.exec(value);
+    month = match ? `${match[1]}-${match[2]}` : undefined;
+  }
+  return month !== undefined && photoTakenProblem(month, now) === null ? month : undefined;
+}
+
+function checkPhotoFiles(value: unknown, errors: string[], now: Date): PhotoFiles | undefined {
   if (!isObject(value)) {
     errors.push("photo must be an object");
     return undefined;
   }
-  const { full_sha256, full_bytes, thumb_sha256, thumb_bytes, focus } = value;
+  const { full_sha256, full_bytes, thumb_sha256, thumb_bytes, focus, caption, taken } = value;
   for (const key of Object.keys(value)) {
-    if (!["full_sha256", "full_bytes", "thumb_sha256", "thumb_bytes", "focus"].includes(key)) errors.push(`unknown field photo.${key}`);
+    if (!["full_sha256", "full_bytes", "thumb_sha256", "thumb_bytes", "focus", "caption", "taken"].includes(key)) errors.push(`unknown field photo.${key}`);
   }
   if (focus !== undefined && !isPhotoFocus(focus)) errors.push("photo.focus must be an object with only x and y, each a number from 0 to 1 with at most 3 decimal places");
+  const captionProblem = caption === undefined ? null : photoCaptionProblem(caption);
+  if (captionProblem) errors.push(`photo.caption ${captionProblem}`);
+  const takenProblem = taken === undefined ? null : photoTakenProblem(taken, now);
+  if (takenProblem) errors.push(`photo.taken ${takenProblem}`);
   if (typeof full_sha256 !== "string" || !SHA256.test(full_sha256)) errors.push("photo.full_sha256 must be a lower case hex SHA-256");
   if (typeof thumb_sha256 !== "string" || !SHA256.test(thumb_sha256)) errors.push("photo.thumb_sha256 must be a lower case hex SHA-256");
   if (!Number.isInteger(full_bytes) || (full_bytes as number) < 1 || (full_bytes as number) > MAX_PHOTO_BYTES) {
@@ -852,6 +912,8 @@ function checkPhotoFiles(value: unknown, errors: string[]): PhotoFiles | undefin
     thumb_sha256: thumb_sha256 as string,
     thumb_bytes: thumb_bytes as number,
     ...(isPhotoFocus(focus) ? { focus: { x: focus.x, y: focus.y } } : {}),
+    ...(typeof caption === "string" && captionProblem === null ? { caption } : {}),
+    ...(typeof taken === "string" && takenProblem === null ? { taken } : {}),
   };
 }
 
@@ -931,7 +993,7 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     return { ok: false, errors };
   }
   if ((OWNER_TYPES as readonly string[]).includes(type)) return validateOwner(input, type as OwnerSubmission["type"]);
-  for (const other of ["report", "review", "check", "review_report", "photo", "photo_report", "photo_removal", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
+  for (const other of ["report", "review", "check", "review_report", "photo", "photo_report", "photo_removal", "photo_vote", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
     if (other !== type && input[other] !== undefined) errors.push(`${other} is not allowed when type is ${type}`);
   }
 
@@ -965,7 +1027,7 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
   };
 
   let value: FeedbackSubmission | undefined;
-  if ((type === "photo" || type === "photo_erasure" || type === "photo_removal" || type === "review_erasure") && contributor === undefined) {
+  if ((type === "photo" || type === "photo_erasure" || type === "photo_removal" || type === "photo_vote" || type === "review_erasure") && contributor === undefined) {
     errors.push(`contributor is required for a ${type}`);
   }
   const contributorProof = input.contributor_proof;
@@ -1006,7 +1068,7 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
       const reviewReport = checkReviewReport(input.review_report, errors);
       if (reviewReport) value = { ...base, place: place as string, type: "review_report", review_report: reviewReport };
     } else if (type === "photo") {
-      const photo = checkPhotoFiles(input.photo, errors);
+      const photo = checkPhotoFiles(input.photo, errors, now);
       if (photo) value = { ...base, place: place as string, type: "photo", photo };
     } else if (type === "photo_report") {
       const photoReport = checkPhotoReport(input.photo_report, errors);
@@ -1014,6 +1076,9 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     } else if (type === "photo_removal") {
       const removal = checkPhotoRemoval(input.photo_removal, errors);
       if (removal) value = { ...base, place: place as string, type: "photo_removal", photo_removal: removal, ...proofField };
+    } else if (type === "photo_vote") {
+      const vote = checkPhotoVote(input.photo_vote, errors);
+      if (vote) value = { ...base, place: place as string, type: "photo_vote", photo_vote: vote };
     } else if (type === "withdraw") {
       value = { ...base, place: place as string, type: "withdraw" };
     } else {
@@ -1178,7 +1243,7 @@ const OWNER_FIELDS: Record<OwnerSubmission["type"], string[]> = {
 /** Validates the three owner submission types (SPEC "Owners"). */
 function validateOwner(input: Record<string, unknown>, type: OwnerSubmission["type"]): ValidationResult {
   const errors: string[] = [];
-  for (const key of ["report", "review", "check", "review_report", "photo", "photo_report", "photo_removal", "contributor", "contributor_proof", "token", "owner", "claim", "listing", "update", "location"]) {
+  for (const key of ["report", "review", "check", "review_report", "photo", "photo_report", "photo_removal", "photo_vote", "contributor", "contributor_proof", "token", "owner", "claim", "listing", "update", "location"]) {
     if (input[key] !== undefined && !OWNER_FIELDS[type].includes(key)) errors.push(`${key} is not allowed when type is ${type}`);
   }
   if (input.terms_accepted !== true) errors.push("terms_accepted must be true");
