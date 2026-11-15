@@ -19,7 +19,8 @@
  * Decisions go to `overture/decisions.ndjson` on the same branch, in the form
  * `pipeline.overture_decide` reads: each candidate line as the import wrote it,
  * plus `decision` (approve, reject or flag), `reason`, `reviewer` and
- * `by_rules`. A rejected candidate's GERS id also goes on the `gers` list of
+ * `by_rules`. The format is described once, in the data repository's
+ * pipeline/README.md, "Overture decisions". A rejected candidate's GERS id also goes on the `gers` list of
  * `overture/do-not-match.json`, as overture_decide puts it there. The run's
  * decisions are one commit, and the PR gets a comment listing only the
  * flagged candidates, which a person decides by editing their line.
@@ -28,14 +29,14 @@
 import type { AiLike } from "./checks.js";
 import type { Fetch, GitHubApp, GitHubAppConfig } from "./github.js";
 import type { D1Like } from "./recent.js";
-import { answerOf, ModelUnavailable, REVIEW_TIMEOUT_MS, safeReason, withTimeout } from "./reviewer.js";
+import { answerOf, ModelUnavailable, onError, REVIEW_TIMEOUT_MS, safeReason, withTimeout } from "./reviewer.js";
 import { claimRun, OVERTURE_REVIEW, REVIEW_EVERY_MS } from "./runs.js";
 
 /** The data repository's branch for the monthly Overture import's PR. */
 export const OVERTURE_BRANCH = "overture-sync";
 /** The candidate lines on that branch, written by `pipeline.overture --candidates`. */
 export const CANDIDATES_PATH = "overture/candidates.ndjson";
-/** The reviewed candidate lines, read by `pipeline.overture_decide`. */
+/** The reviewed candidate lines, read by `pipeline.overture_decide`. Format: the data repository's pipeline/README.md, "Overture decisions". */
 export const DECISIONS_PATH = "overture/decisions.ndjson";
 /** The Overture do-not-match list: `{"pairs": [...], "gers": [...]}`. */
 export const OVERTURE_DO_NOT_MATCH_PATH = "overture/do-not-match.json";
@@ -82,6 +83,17 @@ export interface CandidateCheck {
 /** What the model reads of a candidate's website. */
 export type SiteView = { host: string; title: string; description: string; text: string } | { host: string; problem: string };
 
+/** Limits on reading a candidate's website. */
+export interface SiteOptions {
+  /** How long the website may take, redirects and all (default SITE_TIMEOUT_MS). */
+  timeoutMs?: number;
+  /** The most of the page that is read (default SITE_MAX_BYTES). */
+  maxBytes?: number;
+}
+
+/** "1 candidate", "2 candidates". */
+const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+
 export interface CheckDeps {
   ai: AiLike;
   model: string;
@@ -115,7 +127,9 @@ function settleByRules(c: OvertureCandidate): CandidateCheck | null {
 
 // ------------------------------------------------------------------ the website
 
-const PUBLIC = "it is not a public web address";
+// Why a website could not be read, as the model and the PR comment see it.
+const NOT_PUBLIC_ADDRESS = "it is not a public web address";
+const TIMED_OUT = "it did not answer in time";
 
 /** The URL when it is a public http or https address on the default port, or null. */
 function publicUrl(text: string, base?: URL): URL | null {
@@ -196,16 +210,15 @@ async function readLimited(res: Response, max: number): Promise<string> {
 export async function readWebsite(
   fetchSite: Fetch,
   website: string,
-  options: { timeoutMs?: number; maxBytes?: number } = {},
+  options: SiteOptions = {},
 ): Promise<SiteView> {
   const first = publicUrl(website);
   const shownHost = first ? bareHost(first) : "";
-  if (!first) return { host: shownHost, problem: PUBLIC };
+  const problem = (text: string): SiteView => ({ host: shownHost, problem: text });
+  if (!first) return problem(NOT_PUBLIC_ADDRESS);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? SITE_TIMEOUT_MS);
-  const timedOut = new Promise<SiteView>((resolve) =>
-    controller.signal.addEventListener("abort", () => resolve({ host: shownHost, problem: "it did not answer in time" })),
-  );
+  const timedOut = new Promise<SiteView>((resolve) => controller.signal.addEventListener("abort", () => resolve(problem(TIMED_OUT))));
   const work = async (): Promise<SiteView> => {
     let url = first;
     for (let hops = 0; ; hops++) {
@@ -218,19 +231,19 @@ export async function readWebsite(
         await res.body?.cancel().catch(() => undefined);
         const location = res.headers.get("location");
         const next = location ? publicUrl(location, url) : null;
-        if (!next || bareHost(next) !== bareHost(first)) return { host: shownHost, problem: "it redirects to another host" };
-        if (hops >= MAX_REDIRECTS) return { host: shownHost, problem: "it redirects too many times" };
+        if (!next || bareHost(next) !== bareHost(first)) return problem("it redirects to another host");
+        if (hops >= MAX_REDIRECTS) return problem("it redirects too many times");
         url = next;
         continue;
       }
       if (!res.ok) {
         await res.body?.cancel().catch(() => undefined);
-        return { host: shownHost, problem: `it answered ${res.status}` };
+        return problem(`it answered ${res.status}`);
       }
       const type = (res.headers.get("content-type") ?? "").toLowerCase();
       if (!type.includes("text/html") && !type.includes("text/plain") && !type.includes("application/xhtml")) {
         await res.body?.cancel().catch(() => undefined);
-        return { host: shownHost, problem: "it is not a web page" };
+        return problem("it is not a web page");
       }
       return { host: shownHost, ...pageText(await readLimited(res, options.maxBytes ?? SITE_MAX_BYTES)) };
     }
@@ -238,7 +251,7 @@ export async function readWebsite(
   try {
     return await Promise.race([work(), timedOut]);
   } catch {
-    return controller.signal.aborted ? { host: shownHost, problem: "it did not answer in time" } : { host: shownHost, problem: "it could not be read" };
+    return problem(controller.signal.aborted ? TIMED_OUT : "it could not be read");
   } finally {
     clearTimeout(timer);
     controller.abort();
@@ -277,7 +290,7 @@ const DECISION_SCHEMA = {
  * A model call that fails or takes too long throws ModelUnavailable, so the
  * candidate is asked about again next run.
  */
-export async function checkCandidate(deps: CheckDeps, c: OvertureCandidate, siteOptions?: { timeoutMs?: number; maxBytes?: number }): Promise<CandidateCheck> {
+export async function checkCandidate(deps: CheckDeps, c: OvertureCandidate, siteOptions?: SiteOptions): Promise<CandidateCheck> {
   const settled = settleByRules(c);
   if (settled) return settled;
   const site = c.website ? await readWebsite(deps.fetchSite, c.website, siteOptions) : null;
@@ -333,7 +346,7 @@ export interface OvertureReviewerDeps extends CheckDeps {
   onError?: (error: unknown) => void;
   /** Called when the model call for candidate `gers` failed. The run goes on to the next. */
   onModelFailure?: (gers: string, error: unknown) => void;
-  siteOptions?: { timeoutMs?: number; maxBytes?: number };
+  siteOptions?: SiteOptions;
 }
 
 /** One decision, as the run returns it. */
@@ -418,7 +431,7 @@ export function flagComment(reviewer: string, records: readonly CandidateRecord[
   const count = (d: CandidateDecision) => records.filter((r) => r.decision === d).length;
   const flagged = records.filter((r) => r.decision === "flag");
   const lines = [
-    `The reviewer \`${reviewer}\` checked ${records.length} Overture candidate${records.length === 1 ? "" : "s"}: ` +
+    `The reviewer \`${reviewer}\` checked ${plural(records.length, "Overture candidate")}: ` +
       `${count("approve")} approved, ${count("reject")} rejected (their GERS ids are now on \`${OVERTURE_DO_NOT_MATCH_PATH}\`) and ${flagged.length} flagged for a person. ` +
       `Every decision is in \`${DECISIONS_PATH}\` on this branch, with its reason. To decide a flagged one, change its \`decision\` to \`approve\` or \`reject\` there.`,
     "",
@@ -479,7 +492,7 @@ export async function reviewOvertureCandidates(deps: OvertureReviewerDeps): Prom
       decided.set(c.gers, { decision: record.decision, reason: record.reason, reviewer, by_rules: record.by_rules });
     }
   } catch (error) {
-    (deps.onError ?? (() => undefined))(error);
+    onError(deps, error);
   }
   if (records.length === 0) return { outcome: "reviewed", pr: pr.number, decisions: [], committed: false };
 
@@ -495,7 +508,7 @@ export async function reviewOvertureCandidates(deps: OvertureReviewerDeps): Prom
   if (rejected.length > 0) writes.push({ path: OVERTURE_DO_NOT_MATCH_PATH, content: withRejected(listFile?.text, rejected), sha: listFile?.sha });
 
   const message = [
-    `${reviewer}: ${records.length} decision${records.length === 1 ? "" : "s"} on Overture candidates`,
+    `${reviewer}: ${plural(records.length, "decision")} on Overture candidates`,
     "",
     ...records.map((r) => `- ${r.decision} ${r.gers}: ${r.reason}`),
     "",
@@ -505,7 +518,7 @@ export async function reviewOvertureCandidates(deps: OvertureReviewerDeps): Prom
   try {
     committed = await commitOnce(deps, base, writes, [...writes, { path: CANDIDATES_PATH, sha: candidateFile.sha }], message);
   } catch (error) {
-    (deps.onError ?? (() => undefined))(error);
+    onError(deps, error);
   }
   if (committed && records.some((r) => r.decision === "flag")) {
     await github.commentOnPullRequest(data, pr.number, flagComment(reviewer, records, new Map(candidates.map((c) => [c.gers, c]))));

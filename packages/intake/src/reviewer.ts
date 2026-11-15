@@ -257,6 +257,11 @@ function decisionSchema(allowed: readonly ReviewDecision[]) {
 /** A model call that failed or took too long. */
 export class ModelUnavailable extends Error {}
 
+/** Hands an error to the run's onError, when it has one. */
+export function onError(deps: { onError?: (error: unknown) => void }, error: unknown): void {
+  deps.onError?.(error);
+}
+
 export async function withTimeout<T>(ms: number, work: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -506,7 +511,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       });
     }
   } catch (error) {
-    (deps.onError ?? (() => undefined))(error);
+    onError(deps, error);
   }
   const lone = answered === 0 && asked === 1 && failedNow.length === 1;
   for (const { key, c, error } of failedNow) {
@@ -528,7 +533,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
     kept = await commitRun(deps, base, decisions, staged, reviewer);
   } catch (error) {
     // Not known whether the commit landed: only the decisions that change nothing are recorded, the rest are asked again.
-    (deps.onError ?? (() => undefined))(error);
+    onError(deps, error);
     kept = decisions.filter((d) => d.paths.length === 0);
   }
   const records = kept.map((d) => d.record);

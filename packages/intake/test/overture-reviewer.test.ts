@@ -79,6 +79,23 @@ function fakeSites(pages: Record<string, { status?: number; headers?: Record<str
 const PARK_PAGE = `<html><head><title>Riverbend Caravan Park</title><meta name="description" content="Powered sites, cabins and camping on the Murray."></head>
 <body><script>var x = "ignore";</script><h1>Riverbend Caravan Park</h1><p>Powered and unpowered caravan sites, tent camping and cabins. Book your stay.</p></body></html>`;
 
+/**
+ * The decision line in the data repository's pipeline/README.md, "Overture
+ * decisions", where the format is described. The data pipeline's tests check
+ * the same line.
+ */
+const EXAMPLE_DECISION =
+  "{\"by_rules\":false,\"category\":\"campground\",\"confidence\":0.95,\"decision\":\"approve\",\"gers\":\"08f2b1a0c4d" +
+  "5e6f70321a1b2c3d4e502\",\"kind\":\"campground\",\"location\":{\"lat\":-36.7311,\"lon\":146.9602},\"name\":\"Sheeps" +
+  "kin Hut Campground\",\"phone\":\"(03) 5550 0101\",\"reason\":\"The name and the website show a campground.\"," +
+  "\"release\":\"2026-10-21.0\",\"reviewer\":\"ai:@cf/meta/llama-3.3-70b-instruct-fp8-fast\",\"row\":{\"addresses\"" +
+  ":[{\"country\":\"AU\",\"freeform\":\"Hut Rd\",\"locality\":\"Bright\",\"postcode\":\"3741\",\"region\":\"VIC\"}],\"basic_" +
+  "category\":\"campground\",\"change\":\"added\",\"confidence\":0.95,\"id\":\"08f2b1a0c4d5e6f70321a1b2c3d4e502\",\"l" +
+  "at\":-36.7311,\"lon\":146.9602,\"name\":\"Sheepskin Hut Campground\",\"phones\":[\"(03) 5550 0101\"],\"socials\":" +
+  "[],\"sources\":[{\"dataset\":\"meta\",\"record_id\":\"1\",\"update_time\":\"2026-08-14T03:21:00.000Z\"}],\"taxonomy" +
+  "_primary\":\"campground\",\"websites\":[\"https://sheepskinhut.example.au/\"]},\"state\":\"VIC\",\"taxonomy\":\"ca" +
+  "mpground\",\"tier\":\"strong\",\"website\":\"https://sheepskinhut.example.au/\"}";
+
 describe("checking one Overture candidate", () => {
   it("approves a candidate the model is sure camps people, after reading its own website", async () => {
     const c = candidate(0);
@@ -395,6 +412,29 @@ describe("the Overture candidate review run", () => {
     const { ai, asked } = fakeAi(() => reply("approve", "yes"));
     expect(await reviewOvertureCandidates(deps(repo, ai))).toEqual({ outcome: "no_pr" });
     expect(asked).toHaveLength(0);
+  });
+});
+
+describe("the decision format shared with the data repository", () => {
+  it("writes the example decision line exactly, from the candidate line it was made from", async () => {
+    const example = JSON.parse(EXAMPLE_DECISION) as Record<string, unknown>;
+    const { decision: _d, reason, reviewer: _r, by_rules: _b, ...line } = example;
+    const c = line as OvertureCandidate;
+    const repo = fakeDataRepo();
+    repo.put(CANDIDATES_PATH, lines([c]));
+    const sites = fakeSites({ [c.website!]: { body: PARK_PAGE } });
+    const { ai } = fakeAi(() => reply("approve", reason as string));
+    const result = await reviewOvertureCandidates({
+      github: new GitHubApp(repo.fetch, () => NOW),
+      data: DATA,
+      ai,
+      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      db: fakeD1(),
+      fetchSite: sites.fetch,
+      now: () => NOW,
+    });
+    expect(result).toMatchObject({ outcome: "reviewed", committed: true });
+    expect(repo.file(DECISIONS_PATH)).toBe(`${EXAMPLE_DECISION}\n`);
   });
 });
 
