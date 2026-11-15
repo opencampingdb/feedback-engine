@@ -59,6 +59,23 @@ describe("merging a new place into the place it duplicates", () => {
     expect(kept.fact_dates).toEqual({ website: "2026-11-01T00:00:00Z" });
   });
 
+  it("lets a traveller's value replace an Overture value on the kept place, as pipeline.merge does", () => {
+    const kept0 = record({
+      facts: { toilets: true, website: "https://overture.example.au/" },
+      fact_sources: { name: "osm", toilets: "osm", website: "overture" },
+      fact_dates: { website: "2026-11-01T00:00:00Z" },
+    });
+    const traveller = added({
+      facts: { website: "https://creekbend.example.au/" },
+      fact_sources: { name: "feedback", location: "feedback", website: "feedback" },
+      fact_dates: { name: AT, location: AT, website: AT },
+    });
+    const { kept } = mergePlaces(kept0, traveller, AT);
+    expect(kept.facts).toEqual({ toilets: true, website: "https://creekbend.example.au/" });
+    expect(kept.fact_sources).toEqual({ name: "osm", toilets: "osm", website: "feedback" });
+    expect(kept.fact_dates).toEqual({ website: AT });
+  });
+
   it("lets a reviewer merge a duplicate case", () => {
     const c: HeldCase = { case: "duplicate", place: NEW, location: { lat: -36.85, lon: 144.55 }, kind: "rest_area", standing: "held", duplicate_of: OLD, distance_m: 30, feedback: ["fb_01JC0000000000000000000001"] };
     expect(allowedDecisions(c)).toEqual(["approve", "merge", "take_down", "leave"]);

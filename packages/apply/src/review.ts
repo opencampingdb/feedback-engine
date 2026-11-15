@@ -353,7 +353,8 @@ export function reviewerMergeProblem(place: Place, other: Place | undefined, dis
  * `dropped` merged into `kept` at `at`, as the data repository's
  * `pipeline.merge` does it: the facts `dropped` has from feedback,
  * contributions, community reports or Overture Maps that `kept` lacks move
- * with their dates, `kept` takes the newer `last_confirmed`, and `dropped` becomes a
+ * with their dates (and any of them but Overture replaces an Overture value
+ * on `kept`), `kept` takes the newer `last_confirmed`, and `dropped` becomes a
  * tombstone, `status: "merged"` with `merged_into`, otherwise unchanged.
  * Releases list tombstones in `merged.ndjson.gz`, so an app that stored the
  * new place's id can follow it. A person reverses a merge by setting the
@@ -363,7 +364,9 @@ export function reviewerMergeProblem(place: Place, other: Place | undefined, dis
 export function mergePlaces(kept: Place, dropped: Place, at: string): { kept: Place; tombstone: Place } {
   const next = structuredClone(kept);
   for (const [key, source] of Object.entries(dropped.fact_sources).sort(([a], [b]) => (a < b ? -1 : 1))) {
-    if (!isFactName(key) || !MOVABLE.includes(source!) || key in next.facts) continue;
+    // A value from any movable source but Overture also replaces an Overture value (a gap fill) on the kept place.
+    const replaceable = !(key in next.facts) || (next.fact_sources[key] === "overture" && source !== "overture");
+    if (!isFactName(key) || !MOVABLE.includes(source!) || !replaceable) continue;
     const value = (dropped.facts as Record<string, FactValue | undefined>)[key];
     if (value === undefined) continue;
     (next.facts as Record<string, FactValue>)[key] = value;
