@@ -364,9 +364,9 @@ export function reviewerMergeProblem(place: Place, other: Place | undefined, dis
 export function mergePlaces(kept: Place, dropped: Place, at: string): { kept: Place; tombstone: Place } {
   const next = structuredClone(kept);
   for (const [key, source] of Object.entries(dropped.fact_sources).sort(([a], [b]) => (a < b ? -1 : 1))) {
+    if (!isFactName(key) || !MOVABLE.includes(source!)) continue;
     // A value from any movable source but Overture also replaces an Overture value (a gap fill) on the kept place.
-    const replaceable = !(key in next.facts) || (next.fact_sources[key] === "overture" && source !== "overture");
-    if (!isFactName(key) || !MOVABLE.includes(source!) || !replaceable) continue;
+    if (key in next.facts && !(next.fact_sources[key] === "overture" && source !== "overture")) continue;
     const value = (dropped.facts as Record<string, FactValue | undefined>)[key];
     if (value === undefined) continue;
     (next.facts as Record<string, FactValue>)[key] = value;
