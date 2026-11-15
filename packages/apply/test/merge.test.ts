@@ -46,6 +46,19 @@ describe("merging a new place into the place it duplicates", () => {
     expect(tombstone).toEqual({ ...added(), status: "merged", merged_into: OLD });
   });
 
+  it("moves the Overture values the kept place lacks, with their dates, like the other reported sources", () => {
+    const filled = added({
+      facts: { website: "https://creekbend.example.au/", toilets: false },
+      fact_sources: { name: "feedback", website: "overture", toilets: "overture" },
+      fact_dates: { name: AT, website: "2026-11-01T00:00:00Z", toilets: "2026-11-01T00:00:00Z" },
+    });
+    const { kept } = mergePlaces(record(), filled, AT);
+    // The kept place's own toilets value stays. The website it lacked moves, still sourced overture.
+    expect(kept.facts).toEqual({ toilets: true, website: "https://creekbend.example.au/" });
+    expect(kept.fact_sources).toEqual({ name: "osm", toilets: "osm", website: "overture" });
+    expect(kept.fact_dates).toEqual({ website: "2026-11-01T00:00:00Z" });
+  });
+
   it("lets a reviewer merge a duplicate case", () => {
     const c: HeldCase = { case: "duplicate", place: NEW, location: { lat: -36.85, lon: 144.55 }, kind: "rest_area", standing: "held", duplicate_of: OLD, distance_m: 30, feedback: ["fb_01JC0000000000000000000001"] };
     expect(allowedDecisions(c)).toEqual(["approve", "merge", "take_down", "leave"]);
