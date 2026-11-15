@@ -8,11 +8,11 @@ import type { NoteChange, Place } from "./types.js";
  * Only values that changed and whose source is now `feedback` or `owner`
  * count. Values from OSM (the nightly sync) are never echoed back, and
  * contributed, community report and Overture Maps values never leave Open
- * Camping DB. Description, location,
- * booking details, ratings, temporary closures and reopening dates are
- * never sent, and nothing is sent for a place that is not in OSM or is a
- * merged tombstone. A text value holding an email address, phone number or
- * link is never sent, except a website or phone fact.
+ * Camping DB. Description, location, booking details, ratings, temporary
+ * closures and reopening dates are never sent, and nothing is sent for a
+ * place that is not in OSM or is a merged tombstone. A text value holding an
+ * email address, phone number or link is never sent, except a website or
+ * phone fact.
  */
 
 /** Facts whose value is itself a contact detail. */
