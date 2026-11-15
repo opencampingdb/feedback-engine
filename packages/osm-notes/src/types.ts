@@ -3,8 +3,10 @@
  * The full shapes are in packages/apply/src/types.ts and packages/sdk.
  */
 
-/** Where a value in a place record came from. `rule`: set by a rule in the data release (named in its `fact_rules`), so it is in the release and the place index but never in `places/`. */
-export type Source = "osm" | "feedback" | "contributed" | "owner" | "community_report" | "rule";
+import type { FactSource } from "@opencampingdb/feedback";
+
+/** Where a value in a place record came from, as the SDK lists them. Only `feedback` and `owner` values ever go to OSM. */
+export type Source = FactSource;
 
 export type OsmType = "node" | "way" | "relation";
 

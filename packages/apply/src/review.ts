@@ -309,7 +309,7 @@ export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecisio
 export const pairKey = (a: string, b: string) => (a < b ? `${a} ${b}` : `${b} ${a}`);
 
 /** Sources whose facts move to the kept record in a merge, as the data repository's `pipeline.merge` moves them. */
-const MOVABLE: readonly string[] = ["feedback", "contributed", "community_report"];
+const MOVABLE: readonly string[] = ["feedback", "contributed", "community_report", "overture"];
 
 /**
  * Why a new place may not be merged into `other`, the place it may
@@ -352,8 +352,9 @@ export function reviewerMergeProblem(place: Place, other: Place | undefined, dis
 /**
  * `dropped` merged into `kept` at `at`, as the data repository's
  * `pipeline.merge` does it: the facts `dropped` has from feedback,
- * contributions or community reports that `kept` lacks move with their
- * dates, `kept` takes the newer `last_confirmed`, and `dropped` becomes a
+ * contributions, community reports or Overture Maps that `kept` lacks move
+ * with their dates (and any of them but Overture replaces an Overture value
+ * on `kept`), `kept` takes the newer `last_confirmed`, and `dropped` becomes a
  * tombstone, `status: "merged"` with `merged_into`, otherwise unchanged.
  * Releases list tombstones in `merged.ndjson.gz`, so an app that stored the
  * new place's id can follow it. A person reverses a merge by setting the
@@ -363,7 +364,9 @@ export function reviewerMergeProblem(place: Place, other: Place | undefined, dis
 export function mergePlaces(kept: Place, dropped: Place, at: string): { kept: Place; tombstone: Place } {
   const next = structuredClone(kept);
   for (const [key, source] of Object.entries(dropped.fact_sources).sort(([a], [b]) => (a < b ? -1 : 1))) {
-    if (!isFactName(key) || !MOVABLE.includes(source!) || key in next.facts) continue;
+    if (!isFactName(key) || !MOVABLE.includes(source!)) continue;
+    // A value from any movable source but Overture also replaces an Overture value (a gap fill) on the kept place.
+    if (key in next.facts && !(next.fact_sources[key] === "overture" && source !== "overture")) continue;
     const value = (dropped.facts as Record<string, FactValue | undefined>)[key];
     if (value === undefined) continue;
     (next.facts as Record<string, FactValue>)[key] = value;

@@ -34,6 +34,7 @@ import { fromBase64, hex, sha256, toBase64, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
 import type { MajorRoads } from "@opencampingdb/apply/review";
 import { recordInboxWrite, startApplyIfDue, type RunOutcome } from "./runs.js";
+import { reviewOvertureCandidates, type OvertureReviewResult } from "./overture-reviewer.js";
 import { DEFAULT_REVIEW_MODEL, MAX_MODEL_FAILURES, parseBotLogins, REVIEW_BRANCH, reviewHeldCases, type ReviewResult } from "./reviewer.js";
 import { IntegrityError, IntegrityUnavailable, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
 import { SafeSearch, verdict, worseRatings } from "./safesearch.js";
@@ -247,6 +248,14 @@ export interface Env {
   AI_REVIEWER?: string;
   /** The Workers AI model the reviewer asks. Defaults to DEFAULT_REVIEW_MODEL. */
   REVIEW_MODEL?: string;
+  /**
+   * `on` runs the AI reviewer's check of Overture candidates from the
+   * scheduled job, at most once every 10 minutes, on the open PR from
+   * `overture-sync` on DATA_REPO (src/overture-reviewer.ts). Needs AI,
+   * RECENT_LIST and DATA_REPO, with the same GitHub App access as
+   * AI_REVIEWER, and fetches each candidate's own website. Off when left out.
+   */
+  OVERTURE_REVIEWER?: string;
   /**
    * Comma separated bot logins (`<app slug>[bot]`) whose comments on the
    * review PR the AI reviewer reads: the apply's GitHub App, which posts held
@@ -757,6 +766,35 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now"> & { roads?: Maj
 }
 
 /**
+ * The AI reviewer's check of Overture candidates, when it is on (see
+ * OVERTURE_REVIEWER), or "off". A failure is logged and the check tries again
+ * on its next run.
+ */
+export function createOvertureReviewer(deps: Pick<Deps, "fetch" | "now">) {
+  const github = new GitHubApp(deps.fetch, deps.now);
+  return async function reviewOverture(env: Env): Promise<OvertureReviewResult | "off" | "failed"> {
+    if (env.OVERTURE_REVIEWER !== "on" || !env.AI || !env.RECENT_LIST || !env.DATA_REPO) return "off";
+    const warn = (error: unknown) => console.warn(`the Overture candidate check stopped, trying again next run: ${String(error)}`);
+    try {
+      return await reviewOvertureCandidates({
+        github,
+        data: { ...inboxConfig(env), repo: env.DATA_REPO },
+        ai: env.AI,
+        model: env.REVIEW_MODEL || DEFAULT_REVIEW_MODEL,
+        db: env.RECENT_LIST,
+        fetchSite: deps.fetch,
+        now: deps.now,
+        onError: warn,
+        onModelFailure: (gers, error) => console.warn(`the Overture candidate check's model call failed on ${gers}, asking again next run: ${String(error)}`),
+      });
+    } catch (error) {
+      warn(error);
+      return "failed";
+    }
+  };
+}
+
+/**
  * Writes the queued items to the inbox as one commit (inbox-queue.ts). A flush
  * counts as an inbox write for the run triggers. A flush that fails, or gives
  * up on a branch that keeps moving, is logged as an error and the items wait
@@ -799,13 +837,15 @@ export function createFlush(deps: Pick<Deps, "fetch" | "now">) {
 /**
  * The scheduled job, run every minute: writes the queued items to the inbox,
  * starts the inbox's apply workflow when it is due (see runs.ts), then runs
- * the AI reviewer when it is on and due (see reviewer.ts). A failed start,
+ * the AI reviewer and its Overture candidate check when they are on and due
+ * (see reviewer.ts and overture-reviewer.ts). A failed start,
  * such as the GitHub App missing `actions: write`, is logged and tried again
  * on the next tick. Returns what became of the apply.
  */
 export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
   const github = new GitHubApp(deps.fetch, deps.now);
   const review = createReviewer(deps);
+  const reviewOverture = createOvertureReviewer(deps);
   const flush = createFlush(deps);
   return async function scheduled(env: Env): Promise<RunOutcome | "off"> {
     if (env.RECENT_LIST) {
@@ -828,6 +868,7 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
           )
         : "off";
     await review(env);
+    await reviewOverture(env);
     return outcome;
   };
 }
