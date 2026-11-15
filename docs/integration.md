@@ -480,6 +480,8 @@ const visible = places.filter((p) => {
 
 Lay the changes over each place of your release with `withRecentChanges(place, changes, dataVersion)`, where `dataVersion` is the `data_version` of the release you have. It sets each fact (with `fact_sources` `feedback` and the `fact_dates` entry the time it was accepted), takes off a fact whose value is `null`, and skips the changes your release already has: those whose `in_data_at` is earlier than the commit time at the front of `dataVersion` (`20261030T160000Z-abc1234` is 16:00 UTC on 30 October 2026, and `dataVersionTime` reads it). When the version is not in that form, every change is laid over. It returns a new record, or the same one when no change applies.
 
+**Where a value came from.** Each place's `fact_sources` names the source of each value: `osm`, `feedback`, `contributed`, `owner`, `community_report`, `rule` or `overture` (Overture Maps, filling a gap no other source fills). `FACT_SOURCES` lists them and `isFactSource` checks one, so an app can label a value, for example "From Overture Maps", and treat a source it does not know as unknown.
+
 ```ts
 import { withRecentChanges, type RecentList } from "@opencampingdb/feedback";
 
@@ -1103,8 +1105,10 @@ const feedback = createFeedbackClient({
 
 ## What changed by version
 
-What an app moving to 0.36.0 needs to know. A minor version (0.36.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
+What an app moving to 0.37.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
 
+- **0.37.0.** A new fact source:
+  - A place's `fact_sources` may name `overture`, a value from Overture Maps that fills a gap no other source fills: a name for a place with none, a website, a phone or an address. Any other source replaces it, doubts and contact reports take it down as they do a traveller's value, a `clear` of it goes to a person, and it never goes to OpenStreetMap. `FACT_SOURCES`, `isFactSource` and the `FactSource` type are exported, so an app can label where a value came from. Nothing an app sends changes.
 - **0.36.0.** New fields and a new call for photo services ([photos.md](photos.md)):
   - `photo()` takes an optional `caption` (at most 200 characters, tidied onto one line with `tidyCaption`) and `taken` (the month the photo was taken, `YYYY-MM`, never in the future or before 1990). `photoTakenMonth(value)` reads the month from Exif text, an ISO date or a `Date`. The apply run publishes both on the photo's record, and leaves out a caption that fails the text checks a review gets, publishing the photo without it.
   - `votePhoto({ place, photo, helpful, contributor, consent })` marks someone else's photo helpful (`helpful: true`) or takes that back (`false`). It is the new feedback type `photo_vote`, queued like a report. One vote per contributor, install or attested key counts per photo, 50 a day. The photo intake refuses a vote on the voter's own photo with `403 own_photo`. Each apply run recounts and writes `helpful` and `helpful_12m` (votes in the last 12 months) on the photo's record.

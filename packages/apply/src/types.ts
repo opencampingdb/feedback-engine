@@ -1,10 +1,17 @@
-import type { FactName, PlaceFacts, PlaceGroup, PlaceKind } from "@opencampingdb/feedback";
+import type { FactName, FactSource, PlaceFacts, PlaceGroup, PlaceKind } from "@opencampingdb/feedback";
 
 /** `merged` marks a tombstone: the record was merged into `merged_into` by a person. */
 export type PlaceStatus = "open" | "reported_closed" | "closed" | "temporarily_closed" | "merged";
 
-/** Where a value in a place record came from. `rule`: set by a rule in the data release (named in its `fact_rules`), so it is in the release and the place index but never in `places/`. */
-export type Source = "osm" | "feedback" | "contributed" | "owner" | "community_report" | "rule";
+/**
+ * Where a value in a place record came from, as the SDK lists them. `rule`:
+ * set by a rule in the data release (named in its `fact_rules`), so it is in
+ * the release and the place index but never in `places/`. `overture`: an
+ * Overture Maps gap fill, which has none of the protection an `osm` or
+ * `owner` value has: doubts and contact reports take it down, and a
+ * traveller's report replaces it.
+ */
+export type Source = FactSource;
 
 /** Keys of `fact_sources` and `fact_dates`: every fact, plus the name, location, kind, status and description. */
 export type SourceKey = FactName | "name" | "location" | "kind" | "status" | "description";
@@ -25,7 +32,7 @@ export interface Place {
   fact_sources: Partial<Record<SourceKey, Source>>;
   /**
    * When each value not from OSM was accepted, UTC: one entry for every
-   * `fact_sources` entry that is `feedback`, `contributed` or `owner`.
+   * `fact_sources` entry that is not `osm` or `rule`.
    * Left out when there are none. Set it with `setSource`.
    */
   fact_dates?: Partial<Record<SourceKey, string>>;

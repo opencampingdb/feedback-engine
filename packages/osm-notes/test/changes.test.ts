@@ -37,6 +37,16 @@ describe("noteChanges", () => {
     expect(noteChanges(before, next)).toEqual([]);
   });
 
+  it("never sends a value Overture Maps filled in: a fact, a contact, the name or a closure", () => {
+    const next = after({
+      name: "Lake Eppalock Holiday Park",
+      facts: { fee: false, toilets: false, website: "https://park.example.org", phone: "+61 3 5555 0100" },
+      status: "closed",
+      fact_sources: { fee: "overture", toilets: "osm", website: "overture", phone: "overture", name: "overture", status: "overture" },
+    });
+    expect(noteChanges(before, next)).toEqual([]);
+  });
+
   it("skips a value that did not change, even when its source did", () => {
     const next = after({ fact_sources: { fee: "feedback", toilets: "osm" } });
     expect(noteChanges(before, next)).toEqual([]);

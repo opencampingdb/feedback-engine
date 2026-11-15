@@ -53,7 +53,7 @@ await feedback.flush();
 
 **Release updater** (`createReleaseUpdater({ adapter, readableLayouts, readableFormats, gunzip?, fetch?, storage? })`): `update({ knownDataVersion })` keeps the app's SQLite copy of the release database current, by a chain of changesets in one transaction or a whole new database. It answers `up_to_date`, `updated`, `replaced`, `older_release`, `layout_unsupported`, `format_unsupported` or `failed` (with a `reason` and a `cause`), and never throws. Data releases are at format 13 and layout 2. See [docs/integration.md](../../docs/integration.md#10-keeping-the-data-current) section 10 for the adapter, a worked Expo SQLite adapter and the phone's peak memory.
 
-**Helpers**: `tidyName`, `tidyText`, `tidyCaption`, `textProblem`, `firstProblem` and `hasLoneSurrogate` for text, `factFreeText` and `FREE_TEXT_FACTS` for the free words in a fact value, `isCommonsFileName` for a `commons_mismatch` report's file, `contactProblem` and `addressProblems` for contacts and addresses, `openingHoursProblem`, `openMonths`, `withOpenMonths` and `withoutOpenMonths` for `opening_hours`, `parseCharge` and `chargeConditions` for charges, `monthsInRange` for `pets_months`, `withRecentChanges`, `dataVersionTime` and `dataVersionProblem` for the recent list and release names, `photoTakenMonth`, `photoCaptionProblem` and `photoTakenProblem` for a photo's caption and month, `progressInRelease`, `newPlaceId` and `sdkCoordinate`.
+**Helpers**: `tidyName`, `tidyText`, `tidyCaption`, `textProblem`, `firstProblem` and `hasLoneSurrogate` for text, `factFreeText` and `FREE_TEXT_FACTS` for the free words in a fact value, `isCommonsFileName` for a `commons_mismatch` report's file, `contactProblem` and `addressProblems` for contacts and addresses, `openingHoursProblem`, `openMonths`, `withOpenMonths` and `withoutOpenMonths` for `opening_hours`, `parseCharge` and `chargeConditions` for charges, `monthsInRange` for `pets_months`, `withRecentChanges`, `dataVersionTime` and `dataVersionProblem` for the recent list and release names, `photoTakenMonth`, `photoCaptionProblem` and `photoTakenProblem` for a photo's caption and month, `FACT_SOURCES` and `isFactSource` for where a place's value came from (its `fact_sources` entry), `progressInRelease`, `newPlaceId` and `sdkCoordinate`.
 
 ## Options
 
@@ -101,7 +101,11 @@ Key registration refusals use the same codes. Registration also answers `malform
 
 A patch version (0.28.1) is a fix or a small change to an existing call. A minor version (0.32.0) adds a call, option, field or type, and before 1.0.0 may also mark a breaking change, which its release notes spell out. [docs/integration.md](../../docs/integration.md#what-changed-by-version), "What changed by version", lists the recent ones.
 
-This is 0.36.0. What an app moving to it needs to know:
+This is 0.37.0. What an app moving to it needs to know:
+
+- A place's `fact_sources` may name a new source, `overture`: a value from Overture Maps that fills a gap no other source fills, such as a name, website, phone or address. `FACT_SOURCES`, `isFactSource` and the `FactSource` type list every source, so an app can label where a value came from. Any other source replaces an `overture` value, doubts and contact reports take it down as they do a traveller's value, and it never goes to OpenStreetMap. Nothing an app sends changes.
+
+What an app moving to 0.36.0 needed to know:
 
 - `photo()` takes an optional `caption` (at most 200 characters, one line) and `taken` (`YYYY-MM`, read from the original file's Exif with `photoTakenMonth` before the SDK removes the metadata). Records carry both, and a caption that fails the review text checks is left out while the photo is published.
 - `votePhoto({ place, photo, helpful, contributor, consent })` marks someone else's photo helpful or takes it back, queued like a report. Records carry `helpful` and `helpful_12m`. The photo intake refuses a vote on the voter's own photo with `403 own_photo`. Deploy the photo intake and move the apply pin to 0.36.0 first: an older intake refuses these with `400` ([docs/photos.md](../../docs/photos.md#helpful-votes)).

@@ -85,6 +85,24 @@ export type PlaceKind = string;
 /** A kind's group, also from `data/schema/kinds.json`. */
 export type PlaceGroup = string;
 
+/**
+ * Where a value in a place record came from, as its `fact_sources` entry
+ * names it:
+ * - `osm`: OpenStreetMap, through the data's nightly sync.
+ * - `feedback`: a traveller's report.
+ * - `contributed`: sent with a place a traveller added.
+ * - `owner`: the place's verified owner.
+ * - `community_report`: a community report.
+ * - `rule`: a data rule in the release, named in the record's `fact_rules`.
+ * - `overture`: Overture Maps, filling a gap no other source fills. Any other
+ *   source replaces it, and it never goes to OpenStreetMap.
+ */
+export const FACT_SOURCES = ["osm", "feedback", "contributed", "owner", "community_report", "rule", "overture"] as const;
+export type FactSource = (typeof FACT_SOURCES)[number];
+
+/** True for a source a place record's `fact_sources` may name. */
+export const isFactSource = (value: unknown): value is FactSource => typeof value === "string" && (FACT_SOURCES as readonly string[]).includes(value);
+
 export type PetsValue = "yes" | "no" | "leashed" | "seasonal";
 /** true when there is a charge, false when free, donation when payment is by donation. */
 export type FeeValue = boolean | "donation";
