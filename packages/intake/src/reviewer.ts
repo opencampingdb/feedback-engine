@@ -254,9 +254,10 @@ function decisionSchema(allowed: readonly ReviewDecision[]) {
   };
 }
 
-class ModelUnavailable extends Error {}
+/** A model call that failed or took too long. */
+export class ModelUnavailable extends Error {}
 
-async function withTimeout<T>(ms: number, work: Promise<T>): Promise<T> {
+export async function withTimeout<T>(ms: number, work: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new ModelUnavailable("timed out")), ms);
@@ -269,7 +270,7 @@ async function withTimeout<T>(ms: number, work: Promise<T>): Promise<T> {
 }
 
 /** The answer object from a Workers AI text model: `response` as an object or JSON text, or an OpenAI style `choices`. */
-function answerOf(out: unknown): Record<string, unknown> | null {
+export function answerOf(out: unknown): Record<string, unknown> | null {
   if (typeof out !== "object" || out === null) return null;
   const o = out as { response?: unknown; choices?: { message?: { content?: unknown } }[] };
   const raw = o.response ?? o.choices?.[0]?.message?.content;

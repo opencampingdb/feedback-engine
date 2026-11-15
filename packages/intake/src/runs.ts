@@ -94,17 +94,25 @@ export const REVIEW_EVERY_MS = 10 * 60 * 1000;
 /** The row in `runs` for the AI reviewer. Only `last_start` is used. */
 export const REVIEW = "review";
 
+/** The row in `runs` for the AI reviewer's check of Overture candidates. Only `last_start` is used. */
+export const OVERTURE_REVIEW = "overture_review";
+
 /**
  * Claims a run of the AI reviewer at `nowMs`, when the last one started at
  * least REVIEW_EVERY_MS ago. False when it is not due, so two ticks at once
  * start one run.
  */
 export async function claimReviewRun(db: D1Like, nowMs: number): Promise<boolean> {
+  return claimRun(db, REVIEW, nowMs, REVIEW_EVERY_MS);
+}
+
+/** Claims a run of the job named `name` at `nowMs`, when its last run started at least `everyMs` ago. False when it is not due. */
+export async function claimRun(db: D1Like, name: string, nowMs: number, everyMs: number): Promise<boolean> {
   const row = await db
     .prepare(
       "INSERT INTO runs (name, last_start) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET last_start = excluded.last_start WHERE runs.last_start IS NULL OR runs.last_start <= ? RETURNING name",
     )
-    .bind(REVIEW, nowMs, nowMs - REVIEW_EVERY_MS)
+    .bind(name, nowMs, nowMs - everyMs)
     .first<string>("name");
   return row !== null;
 }

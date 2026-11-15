@@ -42,6 +42,13 @@ SAFESEARCH = "off"
 # DATA_REPO = "opencampingdb/data"
 # REVIEW_BOT_LOGINS = "example-bot[bot]"
 # REVIEW_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+# The AI reviewer's check of Overture candidates (src/overture-reviewer.ts):
+# "on" checks the candidates in overture/candidates.ndjson on the open
+# overture-sync PR of DATA_REPO at most once every 10 minutes, with the same
+# AI binding, model and GitHub App access as AI_REVIEWER, and writes its
+# decisions to overture/decisions.ndjson on that branch. It fetches each
+# candidate's own website. Off when left out.
+# OVERTURE_REVIEWER = "on"
 
 # Every minute: writes the queued items to the inbox, starts the apply when it
 # is due, and runs the AI reviewer when it is on and due. Does nothing without
