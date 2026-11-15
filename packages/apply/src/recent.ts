@@ -220,14 +220,14 @@ type ChangeReport = Extract<StoredFeedback, { type: "report" }> & { place: strin
 
 const isChangeReport = (item: StoredFeedback): item is ChangeReport =>
   item.type === "report" &&
-  (item.report.kind === "fact" || item.report.kind === "contact" || item.report.kind === "doubt") &&
+  (item.report.kind === "fact" || item.report.kind === "contact" || item.report.kind === "doubt" || item.report.kind === "clear") &&
   typeof item.place === "string" &&
   typeof item.report.fact === "string";
 
 /**
  * Whether `place`, as it is on main, holds the change an applied report made:
  * the fact was set in that run or later, or it has the reported value (a
- * contact report or a doubt: the value is gone). A place merged into another counts,
+ * contact report, a doubt or a clear: the value is gone). A place merged into another counts,
  * as the data has moved on from it.
  */
 export function inDataOnMain(item: ChangeReport, place: Place | undefined): boolean {

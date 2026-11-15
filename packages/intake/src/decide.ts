@@ -1,5 +1,7 @@
 import {
   CHECK_HOLDS,
+  decideClear,
+  sameValue,
   decideContactReport,
   decideDoubt,
   decideFact,
@@ -12,6 +14,7 @@ import {
   type PlaceState,
   type RefusedReason,
   type ReportItem,
+  type Setter,
 } from "@opencampingdb/apply/decide";
 import {
   newPlaceId,
@@ -123,7 +126,7 @@ export function decidedHere(item: StoredFeedback): item is ReportItem {
   const kind = item.report.kind;
   if (kind === "new_place") return true;
   if (kind === "commons_mismatch") return typeof item.place === "string";
-  return (kind === "fact" || kind === "contact" || kind === "doubt") && typeof item.place === "string" && typeof item.report.fact === "string";
+  return (kind === "fact" || kind === "contact" || kind === "doubt" || kind === "clear") && typeof item.place === "string" && typeof item.report.fact === "string";
 }
 
 
@@ -188,6 +191,8 @@ export async function placeNow(db: D1Like, id: string, decided: DecidedInRequest
 }
 
 interface EvidenceRow {
+  /** How the intake decided the report. Absent on rows read for the rules, which do not need it. */
+  state?: "live" | "held";
   feedback_id: string;
   place: string;
   fact: string;
@@ -234,9 +239,10 @@ export async function earlierReports(
 }
 
 /** The report evidence row an item's decision stores. */
-function evidenceRow(item: ReportItem): EvidenceRow {
+function evidenceRow(item: ReportItem, state: "live" | "held"): EvidenceRow {
   const { kind, fact, value, reason } = item.report;
   return {
+    state,
     feedback_id: item.id,
     place: item.place as string,
     fact: fact as string,
@@ -269,6 +275,27 @@ function evidenceStatement(db: D1Like, item: ReportItem, state: "live" | "held")
       item.attested ?? null,
       state,
     );
+}
+
+/**
+ * The fact report that set a fact's current value, as the intake knows it:
+ * the latest one it put live for the place and fact in the last 90 days, when
+ * it carried `current`. The intake keeps no attested key or contributor proof
+ * with its evidence, so only the device can match; a clear it cannot tie to
+ * its sender is held, and the apply, which can, decides it again.
+ */
+export async function setterAt(db: D1Like, place: string, fact: string, current: unknown, decided: DecidedInRequest = noneDecided()): Promise<Setter | undefined> {
+  if (current === undefined) return undefined;
+  const batched = decided.evidence.filter((row) => row.place === place && row.fact === fact && row.kind === "fact" && row.state === "live").at(-1);
+  const row =
+    batched ??
+    (await db
+      .prepare("SELECT value, received, device FROM report_evidence WHERE place = ? AND fact = ? AND kind = 'fact' AND state = 'live' ORDER BY received DESC, feedback_id DESC LIMIT 1")
+      .bind(place, fact)
+      .first<{ value: string | null; received: string; device: string }>()) ??
+    undefined;
+  if (row === undefined || row.value === null || !sameValue(JSON.parse(row.value) as unknown, current)) return undefined;
+  return { device: row.device, received: row.received };
 }
 
 /** The open case for a fact doubts took down on a place, as `decideFact` reads it, or undefined when there is none. */
@@ -382,7 +409,7 @@ const live = (writes: SendTimeDecision["writes"], addToDecided: (decided: Decide
 });
 /** A held item's evidence: written, and known to the items after it in the batch. */
 const heldWithEvidence = (reason: HeldReason, item: ReportItem): SendTimeDecision =>
-  held(reason, (d) => [evidenceStatement(d, item, "held")], (p) => void p.evidence.push(evidenceRow(item)));
+  held(reason, (d) => [evidenceStatement(d, item, "held")], (p) => void p.evidence.push(evidenceRow(item, "held")));
 const countAccepted = (decided: DecidedInRequest, contributor: string) => decided.accepted.set(contributor, (decided.accepted.get(contributor) ?? 0) + 1);
 
 /**
@@ -413,6 +440,7 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
   const placeId = item.place as string;
   const place = await placeNow(db, placeId, decided);
   if (place === undefined) return held("unknown_place");
+  if (item.report.kind === "clear") return decideClearHere(input, place, record);
   const earlier = await earlierReports(db, placeId, item.report.fact as string, Date.parse(item.received), decided);
   const kind = item.report.kind;
   const openCase = kind === "fact" ? await openDoubt(db, placeId, item.report.fact as string, decided) : undefined;
@@ -425,7 +453,7 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
   // An item without attestation is never live from the intake. The apply's two-device rule still runs.
   if (item.attested === undefined) return heldWithEvidence("not_attested", item);
   // The place already has the value: nothing to show, and nothing for the checks.
-  if (decision.changes.length === 0) return live((d) => [evidenceStatement(d, item, "live")], (p) => void p.evidence.push(evidenceRow(item)));
+  if (decision.changes.length === 0) return live((d) => [evidenceStatement(d, item, "live")], (p) => void p.evidence.push(evidenceRow(item, "live")));
 
   const checked = await checks.check(submission, { ...record, origin: item.origin, attest_key: item.attest_key });
   if ("held" in checked) return heldWithEvidence(checked.held, item);
@@ -442,11 +470,40 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
     ),
     acceptedStatement(d, contributor),
   ], (p) => {
-    p.evidence.push(evidenceRow(item));
+    p.evidence.push(evidenceRow(item, "live"));
     decidedCase(p, item, decision);
     for (const change of decision.changes) {
       p.changes.push({ place: change.place, fact: change.fact, value: change.value === null ? null : JSON.stringify(change.value), accepted: item.received });
     }
+    countAccepted(p, contributor);
+  }, checked.slot);
+}
+
+/**
+ * A clear. It is live, with the fact (and any fact that goes with it) off the
+ * place on the recent list, when the rules put it live and the checks pass.
+ * A clear stores no report evidence: no rule weighs one.
+ */
+async function decideClearHere({ db, checks, item, submission, contributor, decided = noneDecided() }: DecideInput, place: PlaceState & { cell: Cell }, record: CheckContributor): Promise<SendTimeDecision> {
+  const fact = item.report.fact as string;
+  const setter = await setterAt(db, item.place as string, fact, (place.facts as Record<string, unknown>)[fact], decided);
+  const decision = decideClear({ item, place, setter });
+  if (decision.verdict !== "live") return held(decision.reason);
+  if (decision.changes.length === 0) return live(() => [], () => {});
+  const checked = await checks.check(submission, { ...record, origin: item.origin, attest_key: item.attest_key });
+  if ("held" in checked) return held(checked.held);
+  const [cellLon, cellLat] = place.cell;
+  return live((d) => [
+    ...decision.changes.map((change) =>
+      d
+        .prepare(
+          "INSERT OR IGNORE INTO recent_changes (feedback_id, place, fact, value, accepted, in_data_at, cell_lon, cell_lat, contributor) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+        )
+        .bind(item.id, change.place, change.fact, null, item.received, cellLon, cellLat, contributor),
+    ),
+    acceptedStatement(d, contributor),
+  ], (p) => {
+    for (const change of decision.changes) p.changes.push({ place: change.place, fact: change.fact, value: null, accepted: item.received });
     countAccepted(p, contributor);
   }, checked.slot);
 }

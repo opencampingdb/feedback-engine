@@ -869,6 +869,8 @@ export type AnswerOutcome =
  *   below the place's current charge, so a person checks it before it is published.
  * - `commons_report`: a report that a Commons photo is not of the place. The app hides it for the
  *   traveller at once, a reviewer gets the case, and two sources hide it for everyone.
+ * - `not_own_value`: a `clear` of a value another traveller set, or one the intake cannot tie to
+ *   this install, so a person decides.
  */
 export const HELD_REASONS = [
   "not_attested",
@@ -891,6 +893,7 @@ export const HELD_REASONS = [
   "not_seasonal",
   "unlikely_charge",
   "commons_report",
+  "not_own_value",
 ] as const;
 
 /** Why the intake held an item at send time. */

@@ -140,7 +140,7 @@ export function itemInDataOnMain(item: DecidedItem, main: MainData): OnMain {
   switch (item.type) {
     case "report": {
       const kind = item.report.kind;
-      if (kind === "fact" || kind === "contact" || kind === "doubt") return onPlace(changeReportOnMain(item as Parameters<typeof changeReportOnMain>[0], place));
+      if (kind === "fact" || kind === "contact" || kind === "doubt" || kind === "clear") return onPlace(changeReportOnMain(item as Parameters<typeof changeReportOnMain>[0], place));
       const key = REPORT_KEYS[kind];
       if (key !== undefined) return onPlace(datedByRun(place, key) || holdsReportedValue(item, place));
       if (kind === "remove") return onPlace(place.standing === "hidden");

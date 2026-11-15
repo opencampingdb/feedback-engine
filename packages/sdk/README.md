@@ -101,7 +101,11 @@ Key registration refusals use the same codes. Registration also answers `malform
 
 A patch version (0.28.1) is a fix or a small change to an existing call. A minor version (0.32.0) adds a call, option, field or type, and before 1.0.0 may also mark a breaking change, which its release notes spell out. [docs/integration.md](../../docs/integration.md#what-changed-by-version), "What changed by version", lists the recent ones.
 
-This is 0.34.0. What an app moving to it needs to know:
+This is 0.35.0. What an app moving to it needs to know:
+
+- A `clear` report takes a value off a place: `{ kind: "clear", fact }`, with no `value`, for any reportable fact, contacts, the address and `brand` among them. When the install that set the place's current value sends it, with attestation, it goes live at once as a correction would: the intake answers `live` and the recent list carries the fact with `value: null`. A clear of a value another traveller set, or one the intake cannot tie to the install, is held for a person with the new held reason `not_own_value`, and a value from OSM, the owner or a data rule is never cleared this way. Deploy the intake and move the inbox's apply pin to 0.35.0 before an app sends a clear: an older intake refuses it with `400`.
+
+What an app moving to 0.34.0 needed to know:
 
 - `formatPhone(text)` writes a phone number the standard Australian way: landlines `02 6123 4567` or `+61 2 6123 4567`, mobiles `0412 345 678` or `+61 412 345 678`, `1300 123 456`, `1800 123 456` and `13 12 34`. Domestic numbers stay domestic and +61 numbers stay +61, and a trunk 0 after +61 is dropped. Anything else, such as an overseas number, comes back with its spacing tidied and nothing more. Run it on a phone field when it loses focus and before sending. `formatSubmissionPhones(submission)` runs it on every phone number in a submission (a `phone` or `phone_2` fact report, a new place's `contacts.phone`, an owner's listing or update facts), and an intake at 0.34.0 runs it on everything that arrives, so a number from any app is stored the same way.
 

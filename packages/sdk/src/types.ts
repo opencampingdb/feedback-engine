@@ -49,6 +49,15 @@ export type ReportKind =
    */
   | "doubt"
   /**
+   * Takes a value off a place: `fact` names any reportable fact, and there is
+   * no value. It goes live as a correction would when the install that set
+   * the place's current value sends it, with attestation. Any other clear is
+   * held for a person (`not_own_value`). Values from OSM or the owner are
+   * never cleared this way. To say someone else's value is wrong, send a
+   * `doubt` or a `contact` report.
+   */
+  | "clear"
+  /**
    * A Wikimedia Commons photo shown for a place is not of it. `file` names
    * the photo as the place's line in `commons.ndjson.gz` does. The app hides
    * the photo for the traveller who sent it at once, and the intake answers
@@ -296,8 +305,8 @@ export interface ReportBody {
   kind: ReportKind;
   /**
    * Required when `kind` is `fact`. Required on `contact` too, where it is one
-   * of the contact facts (`ContactFactName`), and on `doubt`, where it is any
-   * other fact (`DoubtFactName`).
+   * of the contact facts (`ContactFactName`), on `doubt`, where it is any
+   * other fact (`DoubtFactName`), and on `clear`, where it is any fact.
    */
   fact?: ReportFactName;
   /** Required when `kind` is `fact`, `name` (the name) or `description` (the text). */

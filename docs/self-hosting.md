@@ -205,6 +205,10 @@ The OSM notes workflow (`osm-notes.yml`) is retired, so don't add it. [osm.md](o
 
 Secrets stay in Cloudflare and need no change. The intake validates every submission, so a release that adds facts or report kinds needs this redeploy before apps send them. Until then the intake refuses them with `400`.
 
+### Moving to SDK 0.35.0: clearing a traveller's own value
+
+SDK 0.35.0 adds the `clear` report kind. An older intake refuses it with `400`, and an older apply leaves it undecided, so deploy the intake at 0.35.0 and move both SHAs in the inbox's `apply-feedback.yml` to the same commit before an app sends one. There is no migration.
+
 ### Moving to SDK 0.34.0: phone numbers formatted
 
 An intake at 0.34.0 formats every phone number it accepts with `formatPhone` before storing it, so nothing an app sends is refused that was accepted before, and no deploy order matters. Apps on 0.34.0 can format the number in the field too, so the traveller sees what will be stored.
@@ -333,7 +337,7 @@ The first load writes about two rows per place, so on the D1 free plan a large i
 
 ### Deciding at send time
 
-With the place index loaded, the intake decides `fact`, `contact` and `doubt` reports about a released place, and `new_place` reports, while the app waits. It uses the apply's own rules and then its checks: text checks, link rules, at most 50 live changes a day for each contributor, client network and App Attest key, URLhaus for links, and Llama Guard for free text from a contributor without a track record. When the rules hold an item that would set a link (a place the index does not have yet, an owner's value, a disagreement), its links still go through the link rules and URLhaus: a link that fails is held as `link_check`, and the inbox item records `"links": "passed"` when they pass. The apply sends a held item that sets a link without that record to a person. A `commons_mismatch` report is always held. The answer adds `"state": "live"` or `"state": "held"` with a `held_reason`.
+With the place index loaded, the intake decides `fact`, `contact`, `doubt` and `clear` reports about a released place, and `new_place` reports, while the app waits. It uses the apply's own rules and then its checks: text checks, link rules, at most 50 live changes a day for each contributor, client network and App Attest key, URLhaus for links, and Llama Guard for free text from a contributor without a track record. When the rules hold an item that would set a link (a place the index does not have yet, an owner's value, a disagreement), its links still go through the link rules and URLhaus: a link that fails is held as `link_check`, and the inbox item records `"links": "passed"` when they pass. The apply sends a held item that sets a link without that record to a person. A `commons_mismatch` report is always held. The answer adds `"state": "live"` or `"state": "held"` with a `held_reason`.
 
 A live fact, contact takedown or doubt takedown is a recent change, listed under `changes` (a takedown has a null `value`). A live new place is listed with its description, fee and contacts. The inbox item records the decision as `intake`, and the apply still writes the data. It decides each item again with its own rules, but an item the intake held for a check (`text_check`, `link_check`, `ai_check`, `daily_cap` or `check_unavailable`) goes to a person on the review PR, never into the data on its own.
 

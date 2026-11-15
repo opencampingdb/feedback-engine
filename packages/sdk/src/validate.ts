@@ -68,6 +68,7 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   "remove",
   "contact",
   "doubt",
+  "clear",
   "commons_mismatch",
 ];
 /** The values `first_hand` may take, on a report of a kind in `FIRST_HAND_KINDS`. */
@@ -619,10 +620,15 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
     else if (retiredFactProblem(value.fact) !== null) errors.push(`report.fact ${retiredFactProblem(value.fact)}`);
     else out.fact = value.fact;
     if (value.value !== undefined) errors.push("report.value is not allowed when report.kind is doubt");
+  } else if (kind === "clear") {
+    if (!isFactName(value.fact)) errors.push(`report.fact must be one of ${Object.keys(FACTS).join(", ")}`);
+    else if (retiredFactProblem(value.fact) !== null) errors.push(`report.fact ${retiredFactProblem(value.fact)}`);
+    else out.fact = value.fact;
+    if (value.value !== undefined) errors.push("report.value is not allowed when report.kind is clear");
   } else if (kind === "name" || kind === "description") {
     const max = kind === "name" ? MAX_NAME_LENGTH : MAX_DESCRIPTION_LENGTH;
     const text = value.value;
-    if (value.fact !== undefined) errors.push("report.fact is only allowed when report.kind is fact, contact or doubt");
+    if (value.fact !== undefined) errors.push("report.fact is only allowed when report.kind is fact, contact, doubt or clear");
     if (typeof text !== "string" || text.trim().length === 0 || text.length > max) {
       errors.push(`report.value must be the ${kind}, 1 to ${max} characters`);
     } else if (findContactDetails(text).length > 0) {
@@ -631,7 +637,7 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
       out.value = text.trim();
     }
   } else if (value.fact !== undefined || value.value !== undefined) {
-    errors.push("report.fact and report.value are only allowed when report.kind is fact, name or description, and report.fact on contact or doubt");
+    errors.push("report.fact and report.value are only allowed when report.kind is fact, name or description, and report.fact on contact, doubt or clear");
   }
   if (kind === "commons_mismatch") {
     const file = value.file;

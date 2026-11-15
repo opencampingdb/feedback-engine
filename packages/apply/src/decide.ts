@@ -74,7 +74,8 @@ export type PlaceState = Pick<Place, "facts" | "fact_sources" | "fact_dates">;
  * `disagreement` that as many sources confirm the value as doubt it, or more.
  * `not_seasonal`: `pets_months` for a place whose `pets` is not `seasonal`.
  * `unlikely_charge`: a charge a person checks before it is published
- * (`unlikelyCharge`).
+ * (`unlikelyCharge`). `not_own_value`: a clear of a value another source set
+ * (`decideClear`).
  */
 export type HeldReason =
   | "not_attested"
@@ -88,7 +89,8 @@ export type HeldReason =
   | "protected_source"
   | "taken_down"
   | "not_seasonal"
-  | "unlikely_charge";
+  | "unlikely_charge"
+  | "not_own_value";
 
 /** The reasons the intake holds an item for one of its checks rather than for these rules. */
 export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "check_unavailable"];
@@ -562,5 +564,68 @@ export function decideDoubt({ item, place, earlier }: ItemInput): ItemDecision {
     changes: [{ place: item.place as string, fact, value: null }],
     why: `${fact} taken down after doubts from ${doubts.sources === 2 ? "two" : doubts.sources} sources`,
     doubtTakedown: { fact, value, sources: doubts.sources, doubts: doubts.feedback, confirmations: confirmations.feedback },
+  };
+}
+
+/** What the clear rule reads of the report that set a fact's current value. */
+export interface Setter {
+  device: string;
+  attest_key?: string;
+  contributor?: string;
+  proved?: true;
+  received: string;
+}
+
+/**
+ * Whether `item` comes from the same sender as `setter`, as a review replaces
+ * the contributor's earlier one: the same device, the same attested key, or a
+ * contributor the app's server proved on both.
+ */
+export function sameSender(item: Omit<Setter, "received">, setter: Omit<Setter, "received">): boolean {
+  if (item.device === setter.device) return true;
+  if (item.attest_key !== undefined && item.attest_key === setter.attest_key) return true;
+  return item.proved === true && setter.proved === true && item.contributor !== undefined && item.contributor === setter.contributor;
+}
+
+export interface ClearInput {
+  item: ReportItem;
+  place: PlaceState;
+  /**
+   * The report that set the fact's current value: the latest one applied
+   * (or, at the intake, put live) for the place and fact, when it carried the
+   * value the place has now. Undefined when there is none, or the value has
+   * changed since by another route.
+   */
+  setter: Setter | undefined;
+}
+
+/**
+ * A `clear` report: a traveller takes a value off a place. A clear from the
+ * sender of the place's current value is a correction of their own data, so
+ * it goes live as their correction would: with attestation, at once. A value
+ * from OSM, the owner or a data rule, or one another sender set, goes to a
+ * person (`protected_source`, `owner_value`, `not_own_value`); a traveller
+ * who thinks someone else's value is wrong sends a `doubt` or `contact`
+ * report instead. A clear sent before the value was set is about an older
+ * value and is refused, and a clear of a fact the place does not have is
+ * live with nothing to change.
+ */
+export function decideClear({ item, place, setter }: ClearInput): ItemDecision {
+  const fact = item.report.fact;
+  if (!isFactName(fact)) return { verdict: "refused", reason: "invalid_value", why: `${String(fact)} is not a fact` };
+  if ((place.facts as Record<string, unknown>)[fact] === undefined) return { verdict: "live", changes: [], why: `place has no ${fact}` };
+  const source = place.fact_sources[fact];
+  if (source === "owner") return { verdict: "held", reason: "owner_value", why: `${fact} was set by the owner, so a person decides` };
+  const from = protectedSource(place, fact);
+  if (from !== undefined) return { verdict: "held", reason: "protected_source", why: `${fact} came from ${from}, so a person decides` };
+  if ((source !== "feedback" && source !== "contributed") || setter === undefined || !sameSender(item, setter)) {
+    return { verdict: "held", reason: "not_own_value", why: `${fact} was not set by this traveller, so a person decides` };
+  }
+  if (time(item) < Date.parse(setter.received)) return { verdict: "refused", reason: "no_value", why: `${fact} was set again after the clear was sent` };
+  if (item.attested === undefined) return { verdict: "held", reason: "not_attested", why: `clearing ${fact} without attestation is read by a person` };
+  return {
+    verdict: "live",
+    changes: [{ place: item.place as string, fact, value: null }, ...factsClearedBy(place.facts, fact, null).map((cleared) => ({ place: item.place as string, fact: cleared, value: null }))],
+    why: `${fact} cleared by the traveller who set it`,
   };
 }
