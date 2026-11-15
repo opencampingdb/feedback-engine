@@ -29,6 +29,8 @@ export const LINK_LOOKUP_ORIGIN_DAILY_LIMIT = 100;
 export const CONTRIBUTOR_DAILY_LIMIT = 200;
 /** Photo uploads per contributor per day. */
 export const PHOTO_CONTRIBUTOR_DAILY_LIMIT = 10;
+/** Helpful votes on photos a contributor may send in one day, on top of their other feedback. */
+export const PHOTO_VOTE_DAILY_LIMIT = 50;
 /** Feedback per attested App Attest key per day. */
 export const ATTEST_KEY_DAILY_LIMIT = 200;
 /**

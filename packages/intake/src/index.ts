@@ -52,6 +52,7 @@ import {
   pruneRateCounts,
   CONTRIBUTOR_DAILY_LIMIT,
   PHOTO_CONTRIBUTOR_DAILY_LIMIT,
+  PHOTO_VOTE_DAILY_LIMIT,
   type CountStore,
   type KVLike,
 } from "./ratelimit.js";
@@ -1042,7 +1043,7 @@ export function createHandler(deps: Deps) {
     }
 
     const body = new Uint8Array(await request.arrayBuffer());
-    const { full_bytes, thumb_bytes, full_sha256, thumb_sha256, focus } = submission.photo;
+    const { full_bytes, thumb_bytes, full_sha256, thumb_sha256, focus, caption, taken } = submission.photo;
     if (body.length > MAX_PHOTO_BODY_BYTES) return json(413, { error: "too_large" }, cors);
     if (body.length !== full_bytes + thumb_bytes) {
       return json(400, { error: "invalid", details: ["body length must be photo.full_bytes plus photo.thumb_bytes"] }, cors);
@@ -1119,6 +1120,8 @@ export function createHandler(deps: Deps) {
         width: size.width,
         height: size.height,
         ...(focus ? { focus } : {}),
+        ...(caption !== undefined ? { caption } : {}),
+        ...(taken !== undefined ? { taken } : {}),
         ...(ratings ? { safesearch: ratings } : {}),
       },
     } as StoredFeedback;
@@ -1624,7 +1627,10 @@ export function createHandler(deps: Deps) {
     }
     if (submission.type === "photo") return { status: 400, body: { error: "invalid", details: ["photos are sent to /v1/photos"] } };
     // Photo reports, removals and erasures belong to a photo service: an intake with a photo bucket.
-    if ((submission.type === "photo_report" || submission.type === "photo_erasure" || submission.type === "photo_removal") && !env.PHOTOS_PENDING) {
+    if (
+      (submission.type === "photo_report" || submission.type === "photo_erasure" || submission.type === "photo_removal" || submission.type === "photo_vote") &&
+      !env.PHOTOS_PENDING
+    ) {
       return { status: 404, body: { error: "photos_not_served_here" } };
     }
     const device = await hashDevice(env.DEVICE_SALT, submission.device);
@@ -1662,7 +1668,7 @@ export function createHandler(deps: Deps) {
       if (contributor === undefined && proof && feedback.type === "report" && feedback.report.kind === "new_place") {
         contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
       }
-      if (contributor === undefined && ["review", "review_report", "photo_report", "photo_erasure", "photo_removal", "review_erasure"].includes(feedback.type)) {
+      if (contributor === undefined && ["review", "review_report", "photo_report", "photo_erasure", "photo_removal", "photo_vote", "review_erasure"].includes(feedback.type)) {
         return { status: 400, body: { error: "contributor_required" } };
       }
       // With a proof key, only the app's server can say the account is the contributor's: a removal or
@@ -1704,6 +1710,13 @@ export function createHandler(deps: Deps) {
         owner = typeof served === "string" ? served : served.contributor === contributor ? "mine" : "theirs";
         if (typeof served !== "string" && proof === undefined && served.app !== app.app) reportMayWithhold = false;
       }
+      // Nobody votes for their own photo. When the served records say whose it is, the intake answers at once;
+      // otherwise the apply run checks it against the photo lines.
+      if (feedback.type === "photo_vote" && env.PHOTOS_SERVED) {
+        if ((await photoOwner(env.PHOTOS_SERVED, feedback.place, feedback.photo_vote.photo, contributor!)) === "mine") {
+          return { status: 403, body: { error: "own_photo" } };
+        }
+      }
       if (feedback.type === "photo_report" && env.RECENT_LIST && (await isBlocked(env.RECENT_LIST, contributor!).catch(() => false))) {
         reportMayWithhold = false;
       }
@@ -1712,6 +1725,7 @@ export function createHandler(deps: Deps) {
       }
       if (contributor) extra.push({ prefix: "c", id: contributor, limit: app.contributor_daily_limit ?? CONTRIBUTOR_DAILY_LIMIT });
       if (attestKey) extra.push({ prefix: "k", id: attestKey, limit: ATTEST_KEY_DAILY_LIMIT });
+      if (feedback.type === "photo_vote") extra.push({ prefix: "v", id: contributor!, limit: PHOTO_VOTE_DAILY_LIMIT });
       if (feedback.type === "report" && feedback.report.kind === "new_place") {
         extra.push({ prefix: "np", id: contributor ?? device, limit: NEW_PLACE_DAILY_LIMIT });
       }
@@ -1776,6 +1790,7 @@ export function createHandler(deps: Deps) {
       ...("review_report" in rest ? { review_report: rest.review_report } : {}),
       ...("photo_report" in rest ? { photo_report: rest.photo_report } : {}),
       ...("photo_removal" in rest ? { photo_removal: rest.photo_removal } : {}),
+      ...("photo_vote" in rest ? { photo_vote: rest.photo_vote } : {}),
     } as StoredFeedback;
     // A report for a reason on the withhold list, or a removal by the photo's own contributor,
     // stops the photo being served at once. The stored item says so, for the apply run. A report

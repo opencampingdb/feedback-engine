@@ -111,6 +111,11 @@ export function tidyText(text: string): string {
   );
 }
 
+/** A photo caption as it should read: `tidyText` on one line. Empty when nothing is left. */
+export function tidyCaption(caption: string): string {
+  return tidyText(caption.replace(/\s+/g, " "));
+}
+
 // Rude words and slurs, matched as whole words in folded text (see `fold`). Each letter may repeat, so
 // "fuuuck" matches, but "niger" doesn't match a word that needs "gg". An entry ending in * also matches
 // longer words that start with it.

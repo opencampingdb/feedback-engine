@@ -53,6 +53,7 @@ export type {
   QueuedRefs,
   QueueSummary,
   PhotoReportInput,
+  PhotoVoteInput,
   PhotoResult,
   RefusalReason,
   ReportInput,
@@ -82,6 +83,11 @@ export {
   MAX_DESCRIPTION_LENGTH,
   MAX_NAME_LENGTH,
   MAX_PHOTO_BYTES,
+  MAX_PHOTO_CAPTION_LENGTH,
+  EARLIEST_PHOTO_TAKEN,
+  photoCaptionProblem,
+  photoTakenProblem,
+  photoTakenMonth,
   MAX_THUMB_BYTES,
   MAX_TEXT_LENGTH,
   MONTHS,
@@ -147,7 +153,7 @@ export { jpegMetadata, jpegSize, stripJpegMetadata, type JpegMetadata } from "./
 export { sha256Hex, sha256HexBytes } from "./sha256.js";
 export { REMOVED_MARKER, findContactDetails, findContactDetailsInHours, stripContactDetails } from "./text.js";
 export type { ContactDetailKind } from "./text.js";
-export { firstProblem, textProblem, tidyName, tidyText } from "./tidy.js";
+export { firstProblem, textProblem, tidyCaption, tidyName, tidyText } from "./tidy.js";
 export { formatPhone, formatSubmissionPhones } from "./phone.js";
 export type { TextProblem } from "./tidy.js";
 export { NEW_PLACE_CHECKS_TO_CONFIRM, NEW_PLACE_REPORTS_TO_HIDE, NEW_PLACE_REPORTS_TO_HIDE_CONFIRMED, newPlaceStanding } from "./standing.js";

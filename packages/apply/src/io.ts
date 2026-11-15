@@ -10,7 +10,7 @@ import { pairKey, withDoNotMatch, type DoNotMatchEntry } from "./review.js";
 import { majorRoads, type MajorRoads } from "./roads.js";
 import type { Decision } from "./rules.js";
 import { dumpPhotoLine, dumpPlace, dumpReviewLine, photoPath, placePath, reviewPath } from "./serialise.js";
-import type { BlockedList, Photo, Place, RemovedPhotos, Review, Source } from "./types.js";
+import type { BlockedList, Photo, PhotoVotes, Place, RemovedPhotos, Review, Source } from "./types.js";
 
 export interface PendingFile {
   path: string;
@@ -219,6 +219,64 @@ export async function readRoads(path: string): Promise<MajorRoads> {
     if (line.includes('"road"')) lines.push(line);
   }
   return majorRoads(lines);
+}
+
+/** Where the apply run keeps the helpful votes that count, in the inbox. Private: it names installs. */
+export const PHOTO_VOTES_FILE = "votes/photos.json";
+
+/** The helpful votes that count, from the inbox. Empty when there are none yet. */
+export async function readPhotoVotes(inbox: string): Promise<PhotoVotes> {
+  let text: string;
+  try {
+    text = await readFile(join(inbox, PHOTO_VOTES_FILE), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { photos: {} };
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Votes are never dropped by guessing: the run stops until a person fixes the file.
+    throw new Error(`${PHOTO_VOTES_FILE} in the inbox is not valid JSON: fix it by hand, from its git history`);
+  }
+  const photos = (parsed as { photos?: unknown } | null)?.photos;
+  const out: PhotoVotes = { photos: {} };
+  if (typeof photos !== "object" || photos === null) {
+    throw new Error(`${PHOTO_VOTES_FILE} in the inbox has no "photos" object: fix it by hand, from its git history`);
+  }
+  for (const [photo, list] of Object.entries(photos)) {
+    const valid = Array.isArray(list) ? list.filter(isPhotoVote) : [];
+    if (!Array.isArray(list) || valid.length < list.length) console.warn(`skipping malformed votes for ${photo} in ${PHOTO_VOTES_FILE}`);
+    if (valid.length > 0) out.photos[photo] = valid;
+  }
+  return out;
+}
+
+function isPhotoVote(value: unknown): value is PhotoVotes["photos"][string][number] {
+  const v = value as Record<string, unknown> | null;
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    typeof v.feedback === "string" &&
+    typeof v.at === "string" &&
+    typeof v.contributor === "string" &&
+    typeof v.device === "string" &&
+    (v.attest_key === undefined || typeof v.attest_key === "string") &&
+    (v.helpful === undefined || typeof v.helpful === "boolean")
+  );
+}
+
+/** Writes the helpful votes back, photos in id order. True when the file changed. */
+export async function writePhotoVotes(inbox: string, votes: PhotoVotes): Promise<boolean> {
+  const ordered: PhotoVotes = { photos: Object.fromEntries(Object.entries(votes.photos).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) };
+  const text = `${JSON.stringify(ordered, null, 2)}\n`;
+  const path = join(inbox, PHOTO_VOTES_FILE);
+  const before = await readFile(path, "utf8").catch(() => undefined);
+  if (before === text || (before === undefined && Object.keys(ordered.photos).length === 0)) return false;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, text, "utf8");
+  return true;
 }
 
 /** Approved owners: `owners/<place id>.json`. */
