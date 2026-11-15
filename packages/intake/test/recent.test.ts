@@ -1364,6 +1364,54 @@ describe("send-time decisions", () => {
     });
   });
 
+  describe("clears", () => {
+    const clear = (place: string, name: string, who: Parameters<typeof report>[2] = {}) => report(place, { kind: "clear", fact: name }, who);
+    const second = { device: otherDevice(1), contributor: "acct_second_person_01" };
+
+    it("takes a value off at once when the device that set it clears it", async () => {
+      expect(await send(fact(PLACE, "facebook", "https://www.facebook.com/wrongpark"))).toMatchObject({ state: "live" });
+      clock += HOUR;
+      expect(await send(clear(PLACE, "facebook"))).toMatchObject({ state: "live" });
+      expect(written()[1]!.intake).toEqual({ state: "live" });
+      expect((await listing()).changes.filter((c) => c.fact === "facebook").at(-1)).toEqual({
+        place: PLACE,
+        fact: "facebook",
+        value: null,
+        accepted: "2026-11-03T10:00:00Z",
+        in_data_at: null,
+      });
+      // Gone now: a second clear changes nothing.
+      clock += HOUR;
+      expect(await send(clear(PLACE, "facebook"))).toMatchObject({ state: "live" });
+    });
+
+    it("holds a clear of a value another device set, and the value stays", async () => {
+      await send(fact(PLACE, "facebook", "https://www.facebook.com/wrongpark"));
+      clock += HOUR;
+      expect(await send(clear(PLACE, "facebook", second))).toMatchObject(held("not_own_value"));
+      expect((await listing()).changes.filter((c) => c.fact === "facebook")).toMatchObject([{ value: "https://www.facebook.com/wrongpark" }]);
+    });
+
+    it("holds a clear once another device has confirmed the value", async () => {
+      await send(fact(PLACE, "facebook", "https://www.facebook.com/wrongpark"));
+      clock += HOUR;
+      await send(fact(PLACE, "facebook", "https://www.facebook.com/wrongpark", second));
+      clock += HOUR;
+      expect(await send(clear(PLACE, "facebook"))).toMatchObject(held("not_own_value"));
+    });
+
+    it("holds a clear of an owner's value, and of a value it cannot tie to the device", async () => {
+      expect(await send(clear(PLACE, "website"))).toMatchObject(held("owner_value"));
+      expect(await send(clear(PLACE, "phone"))).toMatchObject(held("not_own_value"));
+      expect((await listing()).changes).toEqual([]);
+    });
+
+    it("refuses a clear that carries a value", async () => {
+      const res = await handle(feedback(report(PLACE, { kind: "clear", fact: "facebook", value: "x" })), e);
+      expect(res.status).toBe(400);
+    });
+  });
+
   describe("what the apply tells it", () => {
     const call = (route: "in-data" | "overruled", body: unknown, token = TOKEN) =>
       new Request(`https://intake.example/v1/places/recent/${route}`, {

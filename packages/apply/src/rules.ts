@@ -17,6 +17,7 @@ import {
   type StoredFeedback,
 } from "@opencampingdb/feedback";
 import {
+  decideClear,
   decideContactReport,
   decideDoubt,
   decideFact,
@@ -37,6 +38,7 @@ import {
   WINDOW_DAYS,
   type ItemDecision,
   type OpenDoubt,
+  type Setter,
 } from "./decide.js";
 import { moderateReview } from "./moderation.js";
 import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase } from "./review.js";
@@ -654,6 +656,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   applyDoubts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "doubt"));
   applyFacts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
   applyNewPlaces(known.filter((i): i is ReportItem => isNewPlaceReport(i)), newPlaceEvidence);
+  // After facts and new places, so a value set in this run can be cleared by its sender in it too.
+  applyClears(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "clear"));
   applyContactReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "contact"));
   applyCommonsReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "commons_mismatch"));
   routeToPerson(known.filter((i): i is ReportItem => i.type === "report"));
@@ -1584,6 +1588,61 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
    * report about a contact the place does not have is refused. Reports sent
    * before the contact was last set are about an older value and do not count.
    */
+  /**
+   * The report that set a fact's current value on a place, for `decideClear`:
+   * the latest fact report applied for it, in an earlier run or this one,
+   * when it carried the value the place has now; for a contact a traveller
+   * sent with a new place (`contributed`), that new place report.
+   */
+  function setterOf(placeId: string, fact: FactName, place: Place): Setter | undefined {
+    const current = (place.facts as Record<string, unknown>)[fact];
+    if (current === undefined) return undefined;
+    if (place.fact_sources[fact] === "contributed") {
+      const origin = origins.get(placeId);
+      const sent = origin === undefined ? undefined : (newPlaceFields(origin).contacts as Record<string, unknown>)[fact];
+      return origin !== undefined && sameValue(sent, current) ? origin : undefined;
+    }
+    const applied = [...input.history, ...known].filter(
+      (h): h is ReportItem =>
+        h.type === "report" && h.report.kind === "fact" && h.place === placeId && h.report.fact === fact && (wasApplied(h) || decisions.get(h.id)?.outcome === "applied"),
+    );
+    const latest = applied.reduce<ReportItem | undefined>((last, h) => (last === undefined || time(h) > time(last) || (time(h) === time(last) && h.id > last.id) ? h : last), undefined);
+    return latest !== undefined && sameValue(latest.report.value, current) ? latest : undefined;
+  }
+
+  /**
+   * Clears: a traveller takes a value off a place. The sender of the current
+   * value clears it at once, with attestation (`decideClear`), as their
+   * correction would change it, and the fact comes off with its source and
+   * date. Any other clear goes to a person, who decides whether to remove the
+   * value; a clear the intake held for a check does too.
+   */
+  function applyClears(items: ReportItem[]): void {
+    for (const item of items) {
+      const placeId = item.place as string;
+      const fact = item.report.fact as FactName;
+      const place = record(placeId);
+      const decision = decideClear({ item, place, setter: setterOf(placeId, fact, place) });
+      if (decision.verdict === "refused") {
+        decide(item, "refused", decision.why);
+        continue;
+      }
+      const check = heldForCheck(item);
+      if (decision.verdict === "live" && (decision.changes.length === 0 || check === null)) {
+        if (decision.changes.length > 0) {
+          takeDown(place, fact);
+          note(placeId, `${fact} cleared by the traveller who set it`, true, [item]);
+        }
+        decide(item, "applied", decision.why);
+        continue;
+      }
+      edits.push({ kind: "note", place: placeId, feedback: item.id });
+      const why = decision.verdict === "held" ? decision.why : `the intake held it for ${check}, so a person checks it`;
+      note(placeId, `clearing ${fact} was asked for: ${why} (decide: keep it or remove it)`, false, [item]);
+      decide(item, "needs_review", why);
+    }
+  }
+
   function applyContactReports(items: ReportItem[]): void {
     const takenDown = new Map<string, HeldCase>();
     const again = replayTakedowns(items, (item, place) => {

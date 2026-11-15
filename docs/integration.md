@@ -316,6 +316,16 @@ await feedback.report({ place, report: { kind: "fact", fact: "toilets", value: t
 await feedback.report({ place, report: { kind: "doubt", fact: "toilets", note: "None I could find" }, consent: true }); // wrong, right value unknown
 ```
 
+### Clearing a value the traveller set
+
+A traveller who sent a wrong value, such as the wrong Facebook page or the wrong brand, takes it back with a `clear` report: `fact` is any reportable fact, it needs the place, and it carries no `value`. Send it when a traveller empties a field, or picks "None" for a choice such as the brand.
+
+A clear is a correction of the traveller's own data. When the install that set the place's current value sends it (the same device or App Attest key, or a contributor the app's server proved on both, as a review replaces the contributor's earlier one), with attestation, it goes live at once: the intake answers `live`, and the recent list carries the fact with `value: null`, with `pets_months` too when `pets` comes off. A clear of a value someone else set, or one the intake cannot tie to the install, is answered `held` (`not_own_value`) and a person decides; to say someone else's value is wrong, send a `doubt` or a `contact` report instead. A value from OSM or the owner is never cleared this way (`protected_source`, `owner_value`). The sender is the one who set the value most recently, so once another traveller has confirmed a value, it is theirs too, and a person decides. A clear of a fact the place doesn't have is `live` with nothing to change.
+
+```ts
+await feedback.report({ place, report: { kind: "clear", fact: "facebook" }, consent: true }); // the traveller's own wrong link
+```
+
 ### First-hand reports
 
 A report of what a person at the place sees may carry `first_hand`, to say the traveller was at the place in the last month (`FIRST_HAND`). It is allowed on the kinds in `FIRST_HAND_KINDS`: `fact`, `doubt`, `name`, `closed`, `reopened`, `kind` and `wrong_location`. `reportFacts` takes it once for the whole edit. The two values are:
@@ -656,7 +666,7 @@ Owner requests and photo uploads are sent at once and answer directly, so they t
 
 ### Live or held
 
-The intake decides fact reports, contact reports, doubts and new places when they arrive, and says what it decided. A `sent` outcome, and the `sent` result of a call that sent at once, then carries `state`: `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`. A `commons_mismatch` report is always `held` (`commons_report`). Other kinds of item come back with neither, and the apply run decides them. The apply run still writes every item into the data, and may yet decide a live item differently, for example when two reports collide in one run: the change then leaves the recent list.
+The intake decides fact reports, contact reports, doubts, clears and new places when they arrive, and says what it decided. A `sent` outcome, and the `sent` result of a call that sent at once, then carries `state`: `live` when the change shows at once on the recent list, or `held` when it waits for a reviewer, with `heldReason`. A `commons_mismatch` report is always `held` (`commons_report`). Other kinds of item come back with neither, and the apply run decides them. The apply run still writes every item into the data, and may yet decide a live item differently, for example when two reports collide in one run: the change then leaves the recent list.
 
 The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your own message for each. `itemDecision(answer)` reads `state` and `heldReason` from an intake answer you fetched yourself.
 
@@ -682,6 +692,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `not_seasonal` | `pets_months` for a place whose `pets` is not `seasonal`, so a person checks it. |
 | `unlikely_charge` | A `charge` or `charge_powered` over 250 AUD a night, or more than 50% above or below the place's current charge, so a person checks it. |
 | `commons_report` | A report that a Commons photo is not of the place. Hide it for the traveller who sent it: a reviewer decides, and two sources hide it for everyone. |
+| `not_own_value` | A `clear` of a value another traveller set, or one the intake cannot tie to this install, so a person decides. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.
 
@@ -1092,8 +1103,10 @@ const feedback = createFeedbackClient({
 
 ## What changed by version
 
-What an app moving to 0.34.0 needs to know. A minor version (0.34.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
+What an app moving to 0.35.0 needs to know. A minor version (0.35.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
 
+- **0.35.0.** A new report kind:
+  - A `clear` report takes a value off a place: `{ kind: "clear", fact }`, with no `value`, for any reportable fact, contacts, the address and `brand` among them. When the install that set the place's current value sends it, with attestation, it goes live at once as a correction would: the intake answers `live` and the recent list carries the fact with `value: null`. A clear of a value another traveller set, or one the intake cannot tie to the install, is held for a person with the new held reason `not_own_value`, and a value from OSM, the owner or a data rule is never cleared this way. Deploy the intake and move the inbox's apply pin to 0.35.0 before an app sends a clear: an older intake refuses it with `400`.
 - **0.34.0.** New calls:
   - `formatPhone(text)` writes a phone number the standard Australian way: landlines `02 6123 4567` or `+61 2 6123 4567`, mobiles `0412 345 678` or `+61 412 345 678`, `1300 123 456`, `1800 123 456` and `13 12 34`. Domestic numbers stay domestic and +61 numbers stay +61, and a trunk 0 after +61 is dropped. Anything else, such as an overseas number, comes back with its spacing tidied and nothing more. Run it on a phone field when it loses focus and before sending. `formatSubmissionPhones(submission)` runs it on every phone number in a submission (a `phone` or `phone_2` fact report, a new place's `contacts.phone`, an owner's listing or update facts), and an intake at 0.34.0 runs it on everything that arrives, so a number from any app is stored the same way.
 - **0.33.0.** New fields:
