@@ -34,6 +34,7 @@ import { fromBase64, hex, sha256, toBase64, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
 import type { MajorRoads } from "@opencampingdb/apply/review";
 import { recordInboxWrite, startApplyIfDue, type RunOutcome } from "./runs.js";
+import { parseTimetable, startTimedIfDue, type TimedStart } from "./timed.js";
 import { reviewOvertureCandidates, type OvertureReviewResult } from "./overture-reviewer.js";
 import { DEFAULT_REVIEW_MODEL, MAX_MODEL_FAILURES, parseBotLogins, REVIEW_BRANCH, reviewHeldCases, type ReviewResult } from "./reviewer.js";
 import { IntegrityError, IntegrityUnavailable, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
@@ -234,6 +235,21 @@ export interface Env {
    * Needs the GitHub App's `actions: write` on the inbox. Off when left out.
    */
   APPLY_WORKFLOW?: string;
+  /**
+   * Workflows the scheduled job starts at set times (src/timed.ts), because
+   * GitHub starts scheduled workflows hours late. A JSON array, as a string
+   * or a TOML array in `[vars]`, of `{ "repo": "owner/name", "workflow":
+   * "sync-osm.yml", "cron": "0 16 * * *", "ref": "main" }` (`ref` optional,
+   * cron in UTC). Needs RECENT_LIST and the TIMED_APP_* settings: a GitHub App
+   * with `actions: write` alone, installed on each repo named. Off when left out.
+   */
+  TIMED_STARTS?: string | TimedStart[];
+  /** The GitHub App TIMED_STARTS uses. */
+  TIMED_APP_ID?: string;
+  /** Secret. That App's private key. */
+  TIMED_APP_PRIVATE_KEY?: string;
+  /** That App's installation id in the owner of the repos in TIMED_STARTS. */
+  TIMED_INSTALLATION_ID?: string;
   /** Secret. The abuse.ch auth key for the URLhaus check on links. Without it, an item with a link is held. */
   URLHAUS_KEY?: string;
   /** Workers AI, for the Llama Guard check on free text and the AI reviewer. Without it, free text from a contributor without a track record is held. */
@@ -847,6 +863,7 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
   const review = createReviewer(deps);
   const reviewOverture = createOvertureReviewer(deps);
   const flush = createFlush(deps);
+  const timed = createTimedStarts(deps);
   return async function scheduled(env: Env): Promise<RunOutcome | "off"> {
     if (env.RECENT_LIST) {
       const db = env.RECENT_LIST;
@@ -867,9 +884,43 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
             (error) => console.warn(`starting ${workflow} failed, trying again next minute: ${String(error)}`),
           )
         : "off";
+    await timed(env);
     await review(env);
     await reviewOverture(env);
     return outcome;
+  };
+}
+
+/**
+ * Starts the workflows in TIMED_STARTS when their time comes. Never throws:
+ * a timetable that cannot be read, or a start that fails, is logged, and a
+ * failed start is tried again on the next tick.
+ */
+function createTimedStarts(deps: Pick<Deps, "fetch" | "now">) {
+  // Its own App and key, apart from the inbox's.
+  const github = new GitHubApp(deps.fetch, deps.now);
+  return async function timed(env: Env): Promise<void> {
+    if (env.TIMED_STARTS === undefined || !env.RECENT_LIST) return;
+    const { TIMED_APP_ID: appId, TIMED_APP_PRIVATE_KEY: privateKeyPem, TIMED_INSTALLATION_ID: installationId } = env;
+    if (!appId || !privateKeyPem || !installationId) {
+      console.warn("TIMED_STARTS is set but TIMED_APP_ID, TIMED_APP_PRIVATE_KEY or TIMED_INSTALLATION_ID is missing, so no workflow is started");
+      return;
+    }
+    try {
+      const entries = parseTimetable(env.TIMED_STARTS);
+      await startTimedIfDue(
+        env.RECENT_LIST,
+        deps.now(),
+        entries,
+        async (entry) => {
+          await github.dispatchWorkflow({ appId, privateKeyPem, installationId, repo: entry.repo }, entry.workflow, entry.ref ?? "main");
+          console.log(`started ${entry.repo} ${entry.workflow}`);
+        },
+        (entry, error) => console.warn(`starting ${entry.repo} ${entry.workflow} failed, trying again next minute: ${String(error)}`),
+      );
+    } catch (error) {
+      console.warn(`timed starts failed: ${String(error)}`);
+    }
   };
 }
 
