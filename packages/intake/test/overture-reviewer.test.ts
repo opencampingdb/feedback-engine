@@ -210,6 +210,14 @@ describe("reading a candidate's website", () => {
     expect(sites.fetched).toHaveLength(0);
   });
 
+  it("does not fetch a local host written with a trailing dot or on a private-use name", async () => {
+    const sites = fakeSites({});
+    for (const url of ["http://localhost./", "http://camp.localhost./", "http://router.local/", "http://metadata.google.internal/", "http://nas.home.arpa/"]) {
+      expect(await readWebsite(sites.fetch, url)).toMatchObject({ problem: "it is not a public web address" });
+    }
+    expect(sites.fetched).toHaveLength(0);
+  });
+
   it("does not read a page that is not HTML or text", async () => {
     const sites = fakeSites({ "https://pdf.example.com.au/": { headers: { "content-type": "application/pdf" }, body: "%PDF" } });
     expect(await readWebsite(sites.fetch, "https://pdf.example.com.au/")).toMatchObject({ problem: "it is not a web page" });

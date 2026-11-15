@@ -131,6 +131,9 @@ function settleByRules(c: OvertureCandidate): CandidateCheck | null {
 const NOT_PUBLIC_ADDRESS = "it is not a public web address";
 const TIMED_OUT = "it did not answer in time";
 
+/** Names for hosts on a local or private network, never on the public web. */
+const PRIVATE_NAMES = ["localhost", "local", "internal", "home.arpa"];
+
 /** The URL when it is a public http or https address on the default port, or null. */
 function publicUrl(text: string, base?: URL): URL | null {
   let url: URL;
@@ -139,10 +142,12 @@ function publicUrl(text: string, base?: URL): URL | null {
   } catch {
     return null;
   }
-  const host = url.hostname.toLowerCase();
+  // A trailing dot names the same host ("localhost." is localhost).
+  const host = url.hostname.toLowerCase().replace(/\.+$/, "");
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
   if (url.username || url.password || url.port) return null;
-  if (!host.includes(".") || host.startsWith("[") || host === "localhost" || host.endsWith(".localhost") || /^[\d.]+$/.test(host)) return null;
+  if (!host.includes(".") || host.startsWith("[") || /^[\d.]+$/.test(host)) return null;
+  if (PRIVATE_NAMES.some((name) => host === name || host.endsWith(`.${name}`))) return null;
   return url;
 }
 
