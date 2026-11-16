@@ -1581,7 +1581,7 @@ describe("new places", () => {
       attested: "app_attest",
       type: "report",
       location,
-      report: { kind: "new_place", place_kind: "free_camp", note: "Gravel pit off the highway", ...extra },
+      report: { kind: "new_place", place_kind: "free_camp", ...extra },
     }) as StoredFeedback;
   const idOf = (item: StoredFeedback) => `ocdb_${item.id.slice(3)}`;
 
@@ -1770,6 +1770,14 @@ describe("new places", () => {
       expect(out.changes).toEqual([expect.objectContaining({ place: idOf(item), automatic: true, summary: expect.stringContaining(`merged into ${PLACE}`) })]);
     });
 
+    it("lists a merged place's note for a person, as the kept record may need what it says", () => {
+      const item = same({ note: "Address: 1 Lake Road" });
+      const out = run([item], { extra: noRoad });
+      expect(out.after(idOf(item))?.status).toBe("merged");
+      expect(out.held).toEqual([expect.objectContaining({ case: "note", place: idOf(item), feedback: [item.id] })]);
+      expect(JSON.stringify(out.held)).not.toContain("Lake Road");
+    });
+
     it("holds it for a reviewer when the name differs, it is 50 m or more away, a major road runs between, or the run has no road data", () => {
       const roads = { between: () => ({ highway: "trunk", name: "Example Highway" }) };
       const cases: [StoredFeedback, Partial<RulesInput>][] = [
@@ -1913,6 +1921,24 @@ describe("new places", () => {
     const out = run([item, remove(0.1, "dev-b", item), remove(0.2, "dev-c", item)]);
     const edit = out.edits[0];
     expect(edit?.kind === "new_place" && edit.record).toMatchObject({ standing: "hidden", facts: { address }, fact_sources: { address: "feedback" } });
+  });
+
+  it("lists a published place's note for a person, without its words", () => {
+    const item = added(0, "dev-a", { note: "Address: 12 River Road, Lakeside" });
+    const history = [applied(added(-5, "dev-a", {}, { lat: -30, lon: 140 }))];
+    const out = run([item], { history });
+    expect(out.outcome(item)).toBe("applied");
+    expect(out.after(idOf(item))?.standing).toBe("shown");
+    expect(out.held).toEqual([{ case: "note", place: idOf(item), standing: "shown", location: SPOT, kind: "free_camp", feedback: [item.id] }]);
+    expect(JSON.stringify(out.held)).not.toContain("River Road");
+    expect(run([added(0, "dev-a", { note: "  " })], { history }).held).toEqual([]);
+    expect(run([added(0, "dev-a")], { history }).held).toEqual([]);
+  });
+
+  it("lists the note of a place drafted for a person, and of one merged into the place it duplicates", () => {
+    const drafted = added(0, "dev-a", { note: "Gravel pit off the highway" });
+    const out = run([drafted, remove(0.1, "dev-b", drafted), remove(0.2, "dev-c", drafted)]);
+    expect(out.held.map((h) => h.case)).toEqual(["hidden", "first_place", "note"]);
   });
 
   it("lists a contributor's first place, published, and not their second", () => {

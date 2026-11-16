@@ -50,10 +50,14 @@ export type { Place };
  * `commons_mismatch`: travellers say the
  * Commons photo `file` shown for the place is not of it, from `sources`
  * independent sources, not yet enough to put it on the do-not-match list.
+ * `note`: a new place whose report carries a note, published, drafted or
+ * merged into the place it duplicates. The note may say something the place
+ * should carry, such as an address the app could not confirm on the map, so a
+ * person reads it in the inbox and adds what it says by hand.
  * Contact values a traveller sent, notes and device ids are never in it.
  */
 export interface HeldCase {
-  case: "duplicate" | "hidden" | "contacts" | "description" | "first_place" | "contact_withdrawn" | "fact_doubted" | "vehicle_access_candidate" | "commons_mismatch";
+  case: "duplicate" | "hidden" | "contacts" | "description" | "first_place" | "contact_withdrawn" | "fact_doubted" | "vehicle_access_candidate" | "commons_mismatch" | "note";
   place: string;
   /** The place's standing. Left out for a place travellers did not add. */
   standing?: "shown" | "confirmed" | "held" | "hidden";
@@ -112,6 +116,7 @@ export const HELD_CASES: readonly HeldCase["case"][] = [
   "fact_doubted",
   "vehicle_access_candidate",
   "commons_mismatch",
+  "note",
 ];
 
 /** Cases that come from the data rather than from feedback, so they name no feedback ids. */
@@ -234,6 +239,8 @@ export function settleByRules(
   context: { doNotMatch?: readonly Pick<DoNotMatchEntry, "place" | "file">[] } = {},
 ): { decision: "leave"; reason: string } | null {
   const leave = (reason: string) => ({ decision: "leave" as const, reason });
+  // Only a person reads a traveller's note: it is in the inbox, never in the case.
+  if (c.case === "note") return leave("the note is in the inbox, so a person reads it");
   if (!place) return leave("the place record is not on the review branch");
   if (place.status === "merged") return leave("the place was merged into another");
   if (c.case === "contacts" || c.case === "description") return leave("what was left off the place is in the inbox, so a person decides");
