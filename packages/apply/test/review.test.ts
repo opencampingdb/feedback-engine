@@ -120,11 +120,17 @@ describe("reading held cases", () => {
 
 describe("what the rules settle", () => {
   it("leaves the cases whose values wait in the inbox to a person", () => {
-    for (const kind of ["contacts", "description"] as const) {
+    for (const kind of ["contacts", "description", "note"] as const) {
       const c: HeldCase = { ...base, case: kind, standing: "shown" };
       expect(allowedDecisions(c)).toEqual(["leave"]);
       expect(settleByRules(c, place({ standing: "shown" }))?.decision).toBe("leave");
     }
+  });
+
+  it("leaves a note to a person, even on a merged place", () => {
+    const c: HeldCase = { ...base, case: "note", standing: "held" };
+    expect(settleByRules(c, place({ status: "merged" }))?.reason).toBe("the note is in the inbox, so a person reads it");
+    expect(parseHeldCases(`- held-case ${JSON.stringify(c)}`)).toEqual([c]);
   });
 
   it("leaves a blocked contributor's place, an owner's place and a place a person decided on", () => {

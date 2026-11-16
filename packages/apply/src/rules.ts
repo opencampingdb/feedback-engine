@@ -1566,6 +1566,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       const { contacts: heldFacts, failing, descriptionProblem } = newPlaceFields(origin);
       const contacts = Object.keys(heldFacts) as (keyof typeof heldFacts)[];
       const where = `${origin.location!.lat}, ${origin.location!.lon}`;
+      // A note may say what the form had no field for, so a person reads it whatever happens to the place.
+      const hasNote = isPending && (origin.report.note ?? "").trim() !== "";
       const against = [...earlier, ...mine].filter((i) => i.type === "report" || (i.type === "check" && !i.check.still_there));
       const reasons = [...new Set(against.map((i) => (i.type === "report" ? i.report.reason! : "not_there")))].sort();
       const caseFor = (kind: HeldCase["case"], feedback: readonly StoredFeedback[]): HeldCase => ({
@@ -1597,6 +1599,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         const why = `new place merged into ${kept.id}: the same name, ${target.distance} m away, in the same group, with no major road between`;
         note(id, `${why} (to undo: set status back to open, remove merged_into, and list the pair in moderation/distinct_places.json)`, true, [origin]);
         decide(origin, "applied", why);
+        if (hasNote) held.push(caseFor("note", [origin]));
         continue;
       }
 
@@ -1649,6 +1652,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       if (isPending && published && failing.length > 0) held.push(caseFor("contacts", [origin]));
       if (isPending && published && descriptionProblem !== null) held.push(caseFor("description", [origin]));
       if (isPending && firstPlace) held.push(caseFor("first_place", [origin]));
+      if (isPending && hasNote) held.push(caseFor("note", [origin]));
     }
   }
 

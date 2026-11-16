@@ -28,7 +28,7 @@ describe("review PR body held cases", () => {
   it("explains each case and how to restore a withdrawn contact", () => {
     const body = reviewPrBody("2026-11-04T00:00:00Z", [], new Map(), [], [withdrawn]);
     expect(body).toContain("## Held cases");
-    for (const name of ["duplicate", "hidden", "contacts", "description", "first_place", "contact_withdrawn"]) expect(body).toContain(`\`${name}\``);
+    for (const name of ["duplicate", "hidden", "contacts", "description", "first_place", "contact_withdrawn", "note"]) expect(body).toContain(`\`${name}\``);
     expect(body).toContain("its `value` is the place's own published contact");
     expect(body).toContain("To restore it, set `facts.<fact>` back to `value` on the place in this PR.");
   });
