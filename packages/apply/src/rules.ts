@@ -1,5 +1,6 @@
 import {
   FEE_RETIRED,
+  factFreeText,
   firstProblem,
   isCommonsFileName,
   isContactFact,
@@ -57,6 +58,7 @@ import {
   mergePlaces,
   mergeProblem,
   REVIEWER_CHECKS,
+  UNCONFIRMED_AFTER_DAYS,
   type ClosedCase,
   type DoNotMatchEntry,
   type HeldCase,
@@ -672,6 +674,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       feedback: [item.id],
     };
   };
+  /** Fact reports without attestation left waiting for a second source in this run (not a confirmation of a fact doubts took down). */
+  const unmatched: ReportItem[] = [];
   /** Gap fills applied by client network (or device, without one) and UTC day, from earlier runs and this one. */
   const gapFillKey = (item: StoredFeedback) => `${sourceOf(item)} ${item.received.slice(0, 10)}`;
   const gapFills = new Map<string, number>();
@@ -846,6 +850,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   const unfrozen = known.filter((i) => !frozenOut.has(i.id));
   applyDoubts(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "doubt"));
   applyFacts(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
+  applyUnconfirmed();
   applyNewPlaces(known.filter((i): i is ReportItem => isNewPlaceReport(i)), newPlaceEvidence);
   // After facts and new places, so a value set in this run can be cleared by its sender in it too.
   applyClears(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "clear"));
@@ -1775,6 +1780,57 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     return conflict ? waits : decision;
   }
 
+  /**
+   * Fact reports without attestation that still wait for a second source.
+   * One that has waited UNCONFIRMED_AFTER_DAYS or more, with no other source
+   * sending a different value within 90 days, is listed for the AI reviewer
+   * as an `unconfirmed_fact` case, one case per place, fact and value.
+   */
+  function applyUnconfirmed(): void {
+    const groups = new Map<string, ReportItem[]>();
+    for (const item of unmatched) {
+      if (decisions.get(item.id)?.outcome !== "waiting" || now - time(item) < UNCONFIRMED_AFTER_DAYS * DAY_MS) continue;
+      const placeId = item.place as string;
+      const fact = item.report.fact as FactName;
+      const others = [...input.history, ...pending].filter(
+        (r) =>
+          r.id !== item.id &&
+          r.type === "report" &&
+          r.report.kind === "fact" &&
+          r.place === placeId &&
+          r.report.fact === fact &&
+          sourceOf(r) !== sourceOf(item) &&
+          !sameValue(r.report.value, item.report.value) &&
+          Math.abs(time(r) - time(item)) <= WINDOW_MS &&
+          decisions.get(r.id)?.outcome !== "refused",
+      );
+      if (others.length > 0) continue;
+      const key = `${placeId} ${fact} ${JSON.stringify(item.report.value)}`;
+      groups.set(key, [...(groups.get(key) ?? []), item]);
+    }
+    for (const items of groups.values()) {
+      const first = items[0]!;
+      const placeId = first.place as string;
+      const fact = first.report.fact as FactName;
+      const value = first.report.value as FactValue;
+      const place = working.get(placeId) ?? input.places.get(placeId)!;
+      const source = place.fact_sources[fact];
+      held.push({
+        case: "unconfirmed_fact",
+        place: placeId,
+        ...(place.standing !== undefined ? { standing: place.standing } : {}),
+        location: { lat: roundCoord(place.location.lat), lon: roundCoord(place.location.lon) },
+        kind: place.kind,
+        fact,
+        // A value with free words is read by a person in the inbox, never shown in the PR.
+        ...(factFreeText(fact, value).length === 0 ? { value } : {}),
+        ...(source !== undefined && (place.facts as Record<string, unknown>)[fact] !== undefined ? { from_source: source } : {}),
+        feedback: items.map((i) => i.id),
+      });
+      for (const item of items) decide(item, "waiting", `${decisions.get(item.id)!.reason}, and listed for the AI reviewer`);
+    }
+  }
+
   function applyFacts(items: ReportItem[]): void {
     const groups = new Map<string, ReportItem[]>();
     for (const item of items) {
@@ -2011,6 +2067,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
               ? `waiting for a second device to agree on ${fact}: its network reached ${GAP_FILL_DAILY_LIMIT} gap fills a day`
               : `waiting for a second device to agree on ${fact}`,
         );
+        if (openCase === undefined || !sameValue(item.report.value, openCase.value)) unmatched.push(item);
       }
     }
   }

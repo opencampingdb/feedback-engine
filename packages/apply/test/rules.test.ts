@@ -2448,3 +2448,28 @@ describe("gap fills", () => {
     expect(run([nextDay], { now: 3, places, history: earlier }).outcome(nextDay)).toBe("applied");
   });
 });
+
+describe("unconfirmed facts", () => {
+  const web = (item: StoredFeedback, origin = "net-1") => ({ ...item, origin, human_checked: true }) as StoredFeedback;
+  const reasonOf = (out: ReturnType<typeof run>, item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.reason;
+
+  it("lists a report still waiting for a second source after 7 days for the AI reviewer", () => {
+    const r = web(fact(0, "dev-a", "power", true));
+    expect(run([r], { now: 6 }).held).toEqual([]);
+    const out = run([r], { now: 7 });
+    expect(out.outcome(r)).toBe("waiting");
+    expect(out.held).toEqual([
+      {
+        case: "unconfirmed_fact",
+        place: PLACE,
+        location: { lat: -36.85, lon: 144.55 },
+        kind: "free_camp",
+        fact: "power",
+        value: true,
+        from_source: "osm",
+        feedback: [r.id],
+      },
+    ]);
+    expect(reasonOf(out, r)).toBe("waiting for a second device to agree on power, and listed for the AI reviewer");
+  });
+});

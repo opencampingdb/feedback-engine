@@ -90,6 +90,14 @@ export type { Place };
  * (closed, reopened, or found there or gone), which changes nothing until a
  * reviewer approves it, after which the apply counts it (`says`: closed,
  * reopened, found there or found gone).
+ * `unconfirmed_fact`: a fact report without attestation that has waited
+ * UNCONFIRMED_AFTER_DAYS or more for a second source, with no other source
+ * sending a different value. `fact` and `value` are what it reports, left
+ * out of `value` when the value holds free words, which a person reads in
+ * the inbox; `from_source` is where the place's current value came from,
+ * when it has one. The value is not on the place: a reviewer confirms it
+ * (the apply puts it in the data on its next run), dismisses it (the apply
+ * refuses the report) or leaves it for a person.
  * Contact values a traveller sent, notes and device ids are never in it.
  */
 export interface HeldCase {
@@ -109,7 +117,8 @@ export interface HeldCase {
     | "place_change"
     | "disputed"
     | "unattested_place"
-    | "intake_check";
+    | "intake_check"
+    | "unconfirmed_fact";
   place: string;
   /** The place's standing. Left out for a place travellers did not add. */
   standing?: "shown" | "confirmed" | "held" | "hidden";
@@ -137,6 +146,7 @@ export interface HeldCase {
    * On `contact_withdrawn` and `fact_doubted`: the value the place published.
    * On `contact_check`: the value the place published before the report, left
    * out when it had none. On `vehicle_access_candidate`: the value its name suggests.
+   * On `unconfirmed_fact`: the value reported.
    */
   value?: FactValue;
   /** On `disputed`: the values the sources sent, left out for a contact, the address or values with free words, which a person reads in the inbox. */
@@ -170,7 +180,7 @@ export interface HeldCase {
   from?: string | null | { lat: number; lon: number };
   /** On `place_change`: the value the report sets. */
   to?: string | { lat: number; lon: number };
-  /** On `place_change`: where the replaced value came from, left out when it had no source. */
+  /** On `place_change`: where the replaced value came from, left out when it had no source. On `unconfirmed_fact`: where the place's current value came from, left out when it has none. */
   from_source?: Source;
   /** On `place_change`: when the replaced value was accepted, left out for a value from OSM or with no date. */
   from_date?: string;
@@ -226,7 +236,11 @@ export const HELD_CASES: readonly HeldCase["case"][] = [
   "disputed",
   "unattested_place",
   "intake_check",
+  "unconfirmed_fact",
 ];
+
+/** How long a fact report without attestation waits for a second source before it is listed for the AI reviewer as `unconfirmed_fact`. */
+export const UNCONFIRMED_AFTER_DAYS = 7;
 
 /** How far from an `unattested_place` its merge candidates may be. */
 export const CANDIDATE_DISTANCE_M = 500;
@@ -281,6 +295,9 @@ export function isHeldCase(v: unknown): v is HeldCase {
     if (typeof v.sources !== "number" || !isStrings(v.doubts) || !isStrings(v.confirmations)) return false;
   } else if (v.case === "intake_check") {
     if (v.fact !== undefined && (!isFactName(v.fact) || (v.value !== undefined && !isValidFactValue(v.fact, v.value)))) return false;
+  } else if (v.case === "unconfirmed_fact") {
+    if (!isFactName(v.fact) || isContactFact(v.fact) || (v.value !== undefined && !isValidFactValue(v.fact, v.value))) return false;
+    if (v.from_source !== undefined && typeof v.from_source !== "string") return false;
   } else if (v.fact !== undefined && (typeof v.fact !== "string" || !isContactFact(v.fact))) return false;
   if (v.case === "contact_withdrawn" && (v.fact === undefined || v.value === undefined)) return false;
   if (v.case === "contact_check") {
@@ -388,6 +405,8 @@ export function allowedDecisions(c: HeldCase): ReviewDecision[] {
       return ["approve", "revert", "leave"];
     case "disputed":
       return ["confirm", "leave"];
+    case "unconfirmed_fact":
+      return ["confirm", "dismiss", "leave"];
     case "intake_check":
       return c.about === "fact" ? ["confirm", "dismiss", "leave"] : c.about === "review" ? ["approve", "leave"] : ["approve", "dismiss", "leave"];
     default:
