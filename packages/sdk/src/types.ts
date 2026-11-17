@@ -734,7 +734,7 @@ export type StoredOwnerSubmission =
   | (Omit<OwnerListingSubmission, "device"> & OwnerStoredFields & { code: string; token_sha256: string })
   | (Omit<OwnerUpdateSubmission, "device" | "token"> & OwnerStoredFields & { token_sha256: string });
 
-type OwnerStoredFields = Omit<StoredFields, "contributor" | "attested" | "attest_key" | "intake">;
+type OwnerStoredFields = Omit<StoredFields, "contributor" | "attested" | "human_checked" | "attest_key" | "intake">;
 
 /** Everything that can be in `inbox/pending/`. */
 export type StoredSubmission = StoredFeedback | StoredOwnerSubmission;
@@ -764,6 +764,12 @@ interface StoredFields {
    * the app key does not require attestation.
    */
   attested?: "app_attest" | "play_integrity";
+  /**
+   * A person passed a human check (Turnstile) on the form that sent it.
+   * This is not attestation: the item is weighed as an unattested one.
+   * Absent when the app key does not require a human check.
+   */
+  human_checked?: true;
   /** `ak_` and 16 hex characters of the salted App Attest key id: a second signal beside the contributor. */
   attest_key?: string;
   /**

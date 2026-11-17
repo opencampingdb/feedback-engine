@@ -60,6 +60,7 @@ await feedback.flush();
 `endpoint`, `appKey`, `appVersion` and `storage` are required. The others:
 
 - `attest({ body, bodySha256 })` returns the App Attest or Play Integrity headers for an app key that requires them, and `onAttestationRejected(error, refusal?)` hears of a refused proof ([Refused proof](#refused-proof)).
+- `humanCheck({ body, bodySha256 })` returns a fresh Cloudflare Turnstile token, made with `bodySha256` as its `cData`, for a website's app key that requires a human check. It is sent in `x-human-check`, and an item without a token stays queued (docs/integration.md, "Websites: a human check").
 - `onAnswered({ ref, type, outcome })` is called once for each queued item when it is settled, after the queue is saved. Give each submission a `ref` (1 to 100 characters, or 1 to 90 on `reportFacts`) to connect the answer to your own record.
 - `onQueueUnreadable({ keptAt })` is called when the stored queue can't be read: its text is moved to `<storagePrefix>.queue.corrupt` and its items are not sent.
 - `deviceId` (a UUID) sends a caller's own device id in place of the stored one, for a server with one client per install. It is never written to storage.

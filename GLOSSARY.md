@@ -16,6 +16,12 @@ _Avoid_: attestation, signature (for the whole proof)
 The intake saying no to a key registration or an assertion, always with a reason.
 _Avoid_: rejection, failure (for a check that ran and said no)
 
+## Proof of a person
+
+**Human check**:
+A Cloudflare Turnstile token showing that a person filled in the form that sent a request. It says nothing about the device or app, so the items it carries are weighed as unattested ones.
+_Avoid_: attestation, captcha, proof of a genuine app
+
 ## Between releases
 
 **New place**:

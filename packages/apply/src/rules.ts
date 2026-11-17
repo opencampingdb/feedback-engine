@@ -1233,6 +1233,15 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             }
             continue;
           }
+          // A closure from a human check (a website) is one source: the place stays open until a
+          // second source, or an attested report, agrees. It still counts towards closing.
+          if (place.status === "open" && isReport && item.human_checked === true) {
+            const closing = supporting(at, isClosureEvidence, isReopenEvidence);
+            if (distinctDevices(closing) < 2 && !closing.some((e) => e.attested !== undefined)) {
+              decide(item, "applied", "closure from a human check counted as one source: the place stays open until a second source agrees");
+              continue;
+            }
+          }
           if (place.status === "open" && isReport) {
             place.status = "reported_closed";
             note(placeId, "status open to reported_closed", true, [item]);

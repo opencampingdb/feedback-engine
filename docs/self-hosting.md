@@ -117,13 +117,20 @@ Keys must be at least 16 characters: make them with `openssl rand -hex 16`. App 
 | `ios` | `app_id` (your team id, a dot and the bundle id) and optionally `environment` (`production` or `development`). |
 | `android` | `package`, and optionally `certificate_sha256`, the signing certificate digests Play reports. |
 | `contributor_proof_key` | Your app server's Ed25519 public key, the raw 32 bytes in base64. With it, review erasures, photo removals and photo erasures need a proof your server signed for the account, and a review that carries a valid proof is marked proved, so it may replace the contributor's earlier review without waiting for a person ([photos.md](photos.md), "Prove the account for removal and erasure"). Export it with `Buffer.from(await crypto.subtle.exportKey("raw", publicKey)).toString("base64")`. |
+| `requires_human_check` | `true` takes feedback only with a human check: a Cloudflare Turnstile token for the exact body, for a website, which cannot attest. Needs `human_check`, and never goes with `requires_attestation`. Such a key may send only fact reports of fixed-value facts, doubts, contact reports, and closed, name, kind and wrong_location reports. Everything else answers `403 type_not_allowed_for_app_key`. Its items are weighed as unattested ones ([integration.md](integration.md), "Websites: a human check"). |
+| `human_check` | The key's Turnstile widget: `secret` (its secret key), `hostnames` (the sites the widget is served on, such as `["places.example.org"]`), optionally `action` (the form's action, checked when given) and `free_text_facts` (`true` lets fact reports set opening hours, the operator and charges, whose values hold free words). Make one widget for each website. |
+| `report_kinds` | Report kinds the key may send, such as `["fact", "closed"]`. Every other submission answers `403 type_not_allowed_for_app_key`. On a key with `requires_human_check` it can only narrow that key's set. |
 | `photo_pass_unattested` | Photo services only: lets a development key get photo passes without attestation ([photos.md](photos.md)). |
 
 ```json
 {"<app key>": {"app": "example-app", "daily_limit": 5000, "requires_attestation": true,
   "ios": {"app_id": "ABCDE12345.com.example.app"}, "android": {"package": "com.example.app"}},
- "<owner page key>": {"app": "owner-page", "daily_limit": 1000, "owner_daily_limit": 200, "kinds": ["owner"]}}
+ "<owner page key>": {"app": "owner-page", "daily_limit": 1000, "owner_daily_limit": 200, "kinds": ["owner"]},
+ "<website key>": {"app": "example-web", "daily_limit": 500, "requires_human_check": true,
+  "human_check": {"secret": "<Turnstile secret key>", "hostnames": ["places.example.org"]}}}
 ```
+
+A website key ships in a public page. Add its origin to `ALLOWED_ORIGINS`.
 
 ## 7. Deploy and send a test
 

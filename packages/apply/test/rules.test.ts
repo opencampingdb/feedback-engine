@@ -786,6 +786,33 @@ describe("fact reports", () => {
 });
 
 describe("closed and reopened", () => {
+  const web = (day: number, device: string, origin?: string): StoredFeedback =>
+    ({ ...closed(day, device), human_checked: true, ...(origin ? { origin } : {}) }) as StoredFeedback;
+
+  it("a closed report from a human check alone leaves the place open, counted as one source", () => {
+    const a = web(0, "dev-a", "net-a");
+    const out = run([a]);
+    expect(out.after()).toBeUndefined();
+    expect(out.outcome(a)).toBe("applied");
+  });
+
+  it("two human-checked closures from one network still leave it open", () => {
+    const out = run([web(0, "dev-a", "net-a"), web(1, "dev-b", "net-a")], { now: 2 });
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("a second source on another network closes it as two devices do", () => {
+    const earlier = web(0, "dev-a", "net-a");
+    const out = run([web(1, "dev-b", "net-b")], { now: 2, history: [earlier] });
+    expect(out.after()?.status).toBe("closed");
+  });
+
+  it("an attested closure after a human-checked one reports it closed at once", () => {
+    const attested = { ...closed(1, "dev-b"), attested: "app_attest" } as StoredFeedback;
+    const out = run([web(0, "dev-a", "net-a"), attested], { now: 2 });
+    expect(out.after()?.status).not.toBe("open");
+  });
+
   it("one closed report sets reported_closed at once", () => {
     const a = closed(0, "dev-a");
     const out = run([a]);
