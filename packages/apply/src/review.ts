@@ -95,7 +95,8 @@ export type { Place };
  * sending a different value. `fact` and `value` are what it reports, left
  * out of `value` when the value holds free words, which a person reads in
  * the inbox; `from_source` is where the place's current value came from,
- * when it has one. The value is not on the place: a reviewer confirms it
+ * when it has one; `doubts` are the doubts from other sources that answered
+ * No to it, which list it at once. The value is not on the place: a reviewer confirms it
  * (the apply puts it in the data on its next run), dismisses it (the apply
  * refuses the report) or leaves it for a person.
  * Contact values a traveller sent, notes and device ids are never in it.
@@ -157,7 +158,7 @@ export interface HeldCase {
   file?: string;
   /** On `fact_doubted`: independent sources among the doubts. On `commons_mismatch`: among the reports. On `disputed`: among the conflicting reports. */
   sources?: number;
-  /** On `fact_doubted`: the doubts counted. */
+  /** On `fact_doubted`: the doubts counted. On `unconfirmed_fact`: the doubts that answered No to the value. */
   doubts?: string[];
   /** On `fact_doubted`: the confirmations of the value counted against them. */
   confirmations?: string[];
@@ -298,6 +299,7 @@ export function isHeldCase(v: unknown): v is HeldCase {
   } else if (v.case === "unconfirmed_fact") {
     if (!isFactName(v.fact) || isContactFact(v.fact) || (v.value !== undefined && !isValidFactValue(v.fact, v.value))) return false;
     if (v.from_source !== undefined && typeof v.from_source !== "string") return false;
+    if (v.doubts !== undefined && !isStrings(v.doubts)) return false;
   } else if (v.fact !== undefined && (typeof v.fact !== "string" || !isContactFact(v.fact))) return false;
   if (v.case === "contact_withdrawn" && (v.fact === undefined || v.value === undefined)) return false;
   if (v.case === "contact_check") {
@@ -532,6 +534,13 @@ export function settleByRules(
     if (place.fact_sources[c.fact!] === "owner") return leave("the owner set this contact");
     return null;
   }
+  if (c.case === "unconfirmed_fact") {
+    // Owners keep control of their listings: a person decides.
+    if (place.owner_verified === true) return leave("the place has a verified owner");
+    if (place.fact_sources[c.fact!] === "owner") return leave("the owner set this fact");
+    if (c.value === undefined) return leave("the value is in the inbox, so a person decides");
+    return null;
+  }
   if (c.case === "intake_check") {
     // Owners keep control of their listings: a person decides.
     if (place.owner_verified === true) return leave("the place has a verified owner");
@@ -587,6 +596,8 @@ export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecisio
   if (decision === "dismiss" && c.case !== "contact_check" && c.case !== "intake_check") return null;
   // A Commons photo goes on the do-not-match list (`withDoNotMatch`), not into the place record.
   if (c.case === "commons_mismatch") return null;
+  // An unconfirmed value is not on the place: the apply puts a confirmed one in the data, or refuses a dismissed one, on its next run.
+  if (c.case === "unconfirmed_fact") return null;
   // An approved name, kind or location change is on the place already.
   if (c.case === "place_change" && decision === "approve") return null;
   // A confirmed contact stays as the review PR has it, and so does a value the intake held for a check.

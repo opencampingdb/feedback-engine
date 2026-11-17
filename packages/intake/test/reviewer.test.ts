@@ -520,6 +520,62 @@ describe("the AI reviewer", () => {
     });
   });
 
+  describe("unconfirmed_fact cases", () => {
+    const SITE = "https://creekbend.example.org/";
+    const unconfirmed = (n: number, extra: Partial<HeldCase> = {}) => heldCase(n, { case: "unconfirmed_fact", fact: "toilets", ...extra });
+    const withSite = (gh: ReturnType<typeof fakeDataRepo>, html: string) => {
+      const visited: string[] = [];
+      const fetch = async (input: string, init?: RequestInit) => {
+        if (input.startsWith("https://api.github.com/")) return gh.fetch(input, init);
+        visited.push(input);
+        return input === SITE ? new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } }) : new Response("gone", { status: 404 });
+      };
+      return { fetch, visited };
+    };
+
+    it("shows the model the reported value, the place's value with OSM's, the doubts and the place's own website, and writes nothing", async () => {
+      const cases = [unconfirmed(0, { value: false, from_source: "osm", doubts: ["fb_01JC0000000000000000000099"] }), unconfirmed(1, { value: true })];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(place(0, { standing: undefined, osm: { type: "node", id: 1, version: 1 }, facts: { toilets: true, website: SITE }, fact_sources: { toilets: "osm", website: "osm" } }));
+      gh.put(place(1, { standing: undefined, facts: {}, fact_sources: {} }));
+      const site = withSite(gh, "<html><head><title>Creek Bend camp</title></head><body><p>No toilets: bring your own.</p></body></html>");
+      const { ai, asked } = fakeAi((input) => ((caseOf(input).place as { id: string }).id === id(0) ? reply("confirm", "The park's own site says there are no toilets.") : reply("dismiss", "Unlikely.")));
+      const result = await createReviewer({ fetch: site.fetch, now: () => clock })({ ...env, AI: ai });
+      expect(site.visited).toEqual([SITE]);
+      expect(caseOf(asked[0]!.input)).toMatchObject({
+        case: "unconfirmed_fact",
+        fact: "toilets",
+        reported_value: false,
+        current_value: true,
+        current_source: "osm",
+        osm_value: true,
+        doubts: 1,
+        website: { host: "creekbend.example.org", title: "Creek Bend camp", text: expect.stringContaining("No toilets") },
+      });
+      expect(caseOf(asked[1]!.input)).toMatchObject({ case: "unconfirmed_fact", fact: "toilets", reported_value: true, current_value: null, doubts: 0 });
+      expect(caseOf(asked[1]!.input)).not.toHaveProperty("website");
+      if (result === "off" || result === "failed" || result.outcome !== "reviewed") throw new Error("expected a review");
+      expect(result.decisions.map((d) => [d.place, d.decision, d.committed])).toEqual([
+        [id(0), "confirm", false],
+        [id(1), "dismiss", false],
+      ]);
+      expect(gh.read(0).facts.toilets).toBe(true);
+    });
+
+    it("leaves a value on a place with a verified owner, one the owner set, or one with free words to a person", async () => {
+      const cases = [unconfirmed(0, { value: false }), unconfirmed(1, { value: false }), unconfirmed(2)];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(place(0, { standing: undefined, owner_verified: true }));
+      gh.put(place(1, { standing: undefined, fact_sources: { toilets: "owner" } }));
+      gh.put(place(2, { standing: undefined }));
+      const { ai, asked } = fakeAi(() => reply("confirm", "fine"));
+      const result = await run(gh, ai);
+      expect(asked).toHaveLength(0);
+      if (result === "off" || result === "failed" || result.outcome !== "reviewed") throw new Error("expected a review");
+      expect(result.decisions.map((d) => [d.decision, d.by_rules])).toEqual([["leave", true], ["leave", true], ["leave", true]]);
+    });
+  });
+
   describe("fact_doubted cases", () => {
     const doubted = (n: number, takenDown: boolean, extra: Partial<HeldCase> = {}) =>
       heldCase(n, {

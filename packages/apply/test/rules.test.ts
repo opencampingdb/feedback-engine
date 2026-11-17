@@ -2472,4 +2472,80 @@ describe("unconfirmed facts", () => {
     ]);
     expect(reasonOf(out, r)).toBe("waiting for a second device to agree on power, and listed for the AI reviewer");
   });
+
+  it("puts the value in the data when the AI reviewer confirms it, refuses it on dismiss, and sends it to a person on leave", () => {
+    const r = web(fact(0, "dev-a", "power", true));
+    const listed = run([r], { now: 7 }).held[0]!;
+    const decided = (decision: "confirm" | "dismiss" | "leave") => run([r], { now: 8, extra: { reviewerDecisions: [{ case: listed, decision }] } });
+
+    const confirmed = decided("confirm");
+    expect(confirmed.outcome(r)).toBe("applied");
+    expect(reasonOf(confirmed, r)).toBe("power set to true (the AI reviewer confirmed it)");
+    expect(confirmed.after()?.facts.power).toBe(true);
+    expect(confirmed.after()?.fact_sources.power).toBe("feedback");
+    expect(confirmed.held).toEqual([]);
+
+    const dismissed = decided("dismiss");
+    expect(dismissed.outcome(r)).toBe("refused");
+    expect(reasonOf(dismissed, r)).toBe("the AI reviewer dismissed power = true");
+    expect(dismissed.after()).toBeUndefined();
+    expect(dismissed.held).toEqual([]);
+
+    const left = decided("leave");
+    expect(left.outcome(r)).toBe("needs_review");
+    expect(left.after()).toBeUndefined();
+    expect(left.edits).toEqual([{ kind: "fact", place: PLACE, fact: "power", value: true, feedback: r.id }]);
+    expect(left.held).toEqual([]);
+  });
+
+  const no = (day: number, device: string, name: string, origin: string) =>
+    ({ ...base(day, device), origin, type: "report", report: { kind: "doubt", fact: name } }) as StoredFeedback;
+
+  it("sends a report a doubt from another source answers No to straight to the AI reviewer, with the doubt counted", () => {
+    // A change of the place's value, and a gap fill a doubt in the same run stops.
+    const change = web(fact(0, "dev-a", "power", true));
+    const gap = web(fact(0, "dev-a", "toilets", true));
+    const d1 = no(1, "dev-b", "power", "net-2");
+    const d2 = no(1, "dev-b", "toilets", "net-2");
+    const out = run([change, gap, d1, d2], { now: 2 });
+    expect([out.outcome(d1), out.outcome(d2)]).toEqual(["applied", "applied"]);
+    expect([out.outcome(change), out.outcome(gap)]).toEqual(["waiting", "waiting"]);
+    // The doubt counts against the report, not the place's value.
+    expect(out.after()).toBeUndefined();
+    expect(out.held).toEqual([
+      expect.objectContaining({ case: "unconfirmed_fact", fact: "power", value: true, doubts: [d1.id], feedback: [change.id] }),
+      expect.objectContaining({ case: "unconfirmed_fact", fact: "toilets", value: true, doubts: [d2.id], feedback: [gap.id] }),
+    ]);
+  });
+
+  it("refuses a report doubts from two sources on different networks answer No to", () => {
+    const r = web(fact(0, "dev-a", "toilets", true));
+    const first = no(1, "dev-b", "toilets", "net-2");
+    const earlier = run([r, first], { now: 2 });
+    const kept = applied(first, earlier.outcome(first));
+    (kept as unknown as { outcome: { reason: string } }).outcome.reason = earlier.decisions.find((d) => d.id === first.id)!.reason;
+    const second = no(3, "dev-c", "toilets", "net-3");
+    const out = run([r, second], { now: 4, history: [kept] });
+    expect(out.outcome(r)).toBe("refused");
+    expect(reasonOf(out, r)).toBe("doubts from 2 sources say toilets = true is wrong");
+    expect(out.outcome(second)).toBe("applied");
+    expect(out.after()).toBeUndefined();
+    // Two doubts on one network count once.
+    const sameNetwork = no(3, "dev-c", "toilets", "net-2");
+    expect(run([r, sameNetwork], { now: 4, history: [kept] }).outcome(r)).toBe("waiting");
+  });
+
+  it("weighs a doubt as before when no report waits for the fact", () => {
+    const d = no(1, "dev-b", "toilets", "net-2");
+    expect(run([d], { now: 2 }).outcome(d)).toBe("refused");
+  });
+
+  it("sends a confirmed value to a person when the owner has set the fact since", () => {
+    const r = web(fact(0, "dev-a", "power", true));
+    const listed = run([r], { now: 7 }).held[0]!;
+    const owned = place({ fact_sources: { power: "owner", fee: "osm" } });
+    const out = run([r], { now: 8, places: [owned], extra: { reviewerDecisions: [{ case: listed, decision: "confirm" }] } });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.after()).toBeUndefined();
+  });
 });

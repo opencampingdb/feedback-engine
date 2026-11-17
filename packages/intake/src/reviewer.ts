@@ -73,6 +73,7 @@ import { recordReviewerHold } from "./progress.js";
 import { claimReviewRun } from "./runs.js";
 import { addSpend, askSecondModel, monthOf, monthSpend, SECOND_REVIEW_MODEL, SecondModelUnavailable, type SecondStage } from "./second-review.js";
 import { readSiteNames } from "./site-names.js";
+import { readWebsite, SITE_INSTRUCTIONS, type SiteView } from "./overture-reviewer.js";
 
 /**
  * A current Workers AI instruct model that supports JSON Mode, so its answer
@@ -301,6 +302,17 @@ const CASE_GUIDE: Partial<Record<HeldCase["case"], { about?: readonly string[]; 
       approve: "let the item count as an ordinary report: it is believable for this place",
     },
   },
+  unconfirmed_fact: {
+    about: [
+      "In an unconfirmed_fact case, one traveller, from a website form or an app that could not prove it runs on a genuine device, reported a value for a fact (reported_value), and no second traveller has confirmed it. current_value is what the place has now (null for none), current_source where it came from, and osm_value OpenStreetMap's value when the place's value comes from there.",
+      "doubts counts travellers who were shown the value and said it is wrong. website is what the place's own website says, when it could be read.",
+      "Confirm only when the value is believable for this place and nothing speaks against it; a website that clearly states the value is good evidence. Dismiss a value the website or the place clearly contradicts, or one that reads like vandalism.",
+    ],
+    means: {
+      confirm: "put the reported value on the place: it is believable for this place and nothing speaks against it",
+      dismiss: "refuse the reported value: the place's website or its other facts clearly contradict it, or it is not believable",
+    },
+  },
   unattested_place: {
     about: [
       "In an unattested_place case, a traveller added a new place from an app that could not prove it runs on a genuine device. It passed the automatic location, duplicate and text checks. candidates are places of the same group nearby, with how far each is.",
@@ -450,6 +462,17 @@ function caseEvidence(
       ? { candidates: candidates.map((n) => ({ ...placeView(n.place), distance_m: n.distance_m, mergeable: n.mergeable })) }
       : {}),
     ...(c.case === "place_change" && c.held_for !== undefined ? { held_for: c.held_for } : {}),
+    ...(c.case === "unconfirmed_fact"
+      ? {
+          fact: c.fact,
+          reported_value: c.value,
+          current_value: (place.facts as Record<string, unknown>)[c.fact!] ?? null,
+          ...(place.fact_sources[c.fact!] !== undefined ? { current_source: place.fact_sources[c.fact!] } : {}),
+          ...(place.fact_sources[c.fact!] === "osm" ? { osm_value: (place.facts as Record<string, unknown>)[c.fact!] } : {}),
+          doubts: c.doubts?.length ?? 0,
+          ...(extra.website ? { website: extra.website } : {}),
+        }
+      : {}),
     ...(c.case === "intake_check"
       ? {
           held_for: c.held_for,
@@ -462,9 +485,10 @@ function caseEvidence(
   });
 }
 
-/** What a case's evidence adds that is read from the branch: on an `intake_check` of a review, the review's stars and text. */
+/** What a case's evidence adds that is read from the branch or the web: on an `intake_check` of a review, the review's stars and text; on an `unconfirmed_fact`, the place's own website. */
 interface CaseExtra {
   review?: { stars: number; text: string };
+  website?: SiteView;
 }
 
 /** A model's answer object as a decision: `leave`, and unsure, unless it is a sure decision the case allows. */
@@ -746,12 +770,19 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       const siteNames = c.case === "place_change" && c.change === "name" && place && deps.fetchSite ? await readSiteNames(deps.fetchSite, place.facts.website) : undefined;
       // A held review, as the review branch has it.
       const review = c.case === "intake_check" && c.about === "review" && place ? await readReview(read, c.place, c.review!) : undefined;
+      const ruled = settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [], now: deps.now() });
+      // An unconfirmed value the rules leave to the model: what the place's own website says, when it has one.
+      const website =
+        c.case === "unconfirmed_fact" && place && ruled === null && deps.fetchSite && typeof place.facts.website === "string" ? await readWebsite(deps.fetchSite, place.facts.website) : undefined;
+      const speaks = website !== undefined && "text" in website && SITE_INSTRUCTIONS.test(`${website.title} ${website.description} ${website.text}`);
       const settled = closed
         ? { decision: "leave" as const, reason: `the rules closed this case: travellers ${closed.settles} the fact` }
+        : speaks
+          ? { decision: "leave" as const, reason: "the place's website reads like instructions to a reviewer, so a person decides" }
         : c.case === "intake_check" && c.about === "review" && place && review === undefined
           ? { decision: "leave" as const, reason: "the review is not on the review branch, so a person decides" }
           : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [], ...(siteNames ? { siteNames } : {}), now: deps.now() });
-      const extra: CaseExtra = review ? { review } : {};
+      const extra: CaseExtra = { ...(review ? { review } : {}), ...(website ? { website } : {}) };
       let decision: ReviewDecision;
       let reason: string;
       let by = reviewer;

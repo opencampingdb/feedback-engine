@@ -290,7 +290,7 @@ export function reviewPrBody(
 
 const HELD_INTRO =
   "Cases a person, a bot or an AI reviewer should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
-  "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate`, `commons_mismatch`, `contact_check`, `implausible_location`, `note`, `place_change`, `disputed` or `unattested_place`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
+  "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate`, `commons_mismatch`, `contact_check`, `implausible_location`, `note`, `place_change`, `disputed`, `unattested_place`, `intake_check` or `unconfirmed_fact`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
   "set its `standing` to `shown` in this PR. `contacts` and `description` name what was left off a published new place: " +
   "contact details, addresses and descriptions travellers sent are in the inbox items, never here. " +
   "`contact_withdrawn` is a contact taken off a place after reports from two sources: its `value` is the place's own published contact, " +
@@ -312,7 +312,10 @@ const HELD_INTRO =
   "`note` is a new place whose traveller wrote a note: read it in the inbox item and add what it says to the place by hand " +
   "(to the kept record, when the place was merged). Notes are in the inbox, never here. " +
   "`place_change` is a traveller's name, kind or location change, already on the place in this PR: `from` is the value it replaces and `to` the new one. " +
-  "To refuse it, put `from` back on the place.";
+  "To refuse it, put `from` back on the place. " +
+  "`unconfirmed_fact` is a report without attestation of `value` for `fact` that no second source has confirmed in 7 days, or that `doubts` from another source answered No to. " +
+  "It is not on the place: the AI reviewer confirms it (the next run puts it in the data) or dismisses it (the next run refuses it). " +
+  "When it is left, the next run sets it on the place in its review PR for a person.";
 
 const CLOSED_INTRO =
   "Held cases the rules settled, one per line: `closed-case` and a JSON object. Each closes the `fact_doubted` cases for its place and fact listed before it: " +
