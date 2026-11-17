@@ -1432,6 +1432,40 @@ describe("name, description and kind reports", () => {
     ]);
   });
 
+  it("lists each name, kind and location change as a held case for the AI reviewer, with the value it replaces", () => {
+    const name = rep({ kind: "name", value: "Lake Eppalock Free Camp" });
+    const kind = rep({ kind: "kind", place_kind: "campground" });
+    const move = { ...base(0, "dev-b"), type: "report", location: { lat: -36.851, lon: 144.552 }, report: { kind: "wrong_location" } } as StoredFeedback;
+    const before = place({ fact_sources: { power: "osm", fee: "osm", name: "osm", kind: "feedback" }, fact_dates: { kind: "2026-05-01T00:00:00Z" } });
+    const out = run([name, kind, move], { places: [before] });
+    expect([name, kind, move].map(out.outcome)).toEqual(["needs_review", "needs_review", "needs_review"]);
+    expect(out.edits.map((e) => e.kind)).toEqual(["name", "kind", "location"]);
+    const common = { case: "place_change", place: PLACE, location: { lat: -36.85, lon: 144.55 }, kind: "free_camp" };
+    expect(out.held).toEqual([
+      { ...common, change: "name", from: "Lake Eppalock Camp", to: "Lake Eppalock Free Camp", from_source: "osm", feedback: [name.id] },
+      {
+        ...common,
+        change: "kind",
+        from: "free_camp",
+        from_group: "overnight",
+        to: "campground",
+        from_source: "feedback",
+        from_date: "2026-05-01T00:00:00Z",
+        feedback: [kind.id],
+      },
+      // About 210 m: 111 m north and 178 m east.
+      { ...common, change: "location", from: { lat: -36.85, lon: 144.55 }, to: { lat: -36.851, lon: 144.552 }, distance_m: 210, feedback: [move.id] },
+    ]);
+  });
+
+  it("leaves a location report without a new location, and a name that fails the text rules, to a person with no held case", () => {
+    const name = rep({ kind: "name", value: "Dummyname is a wanker" });
+    const move = { ...base(0, "dev-b"), type: "report", report: { kind: "wrong_location" } } as StoredFeedback;
+    const out = run([name, move]);
+    expect([name, move].map(out.outcome)).toEqual(["needs_review", "needs_review"]);
+    expect(out.held).toEqual([]);
+  });
+
   it("sends a name or description that fails the text rules to a person as a note, with no edit and no value in the summary", () => {
     const name = rep({ kind: "name", value: "Dummyname is a wanker" });
     const text = rep({ kind: "description", value: "Dummyname is a wanker and a thief" });
@@ -2112,7 +2146,7 @@ describe("items the intake held for a check", () => {
     }) as StoredFeedback;
   const idOf = (item: StoredFeedback) => `ocdb_${item.id.slice(3)}`;
 
-  for (const reason of ["text_check", "link_check", "ai_check", "daily_cap", "repeated_text", "check_unavailable"]) {
+  for (const reason of ["text_check", "link_check", "ai_check", "daily_cap", "repeated_text", "check_unavailable", "network_reputation"]) {
     it(`sends an attested fact held for ${reason} to a person instead of applying it`, () => {
       const r = heldFor(attested(fact(0, "dev-a", "power", true)), reason);
       const out = run([r]);

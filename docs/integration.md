@@ -299,6 +299,14 @@ addressProblems({ suburb: "Lakeside", state: "Victoria" });
 await feedback.report({ place, report: { kind: "fact", fact: "address", value: address }, consent: true });
 ```
 
+**Contact checks.** A reported contact or address (a `fact` report of one of `CONTACT_FACTS`) goes through automatic checks before it goes live:
+
+- the place's own website on record (its home page and up to 3 contact pages it links to) shows the reported phone, email or social link
+- the domain of a reported website or email was not registered in the last 90 days, from its registry's RDAP record
+- an address's `state`, and the state its `postcode` belongs to, are where the place is, allowing about 30 km either side of a state border
+
+A contact that passes every check that applies to it follows the two-source rule: from an attested install it goes live, and without attestation it waits for a second device to agree. One that fails a check, or whose check times out or cannot run, is held for the AI reviewer, and a person sees it only when the reviewer is unsure. A contact the owner set, or one on a place with a verified owner, still goes to a person. At send time the intake runs only the website check, for about 3 seconds: an attested phone, email or social link the website shows goes live at once, and anything else (a website, an address, a contact the website does not show, or a website that is slow to answer) is answered `held` with `contact_check` until the apply run's full check decides it. A contact that went live at send time and then fails the apply run's check leaves the recent list.
+
 **Reporting a contact.** A `contact` report says a contact on a place is wrong or spam: `fact` is one of `CONTACT_FACTS` and `reason` is `wrong` or `spam` (`CONTACT_REPORT_REASONS`). It needs the place and carries no `value`. One report goes to a person. Reports from two different sources within 90 days, at least one of them attested, take the contact off the place at the next apply run, and a reviewer then decides whether it comes back. A contact the owner set is left to a person, and a report about a contact the place does not have is answered `held` (`no_value`) and refused at the next apply run.
 
 ```ts
@@ -344,7 +352,7 @@ await feedback.report({ place, report: { kind: "doubt", fact: "pets", first_hand
 
 A `fact` report may carry `source`, an https link of up to 500 characters (`MAX_SOURCE_LENGTH`) to a page that shows the reported value: a government page on a `.gov.au` host, or a page on the host of the place's own website as your release has it (with or without `www.`). `reportFacts` takes it once for the whole edit. `sourceLinkProblem(source, place.facts.website)` says whether a link passes, so check it before sending. The intake refuses a link on any other host, a subdomain of the website's host included, with `400 source_not_allowed` and the reason in `details`, and a link off `.gov.au` for a place its place index does not hold, whose website it cannot know.
 
-A report with a link is held as before. When it would wait for a second source, the intake answers `held` (`source_link`). The apply run then fetches the page, and when the value appears on it the page counts as a second source for that value, so the report goes into the data without a second traveller. A page that cannot be fetched, answers with an error, is not HTML or plain text, or redirects off the allowed hosts confirms nothing, and the report keeps waiting for a second source or a later run. A contact or address with a link still goes to a person, who sees that the page shows it.
+A report with a link is held as before. When it would wait for a second source, the intake answers `held` (`source_link`). The apply run then fetches the page, and when the value appears on it the page counts as a second source for that value, so the report goes into the data without a second traveller. A page that cannot be fetched, answers with an error, is not HTML or plain text, or redirects off the allowed hosts confirms nothing, and the report keeps waiting for a second source or a later run. A contact or address counts its page the same way once it has passed the contact checks, and when it goes to a reviewer, the review PR says the page shows it.
 
 What counts as appearing is kept strict:
 
@@ -743,6 +751,8 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `not_own_value` | A `clear` of a value another traveller set, or one the intake cannot tie to this install, so a person decides. |
 | `ai_cap` | Not given at send time. The AI reviewer was unsure, and its second model's monthly spending cap was reached, so a person decides. It shows on the item's progress. |
 | `repeated_text` | Its free text is nearly the same as text three other sources sent in the last 30 days, so a person reads it. |
+| `contact_check` | A contact the automatic contact checks have not passed yet: the place's website does not show it, or its check could not finish in time at send time, or it is a website or address, which only the apply run checks. The apply run's full check decides it, and one that fails goes to the AI reviewer. |
+| `network_reputation` | The report came from an attested install on a network the intake's blocklist names, so a reviewer reads it. The same report from an install that is not attested, or from a website, is dropped silently. |
 | `source_link` | A fact report without attestation that carries a source link. The apply run reads the page: the value goes into the data when the page shows it, or when a second source agrees. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.

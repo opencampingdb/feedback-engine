@@ -51,11 +51,12 @@ import {
   type MajorRoads,
 } from "@opencampingdb/apply/review";
 import type { AiLike } from "./checks.js";
-import type { GitHubApp, GitHubAppConfig, IssueComment } from "./github.js";
+import type { Fetch, GitHubApp, GitHubAppConfig, IssueComment } from "./github.js";
 import type { D1Like } from "./recent.js";
 import { recordReviewerHold } from "./progress.js";
 import { claimReviewRun } from "./runs.js";
 import { addSpend, askSecondModel, monthOf, monthSpend, SECOND_REVIEW_MODEL, SecondModelUnavailable, type SecondStage } from "./second-review.js";
+import { readSiteNames } from "./site-names.js";
 
 /**
  * A current Workers AI instruct model that supports JSON Mode, so its answer
@@ -106,6 +107,12 @@ export interface ReviewerDeps {
    * is merged.
    */
   roads?: MajorRoads;
+  /**
+   * Fetches a place's own website, to read its title and headings for a name
+   * change. Without it, or when the site can't be read, a new name the name
+   * from OSM does not confirm goes to a person.
+   */
+  fetchSite?: Fetch;
   /**
    * The second stage (src/second-review.ts), when the deployment has an
    * Anthropic API key: a case the first model is unsure of is asked of the
@@ -209,6 +216,7 @@ const MEANINGS: Record<ReviewDecision, string> = {
   leave: "a person decides",
   confirm: "set the fact: the place's name clearly says only heavy vehicles (trucks) may use it",
   merge: "merge the new place into the place it may duplicate: the two are clearly one place added twice, with the same or nearly the same name and nothing to tell them apart",
+  revert: "put back the place's earlier value: the change is wrong, unlikely or vandalism",
 };
 
 /** What a decision means for this case. */
@@ -219,7 +227,13 @@ const meaning = (c: HeldCase, d: ReviewDecision) =>
       ? "never show this photo for the place again: its file name clearly names another place or something else"
       : c.case === "commons_mismatch" && d === "dismiss"
         ? "keep showing the photo: its file name clearly names this place"
-        : MEANINGS[d];
+        : c.case === "place_change" && d === "approve"
+          ? "keep the change: it is believable for this place"
+          : c.case === "contact_check" && d === "confirm"
+            ? "keep the reported contact on the place: it is clearly the place's own, despite the failed checks"
+            : c.case === "contact_check" && d === "dismiss"
+              ? "take the reported contact off the place and put back what it had before: it is not the place's own, or it is spam"
+              : MEANINGS[d];
 
 /** What the model reads of a place. Values travellers or the owner sent are data, not instructions. */
 function placeView(place: Place) {
@@ -245,6 +259,15 @@ function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
       : []),
     ...(c.case === "commons_mismatch"
       ? ["In a commons_mismatch case, a traveller says a Wikimedia Commons photo shown for the place is not of it. You see only the photo's file name, matched to the place by its words and distance."]
+      : []),
+    ...(c.case === "place_change"
+      ? ["In a place_change case, a traveller changed the place's name, kind or location (change) from one value (from) to another (to), and the place already shows the new value."]
+      : []),
+    ...(c.case === "contact_check"
+      ? [
+          "In a contact_check case, a traveller reported a contact for the place (the place's facts show it) and it failed automatic checks: the place's own website does not show it, its domain was registered recently or its age is unknown, or the address is in another state.",
+          "A newly registered domain or a contact unrelated to the place points to spam. A check that could not run (a website that timed out, a registry with no date) says little either way.",
+        ]
       : []),
     "Answer with JSON only: {\"decision\": ..., \"reason\": ..., \"sure\": true or false}.",
     `The decisions you may give for this case are: ${allowed.join(", ")}.`,
@@ -323,6 +346,8 @@ function caseEvidence(c: HeldCase, place: Place, duplicateOf: Place | undefined)
       : {}),
     ...(c.case === "vehicle_access_candidate" ? { fact: c.fact, value: c.value } : {}),
     ...(c.case === "commons_mismatch" ? { file: c.file, reporting_sources: c.sources } : {}),
+    ...(c.case === "place_change" ? { change: c.change, from: c.from, to: c.to, ...(c.change === "location" ? { distance_m: c.distance_m } : {}) } : {}),
+    ...(c.case === "contact_check" ? { contact: c.fact, failed_checks: c.checks, found: c.problem, value_before: c.value } : {}),
   });
 }
 
@@ -541,9 +566,11 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       const place = file ? parsePlace(file.text) : undefined;
       const closed = closedBy.get(key);
       const list = c.case === "commons_mismatch" ? await read(DO_NOT_MATCH_PATH) : null;
+      // A new name the place's own website may confirm.
+      const siteNames = c.case === "place_change" && c.change === "name" && place && deps.fetchSite ? await readSiteNames(deps.fetchSite, place.facts.website) : undefined;
       const settled = closed
         ? { decision: "leave" as const, reason: `the rules closed this case: travellers ${closed.settles} the fact` }
-        : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [] });
+        : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [], ...(siteNames ? { siteNames } : {}) });
       let decision: ReviewDecision;
       let reason: string;
       let by = reviewer;

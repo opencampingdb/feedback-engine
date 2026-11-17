@@ -17,7 +17,9 @@ import {
   type ReportItem,
   type Setter,
 } from "@opencampingdb/apply/decide";
+import { websiteCheck, websiteCheckApplies, type Fetch as CheckFetch } from "@opencampingdb/apply/contact-checks";
 import {
+  isContactFact,
   newPlaceId,
   tidyName,
   type ContactFactName,
@@ -397,6 +399,12 @@ export interface DecideInput {
   contributor: string;
   /** What items earlier in the same batch decided. None for an item sent alone. */
   decided?: DecidedInRequest;
+  /**
+   * The website check on an attested contact (contact-checks.ts): the fetch
+   * it reads the place's website with and how long it may take. Left out, no
+   * attested contact goes live at send time: each waits for the apply run.
+   */
+  website?: { fetch: CheckFetch; timeoutMs: number };
 }
 
 const held = (reason: HeldReason, writes: SendTimeDecision["writes"] = () => [], addToDecided?: SendTimeDecision["addToDecided"]): SendTimeDecision => ({
@@ -465,6 +473,17 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
   if (item.attested === undefined) return heldWithEvidence(waiting("not_attested"), item);
   // The place already has the value: nothing to show, and nothing for the checks.
   if (decision.changes.length === 0) return live((d) => [evidenceStatement(d, item, "live")], (p) => void p.evidence.push(evidenceRow(item, "live")));
+  // An attested contact goes live now only when the place's own website shows it, within the time
+  // allowed. Otherwise it waits for the apply run, which runs every contact check.
+  const fact = item.report.fact as string;
+  if (kind === "fact" && isContactFact(fact)) {
+    const website = input.website;
+    const shown =
+      website !== undefined && websiteCheckApplies(fact)
+        ? (await websiteCheck(website.fetch, (place.facts as Record<string, unknown>).website, fact, item.report.value as FactValue, website.timeoutMs)).passed
+        : false;
+    if (!shown) return heldWithEvidence("contact_check", item);
+  }
 
   const checked = await checks.check(submission, { ...record, origin: item.origin, attest_key: item.attest_key });
   if ("held" in checked) return heldWithEvidence(checked.held, item);

@@ -961,6 +961,11 @@ export type AnswerOutcome =
  *   reads the page, and the value goes live when the page shows it or a second source agrees.
  * - `ai_cap`: never given at send time. On an item's progress: the AI reviewer was unsure, and its
  *   second model's monthly spending cap was reached, so a person decides.
+ * - `contact_check`: a contact the automatic contact checks have not passed yet. At send time an
+ *   attested contact goes live only when the place's own website shows it; otherwise the apply run
+ *   checks it in full, and one that fails a check goes to the AI reviewer.
+ * - `network_reputation`: an attested report from a network on the intake's blocklist, which a
+ *   reviewer reads before it goes live.
  */
 export const HELD_REASONS = [
   "not_attested",
@@ -986,6 +991,8 @@ export const HELD_REASONS = [
   "not_own_value",
   "ai_cap",
   "repeated_text",
+  "contact_check",
+  "network_reputation",
   "source_link",
 ] as const;
 

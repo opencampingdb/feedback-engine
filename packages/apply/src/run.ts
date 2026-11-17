@@ -15,6 +15,7 @@ import {
   writeOwners,
   writePhotoVotes,
 } from "./io.js";
+import { checkContacts, type Fetch } from "./contact-checks.js";
 import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
 import { autoPrBody, jobSummary, reviewPrTexts } from "./prbody.js";
 import { previewUrl, PREVIEW_TTL_SECONDS } from "./preview.js";
@@ -95,6 +96,15 @@ export interface RunOptions {
    * the links. Off when left out.
    */
   reviewPreview?: { url: string; secret: string };
+  /**
+   * The automatic contact checks (contact-checks.ts), with the fetch they
+   * read websites and RDAP with. Each contact fact report is checked before
+   * the rules run: one that fails a check is held for the AI reviewer, and
+   * one that passes them all follows the two-source rule. Off when left out:
+   * an attested contact goes live and one without attestation goes to a
+   * person, as before.
+   */
+  contactChecks?: { fetch: Fetch; budget?: { ms: number; concurrency: number }; timeoutMs?: number };
 }
 
 export interface RunSummary {
@@ -291,6 +301,15 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     if (earlier) earlierFacts.set(p.place, (earlierFacts.get(p.place) ?? new Map()).set(fact, earlier));
   }
 
+  // The contact checks, against each place as the data has it before this run.
+  const contactChecks = options.contactChecks && !photosOnly
+    ? await checkContacts(crowd, places, {
+        fetch: options.contactChecks.fetch,
+        now: () => Date.now(),
+        ...(options.contactChecks.budget ? { budget: options.contactChecks.budget } : {}),
+        ...(options.contactChecks.timeoutMs !== undefined ? { timeoutMs: options.contactChecks.timeoutMs } : {}),
+      })
+    : undefined;
   // Source links on fact reports: a page that shows the reported value counts as a second source.
   // The host is checked again against the place's website in the data, whatever the intake knew.
   const linked = photosOnly
@@ -328,6 +347,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     ...(doNotMatch ? { doNotMatch } : {}),
     ...(recent !== undefined ? { recent } : {}),
     ...(earlierFacts.size > 0 ? { earlierFacts } : {}),
+    ...(contactChecks ? { contactChecks } : {}),
     ...(sourceConfirmed.size > 0 ? { sourceConfirmed } : {}),
   });
 

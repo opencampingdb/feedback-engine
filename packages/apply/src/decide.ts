@@ -16,6 +16,7 @@ import {
   type StoredFeedback,
   type TextProblem,
 } from "@opencampingdb/feedback";
+import type { CheckOutcome } from "./contact-checks.js";
 import { textProblems } from "./data-check.js";
 import type { Place } from "./types.js";
 
@@ -75,7 +76,8 @@ export type PlaceState = Pick<Place, "facts" | "fact_sources" | "fact_dates">;
  * `not_seasonal`: `pets_months` for a place whose `pets` is not `seasonal`.
  * `unlikely_charge`: a charge a person checks before it is published
  * (`unlikelyCharge`). `not_own_value`: a clear of a value another source set
- * (`decideClear`).
+ * (`decideClear`). `contact_check`: a contact that failed one of the
+ * automatic contact checks (contact-checks.ts), for the AI reviewer.
  */
 export type HeldReason =
   | "not_attested"
@@ -90,10 +92,11 @@ export type HeldReason =
   | "taken_down"
   | "not_seasonal"
   | "unlikely_charge"
-  | "not_own_value";
+  | "not_own_value"
+  | "contact_check";
 
 /** The reasons the intake holds an item for one of its checks rather than for these rules. */
-export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "repeated_text", "check_unavailable"];
+export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "repeated_text", "check_unavailable", "network_reputation"];
 
 /** Contact facts that are links, which URLhaus checks at the intake. */
 export const LINK_FACTS: readonly ContactFactName[] = ["website", "facebook", "instagram", "tiktok", "x"];
@@ -157,8 +160,8 @@ export type ItemDecision =
    * replacing it with another.
    */
   | { verdict: "live"; changes: FactChange[]; why: string; takedown?: Takedown; doubtTakedown?: DoubtTakedown; settles?: Settles }
-  /** `problem`: on `link_check`, the check the value failed. */
-  | { verdict: "held"; reason: HeldReason; why: string; problem?: string }
+  /** `problem`: on `link_check`, the check the value failed. `failed`: on `contact_check`, the contact checks it failed. */
+  | { verdict: "held"; reason: HeldReason; why: string; problem?: string; failed?: CheckOutcome[] }
   | { verdict: "refused"; reason: RefusedReason; why: string };
 
 export interface ItemInput {
@@ -173,6 +176,15 @@ export interface ItemInput {
   earlier: readonly StoredFeedback[];
   /** On `decideFact`: the open `fact_doubted` case for this place and fact, when doubts took the fact down. */
   openCase?: OpenDoubt;
+  /**
+   * On `decideFact` of a contact fact: what the automatic contact checks
+   * found. Given, a contact that fails any of them is held as
+   * `contact_check`, and one that passes them all follows the two-source
+   * rule: attested, it goes live; without attestation, it waits for a second
+   * device to agree. Left out, the checks are off and a contact without
+   * attestation goes to a person.
+   */
+  contactChecks?: readonly CheckOutcome[];
 }
 
 /** An open `fact_doubted` case as `decideFact` reads it: the value the fact had, and when doubts took it down. */
@@ -255,7 +267,7 @@ export function unlikelyCharge(value: unknown, current: unknown): string | null 
  * fact waits for a second device to agree (which `applyRules` settles across
  * runs).
  */
-export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemDecision {
+export function decideFact({ item, place, earlier, openCase, contactChecks }: ItemInput): ItemDecision {
   const refusal = factRefusal(item);
   if (refusal !== null) return refusal;
   const fact = item.report.fact as FactName;
@@ -274,12 +286,13 @@ export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemD
   const down = openCase !== undefined && (place.facts as Record<string, unknown>)[fact] === undefined ? openCase : undefined;
   if (down !== undefined && sameValue(value, down.value)) return decideRestore(item, earlier, down);
   const reviewed = REVIEWED_FACTS.has(fact);
-  if (reviewed && (!isContactFact(fact) || item.attested === undefined)) {
+  const checked = isContactFact(fact) && contactChecks !== undefined;
+  if (reviewed && (!isContactFact(fact) || (item.attested === undefined && !checked))) {
     return { verdict: "held", reason: "not_attested", why: `${fact} changes are checked by a person` };
   }
   const current = (place.facts as Record<string, unknown>)[fact];
   if (sameValue(current, value)) return { verdict: "live", changes: [], why: `${fact} is already ${show(value)}` };
-  if (item.attested === undefined) {
+  if (item.attested === undefined && !checked) {
     return { verdict: "held", reason: "not_attested", why: `waiting for a second device to agree on ${fact}` };
   }
   if (place.fact_sources[fact] === "owner") {
@@ -290,6 +303,13 @@ export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemD
     if (problem !== null) {
       return { verdict: "held", reason: "link_check", problem, why: `${fact} fails the link checks (${problem}), so a person checks it` };
     }
+  }
+  if (checked) {
+    const failed = contactChecks.filter((c) => !c.passed);
+    if (failed.length > 0) {
+      return { verdict: "held", reason: "contact_check", failed, why: `${fact} failed the contact checks (${failed.map((c) => c.detail).join("; ")}), so the AI reviewer decides` };
+    }
+    if (item.attested === undefined) return { verdict: "held", reason: "not_attested", why: `${fact} passed the contact checks, and waits for a second device to agree` };
   }
   const at = time(item);
   const source = sourceOf(item);

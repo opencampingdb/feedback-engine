@@ -2,6 +2,7 @@ import {
   FEE_RETIRED,
   firstProblem,
   isCommonsFileName,
+  isContactFact,
   isValidFactValue,
   newPlaceStanding,
   safeSearchVerdict,
@@ -41,8 +42,9 @@ import {
   type OpenDoubt,
   type Setter,
 } from "./decide.js";
+import type { CheckOutcome } from "./contact-checks.js";
 import { moderateReview } from "./moderation.js";
-import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase } from "./review.js";
+import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase, type PlaceChange } from "./review.js";
 import type { EarlierFact } from "./io.js";
 import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
@@ -195,6 +197,16 @@ export interface RulesInput {
    * moves. They are decided as that run decided them. None when left out.
    */
   earlierFacts?: ReadonlyMap<string, ReadonlyMap<string, EarlierFact>>;
+  /**
+   * What the automatic contact checks found for each pending contact fact
+   * report, by feedback id (`checkContacts`). Given, a contact that fails
+   * any check is held for the AI reviewer as a `contact_check` case, one that
+   * passes them all follows the two-source rule, and one with no entry (the
+   * checks ran out of time) waits for a later run. Left out, the checks are
+   * off: an attested contact goes live and one without attestation goes to a
+   * person.
+   */
+  contactChecks?: ReadonlyMap<string, readonly CheckOutcome[]>;
   /**
    * Fact reports whose source link shows their value (`confirmSourceLinks`).
    * The page counts as one more source for that value (kind `source_link`):
@@ -1408,6 +1420,26 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           decide(item, "applied", decision.why);
           return;
         }
+        if (decision.reason === "contact_check") {
+          const failed = decision.failed ?? [];
+          const before = current();
+          edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
+          note(placeId, `${fact} set to ${JSON.stringify(value)}, which failed the contact checks: ${failed.map((c) => c.detail).join("; ")} (check before merging)`, false, [item]);
+          held.push({
+            case: "contact_check",
+            place: placeId,
+            ...(place.standing !== undefined ? { standing: place.standing } : {}),
+            location: { lat: roundCoord(place.location.lat), lon: roundCoord(place.location.lon) },
+            kind: place.kind,
+            fact,
+            ...(before !== undefined ? { value: before as FactValue } : {}),
+            checks: failed.map((c) => c.check),
+            problem: failed.map((c) => c.detail).join("; "),
+            feedback: [item.id],
+          });
+          decide(item, "needs_review", decision.why);
+          return;
+        }
         const summary =
           decision.reason === "owner_value"
             ? `${fact}: a device reports ${JSON.stringify(value)}, the owner set ${JSON.stringify(current())}`
@@ -1424,7 +1456,39 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       };
 
       if (REVIEWED_FACTS.has(fact)) {
-        for (const item of reports) settle(item, decideFact({ item, place, earlier: evidence }));
+        const checks = isContactFact(fact) ? input.contactChecks : undefined;
+        // Contacts without attestation that passed every contact check, waiting for a second device to agree.
+        const agreeable: ReportItem[] = [];
+        for (const item of reports) {
+          const found = checks?.get(item.id);
+          if (checks !== undefined && found === undefined) {
+            decide(item, "waiting", `the contact checks have not run on ${fact} yet`);
+            continue;
+          }
+          const decision = decideFact({ item, place, earlier: evidence, ...(found !== undefined ? { contactChecks: found } : {}) });
+          if (found !== undefined && decision.verdict === "held" && decision.reason === "not_attested") agreeable.push(item);
+          else settle(item, decision);
+        }
+        // The two-source rule: two devices that agree within 90 days set the contact.
+        const open = new Set(agreeable);
+        for (const item of agreeable) {
+          if (!open.has(item)) continue;
+          const value = item.report.value as FactValue;
+          const agreeing = [...open].filter((r) => sameValue(r.report.value, value) && inWindow(r, time(item)));
+          // A source link that shows the contact is one more source, as for any other fact.
+          const linked = agreeing.find((r) => sourceConfirmed.has(r.id));
+          if (distinctDevices(agreeing) + (linked ? 1 : 0) < 2) continue;
+          const counted = linked
+            ? `${distinctDevices(agreeing) === 1 ? "one device" : `${distinctDevices(agreeing)} devices`} and a source link (source_link) on ${new URL(linked.report.source as string).hostname}`
+            : `${distinctDevices(agreeing)} devices`;
+          setFact(value);
+          note(placeId, `${fact} set to ${JSON.stringify(value)} (${counted} within ${WINDOW_DAYS} days, contact checks passed)`, true, agreeing);
+          for (const r of agreeing) {
+            open.delete(r);
+            decide(r, "applied", `${fact} set to ${JSON.stringify(value)}${linked ? ` (${counted})` : ""}`);
+          }
+        }
+        for (const item of open) decide(item, "waiting", `${fact} passed the contact checks, and waits for a second device to agree`);
         continue;
       }
 
@@ -2139,6 +2203,33 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     }
   }
 
+  /**
+   * The `place_change` case for a name, kind or location report on a place
+   * in the data, with the value it replaces as the data has it, where that
+   * value came from and when, for the AI reviewer to keep or put back.
+   */
+  function placeChange(item: ReportItem, change: PlaceChange, to: string | { lat: number; lon: number }): HeldCase {
+    const current = input.places.get(item.place as string)!;
+    const from = change === "name" ? current.name : change === "kind" ? current.kind : { ...current.location };
+    const source = current.fact_sources[change];
+    const date = current.fact_dates?.[change];
+    return {
+      case: "place_change",
+      place: current.id,
+      ...(current.standing !== undefined ? { standing: current.standing } : {}),
+      location: { lat: roundCoord(current.location.lat), lon: roundCoord(current.location.lon) },
+      kind: current.kind,
+      change,
+      from,
+      ...(change === "kind" ? { from_group: current.group } : {}),
+      to,
+      ...(source !== undefined ? { from_source: source } : {}),
+      ...(date !== undefined ? { from_date: date } : {}),
+      ...(change === "location" ? { distance_m: Math.round(distanceM(current.location, to as { lat: number; lon: number })) } : {}),
+      feedback: [item.id],
+    };
+  }
+
   function routeToPerson(items: ReportItem[]): void {
     for (const item of items) {
       const { kind, note: text, value } = item.report;
@@ -2149,11 +2240,13 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           edits.push({ kind: "location", place: item.place, location, feedback: item.id });
           const where = `${item.location.lat}, ${item.location.lon}`;
           note(item.place, `location moved to ${where}${quote(text)} (check before merging)`, false, [item]);
+          held.push(placeChange(item, "location", location));
+          decide(item, "needs_review", "location changes are checked by the AI reviewer or a person");
         } else {
           edits.push({ kind: "note", place: item.place, feedback: item.id });
           note(item.place, `location reported wrong, no new location given${quote(text)}`, false, [item]);
+          decide(item, "needs_review", "location reports are checked by a person");
         }
-        decide(item, "needs_review", "location reports are checked by a person");
       } else if (problem !== null && item.place) {
         // The value never reaches the review checkout: a person reads it in the inbox.
         edits.push({ kind: "note", place: item.place, feedback: item.id });
@@ -2162,7 +2255,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       } else if (kind === "name" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "name", place: item.place, name: item.report.value, feedback: item.id });
         note(item.place, `name changed to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
-        decide(item, "needs_review", "names are checked by a person");
+        held.push(placeChange(item, "name", item.report.value));
+        decide(item, "needs_review", "names are checked by the AI reviewer or a person");
       } else if (kind === "description" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "description", place: item.place, description: item.report.value, feedback: item.id });
         note(item.place, `description set to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
@@ -2176,7 +2270,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         }
         edits.push({ kind: "kind", place: item.place, placeKind: picked, group, feedback: item.id });
         note(item.place, `kind changed to ${picked}${quote(text)} (check before merging)`, false, [item]);
-        decide(item, "needs_review", "kind changes are checked by a person");
+        held.push(placeChange(item, "kind", picked));
+        decide(item, "needs_review", "kind changes are checked by the AI reviewer or a person");
       } else if (kind === "remove" && item.place) {
         // Only places added in the last 90 days come down on reports. On any other place a person decides.
         edits.push({ kind: "note", place: item.place, feedback: item.id });

@@ -164,6 +164,16 @@ describe("source links in the apply run", () => {
     expect(outcomeOf(summary, 1)?.outcome).toBe("applied");
   });
 
+  it("counts the link as a second source for a contact that passed the contact checks", async () => {
+    const onWebsite = new Response("<html><body>Call us on (03) 5555 0100</body></html>", { status: 200, headers: { "content-type": "text/html" } });
+    const contactFetch = async (url: string) => (url.startsWith("https://www.example.org") ? onWebsite.clone() : new Response("not found", { status: 404 }));
+    await report(1, "aaaa", "phone", "03 5555 0100", GOV);
+    const { transport } = network({ [GOV]: page("Bookings: phone 03 5555 0100") });
+    const summary = await run({ inbox, data, now: NOW, sourceTransport: transport, contactChecks: { fetch: contactFetch } });
+    expect(outcomeOf(summary, 1)).toMatchObject({ outcome: "applied", reason: expect.stringContaining("source_link") });
+    expect((await placeNow()).facts.phone).toBe("03 5555 0100");
+  });
+
   it("is off without a transport for an inbox item that has no link", async () => {
     await report(1, "aaaa", "toilets", true);
     const summary = await run({ inbox, data, now: NOW });
