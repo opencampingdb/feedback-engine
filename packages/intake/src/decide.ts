@@ -5,6 +5,7 @@ import {
   decideContactReport,
   decideDoubt,
   decideFact,
+  findDispute,
   newPlaceFields,
   newPlaceListing,
   WINDOW_DAYS,
@@ -93,11 +94,13 @@ export interface DecidedInRequest {
   cases: Map<string, { value: string; taken_down_at: string } | null>;
   /** Accepted items by contributor. */
   accepted: Map<string, number>;
+  /** Places frozen by an item in the batch, with the disputed fact and when. */
+  frozen: Map<string, { fact: string; frozen_at: string }>;
 }
 
 /** Nothing decided yet: for a single item, or the start of a batch. */
 export function noneDecided(): DecidedInRequest {
-  return { changes: [], evidence: [], cases: new Map(), accepted: new Map() };
+  return { changes: [], evidence: [], cases: new Map(), accepted: new Map(), frozen: new Map() };
 }
 
 const caseKey = (place: string, fact: string) => `${place}\u0000${fact}`;
@@ -445,9 +448,18 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
   const placeId = item.place as string;
   const place = await placeNow(db, placeId, decided);
   if (place === undefined) return held("unknown_place");
+  // A frozen place takes no fact change until the reviewer's value is in the data.
+  const freeze = await freezeOf(db, placeId, decided);
+  if (freeze !== undefined && freeze.lifted_at === null) return item.report.kind === "clear" ? held("disputed") : heldWithEvidence("disputed", item);
   if (item.report.kind === "clear") return decideClearHere(input, place, record);
   const earlier = await earlierReports(db, placeId, item.report.fact as string, Date.parse(item.received), decided);
   const kind = item.report.kind;
+  if (kind === "fact") {
+    // Reports of a fact a reviewer settled no longer count towards a dispute.
+    const settledAt = freeze !== undefined && freeze.fact === item.report.fact ? freeze.lifted_at : null;
+    const counted = settledAt === null ? earlier : earlier.filter((r) => r.received > settledAt);
+    if (findDispute([...counted, item], placeId) !== null) return frozeHere(item);
+  }
   const openCase = kind === "fact" ? await openDoubt(db, placeId, item.report.fact as string, decided) : undefined;
   const decision =
     kind === "fact"
@@ -482,6 +494,52 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
     }
     countAccepted(p, contributor);
   }, checked.slot);
+}
+
+/** A place's freeze: the latest one, lifted or not, or undefined when it has none. */
+export async function freezeOf(db: D1Like, place: string, decided: DecidedInRequest = noneDecided()): Promise<{ fact: string; frozen_at: string; lifted_at: string | null } | undefined> {
+  const batched = decided.frozen.get(place);
+  if (batched !== undefined) return { ...batched, lifted_at: null };
+  const row = await db.prepare("SELECT fact, frozen_at, lifted_at FROM frozen_places WHERE place = ?").bind(place).first<{ fact: string; frozen_at: string; lifted_at: string | null }>();
+  return row ?? undefined;
+}
+
+/**
+ * The upsert for a freeze. A freeze replaces the place's row when it started
+ * no earlier, or when it lifted at or after the row's freeze started, so the
+ * apply's freeze, which may start at an earlier report than the intake saw
+ * last, still lifts the row the intake wrote for the same dispute.
+ */
+const FREEZE_UPSERT = `INSERT INTO frozen_places (place, fact, frozen_at, lifted_at) VALUES (?, ?, ?, ?)
+  ON CONFLICT (place) DO UPDATE SET fact = excluded.fact, frozen_at = excluded.frozen_at, lifted_at = excluded.lifted_at
+  WHERE excluded.frozen_at >= frozen_places.frozen_at OR (excluded.lifted_at IS NOT NULL AND excluded.lifted_at >= frozen_places.frozen_at)`;
+
+/** A fact report that completes a dispute (`findDispute`): held as `disputed`, and the place frozen from its time. */
+function frozeHere(item: ReportItem): SendTimeDecision {
+  const fact = item.report.fact as string;
+  return held(
+    "disputed",
+    (d) => [evidenceStatement(d, item, "held"), d.prepare(FREEZE_UPSERT).bind(item.place, fact, item.received, null)],
+    (p) => {
+      p.evidence.push(evidenceRow(item, "held"));
+      p.frozen.set(item.place as string, { fact, frozen_at: item.received });
+    },
+  );
+}
+
+/** A freeze the apply keeps in the inbox, as it sends it to `recordFreezes`. */
+export interface Freeze {
+  place: string;
+  fact: string;
+  frozen_at: string;
+  lifted_at?: string;
+}
+
+/** Records the apply's freezes, and lifts the ones it says have lifted. Sending them again changes nothing. Returns the rows written. */
+export async function recordFreezes(db: D1Like, freezes: readonly Freeze[]): Promise<number> {
+  if (freezes.length === 0) return 0;
+  const results = await db.batch(freezes.map((f) => db.prepare(FREEZE_UPSERT).bind(f.place, f.fact, f.frozen_at, f.lifted_at ?? null)));
+  return results.reduce<number>((sum, result) => sum + changesOf(result), 0);
 }
 
 /**
@@ -666,7 +724,7 @@ export async function overrule(db: D1Like, ids: readonly string[], takenDown: re
  * Deletes recent changes the data has held for more than 7 days, those
  * accepted more than 7 days ago that the data still does not hold, new places
  * the apply run was done with more than 7 days ago with their evidence, and
- * report evidence and doubt cases older than the rules' 90 days. For the
+ * report evidence, doubt cases and freezes older than the rules' 90 days. For the
  * scheduled job.
  */
 export async function pruneDecisions(db: D1Like, now: number): Promise<void> {
@@ -675,6 +733,7 @@ export async function pruneDecisions(db: D1Like, now: number): Promise<void> {
     db.prepare("DELETE FROM recent_changes WHERE in_data_at IS NULL AND accepted < ?").bind(isoSeconds(now - KEEP_NOT_IN_DATA_DAYS * DAY_MS)),
     db.prepare("DELETE FROM report_evidence WHERE received < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
     db.prepare("DELETE FROM doubt_cases WHERE taken_down_at < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
+    db.prepare("DELETE FROM frozen_places WHERE frozen_at < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
     ...prunePlaceStatements(db, now),
   ]);
 }

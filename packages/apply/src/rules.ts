@@ -22,6 +22,9 @@ import {
   decideContactReport,
   decideDoubt,
   decideFact,
+  DISPUTE_HOURS,
+  disputeValuesShown,
+  findDispute,
   distinctSources as distinctDevices,
   factRefusal,
   factsClearedBy,
@@ -67,11 +70,25 @@ export type { ClosedCase, HeldCase };
  */
 
 /** The rules for one item against one place live in `decide.ts`, shared with the intake. */
-export { inWindow, REVIEWED_FACTS, WINDOW_DAYS };
+export { DISPUTE_HOURS, inWindow, REVIEWED_FACTS, WINDOW_DAYS };
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WINDOW_MS = WINDOW_DAYS * DAY_MS;
 
 /** Kind given to a draft record for a `new_place` report until a person sets it. */
+/** Report kinds that change a fact, which a freeze stops. */
+const FREEZES: ReadonlySet<string> = new Set(["fact", "doubt", "clear", "contact"]);
+
+/**
+ * When a freeze lifted: the date the data has on the disputed fact, when it
+ * is at or after the freeze. A reviewer's decision on the `disputed` case
+ * sets the fact with the time of the decision, and so does a person who sets
+ * it on the review PR. Undefined while the place is still frozen.
+ */
+export function liftOf(place: Place, freeze: FreezeRecord): string | undefined {
+  const date = place.fact_dates?.[freeze.fact];
+  return date !== undefined && date >= freeze.at ? date : undefined;
+}
+
 export const DRAFT_KIND = "campground";
 const DRAFT_GROUP = "overnight";
 
@@ -114,6 +131,19 @@ export interface Decision {
    * it back as the open `fact_doubted` case (see `openDoubt`).
    */
   doubted?: DoubtedRecord;
+  /**
+   * On the reports that froze a place: the disputed fact and when the freeze
+   * started. The inbox keeps it with the outcome, and later runs read it back
+   * (see `standingFreeze`) until the data has a value for the fact set at or
+   * after that time, which a reviewer's decision on the `disputed` case sets.
+   */
+  frozen?: FreezeRecord;
+}
+
+/** A freeze, as the inbox keeps it on the reports that froze the place. */
+export interface FreezeRecord {
+  fact: FactName;
+  at: string;
 }
 
 /** A fact doubts took down, as the inbox keeps it on the doubt that did it. */
@@ -671,12 +701,15 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   );
   // Doubts before facts, so a confirmation sent after a takedown in this run can restore it.
   const downInRun = new Map<string, DoubtedRecord>();
-  applyDoubts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "doubt"));
-  applyFacts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
+  // A disputed place is frozen first: nothing below changes a fact on it.
+  const frozenOut = applyFreezes(known.filter((i): i is ReportItem => i.type === "report" && FREEZES.has(i.report.kind as string)));
+  const unfrozen = known.filter((i) => !frozenOut.has(i.id));
+  applyDoubts(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "doubt"));
+  applyFacts(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
   applyNewPlaces(known.filter((i): i is ReportItem => isNewPlaceReport(i)), newPlaceEvidence);
   // After facts and new places, so a value set in this run can be cleared by its sender in it too.
-  applyClears(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "clear"));
-  applyContactReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "contact"));
+  applyClears(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "clear"));
+  applyContactReports(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "contact"));
   applyCommonsReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "commons_mismatch"));
   routeToPerson(known.filter((i): i is ReportItem => i.type === "report"));
 
@@ -1347,6 +1380,86 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     return input.history.filter(
       (h): h is ReportItem => h.type === "report" && h.report.kind === "fact" && h.place === placeId && h.report.fact === fact && wasApplied(h),
     );
+  }
+
+  /**
+   * Freezes a disputed place (`findDispute`): conflicting values for one fact
+   * from DISPUTE_SOURCES sources within DISPUTE_HOURS. The reports in the
+   * dispute go to the reviewer as one `disputed` case, and every other
+   * report that would change a fact on the place (a fact report, doubt,
+   * clear or contact report) waits. A later run keeps the place frozen
+   * (`standingFreeze`) until the data holds a value for the disputed fact set
+   * at or after the freeze, which the reviewer's decision writes; then
+   * reports of that fact sent before the decision are refused, and the rest
+   * are decided as usual. Answers the ids of the items decided here.
+   */
+  function applyFreezes(items: ReportItem[]): Set<string> {
+    const out = new Set<string>();
+    const byPlace = new Map<string, ReportItem[]>();
+    for (const item of items) byPlace.set(item.place as string, [...(byPlace.get(item.place as string) ?? []), item]);
+    for (const [placeId, mine] of byPlace) {
+      const place = input.places.get(placeId)!;
+      const standing = standingFreeze(placeId);
+      const liftedAt = standing === undefined ? undefined : liftOf(place, standing);
+      if (standing !== undefined && liftedAt === undefined) {
+        for (const item of mine) {
+          decide(item, "waiting", `the place is frozen while a reviewer settles conflicting values for ${standing.fact}`);
+          out.add(item.id);
+        }
+        continue;
+      }
+      // Reports of a fact a reviewer settled, sent before the decision, are over.
+      const settled = (r: StoredFeedback) =>
+        standing !== undefined && liftedAt !== undefined && r.type === "report" && r.report.fact === standing.fact && r.received <= liftedAt;
+      for (const item of mine) {
+        if (!settled(item)) continue;
+        decide(item, "refused", `a reviewer settled ${standing!.fact} after conflicting values`);
+        out.add(item.id);
+      }
+      const open = mine.filter((i) => !out.has(i.id));
+      const earlier = input.history.filter(
+        (h) => h.place === placeId && h.type === "report" && h.report.kind === "fact" && (h as { outcome?: { result?: string } }).outcome?.result !== "refused" && !settled(h),
+      );
+      const dispute = findDispute([...earlier, ...open], placeId);
+      const ids = new Set(dispute?.feedback ?? []);
+      if (dispute === null || !open.some((i) => ids.has(i.id))) continue;
+      const frozen: FreezeRecord = { fact: dispute.fact, at: dispute.at };
+      const counted = open.filter((i) => ids.has(i.id));
+      for (const item of open) {
+        out.add(item.id);
+        if (ids.has(item.id)) {
+          decide(item, "needs_review", `${dispute.sources} sources sent conflicting values for ${dispute.fact} within ${DISPUTE_HOURS} hours, so the place is frozen and a reviewer decides`);
+          decisions.get(item.id)!.frozen = frozen;
+        } else {
+          decide(item, "waiting", `the place is frozen while a reviewer settles conflicting values for ${dispute.fact}`);
+        }
+      }
+      // A note edit, so the run lists the case on the review PR although no file changes.
+      edits.push({ kind: "note", place: placeId, feedback: counted.at(-1)!.id });
+      note(placeId, `frozen: ${dispute.sources} sources sent conflicting values for ${dispute.fact} within ${DISPUTE_HOURS} hours, so no fact changes until a reviewer decides`, false, counted);
+      held.push({
+        case: "disputed",
+        place: placeId,
+        location: place.location,
+        kind: place.kind,
+        fact: dispute.fact,
+        ...(disputeValuesShown(dispute.fact, dispute.values) ? { values: dispute.values } : {}),
+        sources: dispute.sources,
+        feedback: dispute.feedback,
+      });
+    }
+    return out;
+  }
+
+  /** The latest freeze the inbox keeps for a place, on a report in the history. */
+  function standingFreeze(placeId: string): FreezeRecord | undefined {
+    let found: FreezeRecord | undefined;
+    for (const h of input.history) {
+      const kept = (h as { outcome?: { frozen?: FreezeRecord } }).outcome?.frozen;
+      if (h.place !== placeId || kept === undefined) continue;
+      if (found === undefined || kept.at > found.at) found = kept;
+    }
+    return found;
   }
 
   function applyFacts(items: ReportItem[]): void {

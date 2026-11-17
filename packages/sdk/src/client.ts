@@ -955,6 +955,8 @@ export type AnswerOutcome =
  *   traveller at once, a reviewer gets the case, and two sources hide it for everyone.
  * - `not_own_value`: a `clear` of a value another traveller set, or one the intake cannot tie to
  *   this install, so a person decides.
+ * - `disputed`: the place is frozen because three or more sources sent conflicting values for one of
+ *   its facts within 24 hours. No fact on it changes until a reviewer settles the value.
  * - `ai_cap`: never given at send time. On an item's progress: the AI reviewer was unsure, and its
  *   second model's monthly spending cap was reached, so a person decides.
  */
@@ -982,6 +984,7 @@ export const HELD_REASONS = [
   "not_own_value",
   "ai_cap",
   "repeated_text",
+  "disputed",
 ] as const;
 
 /** Why the intake held an item at send time. */

@@ -75,7 +75,8 @@ export type PlaceState = Pick<Place, "facts" | "fact_sources" | "fact_dates">;
  * `not_seasonal`: `pets_months` for a place whose `pets` is not `seasonal`.
  * `unlikely_charge`: a charge a person checks before it is published
  * (`unlikelyCharge`). `not_own_value`: a clear of a value another source set
- * (`decideClear`).
+ * (`decideClear`). `disputed`: the place is frozen while a reviewer settles
+ * conflicting values for one of its facts (`findDispute`).
  */
 export type HeldReason =
   | "not_attested"
@@ -90,7 +91,8 @@ export type HeldReason =
   | "taken_down"
   | "not_seasonal"
   | "unlikely_charge"
-  | "not_own_value";
+  | "not_own_value"
+  | "disputed";
 
 /** The reasons the intake holds an item for one of its checks rather than for these rules. */
 export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "repeated_text", "check_unavailable"];
@@ -629,3 +631,55 @@ export function decideClear({ item, place, setter }: ClearInput): ItemDecision {
     why: `${fact} cleared by the traveller who set it`,
   };
 }
+
+/** Hours within which conflicting values freeze a place (`findDispute`). */
+export const DISPUTE_HOURS = 24;
+/** Sources, each with its own value, that freeze a place when they conflict within DISPUTE_HOURS. */
+export const DISPUTE_SOURCES = 3;
+const DISPUTE_MS = DISPUTE_HOURS * 60 * 60 * 1000;
+
+/** Conflicting values for one fact on one place, which freeze the place until a reviewer decides. */
+export interface Dispute {
+  place: string;
+  fact: FactName;
+  /** When the report that made the dispute was received: the freeze starts then. */
+  at: string;
+  /** The values the sources sent, each once, sorted by their JSON. */
+  values: FactValue[];
+  /** Independent sources among the reports. */
+  sources: number;
+  /** The reports counted, oldest first. */
+  feedback: string[];
+}
+
+/**
+ * The first dispute among `reports`, or null when there is none: the fact
+ * reports about one place and fact, from DISPUTE_SOURCES or more independent
+ * sources within DISPUTE_HOURS, whose values make DISPUTE_SOURCES or more
+ * different values. Each source counts with its latest value in the window,
+ * so one source changing its mind is not a dispute, and neither is two
+ * sources sending two values. Reports that are not fact reports, or name
+ * another place, are skipped.
+ */
+export function findDispute(reports: readonly StoredFeedback[], place: string): Dispute | null {
+  const facts = reports
+    .filter((r): r is ReportItem => r.type === "report" && r.report.kind === "fact" && r.place === place && isFactName(r.report.fact) && r.report.value !== undefined)
+    .sort((a, b) => time(a) - time(b) || (a.id < b.id ? -1 : 1));
+  for (const end of facts) {
+    const t = time(end);
+    const window = facts.filter((r) => r.report.fact === end.report.fact && time(r) <= t && t - time(r) <= DISPUTE_MS);
+    const latest = new Map<string, unknown>();
+    for (const r of window) latest.set(sourceOf(r), r.report.value);
+    const values = [...new Map([...latest.values()].map((v) => [show(v), v as FactValue])).entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([, v]) => v);
+    if (latest.size < DISPUTE_SOURCES || values.length < DISPUTE_SOURCES) continue;
+    return { place, fact: end.report.fact as FactName, at: end.received, values, sources: latest.size, feedback: window.map((r) => r.id) };
+  }
+  return null;
+}
+
+/**
+ * Whether a reviewer may read the values in a dispute about `fact`: not for
+ * a contact or the address, nor for values with free words, which a person
+ * reads in the inbox.
+ */
+export const disputeValuesShown = (fact: FactName, values: readonly FactValue[]) => !REVIEWED_FACTS.has(fact) && values.every((v) => factFreeText(fact, v).length === 0);

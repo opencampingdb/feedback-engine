@@ -15,7 +15,9 @@
  * withdrawn contact, take down a new place that is clear spam, restore or
  * keep down a fact doubts took down, dismiss doubts about a fact that
  * stays, and confirm `vehicle_access` on a place whose name says only heavy
- * vehicles may use it. A case the apply's rules closed (a doubted fact that
+ * vehicles may use it, and set a disputed fact to one of the values its
+ * sources sent or the place has, which lifts the place's freeze once the
+ * decision is in the data. A case the apply's rules closed (a doubted fact that
  * travellers restored or replaced) is left without asking. Owner-set
  * values, blocked contributors and values that wait in the inbox go to a
  * person, and an answer the model isn't sure of, or one that can't be read,
@@ -33,6 +35,7 @@
 import {
   allowedDecisions,
   applyDecision,
+  disputeChoices,
   dumpPlace,
   heldCaseKey,
   mergePlaces,
@@ -50,6 +53,7 @@ import {
   type DoNotMatchEntry,
   type MajorRoads,
 } from "@opencampingdb/apply/review";
+import type { FactValue } from "@opencampingdb/feedback";
 import type { AiLike } from "./checks.js";
 import type { GitHubApp, GitHubAppConfig, IssueComment } from "./github.js";
 import type { D1Like } from "./recent.js";
@@ -130,6 +134,8 @@ export interface ReviewRecord {
   committed: boolean;
   /** `ai_cap`: the first model was unsure and the second model's monthly spending cap was reached, so a person decides. */
   held?: "ai_cap";
+  /** On `confirm` of a `disputed` case: the value set. */
+  value?: FactValue;
 }
 
 export type ReviewResult =
@@ -217,6 +223,8 @@ const meaning = (c: HeldCase, d: ReviewDecision) =>
     ? "put the last value back on the place: the doubts are outweighed or unlikely"
     : c.case === "commons_mismatch" && d === "confirm"
       ? "never show this photo for the place again: its file name clearly names another place or something else"
+      : c.case === "disputed" && d === "confirm"
+        ? "set the fact to the value you give, one of the choices, which settles the dispute"
       : c.case === "commons_mismatch" && d === "dismiss"
         ? "keep showing the photo: its file name clearly names this place"
         : MEANINGS[d];
@@ -246,6 +254,12 @@ function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
     ...(c.case === "commons_mismatch"
       ? ["In a commons_mismatch case, a traveller says a Wikimedia Commons photo shown for the place is not of it. You see only the photo's file name, matched to the place by its words and distance."]
       : []),
+    ...(c.case === "disputed"
+      ? [
+          "In a disputed case, independent travellers sent conflicting values for one fact within a day, so no fact on the place changes until a reviewer settles the value.",
+          "With confirm, give value: the JSON of one of the values listed, the one the place most likely has now.",
+        ]
+      : []),
     "Answer with JSON only: {\"decision\": ..., \"reason\": ..., \"sure\": true or false}.",
     `The decisions you may give for this case are: ${allowed.join(", ")}.`,
     ...allowed.map((d) => `- ${d}: ${meaning(c, d)}.`),
@@ -255,11 +269,13 @@ function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
   ].join("\n");
 }
 
-function decisionSchema(allowed: readonly ReviewDecision[]) {
+/** The answer's schema. With `choices` (a disputed case), the answer also gives `value`, the JSON of one of them. */
+function decisionSchema(allowed: readonly ReviewDecision[], choices: readonly FactValue[] = []) {
   return {
     type: "object",
     properties: {
       decision: { type: "string", enum: allowed },
+      ...(choices.length > 0 ? { value: { type: "string", enum: choices.map((v) => JSON.stringify(v)) } } : {}),
       reason: { type: "string" },
       sure: { type: "boolean" },
     },
@@ -308,10 +324,12 @@ export interface ModelDecision {
   decision: ReviewDecision;
   reason: string;
   unsure: boolean;
+  /** On `confirm` of a disputed case: the value, one of its choices. */
+  value?: FactValue;
 }
 
 /** What a model reads about a case, as JSON. */
-function caseEvidence(c: HeldCase, place: Place, duplicateOf: Place | undefined): string {
+function caseEvidence(c: HeldCase, place: Place, duplicateOf: Place | undefined, choices: readonly FactValue[] = []): string {
   return JSON.stringify({
     case: c.case,
     place: placeView(place),
@@ -323,15 +341,21 @@ function caseEvidence(c: HeldCase, place: Place, duplicateOf: Place | undefined)
       : {}),
     ...(c.case === "vehicle_access_candidate" ? { fact: c.fact, value: c.value } : {}),
     ...(c.case === "commons_mismatch" ? { file: c.file, reporting_sources: c.sources } : {}),
+    ...(c.case === "disputed" ? { fact: c.fact, values: choices, sources: c.sources } : {}),
   });
 }
 
 /** A model's answer object as a decision: `leave`, and unsure, unless it is a sure decision the case allows. */
-function decisionOf(answer: Record<string, unknown> | null, allowed: readonly ReviewDecision[]): ModelDecision {
+function decisionOf(answer: Record<string, unknown> | null, allowed: readonly ReviewDecision[], choices: readonly FactValue[] = []): ModelDecision {
   if (!answer || typeof answer.decision !== "string") return { decision: "leave", reason: "the model's answer could not be read", unsure: true };
   const reason = typeof answer.reason === "string" ? answer.reason : "";
   if (!allowed.includes(answer.decision as ReviewDecision)) return { decision: "leave", reason: `the model answered ${safeReason(answer.decision)}, which this case does not allow`, unsure: true };
   if (answer.decision !== "leave" && answer.sure !== true) return { decision: "leave", reason: `the model was not sure: ${reason}`, unsure: true };
+  if (choices.length > 0 && answer.decision === "confirm") {
+    const value = choices.find((v) => JSON.stringify(v) === answer.value);
+    if (value === undefined) return { decision: "leave", reason: "the model gave a value that is not among the choices", unsure: true };
+    return { decision: "confirm", reason, unsure: false, value };
+  }
   return { decision: answer.decision as ReviewDecision, reason, unsure: answer.decision === "leave" };
 }
 
@@ -347,6 +371,7 @@ export async function askModel(
   place: Place,
   duplicateOf: Place | undefined,
   allowed: readonly ReviewDecision[] = allowedDecisions(c),
+  choices: readonly FactValue[] = disputeChoices(c, place),
 ): Promise<ModelDecision> {
   let out: unknown;
   try {
@@ -355,17 +380,17 @@ export async function askModel(
       ai.run(model, {
         messages: [
           { role: "system", content: systemPrompt(c, allowed) },
-          { role: "user", content: caseEvidence(c, place, duplicateOf) },
+          { role: "user", content: caseEvidence(c, place, duplicateOf, choices) },
         ],
         temperature: 0,
         max_tokens: 256,
-        response_format: { type: "json_schema", json_schema: decisionSchema(allowed) },
+        response_format: { type: "json_schema", json_schema: decisionSchema(allowed, choices) },
       }),
     );
   } catch (error) {
     throw error instanceof ModelUnavailable ? error : new ModelUnavailable(String(error));
   }
-  return decisionOf(answerOf(out), allowed);
+  return decisionOf(answerOf(out), allowed, choices);
 }
 
 /** The second stage's decision on a case the first model was unsure of, with who made it. */
@@ -374,6 +399,7 @@ interface SecondDecision {
   reason: string;
   reviewer: string;
   held?: "ai_cap";
+  value?: FactValue;
 }
 
 /** The second model's name on a decision. */
@@ -408,7 +434,8 @@ async function askSecondStage(
   }
   let answer: Awaited<ReturnType<typeof askSecondModel>>;
   try {
-    answer = await askSecondModel(deps.second, systemPrompt(c, allowed), caseEvidence(c, place, duplicateOf), decisionSchema(allowed));
+    const choices = disputeChoices(c, place);
+    answer = await askSecondModel(deps.second, systemPrompt(c, allowed), caseEvidence(c, place, duplicateOf, choices), decisionSchema(allowed, choices));
   } catch (error) {
     if (!(error instanceof SecondModelUnavailable)) throw error;
     onError(deps, error);
@@ -420,9 +447,9 @@ async function askSecondStage(
     onError(deps, error);
     return { decision: "leave", reason: "the second model's spending could not be recorded, so a person decides", reviewer: SECOND_REVIEWER };
   }
-  const second = decisionOf(answer.answer, allowed);
+  const second = decisionOf(answer.answer, allowed, disputeChoices(c, place));
   if (second.unsure) return { decision: "leave", reason: `both models were unsure: ${first.reason}; ${second.reason}`, reviewer: SECOND_REVIEWER };
-  return { decision: second.decision, reason: second.reason, reviewer: SECOND_REVIEWER };
+  return { decision: second.decision, reason: second.reason, reviewer: SECOND_REVIEWER, ...(second.value !== undefined ? { value: second.value } : {}) };
 }
 
 /** A place record from its file, or undefined when the file is not one. */
@@ -548,6 +575,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       let reason: string;
       let by = reviewer;
       let held: "ai_cap" | undefined;
+      let value: FactValue | undefined;
       let otherFile: { text: string } | null = null;
       let other: Place | undefined;
       const failed = failures.get(key)?.failures ?? 0;
@@ -574,9 +602,9 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
           failedNow.push({ key, c, error });
           continue;
         }
-        ({ decision, reason } = first);
+        ({ decision, reason, value } = first);
         if (first.unsure && deps.second) {
-          ({ decision, reason, reviewer: by, held } = await askSecondStage({ ...deps, second: deps.second }, reviewer, first, c, place!, other, allowed));
+          ({ decision, reason, reviewer: by, held, value } = await askSecondStage({ ...deps, second: deps.second }, reviewer, first, c, place!, other, allowed));
         }
       }
       reason = safeReason(reason);
@@ -590,7 +618,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         const entry: DoNotMatchEntry = { place: c.place, file: c.file!, added: at.slice(0, 10), source: "reviewer" };
         writes.push({ path: DO_NOT_MATCH_PATH, text: withDoNotMatch(list?.text, [entry]) });
       } else {
-        const next = place && file ? applyDecision(place, c, decision, at) : null;
+        const next = place && file ? applyDecision(place, c, decision, at, value) : null;
         if (next && file) writes.push({ path, text: dumpPlace(next) });
       }
       for (const write of writes) {
@@ -598,7 +626,18 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         staged.set(write.path, { text: write.text, sha: shas.get(write.path) });
       }
       decisions.push({
-        record: { key, case: c.case, place: c.place, decision, reviewer: by, reason, by_rules: settled !== null, committed: writes.length > 0, ...(held ? { held } : {}) },
+        record: {
+          key,
+          case: c.case,
+          place: c.place,
+          decision,
+          reviewer: by,
+          reason,
+          by_rules: settled !== null,
+          committed: writes.length > 0,
+          ...(held ? { held } : {}),
+          ...(value !== undefined ? { value } : {}),
+        },
         paths: writes.map((w) => w.path),
         title: `${by}: ${decision} held case ${c.case} on ${c.place}`,
         reason,

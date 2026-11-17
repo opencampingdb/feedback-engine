@@ -84,6 +84,10 @@ _Avoid_: status, outcome, decision
 Accepted, but kept from apps until a reviewer decides.
 _Avoid_: pending, queued, quarantined
 
+**Frozen place**:
+A place where three or more sources sent conflicting values for one fact within 24 hours, so no fact on it changes until a reviewer settles the value.
+_Avoid_: locked place, edit war (for the state)
+
 **Reviewer**:
 A person, bot or AI that the maintainers allow to decide held items, named on every decision it makes.
 _Avoid_: moderator, admin

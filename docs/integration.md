@@ -727,6 +727,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `not_own_value` | A `clear` of a value another traveller set, or one the intake cannot tie to this install, so a person decides. |
 | `ai_cap` | Not given at send time. The AI reviewer was unsure, and its second model's monthly spending cap was reached, so a person decides. It shows on the item's progress. |
 | `repeated_text` | Its free text is nearly the same as text three other sources sent in the last 30 days, so a person reads it. |
+| `disputed` | The place is frozen: three or more sources sent conflicting values for one of its facts within 24 hours. No fact report, doubt, clear or contact report changes the place until a reviewer settles the value, and then reports are decided as usual. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.
 

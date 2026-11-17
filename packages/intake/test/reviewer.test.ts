@@ -346,6 +346,66 @@ describe("the AI reviewer", () => {
     expect(message).toContain("The email is the park's own.");
   });
 
+  describe("disputed cases", () => {
+    const disputed = (n: number, extra: Partial<HeldCase> = {}, values: HeldCase["values"] | null = ["leashed", "no", "yes"]) =>
+      heldCase(n, {
+        case: "disputed",
+        fact: "pets",
+        ...(values === null ? {} : { values }),
+        sources: 3,
+        feedback: [`fb_01JC00000000000000000000${n}1`, `fb_01JC00000000000000000000${n}2`, `fb_01JC00000000000000000000${n}3`],
+        ...extra,
+      });
+    const answer = (decision: string, value: unknown, reason = "Most travellers and the park's sign say dogs on a lead.") => ({ response: { decision, value, reason, sure: true } });
+
+    it("sets the fact to the value the model decides, dated now, which lifts the freeze", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [disputed(0)]));
+      gh.put(place(0, { standing: undefined, facts: { toilets: true, pets: "yes" }, fact_sources: { name: "contributed", toilets: "contributed", pets: "feedback" }, fact_dates: { name: "2026-11-01T00:00:00Z", toilets: "2026-11-01T00:00:00Z", pets: "2026-11-03T00:00:00Z" } }));
+      const { ai, asked } = fakeAi(() => answer("confirm", JSON.stringify("leashed")));
+      const result = await run(gh, ai);
+      expect(result).toMatchObject({ outcome: "reviewed", decisions: [{ case: "disputed", decision: "confirm", value: "leashed", committed: true }] });
+      expect(caseOf(asked[0]!.input)).toMatchObject({ case: "disputed", fact: "pets", values: ["leashed", "no", "yes"], sources: 3 });
+      const schema = (asked[0]!.input.response_format as { json_schema: { properties: { decision: { enum: string[] }; value: { enum: string[] } } } }).json_schema;
+      expect(schema.properties.decision.enum).toEqual(["confirm", "leave"]);
+      expect(schema.properties.value.enum).toEqual(['"leashed"', '"no"', '"yes"']);
+      expect(gh.read(0)).toMatchObject({ facts: { pets: "leashed" }, fact_sources: { pets: "feedback" }, fact_dates: { pets: AT }, updated: AT });
+    });
+
+    it("dates the fact even when the model keeps the value the place has, so the freeze still lifts", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [disputed(0)]));
+      gh.put(place(0, { standing: undefined, facts: { toilets: true, pets: "yes" }, fact_sources: { name: "contributed", toilets: "contributed", pets: "feedback" }, fact_dates: { name: "2026-11-01T00:00:00Z", toilets: "2026-11-01T00:00:00Z", pets: "2026-11-03T00:00:00Z" } }));
+      const { ai } = fakeAi(() => answer("confirm", JSON.stringify("yes")));
+      await run(gh, ai);
+      expect(gh.read(0)).toMatchObject({ facts: { pets: "yes" }, fact_dates: { pets: AT } });
+    });
+
+    it("leaves a value that is not among the choices to a person, and changes nothing", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [disputed(0)]));
+      gh.put(place(0, { standing: undefined }));
+      const { ai } = fakeAi(() => answer("confirm", JSON.stringify("seasonal")));
+      const result = await run(gh, ai);
+      expect(result).toMatchObject({ decisions: [{ decision: "leave", committed: false }] });
+      expect(gh.commits()).toHaveLength(0);
+    });
+
+    it("leaves to a person, without asking, a dispute without values, about an owner's fact or on a place with a verified owner", async () => {
+      const cases = [disputed(0, { fact: "phone" }, null), disputed(1), disputed(2)];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(place(0, { standing: undefined }));
+      gh.put(place(1, { standing: undefined, facts: { pets: "no" }, fact_sources: { pets: "owner" } }));
+      gh.put(place(2, { standing: undefined, owner_verified: true }));
+      const { ai, asked } = fakeAi(() => answer("confirm", JSON.stringify("no")));
+      const result = await run(gh, ai);
+      expect(asked).toHaveLength(0);
+      if (result === "off" || result === "failed" || result.outcome !== "reviewed") throw new Error("expected a review");
+      expect(result.decisions.map((d) => [d.decision, d.by_rules])).toEqual([
+        ["leave", true],
+        ["leave", true],
+        ["leave", true],
+      ]);
+    });
+  });
+
   describe("fact_doubted cases", () => {
     const doubted = (n: number, takenDown: boolean, extra: Partial<HeldCase> = {}) =>
       heldCase(n, {

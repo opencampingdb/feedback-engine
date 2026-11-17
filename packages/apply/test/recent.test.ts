@@ -2,7 +2,7 @@ import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { intakeRecentList, intakeRecentStore, sendBlockList, sendDoubtCases, sendOverruled, settleRecentChanges, settleRecentPlaces, tellIntake } from "../src/recent.js";
+import { intakeRecentList, intakeRecentStore, sendBlockList, sendDoubtCases, sendFreezes, sendOverruled, settleRecentChanges, settleRecentPlaces, tellIntake } from "../src/recent.js";
 import { run } from "../src/run.js";
 import { dumpPlace } from "../src/serialise.js";
 import type { Place } from "../src/types.js";
@@ -239,6 +239,43 @@ describe("sendDoubtCases", () => {
     const doubtCases = vi.fn(async (_cases: readonly unknown[]) => {});
     expect(await sendDoubtCases({ inbox, store: { inData: async () => {}, overruled: async () => {}, doubtCases }, now: NOW })).toEqual([]);
     expect(doubtCases).not.toHaveBeenCalled();
+  });
+});
+
+describe("sendFreezes", () => {
+  const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
+  const OTHER = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZB";
+  async function report(n: number, place: string, received: string, frozen?: Record<string, unknown>) {
+    await put(join(inbox, "applied", received.slice(0, 10), `${id(n)}.json`), {
+      id: id(n),
+      received,
+      app: "example-app",
+      device: "aaaa",
+      app_version: "1.0.0",
+      consent: true,
+      type: "report",
+      place,
+      report: { kind: "fact", fact: "pets", value: "yes" },
+      outcome: { result: "needs_review", reason: "", run: received, ...(frozen ? { frozen } : {}) },
+    });
+  }
+
+  it("sends each place's latest freeze in the last 90 days, lifted once main has a value for the fact set at or after it", async () => {
+    await report(1, PLACE, "2026-10-28T00:00:00Z", { fact: "pets", at: "2026-10-28T00:00:00Z" });
+    await report(2, PLACE, "2026-10-20T00:00:00Z", { fact: "power", at: "2026-10-20T00:00:00Z" });
+    await report(3, OTHER, "2026-10-25T00:00:00Z", { fact: "pets", at: "2026-10-25T00:00:00Z" });
+    await report(4, OTHER, "2026-07-01T00:00:00Z", { fact: "pets", at: "2026-07-01T00:00:00Z" });
+    await report(5, PLACE, "2026-10-29T00:00:00Z");
+    await put(join(main, "places", OTHER.slice(-2).toLowerCase(), `${OTHER}.json`), { id: OTHER, facts: { pets: "no" }, fact_dates: { pets: "2026-10-26T00:00:00Z" } });
+    await put(join(main, "places", PLACE.slice(-2).toLowerCase(), `${PLACE}.json`), { id: PLACE, facts: { pets: "no" }, fact_dates: { pets: "2026-10-01T00:00:00Z" } });
+    const freezes = vi.fn(async (_freezes: readonly unknown[]) => {});
+    const store = { inData: async () => {}, overruled: async () => {}, doubtCases: async () => {}, freezes };
+    const expected = [
+      { place: PLACE, fact: "pets", frozen_at: "2026-10-28T00:00:00Z" },
+      { place: OTHER, fact: "pets", frozen_at: "2026-10-25T00:00:00Z", lifted_at: "2026-10-26T00:00:00Z" },
+    ];
+    expect(await sendFreezes({ inbox, main, store, now: NOW })).toEqual(expected);
+    expect(freezes).toHaveBeenCalledWith(expected);
   });
 });
 

@@ -1,9 +1,9 @@
 import { contactProblem, isCommonsFileName, isContactFact, isDoubtFact, isFactName, isValidFactValue, tidyName, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
 import { byCodePoint } from "./data-check.js";
-import type { Settles } from "./decide.js";
+import { factsClearedBy, type Settles } from "./decide.js";
 import { distanceM, majorRoads, type MajorRoads } from "./roads.js";
 import { dumpPlace, placePath } from "./serialise.js";
-import { setSource } from "./sources.js";
+import { dropSource, setSource } from "./sources.js";
 import type { Place } from "./types.js";
 
 /**
@@ -14,7 +14,7 @@ import type { Place } from "./types.js";
  * A reviewer decides `approve` (keep a held or hidden new place), `restore`
  * (put a withdrawn contact, or a fact doubts took down, back), `merge` (a
  * held new place into the place it duplicates, with `mergePlaces`),
- * `confirm` (a fact a case suggests), `take_down`
+ * `confirm` (a fact a case suggests, or one value for a disputed fact), `take_down`
  * (hide a new place that is clear spam), `keep_down` (leave a fact doubts
  * took down off the place), `dismiss` (doubts about a fact that stays) or
  * `leave` (a person decides). `settleByRules` settles what it can before
@@ -54,10 +54,24 @@ export type { Place };
  * merged into the place it duplicates. The note may say something the place
  * should carry, such as an address the app could not confirm on the map, so a
  * person reads it in the inbox and adds what it says by hand.
+ * `disputed`: a place frozen because `sources` independent sources sent
+ * conflicting values for `fact` within 24 hours; no fact on it changes until
+ * a reviewer sets the fact to one value, which lifts the freeze.
  * Contact values a traveller sent, notes and device ids are never in it.
  */
 export interface HeldCase {
-  case: "duplicate" | "hidden" | "contacts" | "description" | "first_place" | "contact_withdrawn" | "fact_doubted" | "vehicle_access_candidate" | "commons_mismatch" | "note";
+  case:
+    | "duplicate"
+    | "hidden"
+    | "contacts"
+    | "description"
+    | "first_place"
+    | "contact_withdrawn"
+    | "fact_doubted"
+    | "vehicle_access_candidate"
+    | "commons_mismatch"
+    | "note"
+    | "disputed";
   place: string;
   /** The place's standing. Left out for a place travellers did not add. */
   standing?: "shown" | "confirmed" | "held" | "hidden";
@@ -75,11 +89,13 @@ export interface HeldCase {
   fact?: FactName;
   /** On `contact_withdrawn` and `fact_doubted`: the value the place published. On `vehicle_access_candidate`: the value its name suggests. */
   value?: FactValue;
+  /** On `disputed`: the values the sources sent, left out for a contact, the address or values with free words, which a person reads in the inbox. */
+  values?: FactValue[];
   /** On `fact_doubted`: the doubts took the fact off the place. */
   taken_down?: boolean;
   /** On `commons_mismatch`: the Commons file name, as `file` in `commons.ndjson.gz`. */
   file?: string;
-  /** On `fact_doubted`: independent sources among the doubts. On `commons_mismatch`: among the reports. */
+  /** On `fact_doubted`: independent sources among the doubts. On `commons_mismatch`: among the reports. On `disputed`: among the conflicting reports. */
   sources?: number;
   /** On `fact_doubted`: the doubts counted. */
   doubts?: string[];
@@ -117,6 +133,7 @@ export const HELD_CASES: readonly HeldCase["case"][] = [
   "vehicle_access_candidate",
   "commons_mismatch",
   "note",
+  "disputed",
 ];
 
 /** Cases that come from the data rather than from feedback, so they name no feedback ids. */
@@ -142,6 +159,10 @@ export function isHeldCase(v: unknown): v is HeldCase {
     if (typeof v.file !== "string" || v.file.length === 0 || typeof v.sources !== "number" || v.fact !== undefined) return false;
   } else if (v.case === "vehicle_access_candidate") {
     if (v.fact !== "vehicle_access" || !isValidFactValue("vehicle_access", v.value)) return false;
+  } else if (v.case === "disputed") {
+    const fact = v.fact;
+    if (!isFactName(fact) || typeof v.sources !== "number") return false;
+    if (v.values !== undefined && (!Array.isArray(v.values) || !v.values.every((value) => isValidFactValue(fact, value)))) return false;
   } else if (v.case === "fact_doubted") {
     if (!isDoubtFact(v.fact) || v.value === undefined || typeof v.taken_down !== "boolean") return false;
     if (typeof v.sources !== "number" || !isStrings(v.doubts) || !isStrings(v.confirmations)) return false;
@@ -223,6 +244,8 @@ export function allowedDecisions(c: HeldCase): ReviewDecision[] {
       return ["leave"];
     case "commons_mismatch":
       return ["confirm", "dismiss", "leave"];
+    case "disputed":
+      return ["confirm", "leave"];
     default:
       return ["leave"];
   }
@@ -261,6 +284,13 @@ export function settleByRules(
     if (!c.taken_down && (current === undefined || JSON.stringify(current) !== JSON.stringify(c.value))) return leave("the fact has changed since the doubt");
     return null;
   }
+  if (c.case === "disputed") {
+    // Owners keep control of their listings, whatever a model says.
+    if (place.fact_sources[c.fact!] === "owner") return leave("the owner set this fact");
+    if (place.owner_verified === true) return leave("the place has a verified owner");
+    if (c.values === undefined) return leave("the values are in the inbox, so a person decides");
+    return null;
+  }
   if (c.case === "contact_withdrawn") {
     const fact = c.fact as ContactFactName;
     if (place.fact_sources[fact] === "owner") return leave("the owner set this contact");
@@ -282,21 +312,45 @@ export function settleByRules(
 }
 
 /**
+ * The values a reviewer may set on a `disputed` case: those the sources sent
+ * and the value the place has now, each once, sorted by their JSON. None when
+ * the case carries no values.
+ */
+export function disputeChoices(c: HeldCase, place: Place): FactValue[] {
+  if (c.case !== "disputed" || c.values === undefined) return [];
+  const current = (place.facts as Record<string, FactValue | undefined>)[c.fact!];
+  const all = current === undefined ? c.values : [...c.values, current];
+  return [...new Map(all.map((v) => [JSON.stringify(v), v])).entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([, v]) => v);
+}
+
+/**
  * The place record after a reviewer's decision, at `at` (a UTC time), or null
  * when the decision changes nothing in the data. `approve` sets a held place's
  * standing to `shown`, and restores a hidden one with a `restore` decision;
  * on a published first place it changes nothing. `take_down` hides the place
  * with a `hide` decision, so reports can't bring it back. `restore` sets the
  * withdrawn contact, or a fact doubts took down, back to the value the place
- * published. `keep_down` and `dismiss` change nothing, and neither does
- * `merge` here: it writes two records, with `mergePlaces`.
+ * published. `confirm` on a `disputed` case sets the fact to `value`, one of
+ * `disputeChoices`, dated `at` even when the place has that value already:
+ * the date lifts the freeze once it is in the data. `keep_down` and
+ * `dismiss` change nothing, and neither does `merge` here: it writes two
+ * records, with `mergePlaces`.
  */
-export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecision, at: string): Place | null {
+export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecision, at: string, value?: FactValue): Place | null {
   if (!allowedDecisions(c).includes(decision) || decision === "leave" || decision === "keep_down" || decision === "dismiss" || decision === "merge") return null;
   // A Commons photo goes on the do-not-match list (`withDoNotMatch`), not into the place record.
   if (c.case === "commons_mismatch") return null;
   const next = structuredClone(place);
-  if (decision === "restore") {
+  if (c.case === "disputed") {
+    const fact = c.fact!;
+    if (value === undefined || !disputeChoices(c, place).some((v) => JSON.stringify(v) === JSON.stringify(value))) return null;
+    for (const cleared of factsClearedBy(next.facts, fact, value)) {
+      delete (next.facts as Record<string, FactValue | undefined>)[cleared];
+      dropSource(next, cleared);
+    }
+    (next.facts as Record<string, FactValue>)[fact] = value;
+    setSource(next, fact, "feedback", at);
+  } else if (decision === "restore") {
     (next.facts as Record<string, FactValue>)[c.fact!] = c.value as FactValue;
     setSource(next, c.fact!, "feedback", at);
   } else if (decision === "take_down") {

@@ -16,6 +16,7 @@ import {
   type StoredOwnerSubmission,
   isPlaceId,
   isDoubtFact,
+  isFactName,
   isValidFactValue,
   FEE_RETIRED,
   isFeedbackId,
@@ -90,6 +91,7 @@ import {
   markInData,
   openDoubtCases,
   overrule,
+  recordFreezes,
   pruneDecisions,
   UNAVAILABLE,
   type DoubtCase,
@@ -1663,6 +1665,33 @@ export function createHandler(deps: Deps) {
   }
 
   /**
+   * `POST /v1/places/recent/freezes`, for the apply run: `{ "freezes": [{
+   * "place", "fact", "frozen_at", "lifted_at"? }] }`, the places it froze over
+   * conflicting values in the last 90 days, with `lifted_at` once the
+   * reviewer's value is in the data, and `authorization: Bearer
+   * <PLACES_TOKEN>`. A frozen place's fact changes are held as `disputed`
+   * (see `recordFreezes`), and sending them again changes nothing.
+   */
+  async function freezesRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 16);
+    if (call instanceof Response) return call;
+    const freezes = call.body.freezes;
+    const isFreeze = (f: unknown): f is { place: string; fact: string; frozen_at: string; lifted_at?: string } => {
+      if (typeof f !== "object" || f === null) return false;
+      const { place, fact, frozen_at: frozenAt, lifted_at: liftedAt } = f as Record<string, unknown>;
+      return isPlaceId(place) && isFactName(fact) && isIsoSeconds(frozenAt) && (liftedAt === undefined || isIsoSeconds(liftedAt));
+    };
+    if (!Array.isArray(freezes) || freezes.length === 0 || freezes.length > MAX_REMOVE_IDS || !freezes.every(isFreeze)) {
+      return json(400, { error: "invalid", details: [`freezes must be 1 to ${MAX_REMOVE_IDS} frozen places`] }, cors);
+    }
+    const written = await recordFreezes(
+      call.db,
+      freezes.map(({ place, fact, frozen_at, lifted_at }) => ({ place, fact, frozen_at, ...(lifted_at !== undefined ? { lifted_at } : {}) })),
+    );
+    return json(200, { written }, cors);
+  }
+
+  /**
    * `GET /v1/feedback/progress?ids=fb_...,fb_...`: where each of 1 to 100
    * contributions is, by the id the intake answered when it was sent. Public,
    * like the recent list, and never cached at the edge. Answers `{ "items" }`
@@ -2378,6 +2407,10 @@ export function createHandler(deps: Deps) {
     if (route === "/v1/places/recent/doubt-cases") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return doubtCasesRecent(request, env, cors);
+    }
+    if (route === "/v1/places/recent/freezes") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return freezesRecent(request, env, cors);
     }
     if (route === "/v1/places/recent/block") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });

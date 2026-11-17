@@ -343,7 +343,7 @@ export async function settleAwaiting(
   return moved;
 }
 
-/** Moves each decided pending file to `applied/` or `refused/`, adding the outcome (with `doubted` on a doubt that took a fact down). Waiting files stay. */
+/** Moves each decided pending file to `applied/` or `refused/`, adding the outcome (with `doubted` on a doubt that took a fact down, and `frozen` on the reports that froze a place). Waiting files stay. */
 export async function moveDecided(
   inbox: string,
   files: readonly PendingFile[],
@@ -377,6 +377,7 @@ export async function moveDecided(
       run: runAt,
       ...(decision.held_reason ? { held_reason: decision.held_reason } : {}),
       ...(decision.doubted ? { doubted: decision.doubted } : {}),
+      ...(decision.frozen ? { frozen: decision.frozen } : {}),
     };
     const withOutcome = { ...file.item, outcome };
     await writeFile(target, `${JSON.stringify(withOutcome, null, 2)}\n`, "utf8");
