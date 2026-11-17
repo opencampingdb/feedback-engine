@@ -40,7 +40,8 @@ import type { MajorRoads } from "@opencampingdb/apply/review";
 import { recordInboxWrite, startApplyIfDue, type RunOutcome } from "./runs.js";
 import { parseTimetable, startTimedIfDue, type TimedStart } from "./timed.js";
 import { reviewOvertureCandidates, type OvertureReviewResult } from "./overture-reviewer.js";
-import { DEFAULT_REVIEW_MODEL, MAX_MODEL_FAILURES, parseBotLogins, REVIEW_BRANCH, reviewHeldCases, type ReviewResult } from "./reviewer.js";
+import { DEFAULT_REVIEW_MODEL, MAX_MODEL_FAILURES, parseBotLogins, REVIEW_BRANCH, REVIEW_TIMEOUT_MS, reviewHeldCases, type ReviewResult } from "./reviewer.js";
+import { capOf } from "./second-review.js";
 import { IntegrityError, IntegrityUnavailable, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
 import { SafeSearch, verdict, worseRatings } from "./safesearch.js";
 import { jpegSize } from "./jpeg.js";
@@ -82,6 +83,7 @@ import {
 } from "./recent.js";
 import { cellHashes, getIndexedPlace, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
 import { createChecks, pruneLiveCounts, releaseLive, type AiLike, type LiveSlot } from "./checks.js";
+import { checkRepeated, pruneTextVectors, repeatedTextOf, type RepeatedResult, type VectorizeLike } from "./repeated.js";
 import {
   decideAtSendTime,
   decidedHere,
@@ -112,6 +114,7 @@ import {
 } from "./progress.js";
 import { verifyPreview } from "@opencampingdb/apply/preview";
 import { IDEMPOTENCY_HEADER, isIdempotencyKey, keepAnswer, keptAnswers, pruneRequestKeys, requestKey } from "./idempotency.js";
+import { countSilentDrops, pruneSilentDrops, type SilentReason } from "./silent.js";
 import {
   appVersionAtLeast,
   minimumAppVersion,
@@ -259,6 +262,12 @@ export interface Env {
   TIMED_INSTALLATION_ID?: string;
   /** Secret. The abuse.ch auth key for the URLhaus check on links. Without it, an item with a link is held. */
   URLHAUS_KEY?: string;
+  /**
+   * Vectorize index (768 dimensions, cosine, with number metadata index `at`
+   * and string metadata index `source`) for the repeated text check
+   * (src/repeated.ts), with AI and RECENT_LIST. Off without it.
+   */
+  VECTORIZE?: VectorizeLike;
   /** Workers AI, for the Llama Guard check on free text and the AI reviewer. Without it, free text from a contributor without a track record is held. */
   AI?: AiLike;
   /**
@@ -271,6 +280,15 @@ export interface Env {
   AI_REVIEWER?: string;
   /** The Workers AI model the reviewer asks. Defaults to DEFAULT_REVIEW_MODEL. */
   REVIEW_MODEL?: string;
+  /**
+   * Secret. An Anthropic API key for the AI reviewer's second stage
+   * (src/second-review.ts): a held case the first model is unsure of is asked
+   * of SECOND_REVIEW_MODEL while the month's spending is under
+   * SECOND_REVIEW_CAP_USD. Without it, such a case is left for a person.
+   */
+  ANTHROPIC_API_KEY?: string;
+  /** The second stage's monthly spending cap in US dollars. Defaults to DEFAULT_SECOND_REVIEW_CAP_USD (20). */
+  SECOND_REVIEW_CAP_USD?: string;
   /**
    * `on` runs the AI reviewer's check of Overture candidates from the
    * scheduled job, at most once every 10 minutes, on the open PR from
@@ -314,8 +332,8 @@ const INVALID_KEY = `${IDEMPOTENCY_HEADER} must be 16 to 128 letters, digits, _ 
  * Not for an owner claim or listing, whose answer holds a token that is
  * never stored, and not without the D1 database.
  */
-function withKey<T extends Admitted | ItemAnswer>(db: D1Like | undefined, app: AppEntry, key: string | undefined, at: string, item: T): T {
-  if (!("file" in item) || !db || key === undefined || "token" in item.answer) return item;
+function withKey<T extends Admitted | Dropped | ItemAnswer>(db: D1Like | undefined, app: AppEntry, key: string | undefined, at: string, item: T): T {
+  if (!("file" in item || "dropped" in item) || !db || key === undefined || "token" in item.answer) return item;
   return { ...item, writes: [...item.writes, keepAnswer(db, app.app, key, { status: 202, body: item.answer }, at)] };
 }
 
@@ -693,11 +711,27 @@ interface Admitted {
   after: () => Promise<void>;
 }
 
-/** The answer to a human check that did not pass, or undefined when it passed. */
-function humanCheckRefusal(result: HumanCheckResult): ItemAnswer | undefined {
-  if (result.ok) return undefined;
+/**
+ * An item dropped silently (silent.ts): its answer, the one an accepted item
+ * gets, and its progress row (with its kept idempotency answer, when it has
+ * a key). Nothing else is written for it.
+ */
+interface Dropped {
+  dropped: SilentReason;
+  writes: D1Statement[];
+  answer: Record<string, unknown>;
+}
+
+/**
+ * What a human check settles: the item goes on, human checked; it is
+ * dropped silently, when the token is missing or did not pass, so a sender
+ * cannot tell whether its token was taken; or it is answered `503`, when
+ * Turnstile could not answer, which is not the sender's fault.
+ */
+function humanCheckOutcome(result: HumanCheckResult): { humanChecked: true } | { dropped: SilentReason } | ItemAnswer {
+  if (result.ok) return { humanChecked: true };
   if (result.error === "unavailable") return { status: 503, body: { error: "unavailable" }, headers: { "retry-after": "60" } };
-  return { status: 401, body: result.error === "human_check_failed" ? { error: result.error, details: result.details } : { error: result.error } };
+  return { dropped: result.error };
 }
 
 /** Over a daily limit: 429, with the seconds until the counters reset. */
@@ -817,6 +851,7 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now"> & { roads?: Maj
         botLogins,
         now: deps.now,
         onError: warn,
+        ...(env.ANTHROPIC_API_KEY ? { second: { apiKey: env.ANTHROPIC_API_KEY, fetch: deps.fetch, capUsd: capOf(env.SECOND_REVIEW_CAP_USD), timeoutMs: REVIEW_TIMEOUT_MS } } : {}),
         onModelFailure: (key, failures, error) =>
           console.warn(`the AI reviewer's model call failed on held case ${key} (${failures} of ${MAX_MODEL_FAILURES} runs), going on to the next case: ${String(error)}`),
         ...(deps.roads ? { roads: deps.roads } : {}),
@@ -915,9 +950,14 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
     if (env.RECENT_LIST) {
       const db = env.RECENT_LIST;
       const nowMs = deps.now();
-      await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs), pruneProgress(db, nowMs), pruneRateCounts(db, nowMs), pruneRequestKeys(db, nowMs)]).catch((error: unknown) => {
+      await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs), pruneProgress(db, nowMs), pruneRateCounts(db, nowMs), pruneRequestKeys(db, nowMs), pruneSilentDrops(db, nowMs)]).catch((error: unknown) => {
         console.warn(`pruning the recent list failed: ${String(error)}`);
       });
+      if (env.VECTORIZE) {
+        await pruneTextVectors(db, env.VECTORIZE, nowMs).catch((error: unknown) => {
+          console.warn(`deleting old text vectors failed: ${String(error)}`);
+        });
+      }
     }
     // Before the apply is started, so a run that starts now finds this minute's items.
     await flush(env);
@@ -1744,7 +1784,7 @@ export function createHandler(deps: Deps) {
    * attestation is checked once the item is read. A batch has `batch.proof`,
    * its attestation already checked over the whole body.
    */
-  type IntakeHow = { text: string } | { batch: { proof: Proof | undefined; humanChecked: boolean } };
+  type IntakeHow = { text: string } | { batch: { proof: Proof | undefined; humanChecked: boolean; dropped: SilentReason | undefined } };
   type Intake = IntakeShared & IntakeHow;
 
   async function newIntake(request: Request, env: Env, app: AppEntry, nowMs: number, how: IntakeHow & { nextId: () => string }): Promise<Intake> {
@@ -1763,7 +1803,7 @@ export function createHandler(deps: Deps) {
    * refusal, or what to store for it, which the caller stores. Nothing is
    * stored here, apart from the live change the checks take (`slot`).
    */
-  async function admit(intake: Intake, body: unknown): Promise<Admitted | ItemAnswer> {
+  async function admit(intake: Intake, body: unknown): Promise<Admitted | Dropped | ItemAnswer> {
     const { request, env, app, nowMs, received, day, origin } = intake;
     // Fee reports are no longer collected. Answered before validation, so a client of any SDK version gets the same refusal.
     if (typeof body === "object" && body !== null && (body as { type?: unknown }).type === "fee") {
@@ -1795,12 +1835,16 @@ export function createHandler(deps: Deps) {
       return { status: 403, body: { error: "type_not_allowed_for_app_key" } };
     }
     let humanChecked = false;
-    if ("batch" in intake) humanChecked = intake.batch.humanChecked;
+    let dropped: SilentReason | undefined;
+    if ("batch" in intake) ({ humanChecked, dropped } = intake.batch);
     else if (app.requires_human_check) {
-      const refused = humanCheckRefusal(await humanCheck(request, app, intake.text));
-      if (refused) return refused;
-      humanChecked = true;
+      const outcome = humanCheckOutcome(await humanCheck(request, app, intake.text));
+      if ("status" in outcome) return outcome;
+      if ("dropped" in outcome) dropped = outcome.dropped;
+      else humanChecked = true;
     }
+    // A human-check key sends only reports (humanCheckAllows), so the submission is feedback.
+    if (dropped) return dropSilently(intake, submission as FeedbackSubmission, dropped);
 
     let proof: Proof | undefined;
     let contributor: string | undefined;
@@ -1972,6 +2016,18 @@ export function createHandler(deps: Deps) {
         stored.type === "photo_erasure");
     if (withhold) stored.withheld = true;
 
+    // The repeated text check, with the AI and VECTORIZE bindings and RECENT_LIST, run once for the item.
+    // One source is one client network, or the device when the network is not known.
+    let repeatedOnce: Promise<RepeatedResult> | undefined;
+    const repeated =
+      env.RECENT_LIST && env.AI && env.VECTORIZE
+        ? () =>
+            (repeatedOnce ??= checkRepeated(
+              { ai: env.AI!, index: env.VECTORIZE!, db: env.RECENT_LIST!, now: deps.now },
+              { id, source: stored.origin ?? stored.device, text: repeatedTextOf(submission as FeedbackSubmission) },
+            ))
+        : undefined;
+
     // Decided before the item is stored, and recorded in the same D1 batch that queues it.
     let decision: SendTimeDecision | undefined;
     if (env.RECENT_LIST && decidedHere(stored)) {
@@ -1987,7 +2043,7 @@ export function createHandler(deps: Deps) {
                 (r) => r.allowed,
                 () => false,
               );
-      const checks = createChecks({ db, fetch: deps.fetch, urlhausKey: env.URLHAUS_KEY, ai: env.AI, now: deps.now, linkLookup });
+      const checks = createChecks({ db, fetch: deps.fetch, urlhausKey: env.URLHAUS_KEY, ai: env.AI, now: deps.now, linkLookup, repeated });
       decision = await decideAtSendTime({
         db,
         checks,
@@ -2005,7 +2061,13 @@ export function createHandler(deps: Deps) {
       stored.intake = decision.linksPassed && answer.state === "held" ? { ...answer, links: "passed" } : answer;
       // The items after it in a batch are decided as if it were stored already.
       decision.addToDecided?.(intake.decided);
+    } else if (stored.type === "review" && repeated) {
+      // The apply decides a review. One repeated across sources, or one the check could not read, goes to a person.
+      const found = await repeated();
+      if (found === "repeated_text" || found === "check_unavailable") stored.intake = { state: "held", held_reason: found };
     }
+    // An item decided without the checks still leaves its text for the items after it.
+    if (repeated) await repeated();
 
     const writes = env.RECENT_LIST
       ? [
@@ -2092,6 +2154,46 @@ export function createHandler(deps: Deps) {
   }
 
   /**
+   * Answers an item as `admit` answers an accepted one from the same key, but
+   * stores nothing (silent.ts). It gets an id and, with RECENT_LIST, a
+   * progress row, so its progress reads `received` and never moves on. An
+   * item the intake decides at send time is answered as a human-checked one
+   * is: held as `not_attested`, or `unknown_place` for a place the intake
+   * does not know. Nothing is counted against a limit or as a source.
+   */
+  async function dropSilently(intake: Intake, submission: FeedbackSubmission, reason: SilentReason): Promise<Dropped> {
+    const db = intake.env.RECENT_LIST;
+    const id = `fb_${intake.nextId()}`;
+    const place = typeof submission.place === "string" ? submission.place : null;
+    let state: ItemState | undefined;
+    if (db && decidedHere({ ...submission, id, received: intake.received } as unknown as StoredFeedback)) {
+      const known = place !== null && (await getIndexedPlace(db, place).catch(() => undefined)) !== undefined;
+      state = { state: "held", held_reason: known ? "not_attested" : "unknown_place" };
+    }
+    return {
+      dropped: reason,
+      writes: db ? [receivedStatement(db, { id, received: intake.received, place }, state)] : [],
+      answer: state ? { id, ...state } : { id },
+    };
+  }
+
+  /**
+   * Writes the progress rows of silently dropped items and counts them by
+   * reason for `day`. A failure is logged and the items are answered as
+   * accepted all the same.
+   */
+  async function storeDropped(env: Env, day: string, items: readonly Dropped[]): Promise<void> {
+    if (items.length === 0) return;
+    try {
+      const db = env.RECENT_LIST;
+      if (db) await db.batch(items.flatMap((item) => item.writes));
+      await countSilentDrops(countStore(env), day, items.map((item) => item.dropped));
+    } catch (error) {
+      console.warn(`recording silent drops failed: ${String(error)}`);
+    }
+  }
+
+  /**
    * Stores admitted items for the inbox. With RECENT_LIST they are queued, in
    * one D1 batch with their daily counts, decisions and progress rows, so
    * every item is stored or none is, and the scheduled job writes them to the
@@ -2154,19 +2256,21 @@ export function createHandler(deps: Deps) {
       proof = result;
     }
     let humanChecked = false;
+    let dropped: SilentReason | undefined;
     if (app.requires_human_check) {
-      const answer = humanCheckRefusal(await humanCheck(request, app, text));
-      if (answer) return json(answer.status, answer.body, { ...cors, ...answer.headers });
-      humanChecked = true;
+      const outcome = humanCheckOutcome(await humanCheck(request, app, text));
+      if ("status" in outcome) return json(outcome.status, outcome.body, { ...cors, ...outcome.headers });
+      if ("dropped" in outcome) dropped = outcome.dropped;
+      else humanChecked = true;
     }
     const nowMs = deps.now();
     // Items sent before, whose answers were lost, are answered as they were the first time.
     const kept = keys ? await keptAnswers(env.RECENT_LIST, app.app, keys as string[]) : new Map<string, never>();
-    const intake = await newIntake(request, env, app, nowMs, { batch: { proof, humanChecked }, nextId: orderedUlids(nowMs, deps.randomBytes) });
+    const intake = await newIntake(request, env, app, nowMs, { batch: { proof, humanChecked, dropped }, nextId: orderedUlids(nowMs, deps.randomBytes) });
     // Each item is measured as sent, as POST /v1/feedback measures its body, so an item is too
     // large in a batch exactly when it would be alone.
     const sent = arrayElementTexts(text, "items");
-    const answers: (Admitted | ItemAnswer | undefined)[] = items.map((item, i) => {
+    const answers: (Admitted | Dropped | ItemAnswer | undefined)[] = items.map((item, i) => {
       const key = (keys as string[] | undefined)?.[i];
       const before = key === undefined ? undefined : kept.get(key);
       if (before) return { status: before.status, body: before.body };
@@ -2176,6 +2280,7 @@ export function createHandler(deps: Deps) {
     const waiting = answers.filter((a) => a === undefined).length;
     const at = new Date(nowMs).toISOString();
     const admitted: Admitted[] = [];
+    const droppedItems: Dropped[] = [];
     /** Nothing is stored: every count and live change this request took is given back. */
     const notStored = async () => {
       await intake.counts.giveBack().catch(() => undefined);
@@ -2188,7 +2293,8 @@ export function createHandler(deps: Deps) {
       // network's comes first: a network at its limit holds nothing of the app's count, which every
       // other sender of the app shares, and its items are each refused as they would be alone.
       // An app over its daily limit is refused as a whole, as one item would be.
-      let room = waiting;
+      // A batch dropped silently is counted against no limit, so it holds up no one else's count.
+      let room = dropped ? 0 : waiting;
       if (room > 0 && intake.origin !== undefined) room = await intake.counts.reserve([{ key: `n:${intake.day}:${intake.origin}`, limit: ORIGIN_DAILY_LIMIT }], room);
       const appCounter = { key: `a:${intake.day}:${app.app}`, limit: app.daily_limit };
       if (room > 0 && (await intake.counts.reserve([appCounter], room)) === 0) {
@@ -2201,6 +2307,7 @@ export function createHandler(deps: Deps) {
         const answer = withKey(env.RECENT_LIST, app, (keys as string[] | undefined)?.[i], at, await admit(intake, item));
         answers[i] = answer;
         if ("file" in answer) admitted.push(answer);
+        else if ("dropped" in answer) droppedItems.push(answer);
       }
     } catch (error) {
       if (error instanceof CountUnavailable) return notStored();
@@ -2220,9 +2327,10 @@ export function createHandler(deps: Deps) {
       .catch(() => intake.counts.settle())
       .catch((error: unknown) => console.warn(`giving back reserved counts failed: ${String(error)}`));
     for (const item of admitted) await item.after();
+    await storeDropped(env, intake.day, droppedItems);
     const out = answers.map((a) => {
       if (a === undefined) throw new Error("every item is answered");
-      if ("file" in a) return { status: 202, ...a.answer };
+      if ("file" in a || "dropped" in a) return { status: 202, ...a.answer };
       const retry = a.headers?.["retry-after"];
       return { status: a.status, ...a.body, ...(a.status === 429 && retry ? { retry_after: Number(retry) } : {}) };
     });
@@ -2355,7 +2463,7 @@ export function createHandler(deps: Deps) {
       if (kept) return json(kept.status, kept.body, cors);
     }
     const intake = await newIntake(request, env, app, nowMs, { text, nextId: () => ulid(nowMs, deps.randomBytes) });
-    let admitted: Admitted | ItemAnswer;
+    let admitted: Admitted | Dropped | ItemAnswer;
     try {
       admitted = await admit(intake, body);
     } catch (error) {
@@ -2364,6 +2472,10 @@ export function createHandler(deps: Deps) {
       throw error;
     }
     const item = withKey(env.RECENT_LIST, app, key, new Date(nowMs).toISOString(), admitted);
+    if ("dropped" in item) {
+      await storeDropped(env, intake.day, [item]);
+      return json(202, item.answer, cors);
+    }
     if (!("file" in item)) return json(item.status, item.body, { ...cors, ...item.headers });
     try {
       await storeAdmitted(env, [item]);

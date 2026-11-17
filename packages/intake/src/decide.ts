@@ -426,11 +426,16 @@ const countAccepted = (decided: DecidedInRequest, contributor: string) => decide
  * set a link, the checks never run, so its links still get the link rules and
  * URLhaus: a link that fails is held as `link_check`, and links that pass are
  * marked `linksPassed`, without which the apply sends the item to a person.
+ * Its text still gets the repeated text check, so it counts for later items,
+ * and a repeat, or a check that could not run, is held for that instead.
  */
 export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDecision> {
   const decision = await decideByRulesAndChecks(input);
   const { answer } = decision;
   if (answer.state !== "held" || CHECK_HOLDS.includes(answer.held_reason) || answer.held_reason === "blocked") return decision;
+  // The rules held it, so the checks never ran: its text still counts, and a repeat goes to a person.
+  const repeated = await input.checks.repeated();
+  if (repeated === "repeated_text" || repeated === "check_unavailable") return { ...decision, answer: { state: "held", held_reason: repeated } };
   const links = await input.checks.links(input.submission);
   if (links === "none" || links === "check_unavailable") return decision;
   if (links === "passed") return { ...decision, linksPassed: true };

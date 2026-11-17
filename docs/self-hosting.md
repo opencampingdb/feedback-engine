@@ -28,6 +28,15 @@ Note each `id` and the `database_id` they print. Never commit them to this repos
 - `RATE_LIMIT` (KV) is a required binding. With `RECENT_LIST` bound it is never read or written, because the daily counters live in D1. Without `RECENT_LIST` the counters live here.
 - `ATTEST` (KV) holds registered App Attest keys and their challenges. It is needed only when an app key has `ios`. Without one, skip it and delete the `ATTEST` block from your deploy copy in step 3.
 - `RECENT_LIST` (D1) holds the recent list, the place index, the daily counters, the idempotency keys, the inbox queue and each item's progress. Any intake that serves a public app needs it.
+- `VECTORIZE` (a Vectorize index, optional) turns on the repeated text check ([Repeated text](#repeated-text)). Create it with 768 dimensions and the cosine metric, then its two metadata indexes, before the intake stores anything in it:
+
+  ```sh
+  npx wrangler vectorize create ocdb-repeated-text --dimensions=768 --metric=cosine
+  npx wrangler vectorize create-metadata-index ocdb-repeated-text --property-name=at --type=number
+  npx wrangler vectorize create-metadata-index ocdb-repeated-text --property-name=source --type=string
+  ```
+
+  Uncomment the `[[vectorize]]` block in your deploy copy to bind it. It needs `RECENT_LIST` and the `[ai]` binding too, and is off without any of the three.
 - `PER_IP` (a rate limiting binding, optional) limits the public reads per client network (the IPv4 /24 or IPv6 /48 the daily budgets count, so one network cannot spread its reads over many addresses): `GET /v1/places/recent`, `GET /v1/feedback/progress` and `GET /v1/photos/progress`. These need no app key, and the recent list is read from the same database the daily counters and the queue use. Past the limit a read answers `429` with `retry-after: 60`, before the edge cache or the database is read. Uncomment the `[[ratelimits]]` block in your deploy copy to turn it on. Without it, the reads are not limited per network, so put a Cloudflare rate limiting rule in front of them instead.
 
 Without `RECENT_LIST`, the recent-list routes and `POST /v1/feedback/batch` answer `404`, idempotency keys are ignored, every item is a commit of its own and the counters fall back to KV. KV takes one write a second to a key, and every submission writes the app's counter, so a KV-only intake takes about one submission a second across every user of every app. On the free plan KV also allows 1,000 writes a day, and each accepted submission makes three or more (device, network and app, plus contributor and attested key), so about 200 to 330 submissions a day. Keep KV-only intakes for tests.
@@ -46,7 +55,7 @@ Then edit `wrangler.deploy.toml` by hand:
 
 - `INBOX_REPO`: `<your organisation>/inbox`. `INBOX_BRANCH` defaults to `main`.
 - `ALLOWED_ORIGINS`: the web origins allowed to call the intake from a browser, comma separated, or `*`. Native apps send no origin and are not affected.
-- Optional, under `[vars]`: `APPLY_WORKFLOW` (step 10), and `AI_REVIEWER`, `DATA_REPO`, `REVIEW_BOT_LOGINS` and `REVIEW_MODEL` ([The AI reviewer](#the-ai-reviewer)). An app's photo service adds its own bindings and variables ([photos.md](photos.md)).
+- Optional, under `[vars]`: `APPLY_WORKFLOW` (step 10), and `AI_REVIEWER`, `DATA_REPO`, `REVIEW_BOT_LOGINS`, `REVIEW_MODEL` and `SECOND_REVIEW_CAP_USD` ([The AI reviewer](#the-ai-reviewer)). An app's photo service adds its own bindings and variables ([photos.md](photos.md)).
 
 From now on, edit this copy. Running the `sed` command again starts from `wrangler.toml` and drops every value you set by hand, such as `APPLY_WORKFLOW`, `AI_REVIEWER`, `DATA_REPO` and `REVIEW_BOT_LOGINS`, or a `GH_APP_ID` and `GH_INSTALLATION_ID` kept as plain variables.
 
@@ -117,7 +126,7 @@ Keys must be at least 16 characters: make them with `openssl rand -hex 16`. App 
 | `ios` | `app_id` (your team id, a dot and the bundle id) and optionally `environment` (`production` or `development`). |
 | `android` | `package`, and optionally `certificate_sha256`, the signing certificate digests Play reports. |
 | `contributor_proof_key` | Your app server's Ed25519 public key, the raw 32 bytes in base64. With it, review erasures, photo removals and photo erasures need a proof your server signed for the account, and a review that carries a valid proof is marked proved, so it may replace the contributor's earlier review without waiting for a person ([photos.md](photos.md), "Prove the account for removal and erasure"). Export it with `Buffer.from(await crypto.subtle.exportKey("raw", publicKey)).toString("base64")`. |
-| `requires_human_check` | `true` takes feedback only with a human check: a Cloudflare Turnstile token for the exact body, for a website, which cannot attest. Needs `human_check`, and never goes with `requires_attestation`. Such a key may send only fact reports of fixed-value facts, doubts, contact reports, and closed, name, kind and wrong_location reports. Everything else answers `403 type_not_allowed_for_app_key`. Its items are weighed as unattested ones ([integration.md](integration.md), "Websites: a human check"). |
+| `requires_human_check` | `true` takes feedback only with a human check: a Cloudflare Turnstile token for the exact body, for a website, which cannot attest. Needs `human_check`, and never goes with `requires_attestation`. Such a key may send only fact reports of fixed-value facts, doubts, contact reports, and closed, name, kind and wrong_location reports. A first-hand report may only be `says_so`, since `seen_nearby` needs the device's location. Everything else answers `403 type_not_allowed_for_app_key`. Its items are weighed as unattested ones ([integration.md](integration.md), "Websites: a human check"). |
 | `human_check` | The key's Turnstile widget: `secret` (its secret key), `hostnames` (the sites the widget is served on, such as `["places.example.org"]`), optionally `action` (the form's action, checked when given) and `free_text_facts` (`true` lets fact reports set opening hours, the operator and charges, whose values hold free words). Make one widget for each website. |
 | `report_kinds` | Report kinds the key may send, such as `["fact", "closed"]`. Every other submission answers `403 type_not_allowed_for_app_key`. On a key with `requires_human_check` it can only narrow that key's set. |
 | `photo_pass_unattested` | Photo services only: lets a development key get photo passes without attestation ([photos.md](photos.md)). |
@@ -200,7 +209,7 @@ The OSM notes workflow (`osm-notes.yml`) is retired, so don't add it. [osm.md](o
    ```
 
 2. If the diff adds a binding or variable to `wrangler.toml`, add it to your deploy copy by hand. Don't regenerate the copy.
-3. Apply any new migrations, then deploy. Code newer than its schema answers `500`: without `0010` and `0011` to every submission, without `0012` to a photo service's progress calls, and without `0013` to every request with an idempotency key, which every SDK from 0.21.0 sends. Without `0014` the AI reviewer still goes on past a case whose model call fails, but never counts its failed runs, so it never leaves that case to a person. Without `0015` a new place report the intake would put on the recent list answers `500`, because the intake keeps the adder's client network with the place.
+3. Apply any new migrations, then deploy. Code newer than its schema answers `500`: without `0010` and `0011` to every submission, without `0012` to a photo service's progress calls, and without `0013` to every request with an idempotency key, which every SDK from 0.21.0 sends. Without `0014` the AI reviewer still goes on past a case whose model call fails, but never counts its failed runs, so it never leaves that case to a person. Without `0015` a new place report the intake would put on the recent list answers `500`, because the intake keeps the adder's client network with the place. Without `0016` the intake still answers a silently dropped item as accepted, but logs a warning and records neither its progress nor its count. Without `0017` the AI reviewer's second stage can't read its spending, so every case the first model is unsure of goes to a person. Without `0018`, an intake with `VECTORIZE` holds every item with free text to check as `check_unavailable`.
 
    ```sh
    cd packages/intake
@@ -344,9 +353,19 @@ The first load writes about two rows per place, so on the D1 free plan a large i
 
 ### Deciding at send time
 
-With the place index loaded, the intake decides `fact`, `contact`, `doubt` and `clear` reports about a released place, and `new_place` reports, while the app waits. It uses the apply's own rules and then its checks: text checks, link rules, at most 50 live changes a day for each contributor, client network and App Attest key, URLhaus for links, and Llama Guard for free text from a contributor without a track record. When the rules hold an item that would set a link (a place the index does not have yet, an owner's value, a disagreement), its links still go through the link rules and URLhaus: a link that fails is held as `link_check`, and the inbox item records `"links": "passed"` when they pass. The apply sends a held item that sets a link without that record to a person. A `commons_mismatch` report is always held. The answer adds `"state": "live"` or `"state": "held"` with a `held_reason`.
+With the place index loaded, the intake decides `fact`, `contact`, `doubt` and `clear` reports about a released place, and `new_place` reports, while the app waits. It uses the apply's own rules and then its checks: text checks, link rules, at most 50 live changes a day for each contributor, client network and App Attest key, URLhaus for links, the repeated text check with `VECTORIZE` ([Repeated text](#repeated-text)), and Llama Guard for free text from a contributor without a track record. When the rules hold an item that would set a link (a place the index does not have yet, an owner's value, a disagreement), its links still go through the link rules and URLhaus: a link that fails is held as `link_check`, and the inbox item records `"links": "passed"` when they pass. The apply sends a held item that sets a link without that record to a person. A `commons_mismatch` report is always held. The answer adds `"state": "live"` or `"state": "held"` with a `held_reason`.
 
-A live fact, contact takedown or doubt takedown is a recent change, listed under `changes` (a takedown has a null `value`). A live new place is listed with its description, fee and contacts. The inbox item records the decision as `intake`, and the apply still writes the data. An attested contact goes live at send time only when the place's own website on record shows it, read for at most 3 seconds (the website check of the apply's contact checks, run from the Worker). Anything else is held as `contact_check`, and the apply run decides it with every contact check. It decides each item again with its own rules, but an item the intake held for a check (`text_check`, `link_check`, `ai_check`, `daily_cap` or `check_unavailable`) goes to a person on the review PR, never into the data on its own.
+A live fact, contact takedown or doubt takedown is a recent change, listed under `changes` (a takedown has a null `value`). A live new place is listed with its description, fee and contacts. The inbox item records the decision as `intake`, and the apply still writes the data. An attested contact goes live at send time only when the place's own website on record shows it, read for at most 3 seconds (the website check of the apply's contact checks, run from the Worker). Anything else is held as `contact_check`, and the apply run decides it with every contact check. It decides each item again with its own rules, but an item the intake held for a check (`text_check`, `link_check`, `ai_check`, `daily_cap`, `repeated_text` or `check_unavailable`) goes to a person on the review PR, never into the data on its own.
+
+### Repeated text
+
+With `VECTORIZE`, the intake checks free text for repeats across sources, after the text checks, the daily cap and URLhaus, and before Llama Guard, since an embedding costs less. The free text is a report's name, description and note (with its contact details removed), the free words of a fact value, such as an opening hours comment or the operator, and a review's text. Texts shorter than 40 characters, such as most names, are not checked.
+
+The text is embedded with Workers AI (`@cf/baai/bge-base-en-v1.5`) and looked up in the index. When texts from at least 3 other sources sent in the last 30 days have a cosine similarity of 0.95 or more, the item is held as `repeated_text`, and the apply sends it to a person. A source is the client network the item came from, or its device when the network is not known, as the apply counts sources, so one network repeating itself through many devices counts once. The constants are in `packages/intake/src/repeated.ts`.
+
+The text's vector is then stored with its source and time, whatever the outcome, so the texts of items the rules hold (an unattested report, say) count too. When the rules hold an item, its text is still checked, and a repeat is held as `repeated_text` in place of the rule's reason. A review, which the apply decides, carries `"intake": { "state": "held", "held_reason": "repeated_text" }` in the inbox, and the apply sends it to a person. Only the vector is stored, never the text. The `text_vectors` table (migration `0018`) keeps each vector's id and time, and the scheduled job deletes vectors older than 30 days, up to 1,000 a minute.
+
+When the embedding or Vectorize fails or takes longer than 2 seconds, an item with free text to check is held as `check_unavailable`, and an item without is not affected.
 
 The database also keeps each contributor's track record, the reports the intake decided in the last 90 days, so later reports about the same place and fact are decided against them, and, for 90 days, each fact doubts took down with the value it had, so two new travellers confirming that value bring it back and a report of another value replaces it.
 
@@ -377,6 +396,16 @@ It asks the model (`REVIEW_MODEL`, by default `@cf/meta/llama-3.3-70b-instruct-f
 On a `contact_check` case the model reads the reported contact on the place, the checks it failed and what they found. `confirm` keeps the contact the review PR set, and `dismiss` puts back the value the place had before, or takes the contact off when it had none. A contact on a place with a verified owner, or one the owner set, is left to a person.
 
 An answer the model isn't sure of, or one that can't be read, is `leave`. A model call that fails or takes longer than 30 seconds is logged, and the run goes on to the next case. The case is asked about again next run. Its failure counts in the `review_failures` table only when another model call in the same run answered, so an outage counts nothing, or when it was the run's only model call and its last counted failure was at least 30 minutes earlier. Once a case has 3 counted failures it is `leave`, for a person, so a lone case is left only after its failures span at least an hour. The decisions that change a place go to `feedback/review` as one commit at the end of the run, through the Git Data API, with the reviewer (`ai:<model>`) and each reason in the message. A file another writer changed on the branch since the run read it is left out with its decisions, which are decided again next run. Each run adds one comment with a `review-decision` line per decision that landed. A case with a decision is not asked about again. A person can reverse any decision on the PR before merging it.
+
+#### The second stage
+
+With the secret `ANTHROPIC_API_KEY` set, a case the first model is unsure of is asked again of Claude Haiku 5.5 (`claude-haiku-5-5`) on Anthropic's API, with the same instructions, case and allowed decisions. The first model is unsure when it answers `leave`, isn't sure, gives a decision the case doesn't allow or gives an answer that can't be read. A case the first model is sure of is never sent, and neither is a case the rules leave to a person, such as an owner's value or a place with a verified owner. The second model's sure decision is recorded and committed under its own name, `ai:claude-haiku-5-5`. A case both models are unsure of is `leave`, for a person.
+
+```sh
+npx wrangler secret put ANTHROPIC_API_KEY -c wrangler.deploy.toml
+```
+
+Each answer's cost is worked out from the token usage it reports and Claude Haiku 5.5's published prices, and added to the month's total in the `ai_spend` table (migration `0017`), by calendar month in UTC, so each month starts from nothing. `SECOND_REVIEW_CAP_USD`, under `[vars]`, is the monthly cap in US dollars, 20 when it is left out. The second model is asked only while the month's total is under the cap, so the last answer of a month can take it a little over. Once the cap is reached, a case the first model is unsure of is `leave` with `held: "ai_cap"` on its `review-decision` line, and its items' progress says `held` with `held_reason: "ai_cap"`. A second model call that fails or takes longer than 30 seconds, and a month's total that can't be read or written, leave the case for a person too. Without the key the stage is off and those cases go to a person, as before.
 
 ## The apply workflow
 
@@ -474,6 +503,19 @@ Check that `diff` shows only that block, and that the binding list Wrangler prin
 rm wrangler.deploy.toml.bak
 npx wrangler kv namespace delete --namespace-id <RECENT_PLACES namespace id>
 ```
+
+### Silent drops
+
+Some abuse is dropped silently instead of refused: a request from a key with `requires_human_check` that has no token, or whose token Turnstile refuses or made for another site, body or form. The intake answers it exactly as it answers an accepted item from that key, `202` with an id (and, for a report it decides at send time, `held` with `not_attested`, or `unknown_place` for a place it does not know), and writes its progress record as `received`, which never moves on. It stores nothing for the inbox or the recent list, counts nothing as a source, and counts nothing against a daily limit. Text and link refusals stay visible, so an honest traveller can fix what they typed. When Turnstile cannot answer, the intake still answers `503`.
+
+The intake counts silent drops per UTC day and reason (`human_check_required`, `human_check_failed`), with no item content, app, device or network. With `RECENT_LIST` they are rows in `silent_drops`, kept 90 days:
+
+```sh
+npx wrangler d1 execute RECENT_LIST --remote -c wrangler.deploy.toml \
+  --command "SELECT day, reason, count FROM silent_drops ORDER BY day DESC, reason"
+```
+
+Without `RECENT_LIST` they are KV keys `silent:<day>:<reason>` in `RATE_LIMIT`, which expire after 90 days. A steady count of `human_check_required` from a website you run usually means its page sends without calling Turnstile.
 
 ## Abuse
 

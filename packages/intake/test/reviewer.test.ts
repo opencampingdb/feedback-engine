@@ -6,7 +6,7 @@ import { majorRoads } from "../../apply/src/roads.js";
 import { dumpPlace, placePath } from "../../apply/src/serialise.js";
 import type { Place } from "../../apply/src/types.js";
 import type { AiLike } from "../src/checks.js";
-import { createReviewer, createScheduled, type Env } from "../src/index.js";
+import { createHandler, createReviewer, createScheduled, type Env } from "../src/index.js";
 import { decidedKeys, DEFAULT_REVIEW_MODEL, MAX_MODEL_CASES, MAX_MODEL_FAILURES, REVIEW_BRANCH } from "../src/reviewer.js";
 import { REVIEW_EVERY_MS } from "../src/runs.js";
 import { fakeD1 } from "./fake-d1.js";
@@ -890,5 +890,242 @@ describe("the AI reviewer", () => {
     const failing = async () => new Response("{}", { status: 500 });
     const review = createReviewer({ fetch: failing, now: () => clock });
     expect(await review({ ...env, AI: ai })).toBe("failed");
+  });
+});
+
+/** The second model's id, as the reviewer names it. */
+const SECOND = "ai:claude-haiku-5-5";
+
+interface ClaudeCall {
+  url: string;
+  headers: Headers;
+  body: Record<string, unknown>;
+}
+
+/**
+ * Anthropic's Messages API, behind fetch. `answer` gives each call's reply:
+ * a decision, an HTTP error status, or "hang" for a call that never answers
+ * until it is aborted. Usage is a usage block as the API reports it.
+ */
+function fakeClaude(answer: (body: Record<string, unknown>) => { decision: string; reason: string; sure: boolean } | number | "hang", usage = { input_tokens: 812, output_tokens: 95 }) {
+  const calls: ClaudeCall[] = [];
+  async function fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+    const request = new Request(input, init);
+    const body = (await request.json()) as Record<string, unknown>;
+    calls.push({ url: request.url, headers: request.headers, body });
+    const out = answer(body);
+    if (out === "hang") {
+      return new Promise((_, reject) => request.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+    }
+    if (typeof out === "number") {
+      return new Response(JSON.stringify({ type: "error", error: { type: "api_error", message: "Internal server error" } }), { status: out, headers: { "content-type": "application/json" } });
+    }
+    return new Response(
+      JSON.stringify({
+        id: "msg_01EXAMPLE",
+        type: "message",
+        role: "assistant",
+        model: "claude-haiku-5-5",
+        content: [
+          { type: "thinking", thinking: "", signature: "c2lnbmF0dXJl" },
+          { type: "text", text: JSON.stringify(out) },
+        ],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        stop_details: null,
+        usage: {
+          input_tokens: usage.input_tokens,
+          output_tokens: usage.output_tokens,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+          output_tokens_details: { thinking_tokens: 41 },
+          server_tool_use: null,
+          service_tier: "standard",
+          inference_geo: "global",
+          speed: "standard",
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json", "request-id": "req_01EXAMPLE" } },
+    );
+  }
+  return { fetch, calls };
+}
+
+describe("the second AI stage", () => {
+  let env: Env;
+  let clock: number;
+
+  beforeEach(() => {
+    clock = NOW;
+    env = {
+      APP_KEYS: "{}",
+      DEVICE_SALT: "pepper",
+      GH_APP_ID: "12345",
+      GH_APP_PRIVATE_KEY: privateKey,
+      GH_INSTALLATION_ID: "678",
+      INBOX_REPO: "opencampingdb/inbox",
+      RATE_LIMIT: { get: async () => null, put: async () => undefined, delete: async () => undefined },
+      RECENT_LIST: fakeD1(),
+      AI_REVIEWER: "on",
+      DATA_REPO: REPO,
+      REVIEW_BOT_LOGINS: `${APPLY_BOT}, ${INTAKE_BOT}`,
+      ANTHROPIC_API_KEY: "sk-ant-test-key",
+    };
+  });
+
+  /** One fetch for both outside services: Anthropic's API and GitHub. */
+  const both = (gh: ReturnType<typeof fakeDataRepo>, claude: ReturnType<typeof fakeClaude>) => (input: string, init?: RequestInit) =>
+    new URL(input).host === "api.anthropic.com" ? claude.fetch(input, init) : gh.fetch(input, init);
+  const run = async (gh: ReturnType<typeof fakeDataRepo>, ai: AiLike, claude: ReturnType<typeof fakeClaude>, more: Partial<Env> = {}) => {
+    const result = await createReviewer({ fetch: both(gh, claude), now: () => clock })({ ...env, ...more, AI: ai });
+    if (result === "off" || result === "failed" || result.outcome !== "reviewed") throw new Error(`expected a review, got ${JSON.stringify(result)}`);
+    return result;
+  };
+  const duplicate = (n: number) => heldCase(n, { case: "duplicate", standing: "held", duplicate_of: id(9), distance_m: 30 });
+
+  it("asks the second model only about the cases the first is unsure of, and commits its sure decisions under its own name", async () => {
+    const cases = [duplicate(0), duplicate(1), heldCase(3, { case: "first_place", standing: "shown" })];
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+    gh.put(place(0));
+    gh.put(place(1));
+    // An owner's place: the rules leave it to a person before either model is asked.
+    gh.put(place(3, { standing: "shown", owner_verified: true }));
+    const { ai } = fakeAi((input) => (caseOf(input).place as { id: string }).id === id(0) ? reply("approve", "Probably separate.", false) : reply("approve", "A separate free camp."));
+    const claude = fakeClaude(() => ({ decision: "approve", reason: "A separate free camp 30 m away.", sure: true }));
+
+    const result = await run(gh, ai, claude);
+    expect(claude.calls).toHaveLength(1);
+    const call = claude.calls[0]!;
+    expect(call.url).toBe("https://api.anthropic.com/v1/messages");
+    expect(call.headers.get("authorization")).toBe("Bearer sk-ant-test-key");
+    expect(call.body).toMatchObject({ model: "claude-haiku-5-5", output_config: { format: { type: "json_schema" } } });
+    expect(call.body).not.toHaveProperty("temperature");
+    const told = JSON.parse((call.body.messages as { content: string }[])[0]!.content) as Record<string, unknown>;
+    expect(told).toMatchObject({ case: "duplicate", place: { id: id(0) } });
+    const schema = (call.body.output_config as { format: { schema: { properties: { decision: { enum: string[] } } } } }).format.schema;
+    expect(schema.properties.decision.enum).toEqual(["approve", "take_down", "leave"]);
+
+    expect(result.decisions.map((d) => [d.place, d.decision, d.reviewer, d.by_rules])).toEqual([
+      [id(0), "approve", SECOND, false],
+      [id(1), "approve", REVIEWER, false],
+      [id(3), "leave", REVIEWER, true],
+    ]);
+    expect(gh.read(0).standing).toBe("shown");
+    expect(gh.commits()[0]!.body!.message).toContain(`${SECOND}: approve held case duplicate on ${id(0)}`);
+  });
+
+  it("leaves a case both models are unsure of to a person", async () => {
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [duplicate(0)]));
+    gh.put(place(0));
+    const { ai } = fakeAi(() => reply("leave", "Hard to tell.", false));
+    const claude = fakeClaude(() => ({ decision: "approve", reason: "Probably separate.", sure: false }));
+    const result = await run(gh, ai, claude);
+    expect(claude.calls).toHaveLength(1);
+    expect(result.decisions.map((d) => [d.decision, d.reviewer, d.reason])).toEqual([["leave", SECOND, "both models were unsure: Hard to tell.; the model was not sure: Probably separate."]]);
+    expect(gh.commits()).toHaveLength(0);
+    expect(gh.read(0).standing).toBe("held");
+  });
+
+  it("meters each answer's reported usage per month, sends cases over the cap to a person as ai_cap, and starts again next month", async () => {
+    const cases = [duplicate(0), duplicate(1), duplicate(2)];
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+    for (const n of [0, 1, 2]) gh.put(place(n));
+    const { ai } = fakeAi(() => reply("approve", "Probably separate.", false));
+    // 812 input and 95 output tokens at US$0.10 and US$0.50 a million: US$0.0001287 an answer.
+    const claude = fakeClaude(() => ({ decision: "approve", reason: "A separate free camp.", sure: true }));
+    const result = await run(gh, ai, claude, { SECOND_REVIEW_CAP_USD: "0.0002" });
+    // Under the cap before the second answer, over it after.
+    expect(claude.calls).toHaveLength(2);
+    expect(result.decisions.map((d) => [d.place, d.decision, d.reviewer, d.held])).toEqual([
+      [id(0), "approve", SECOND, undefined],
+      [id(1), "approve", SECOND, undefined],
+      [id(2), "leave", REVIEWER, "ai_cap"],
+    ]);
+    expect(result.decisions[2]!.reason).toContain("ai_cap");
+    expect(gh.read(2).standing).toBe("held");
+
+    // The capped case's items say why they wait for a person.
+    const handle = createHandler({ fetch: gh.fetch, now: () => clock, randomBytes: (n) => new Uint8Array(n) });
+    const feedback = cases[2]!.feedback[0]!;
+    const res = await handle(new Request(`https://intake.example.org/v1/feedback/progress?ids=${feedback}`), env);
+    expect(await res.json()).toMatchObject({ items: [{ id: feedback, state: "held", held_reason: "ai_cap", place: id(2) }] });
+
+    // The next month starts under the cap.
+    clock = Date.parse("2026-12-01T00:00:00Z");
+    const next = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [duplicate(3)]));
+    next.put(place(3));
+    const later = await run(next, ai, claude, { SECOND_REVIEW_CAP_USD: "0.0002" });
+    expect(claude.calls).toHaveLength(3);
+    expect(later.decisions.map((d) => [d.decision, d.reviewer])).toEqual([["approve", SECOND]]);
+  });
+
+  it("prices a prompt over 100,000 tokens at the long prompt rates", async () => {
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [duplicate(0), duplicate(1)]));
+    gh.put(place(0));
+    gh.put(place(1));
+    const { ai } = fakeAi(() => reply("approve", "Probably separate.", false));
+    // 100,001 input and 95 output tokens at US$0.50 and US$2.50 a million: US$0.050238, over a US$0.05 cap
+    // (at the shorter prompt rates it would be US$0.0100476, under it).
+    const claude = fakeClaude(() => ({ decision: "approve", reason: "A separate free camp.", sure: true }), { input_tokens: 100_001, output_tokens: 95 });
+    const result = await run(gh, ai, claude, { SECOND_REVIEW_CAP_USD: "0.05" });
+    expect(claude.calls).toHaveLength(1);
+    expect(result.decisions.map((d) => d.held)).toEqual([undefined, "ai_cap"]);
+  });
+
+  it("leaves the case for a person when the second model's call fails, and counts no spending for it", async () => {
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [duplicate(0), duplicate(1)]));
+    gh.put(place(0));
+    gh.put(place(1));
+    const { ai } = fakeAi(() => reply("approve", "Probably separate.", false));
+    const answers: (number | { decision: string; reason: string; sure: boolean })[] = [500, { decision: "approve", reason: "Separate.", sure: true }];
+    const claude = fakeClaude(() => answers.shift()!);
+    // A cap of one answer: the failed call spends nothing, so the second case is still asked.
+    const result = await run(gh, ai, claude, { SECOND_REVIEW_CAP_USD: "0.0001" });
+    expect(claude.calls).toHaveLength(2);
+    expect(result.decisions.map((d) => [d.decision, d.reviewer, d.reason])).toEqual([
+      ["leave", SECOND, "the second model's call failed, so a person decides"],
+      ["approve", SECOND, "Separate."],
+    ]);
+    expect(gh.read(0).standing).toBe("held");
+  });
+
+  it("leaves the case for a person when the second model takes too long", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [duplicate(0)]));
+      gh.put(place(0));
+      const { ai } = fakeAi(() => reply("approve", "Probably separate.", false));
+      const claude = fakeClaude(() => "hang");
+      const running = run(gh, ai, claude);
+      for (let i = 0; i < 40 && claude.calls.length === 0; i++) await vi.advanceTimersByTimeAsync(0);
+      expect(claude.calls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(31_000);
+      const result = await running;
+      expect(result.decisions.map((d) => [d.decision, d.reason])).toEqual([["leave", "the second model's call failed, so a person decides"]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves the case for a person when the month's spending can't be read", async () => {
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [duplicate(0)]));
+    gh.put(place(0));
+    const { ai } = fakeAi(() => reply("approve", "Probably separate.", false));
+    const claude = fakeClaude(() => ({ decision: "approve", reason: "Separate.", sure: true }));
+    (env.RECENT_LIST as ReturnType<typeof fakeD1>).db.exec("DROP TABLE ai_spend");
+    const result = await run(gh, ai, claude);
+    expect(claude.calls).toHaveLength(0);
+    expect(result.decisions.map((d) => [d.decision, d.reason])).toEqual([["leave", "the second model's spending could not be read, so a person decides"]]);
+  });
+
+  it("without ANTHROPIC_API_KEY, leaves a case the first model is unsure of to a person, as before", async () => {
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [duplicate(0)]));
+    gh.put(place(0));
+    const { ai } = fakeAi(() => reply("approve", "Probably separate.", false));
+    const claude = fakeClaude(() => ({ decision: "approve", reason: "Separate.", sure: true }));
+    const result = await run(gh, ai, claude, { ANTHROPIC_API_KEY: "" });
+    expect(claude.calls).toHaveLength(0);
+    expect(result.decisions.map((d) => [d.decision, d.reviewer, d.reason])).toEqual([["leave", REVIEWER, "the model was not sure: Probably separate."]]);
   });
 });

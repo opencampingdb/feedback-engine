@@ -135,8 +135,11 @@ export interface FeedbackClientOptions {
    * `cData`, for example from `turnstile.execute` on a widget rendered with
    * `cData: bodySha256`. The token goes in `x-human-check`. Each token works
    * once, so return a new one on every call. If it throws, the item stays
-   * queued and is tried later. A human check is not attestation: the intake
-   * weighs these items as unattested ones.
+   * queued and is tried later. A missing token, or one Turnstile refuses or
+   * that was made for another site, body or form, is dropped silently: the
+   * intake answers as if it took the item, so the SDK settles it as sent and
+   * it is lost. A human check is not attestation: the intake weighs these
+   * items as unattested ones.
    */
   humanCheck?: (request: { body: string; bodySha256: string }) => Promise<string>;
   /**
@@ -213,7 +216,11 @@ function attestationErrorIn(status: number, answer: unknown): AttestationError |
 /** The header that carries a human check token. */
 export const HUMAN_CHECK_HEADER = "x-human-check";
 
-/** What the intake answers when a human check is missing or does not pass. */
+/**
+ * What an intake from before silent drops answers when a human check is
+ * missing or does not pass. A current intake drops such an item silently and
+ * answers as if it took it.
+ */
 export type HumanCheckError = "human_check_required" | "human_check_failed";
 
 /** The human check error in a `401` answer, or undefined when the answer is not one. */
@@ -931,6 +938,8 @@ export type AnswerOutcome =
  * - `no_contributor`: a new place sent without a contributor.
  * - `daily_cap`: the contributor has had 50 live changes this UTC day.
  * - `ai_check`: the AI check flagged free text.
+ * - `repeated_text`: free text nearly the same as text three other sources
+ *   sent in the last 30 days, so a person reads it.
  * - `check_unavailable`: a check could not run, so the item waits.
  * - `unknown_place`: the intake does not have the place yet.
  * - `blocked`: the contributor is blocked.
@@ -946,6 +955,8 @@ export type AnswerOutcome =
  *   traveller at once, a reviewer gets the case, and two sources hide it for everyone.
  * - `not_own_value`: a `clear` of a value another traveller set, or one the intake cannot tie to
  *   this install, so a person decides.
+ * - `ai_cap`: never given at send time. On an item's progress: the AI reviewer was unsure, and its
+ *   second model's monthly spending cap was reached, so a person decides.
  * - `contact_check`: a contact the automatic contact checks have not passed yet. At send time an
  *   attested contact goes live only when the place's own website shows it; otherwise the apply run
  *   checks it in full, and one that fails a check goes to the AI reviewer.
@@ -972,6 +983,8 @@ export const HELD_REASONS = [
   "unlikely_charge",
   "commons_report",
   "not_own_value",
+  "ai_cap",
+  "repeated_text",
   "contact_check",
 ] as const;
 

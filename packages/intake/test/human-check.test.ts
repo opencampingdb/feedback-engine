@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createHandler, parseAppKeys, type Env } from "../src/index.js";
 import { SITEVERIFY_URL, verifyHumanCheck, type HumanCheckConfig } from "../src/humancheck.js";
 import type { KVLike } from "../src/ratelimit.js";
+import { fakeD1 } from "./fake-d1.js";
 
 const NOW = Date.parse("2026-11-17T09:00:00Z");
 const APP_KEY = "test-web-key-0123456789";
@@ -122,36 +123,38 @@ describe("human check", () => {
     expect(stored.attest_key).toBeUndefined();
   });
 
-  it("refuses a report without a token, and never asks Turnstile", async () => {
-    const res = await handle(post(reportBody()), env(WEB));
-    expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: "human_check_required" });
+  /** The answer an accepted item gets from an intake without D1: its id alone. */
+  const looksAccepted = async (res: Response) => {
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(Object.keys(body)).toEqual(["id"]);
+    expect(body.id).toMatch(/^fb_[0-9A-HJKMNP-TV-Z]{26}$/);
+  };
+
+  it("answers a report without a token as if it were taken, stores nothing, and never asks Turnstile", async () => {
+    await looksAccepted(await handle(post(reportBody()), env(WEB)));
     expect(turnstile.asked).toEqual([]);
     expect(services.writes).toEqual([]);
   });
 
-  it("refuses a token made for another body", async () => {
+  it("answers a token made for another body as if it were taken, and stores nothing", async () => {
     const body = reportBody();
     turnstile.answers.set("tok-1", good(reportBody({ kind: "closed" })));
-    const res = await handle(post(body, { "x-human-check": "tok-1" }), env(WEB));
-    expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: "human_check_failed", details: ["token was made for another body"] });
+    await looksAccepted(await handle(post(body, { "x-human-check": "tok-1" }), env(WEB)));
     expect(services.writes).toEqual([]);
   });
 
-  it("refuses a token Turnstile does not accept, with its error codes", async () => {
+  it("answers a token Turnstile does not accept as if it were taken", async () => {
     turnstile.answers.set("tok-1", { success: false, "error-codes": ["timeout-or-duplicate"] });
-    const res = await handle(post(reportBody(), { "x-human-check": "tok-1" }), env(WEB));
-    expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: "human_check_failed", details: ["timeout-or-duplicate"] });
+    await looksAccepted(await handle(post(reportBody(), { "x-human-check": "tok-1" }), env(WEB)));
+    expect(services.writes).toEqual([]);
   });
 
-  it("refuses a token served from a site the key does not name", async () => {
+  it("drops a token served from a site the key does not name", async () => {
     const body = reportBody();
     turnstile.answers.set("tok-1", good(body, { hostname: "elsewhere.example.net" }));
-    const res = await handle(post(body, { "x-human-check": "tok-1" }), env(WEB));
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("human_check_failed");
+    await looksAccepted(await handle(post(body, { "x-human-check": "tok-1" }), env(WEB)));
+    expect(services.writes).toEqual([]);
   });
 
   it("checks the action when the key names one", async () => {
@@ -159,8 +162,20 @@ describe("human check", () => {
     turnstile.answers.set("tok-1", good(body, { action: "signup" }));
     turnstile.answers.set("tok-2", good(body, { action: "feedback" }));
     const keyed = env({ ...WEB, human_check: { ...CHECK, action: "feedback" } });
-    expect((await handle(post(body, { "x-human-check": "tok-1" }), keyed)).status).toBe(401);
+    expect((await handle(post(body, { "x-human-check": "tok-1" }), keyed)).status).toBe(202);
+    expect(services.writes).toEqual([]);
     expect((await handle(post(body, { "x-human-check": "tok-2" }), keyed)).status).toBe(202);
+    expect(services.writes).toHaveLength(1);
+  });
+
+  it("counts each silent drop by reason for the day, without D1", async () => {
+    const e = env(WEB);
+    await handle(post(reportBody()), e);
+    await handle(post(reportBody()), e);
+    turnstile.answers.set("tok-1", { success: false, "error-codes": ["invalid-input-response"] });
+    await handle(post(reportBody(), { "x-human-check": "tok-1" }), e);
+    expect(await e.RATE_LIMIT.get("silent:2026-11-17:human_check_required")).toBe("2");
+    expect(await e.RATE_LIMIT.get("silent:2026-11-17:human_check_failed")).toBe("1");
   });
 
   it("answers 503 when Turnstile cannot be reached or reports its own fault, so the client tries again", async () => {
@@ -230,6 +245,19 @@ describe("human check", () => {
     expect((await handle(post(phone, { "x-human-check": "tok-p" }), env({ ...WEB, human_check: { ...CHECK, free_text_facts: true } }))).status).toBe(403);
   });
 
+  it("takes a first-hand report the traveller says so, and refuses one seen nearby, before the human check", async () => {
+    const saysSo = reportBody({ kind: "closed", first_hand: "says_so" });
+    turnstile.answers.set("tok-s", good(saysSo));
+    expect((await handle(post(saysSo, { "x-human-check": "tok-s" }), env(WEB))).status).toBe(202);
+    expect((services.writes[0]!.report as Record<string, unknown>).first_hand).toBe("says_so");
+    const seen = reportBody({ kind: "closed", first_hand: "seen_nearby" });
+    turnstile.answers.set("tok-n", good(seen));
+    const res = await handle(post(seen, { "x-human-check": "tok-n" }), env(WEB));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "type_not_allowed_for_app_key" });
+    expect(turnstile.asked.map((a) => a.response)).toEqual(["tok-s"]);
+  });
+
   it("lets the browser send the human check header", async () => {
     const res = await handle(
       new Request("https://intake.example/v1/feedback", { method: "OPTIONS", headers: { origin: "https://places.example.org" } }),
@@ -237,6 +265,93 @@ describe("human check", () => {
     );
     expect(res.headers.get("access-control-allow-headers")).toContain("x-human-check");
     expect(res.headers.get("access-control-allow-origin")).toBe("https://places.example.org");
+  });
+});
+
+describe("silent drops on an intake with D1", () => {
+  const UNKNOWN = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZB";
+  let turnstile: Turnstile;
+  let handle: ReturnType<typeof createHandler>;
+  let store: ReturnType<typeof fakeD1>;
+  let e: Env;
+
+  beforeEach(() => {
+    turnstile = { answers: new Map(), asked: [], status: 200 };
+    handle = createHandler({ fetch: fakeServices(turnstile).fetch, now: () => NOW });
+    store = fakeD1();
+    e = { ...env(WEB), RECENT_LIST: store };
+    store.db
+      .prepare("INSERT INTO place_index (id, cell_lon, cell_lat, facts, fact_sources, fact_dates) VALUES (?, 146, -37, '{\"toilets\":false}', '{}', '{}')")
+      .run(PLACE);
+  });
+
+  const count = (table: string) => (store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+  const progress = async (id: string) =>
+    ((await (await handle(new Request(`https://intake.example/v1/feedback/progress?ids=${id}`), e)).json()) as { items: Record<string, unknown>[] }).items[0]!;
+  /** An answer or progress with its id left out, to set beside another item's. */
+  const withoutId = ({ id: _, ...rest }: Record<string, unknown>) => rest;
+
+  it("answers a dropped report as a taken one is answered, and its progress reads received and stays there", async () => {
+    const body = reportBody();
+    turnstile.answers.set("tok-good", good(body));
+    const taken = await handle(post(body, { "x-human-check": "tok-good" }), e);
+    const takenAnswer = (await taken.json()) as Record<string, unknown>;
+    const queued = count("inbox_queue");
+    const evidence = count("report_evidence");
+
+    const dropped = await handle(post(body), e);
+    expect(dropped.status).toBe(taken.status);
+    const droppedAnswer = (await dropped.json()) as Record<string, unknown>;
+    expect(droppedAnswer).toEqual({ id: expect.stringMatching(/^fb_/), state: "held", held_reason: "not_attested" });
+    expect(withoutId(droppedAnswer)).toEqual(withoutId(takenAnswer));
+    expect(count("inbox_queue")).toBe(queued);
+    expect(count("report_evidence")).toBe(evidence);
+
+    const read = await progress(droppedAnswer.id as string);
+    expect(read).toEqual({ id: droppedAnswer.id, state: "received", held_reason: "not_attested", place: PLACE, received: "2026-11-17T09:00:00Z" });
+    expect(withoutId(read)).toEqual(withoutId(await progress(takenAnswer.id as string)));
+  });
+
+  it("answers a report about a place the intake does not know as a taken one is answered", async () => {
+    const body = reportBody();
+    const unknown = body.replace(PLACE, UNKNOWN);
+    turnstile.answers.set("tok-good", good(unknown));
+    const taken = (await (await handle(post(unknown, { "x-human-check": "tok-good" }), e)).json()) as Record<string, unknown>;
+    const dropped = (await (await handle(post(unknown, { "x-human-check": "tok-bad" }), e)).json()) as Record<string, unknown>;
+    expect(taken).toMatchObject({ state: "held", held_reason: "unknown_place" });
+    expect(withoutId(dropped)).toEqual(withoutId(taken));
+  });
+
+  it("answers a report the intake does not decide at send time with its id alone", async () => {
+    const closed = reportBody({ kind: "closed" });
+    const res = await handle(post(closed), e);
+    expect(res.status).toBe(202);
+    expect(Object.keys((await res.json()) as object)).toEqual(["id"]);
+    expect(count("inbox_queue")).toBe(0);
+  });
+
+  it("counts silent drops by reason for the day, and nothing against the daily limits", async () => {
+    await handle(post(reportBody()), e);
+    await handle(post(reportBody(), { "x-human-check": "tok-bad" }), e);
+    await handle(post(reportBody(), { "x-human-check": "tok-bad" }), e);
+    expect(store.db.prepare("SELECT day, reason, count FROM silent_drops ORDER BY reason").all()).toEqual([
+      { day: "2026-11-17", reason: "human_check_failed", count: 2 },
+      { day: "2026-11-17", reason: "human_check_required", count: 1 },
+    ]);
+    expect(count("rate_counts")).toBe(0);
+  });
+
+  it("gives a dropped report sent again with its idempotency key the same answer", async () => {
+    const send = () => handle(post(reportBody(), { "idempotency-key": "k-0123456789abcdef" }), e);
+    const first = await (await send()).json();
+    expect(await (await send()).json()).toEqual(first);
+    expect(count("inbox_queue")).toBe(0);
+  });
+
+  it("still answers a dropped report as taken when its progress row cannot be written", async () => {
+    const failing = { ...store, batch: async () => Promise.reject(new Error("D1 is down")) } as typeof store;
+    const res = await handle(post(reportBody()), { ...e, RECENT_LIST: failing });
+    expect(res.status).toBe(202);
   });
 });
 

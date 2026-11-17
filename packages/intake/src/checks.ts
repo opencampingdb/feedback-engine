@@ -10,7 +10,10 @@
  *    the App Attest key, counted in D1. The app chooses the contributor id,
  *    so the network and key caps hold when an install changes it.
  * 2. URLhaus (abuse.ch), for the links that passed step 1.
- * 3. Llama Guard 3 on Workers AI, for the name, description and note, and only
+ * 3. The repeated text check (src/repeated.ts), when the intake has it: free
+ *    text nearly the same as text from three other sources in the last 30
+ *    days is held as `repeated_text`. An embedding is cheaper than Llama Guard.
+ * 4. Llama Guard 3 on Workers AI, for the name, description and note, and only
  *    from a contributor without a track record. Facts, choices from a list and
  *    links never go to it.
  *
@@ -35,6 +38,7 @@ import {
 import { LINK_FACTS } from "@opencampingdb/apply/decide";
 import type { Fetch } from "./github.js";
 import type { D1Like } from "./recent.js";
+import type { RepeatedResult } from "./repeated.js";
 
 /** Live changes per contributor, per client network and per App Attest key, per UTC day. Past it, items are held as `daily_cap`. */
 export const LIVE_DAILY_LIMIT = 50;
@@ -50,7 +54,7 @@ export const URLHAUS_HOST_ENDPOINT = "https://urlhaus-api.abuse.ch/v1/host/";
 export const GUARD_MODEL = "@cf/meta/llama-guard-3-8b";
 
 /** Why the checks held an item. */
-export type HeldReason = "text_check" | "link_check" | "daily_cap" | "ai_check" | "check_unavailable";
+export type HeldReason = "text_check" | "link_check" | "daily_cap" | "repeated_text" | "ai_check" | "check_unavailable";
 
 /** The live change an item that passed took from each of its daily caps, to give back if it is not recorded after all. */
 export interface LiveSlot {
@@ -94,6 +98,11 @@ export interface CheckDeps {
    * answers whether it is under the daily cap. Without it there is no cap.
    */
   linkLookup?: (() => Promise<boolean>) | undefined;
+  /**
+   * The repeated text check on the item being checked (src/repeated.ts), run
+   * at most once whatever asks for it. Without it the check is off.
+   */
+  repeated?: (() => Promise<RepeatedResult>) | undefined;
 }
 
 
@@ -138,7 +147,7 @@ const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 class Unavailable extends Error {}
 
 /** `work`, or `Unavailable` when it fails or takes longer than `ms`. The signal aborts a fetch that runs over. */
-async function withTimeout<T>(ms: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+export async function withTimeout<T>(ms: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -303,6 +312,13 @@ export interface Checks {
    * URLhaus could not answer. Counts nothing against the daily cap.
    */
   links(item: FeedbackSubmission): Promise<LinkResult>;
+  /**
+   * The repeated text check on the item, for an item the rules hold, which
+   * `check` never reaches, so its text is still stored and its repeats still
+   * found. `none` when the check is off or the item has no text to check.
+   * Runs once: a second call answers what the first found.
+   */
+  repeated(): Promise<RepeatedResult>;
 }
 
 /** What `Checks.links` found. */
@@ -310,7 +326,10 @@ export type LinkResult = "none" | "passed" | "link_check" | "check_unavailable";
 
 /** The checks, with the services they call. */
 export function createChecks(deps: CheckDeps): Checks {
-  return { check: (item, contributor) => check(deps, item, contributor), links: (item) => links(deps, item) };
+  let found: Promise<RepeatedResult> | undefined;
+  const repeated = () => (found ??= deps.repeated ? deps.repeated() : Promise.resolve("none"));
+  const withOnce = { ...deps, repeated };
+  return { check: (item, contributor) => check(withOnce, item, contributor), links: (item) => links(deps, item), repeated };
 }
 
 /** The links among `contacts`, as URLhaus looks them up. */
@@ -359,7 +378,13 @@ async function check(deps: CheckDeps, item: FeedbackSubmission, contributor: Che
   const listed = await urlhausHold(deps, linksIn(contacts));
   if (listed !== null) return { held: listed };
 
-  // 3. Llama Guard, for free text from a contributor without a track record.
+  // 3. The repeated text check.
+  if (deps.repeated) {
+    const repeated = await deps.repeated();
+    if (repeated === "repeated_text" || repeated === "check_unavailable") return { held: repeated };
+  }
+
+  // 4. Llama Guard, for free text from a contributor without a track record.
   if (texts.length > 0 && !hasTrackRecord(contributor)) {
     if (!deps.ai) return unavailable;
     try {
