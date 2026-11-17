@@ -16,7 +16,7 @@ const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>
                   [--main <dir> --intake <url>]
                   [--recent-places <url>] [--review-preview <url>]
                   [--geometry <file>] [--land-mask <file>] [--buildings <file>]
-                  [--contact-checks]
+                  [--contact-checks] [--dns-resolver <url>]
 
 Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
@@ -38,7 +38,7 @@ when the intake's SafeSearch rating passed it. A photo with no rating still wait
 Open Camping DB data checkout in <dir>, and anything but photos is refused.
 --main and --intake take new places that are now in the data on main, and
 withdrawn ones, out of the intake's recent places store, and send it the
-contributors blocked on main, with the token in PLACES_TOKEN. <dir> is a checkout of the data repository's main branch, so a
+contributors blocked on main and those trusted from their track records, with the token in PLACES_TOKEN. <dir> is a checkout of the data repository's main branch, so a
 place leaves the store only once the PR that writes it is merged. They also
 tell the intake which applied fact and contact reports now have their change
 on main, so it keeps those recent changes for 7 days from this run, and which
@@ -82,6 +82,12 @@ and an address's state and postcode belong where the place is. A contact that
 fails one is held for the AI reviewer as a contact_check case, and one that
 passes them all follows the two-source rule. Without it, an attested contact
 goes live and one without attestation goes to a person.
+--dns-resolver looks up, through that DNS over HTTPS JSON endpoint (such as
+https://cloudflare-dns.com/dns-query), the website domain of each place a
+traveller reported closed. NXDOMAIN on two runs at least a day apart counts as
+a second source for the closure, and the first is kept in
+<inbox>/evidence/nxdomain.json. HTTP errors, timeouts and other DNS answers
+never count. Off when left out.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
 
@@ -113,6 +119,7 @@ async function main(): Promise<number> {
       "land-mask": { type: "string" },
       buildings: { type: "string" },
       "contact-checks": { type: "boolean" },
+      "dns-resolver": { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -128,6 +135,10 @@ async function main(): Promise<number> {
 
   if (values["recent-places"] !== undefined && !URL.canParse(values["recent-places"])) {
     console.error(`--recent-places is not a URL: ${values["recent-places"]}`);
+    return 2;
+  }
+  if (values["dns-resolver"] !== undefined && !values["dns-resolver"].startsWith("https://")) {
+    console.error(`--dns-resolver is not an https URL: ${values["dns-resolver"]}`);
     return 2;
   }
   const previewSecret = process.env.REVIEW_PREVIEW_SECRET;
@@ -161,6 +172,7 @@ async function main(): Promise<number> {
     ...(values["land-mask"] ? { landMask: values["land-mask"] } : {}),
     ...(values.buildings ? { buildings: values.buildings } : {}),
     ...(values["contact-checks"] ? { contactChecks: { fetch: transportFetch() } } : {}),
+    ...(values["dns-resolver"] ? { dns: { resolver: values["dns-resolver"] } } : {}),
     ...(values["recent-places"] ? { recentList: intakeRecentList(values["recent-places"]) } : {}),
     ...(values["review-preview"] && previewSecret ? { reviewPreview: { url: values["review-preview"], secret: previewSecret } } : {}),
   });

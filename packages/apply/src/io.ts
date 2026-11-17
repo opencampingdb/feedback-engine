@@ -10,7 +10,9 @@ import { pairKey, withDoNotMatch, type DoNotMatchEntry } from "./review.js";
 import { boundsNear, buildingFootprints, carriageways, landMask, missingLayers, type PlaceGeometry } from "./plausible.js";
 import { majorRoads, type LatLon, type MajorRoads } from "./roads.js";
 import type { Decision } from "./rules.js";
+import type { TrustRecord } from "./trust.js";
 import { dumpPhotoLine, dumpPlace, dumpReviewLine, photoPath, placePath, reviewPath } from "./serialise.js";
+import { NXDOMAIN_FILE, readOsmHistory, type NxdomainRecord, type NxdomainState, type OsmHistoryEntry } from "./closure-evidence.js";
 import type { BlockedList, Photo, PhotoVotes, Place, RemovedPhotos, Review, Source } from "./types.js";
 
 export interface PendingFile {
@@ -349,6 +351,92 @@ export async function writePhotoVotes(inbox: string, votes: PhotoVotes): Promise
   return true;
 }
 
+/** Where the apply run keeps each signed-in contributor's track record, in the inbox. Private: it ties feedback to contributors. */
+export const TRUST_FILE = "trust/contributors.json";
+
+/** The track records, from the inbox. Empty when there are none yet. */
+export async function readTrust(inbox: string): Promise<TrustRecord> {
+  let text: string;
+  try {
+    text = await readFile(join(inbox, TRUST_FILE), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { contributors: {} };
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // A withdrawal is never lost by guessing: the run stops until a person fixes the file.
+    throw new Error(`${TRUST_FILE} in the inbox is not valid JSON: fix it by hand, from its git history`);
+  }
+  const contributors = (parsed as { contributors?: unknown } | null)?.contributors;
+  if (typeof contributors !== "object" || contributors === null) {
+    throw new Error(`${TRUST_FILE} in the inbox has no "contributors" object: fix it by hand, from its git history`);
+  }
+  const out: TrustRecord = { contributors: {} };
+  for (const [contributor, value] of Object.entries(contributors)) {
+    const entry = value as { confirmed?: unknown; withdrawn?: unknown } | null;
+    const withdrawn = typeof entry?.withdrawn === "string" ? entry.withdrawn : undefined;
+    const confirmed = Array.isArray(entry?.confirmed) ? entry.confirmed.filter(isConfirmedEdit) : [];
+    if (!Array.isArray(entry?.confirmed) || confirmed.length < entry.confirmed.length) console.warn(`skipping malformed confirmed edits for ${contributor} in ${TRUST_FILE}`);
+    out.contributors[contributor] = { confirmed, ...(withdrawn !== undefined ? { withdrawn } : {}) };
+  }
+  return out;
+}
+
+function isConfirmedEdit(value: unknown): value is TrustRecord["contributors"][string]["confirmed"][number] {
+  const v = value as Record<string, unknown> | null;
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    typeof v.feedback === "string" &&
+    typeof v.received === "string" &&
+    typeof v.place === "string" &&
+    (v.fact === undefined || typeof v.fact === "string")
+  );
+}
+
+/** Writes the track records back, contributors in id order. True when the file changed. */
+export async function writeTrust(inbox: string, trust: TrustRecord): Promise<boolean> {
+  const ordered: TrustRecord = { contributors: Object.fromEntries(Object.entries(trust.contributors).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) };
+  const text = `${JSON.stringify(ordered, null, 2)}\n`;
+  const path = join(inbox, TRUST_FILE);
+  const before = await readFile(path, "utf8").catch(() => undefined);
+  if (before === text || (before === undefined && Object.keys(ordered.contributors).length === 0)) return false;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, text, "utf8");
+  return true;
+}
+
+/** Each domain's first NXDOMAIN answer, from the inbox. Empty when there are none yet, or when the file can't be read (the checks start again). */
+export async function readNxdomain(inbox: string): Promise<NxdomainState> {
+  const text = await readFile(join(inbox, NXDOMAIN_FILE), "utf8").catch(() => undefined);
+  if (text === undefined) return { domains: {} };
+  const out: NxdomainState = { domains: {} };
+  try {
+    const domains = (JSON.parse(text) as { domains?: Record<string, Partial<NxdomainRecord>> }).domains ?? {};
+    for (const [domain, record] of Object.entries(domains)) {
+      if (typeof record?.first === "string" && !Number.isNaN(Date.parse(record.first))) out.domains[domain] = { first: record.first };
+    }
+  } catch {
+    console.warn(`${NXDOMAIN_FILE} in the inbox is not valid JSON, so the DNS checks start again`);
+  }
+  return out;
+}
+
+/** Writes the NXDOMAIN records back, domains in order. True when the file changed. */
+export async function writeNxdomain(inbox: string, state: NxdomainState): Promise<boolean> {
+  const ordered: NxdomainState = { domains: Object.fromEntries(Object.entries(state.domains).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) };
+  const text = `${JSON.stringify(ordered, null, 2)}\n`;
+  const path = join(inbox, NXDOMAIN_FILE);
+  const before = await readFile(path, "utf8").catch(() => undefined);
+  if (before === text || (before === undefined && Object.keys(ordered.domains).length === 0)) return false;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, text, "utf8");
+  return true;
+}
+
 /** Approved owners: `owners/<place id>.json`. */
 export async function readOwners(inbox: string): Promise<Map<string, OwnerRecord>> {
   const records = await readJsonFolder<OwnerRecord>(join(inbox, "owners"), PLACE_FILE);
@@ -413,7 +501,7 @@ export async function settleAwaiting(
   return moved;
 }
 
-/** Moves each decided pending file to `applied/` or `refused/`, adding the outcome (with `doubted` on a doubt that took a fact down). Waiting files stay. */
+/** Moves each decided pending file to `applied/` or `refused/`, adding the outcome (with `doubted` on a doubt that took a fact down, and `frozen` on the reports that froze a place). Waiting files stay. */
 export async function moveDecided(
   inbox: string,
   files: readonly PendingFile[],
@@ -447,6 +535,7 @@ export async function moveDecided(
       run: runAt,
       ...(decision.held_reason ? { held_reason: decision.held_reason } : {}),
       ...(decision.doubted ? { doubted: decision.doubted } : {}),
+      ...(decision.frozen ? { frozen: decision.frozen } : {}),
     };
     const withOutcome = { ...file.item, outcome };
     await writeFile(target, `${JSON.stringify(withOutcome, null, 2)}\n`, "utf8");
@@ -720,6 +809,13 @@ export class DataRepo {
     if (!(await exists(path))) return new Set();
     const list = JSON.parse(await readFile(path, "utf8")) as { pairs?: { a: string; b: string }[] };
     return new Set((list.pairs ?? []).map((pair) => pairKey(pair.a, pair.b)));
+  }
+
+  /** What OSM's history says about objects that left the extract (`osm/history.ndjson`), by object. Empty when the file is missing. */
+  async osmHistory(): Promise<Map<string, OsmHistoryEntry>> {
+    const path = join(this.root, "osm", "history.ndjson");
+    if (!(await exists(path))) return new Map();
+    return readOsmHistory(await readFile(path, "utf8"));
   }
 
   /** Contributors in `moderation/blocked_contributors.json`. Empty when the file is missing. */

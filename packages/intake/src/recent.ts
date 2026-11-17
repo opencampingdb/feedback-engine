@@ -51,6 +51,8 @@ export const RECENT_CACHE_SECONDS = 30;
 export const MAX_REMOVE_IDS = 500;
 /** Most contributors the block list may hold. */
 export const MAX_BLOCKED_CONTRIBUTORS = 5000;
+/** Most contributors the trusted list may hold. */
+export const MAX_TRUSTED_CONTRIBUTORS = 5000;
 /** Days a new place stays on the recent list after the apply run is done with it. */
 export const KEEP_PLACE_IN_DATA_DAYS = 7;
 /** D1 allows 100 bound values in one statement. */
@@ -116,6 +118,14 @@ export function evidenceStatement(db: D1Like, place: string, feedbackId: string,
 /** Replaces the block list in one transaction. Standings are worked out with it each time the list is read. */
 export async function setBlockList(db: D1Like, contributors: readonly string[]): Promise<void> {
   await db.batch([db.prepare("DELETE FROM blocked_contributors"), ...blockStatements(db, contributors)]);
+}
+
+/** Replaces the trusted list, every contributor trusted from their track record, in one transaction. */
+export async function setTrustList(db: D1Like, contributors: readonly string[]): Promise<void> {
+  const inserts = chunks([...new Set(contributors)], MAX_BOUND).map((part) =>
+    db.prepare(`INSERT OR IGNORE INTO trusted_contributors (contributor) VALUES ${part.map(() => "(?)").join(", ")}`).bind(...part),
+  );
+  await db.batch([db.prepare("DELETE FROM trusted_contributors"), ...inserts]);
 }
 
 /** Whether a contributor (the stored, hashed id) is on the block list. */

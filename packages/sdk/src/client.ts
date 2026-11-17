@@ -299,6 +299,8 @@ export interface FactsInput {
   ref?: string;
   /** Marks every fact of the edit first-hand, as `report.first_hand` does on a single report. */
   first_hand?: FirstHand;
+  /** A page that shows the edit's values, sent with every fact as `report.source` is on a single report. */
+  source?: string;
 }
 
 /** How a queued call resolves. */
@@ -955,6 +957,10 @@ export type AnswerOutcome =
  *   traveller at once, a reviewer gets the case, and two sources hide it for everyone.
  * - `not_own_value`: a `clear` of a value another traveller set, or one the intake cannot tie to
  *   this install, so a person decides.
+ * - `source_link`: a fact report without attestation that carries a source link. The apply run
+ *   reads the page, and the value goes live when the page shows it or a second source agrees.
+ * - `disputed`: the place is frozen because three or more sources sent conflicting values for one of
+ *   its facts within 24 hours. No fact on it changes until a reviewer settles the value.
  * - `ai_cap`: never given at send time. On an item's progress: the AI reviewer was unsure, and its
  *   second model's monthly spending cap was reached, so a person decides.
  * - `contact_check`: a contact the automatic contact checks have not passed yet. At send time an
@@ -992,6 +998,8 @@ export const HELD_REASONS = [
   "repeated_text",
   "contact_check",
   "network_reputation",
+  "source_link",
+  "disputed",
   "implausible_location",
 ] as const;
 
@@ -2110,13 +2118,13 @@ function createClient(
       return { id: String(answer.id ?? "") };
     },
     report: (input, submitOptions) => submit({ ...input }, "report", submitOptions),
-    reportFacts: async ({ place, facts, contributor, consent, ref, first_hand }, submitOptions) => {
+    reportFacts: async ({ place, facts, contributor, consent, ref, first_hand, source }, submitOptions) => {
       if (ref !== undefined && (ref.length < 1 || ref.length > 90)) throw new RangeError("ref must be 1 to 90 characters");
       const set = (Object.entries(facts) as [FactName, FactValue | undefined][]).filter(([, value]) => value !== undefined);
       const calls: Call[] = set.map(([fact, value]) => ({
         input: {
           place,
-          report: { kind: "fact", fact, value, ...(first_hand !== undefined ? { first_hand } : {}) },
+          report: { kind: "fact", fact, value, ...(first_hand !== undefined ? { first_hand } : {}), ...(source !== undefined ? { source } : {}) },
           ...(contributor !== undefined ? { contributor } : {}),
           consent,
         },

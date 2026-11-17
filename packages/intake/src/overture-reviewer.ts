@@ -154,7 +154,7 @@ function publicUrl(text: string, base?: URL): URL | null {
 const bareHost = (url: URL) => url.hostname.toLowerCase().replace(/^www\./, "");
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
-const decode = (text: string) =>
+export const decode = (text: string) =>
   text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, code: string) => {
     if (code[0] === "#") {
       const n = code[1] === "x" || code[1] === "X" ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
@@ -207,24 +207,37 @@ async function readLimited(res: Response, max: number): Promise<string> {
 
 /**
  * What a candidate's own website says: its title, description and text, or
- * the problem that stopped it being read. One fetch at a time, within
- * `timeoutMs` in all, at most `maxBytes` read, and a redirect followed only on
- * the same host (with or without `www.`), at most MAX_REDIRECTS times. Never
- * throws.
+ * the problem that stopped it being read (see `readPage`). Never throws.
  */
 export async function readWebsite(
   fetchSite: Fetch,
   website: string,
   options: SiteOptions = {},
 ): Promise<SiteView> {
+  const page = await readPage(fetchSite, website, options);
+  return "html" in page ? { host: page.host, ...pageText(page.html) } : page;
+}
+
+/**
+ * A website's page as HTML, or the problem that stopped it being read. One
+ * fetch at a time, within `timeoutMs` in all, at most `maxBytes` read, and a
+ * redirect followed only on the same host (with or without `www.`), at most
+ * MAX_REDIRECTS times. Never throws.
+ */
+export async function readPage(
+  fetchSite: Fetch,
+  website: string,
+  options: SiteOptions = {},
+): Promise<{ host: string; html: string } | { host: string; problem: string }> {
+  type Page = { host: string; html: string } | { host: string; problem: string };
   const first = publicUrl(website);
   const shownHost = first ? bareHost(first) : "";
-  const problem = (text: string): SiteView => ({ host: shownHost, problem: text });
+  const problem = (text: string): Page => ({ host: shownHost, problem: text });
   if (!first) return problem(NOT_PUBLIC_ADDRESS);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? SITE_TIMEOUT_MS);
-  const timedOut = new Promise<SiteView>((resolve) => controller.signal.addEventListener("abort", () => resolve(problem(TIMED_OUT))));
-  const work = async (): Promise<SiteView> => {
+  const timedOut = new Promise<Page>((resolve) => controller.signal.addEventListener("abort", () => resolve(problem(TIMED_OUT))));
+  const work = async (): Promise<Page> => {
     let url = first;
     for (let hops = 0; ; hops++) {
       const res = await fetchSite(url.href, {
@@ -250,7 +263,7 @@ export async function readWebsite(
         await res.body?.cancel().catch(() => undefined);
         return problem("it is not a web page");
       }
-      return { host: shownHost, ...pageText(await readLimited(res, options.maxBytes ?? SITE_MAX_BYTES)) };
+      return { host: shownHost, html: await readLimited(res, options.maxBytes ?? SITE_MAX_BYTES) };
     }
   };
   try {

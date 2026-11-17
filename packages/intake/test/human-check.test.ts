@@ -111,6 +111,16 @@ describe("human check", () => {
     handle = createHandler({ fetch: services.fetch, now: () => NOW });
   });
 
+  it("never marks a human-checked report signed in, so a website's contributor id earns no trust", async () => {
+    const body = JSON.stringify({ ...(JSON.parse(reportBody()) as object), contributor: "acct_web_visitor_00001" });
+    turnstile.answers.set("tok-1", good(body));
+    const res = await handle(post(body, { "x-human-check": "tok-1" }), env(WEB));
+    expect(res.status).toBe(202);
+    const stored = services.writes[0]!;
+    expect(stored).toMatchObject({ human_checked: true });
+    expect(stored).not.toHaveProperty("signed_in");
+  });
+
   it("takes a report whose token was made for its body, and marks it human checked, not attested", async () => {
     const body = reportBody();
     turnstile.answers.set("tok-1", good(body));

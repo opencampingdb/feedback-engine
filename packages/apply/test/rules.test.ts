@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FEE_RETIRED, type StoredFeedback } from "@opencampingdb/feedback";
-import { applyEdit, applyHeldReview, applyRules, ratingOf, REPORTS_TO_HIDE, reviewIdOf, type RulesInput } from "../src/rules.js";
+import { applyEdit, applyHeldReview, applyRules, ratingOf, REPORTS_TO_HIDE, reviewIdOf, type ClosureEvidence, type RulesInput } from "../src/rules.js";
 import type { Place, Review } from "../src/types.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
@@ -1029,6 +1029,69 @@ describe("closed and reopened", () => {
   });
 });
 
+describe("evidence of closure", () => {
+  const osm: ClosureEvidence = { kind: "osm_lifecycle", object: "node/123456", tags: ["disused:tourism=camp_site"], changeset: 191000001 };
+  const evidence = (...found: ClosureEvidence[]) => ({ extra: { closureEvidence: new Map([[PLACE, found]]) } });
+
+  it("one traveller's closure and OSM tagging the object disused: close the place, naming the evidence", () => {
+    const a = closed(0, "dev-a");
+    const out = run([a], { ...evidence(osm) });
+    expect(out.after()?.status).toBe("closed");
+    expect(out.outcome(a)).toBe("applied");
+    expect(out.changes.map((c) => c.summary)).toContain(
+      "status reported_closed to closed (1 device within 90 days, and OSM tagged node/123456 disused:tourism=camp_site in changeset 191000001)",
+    );
+  });
+
+  it("a closure from a human check and the website's domain gone from DNS twice close the place", () => {
+    const web = { ...closed(0, "dev-a"), human_checked: true, origin: "net-a" } as StoredFeedback;
+    const dns: ClosureEvidence = { kind: "nxdomain", domain: "example.org", first: at(0), confirmed: at(1) };
+    const out = run([web], { ...evidence(dns) });
+    expect(out.after()?.status).toBe("closed");
+    expect(out.changes.map((c) => c.summary)).toContain(
+      "status reported_closed to closed (1 device within 90 days, and example.org was not found in DNS on 2026-07-01 or 2026-07-02)",
+    );
+  });
+
+  it("evidence found in a later run, with nothing pending, closes a place a traveller reported closed", () => {
+    const earlier = applied(closed(0, "dev-a"));
+    const out = run([], { now: 20, history: [earlier], places: [place({ status: "reported_closed" })], ...evidence(osm) });
+    expect(out.after()?.status).toBe("closed");
+    const change = out.changes.find((c) => c.summary.startsWith("status reported_closed to closed"));
+    expect(change?.feedback).toEqual([earlier.id]);
+  });
+
+  it("evidence found later also closes a place a human-checked closure left open", () => {
+    const earlier = applied({ ...closed(0, "dev-a"), human_checked: true, origin: "net-a" } as StoredFeedback);
+    const out = run([], { now: 3, history: [earlier], ...evidence(osm) });
+    expect(out.after()?.status).toBe("closed");
+  });
+
+  it("evidence with no traveller's closure changes nothing", () => {
+    const dns: ClosureEvidence = { kind: "nxdomain", domain: "example.org", first: at(0), confirmed: at(1) };
+    const out = run([], { now: 2, ...evidence(osm, dns) });
+    expect(out.after()).toBeUndefined();
+    expect(out.changes).toEqual([]);
+  });
+
+  it("evidence does not count for a closure a later reopened report undid", () => {
+    const out = run([], { now: 5, history: [applied(closed(0, "dev-a")), applied(reopened(2, "dev-b"))], ...evidence(osm) });
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("evidence does not count for a closure older than 90 days", () => {
+    const out = run([], { now: 91, history: [applied(closed(0, "dev-a"))], places: [place({ status: "reported_closed" })], ...evidence(osm) });
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("evidence leaves an owner-verified place's closure to a person", () => {
+    const a = closed(0, "dev-a");
+    const out = run([a], { places: [place({ owner_verified: true })], ...evidence(osm) });
+    expect(out.after()).toBeUndefined();
+    expect(out.outcome(a)).toBe("waiting");
+  });
+});
+
 describe("reviews", () => {
   it("accepts a trusted contributor's clean review and recalculates the rating", () => {
     const r = review(0, "sam", 3, "Shady, flat sites near the water.");
@@ -1430,6 +1493,40 @@ describe("name, description and kind reports", () => {
       { kind: "description", place: PLACE, description: "Shady sites by the river.", feedback: text.id },
       { kind: "kind", place: PLACE, placeKind: "free_camp", group: "overnight", feedback: kind.id },
     ]);
+  });
+
+  it("lists each name, kind and location change as a held case for the AI reviewer, with the value it replaces", () => {
+    const name = rep({ kind: "name", value: "Lake Eppalock Free Camp" });
+    const kind = rep({ kind: "kind", place_kind: "campground" });
+    const move = { ...base(0, "dev-b"), type: "report", location: { lat: -36.851, lon: 144.552 }, report: { kind: "wrong_location" } } as StoredFeedback;
+    const before = place({ fact_sources: { power: "osm", fee: "osm", name: "osm", kind: "feedback" }, fact_dates: { kind: "2026-05-01T00:00:00Z" } });
+    const out = run([name, kind, move], { places: [before] });
+    expect([name, kind, move].map(out.outcome)).toEqual(["needs_review", "needs_review", "needs_review"]);
+    expect(out.edits.map((e) => e.kind)).toEqual(["name", "kind", "location"]);
+    const common = { case: "place_change", place: PLACE, location: { lat: -36.85, lon: 144.55 }, kind: "free_camp" };
+    expect(out.held).toEqual([
+      { ...common, change: "name", from: "Lake Eppalock Camp", to: "Lake Eppalock Free Camp", from_source: "osm", feedback: [name.id] },
+      {
+        ...common,
+        change: "kind",
+        from: "free_camp",
+        from_group: "overnight",
+        to: "campground",
+        from_source: "feedback",
+        from_date: "2026-05-01T00:00:00Z",
+        feedback: [kind.id],
+      },
+      // About 210 m: 111 m north and 178 m east.
+      { ...common, change: "location", from: { lat: -36.85, lon: 144.55 }, to: { lat: -36.851, lon: 144.552 }, distance_m: 210, feedback: [move.id] },
+    ]);
+  });
+
+  it("leaves a location report without a new location, and a name that fails the text rules, to a person with no held case", () => {
+    const name = rep({ kind: "name", value: "Dummyname is a wanker" });
+    const move = { ...base(0, "dev-b"), type: "report", report: { kind: "wrong_location" } } as StoredFeedback;
+    const out = run([name, move]);
+    expect([name, move].map(out.outcome)).toEqual(["needs_review", "needs_review"]);
+    expect(out.held).toEqual([]);
   });
 
   it("sends a name or description that fails the text rules to a person as a note, with no edit and no value in the summary", () => {

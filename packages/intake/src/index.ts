@@ -17,6 +17,7 @@ import {
   type StoredOwnerSubmission,
   isPlaceId,
   isDoubtFact,
+  isFactName,
   isValidFactValue,
   FEE_RETIRED,
   isFeedbackId,
@@ -27,6 +28,7 @@ import {
   isProofPublicKey,
   verifyContributorProof,
   REPORT_KINDS,
+  sourceLinkProblem,
   type ReportKind,
 } from "@opencampingdb/feedback";
 import { placeOf, PROGRESS_UPDATE_STATES, type PhotoProgressUpdate, type ProgressUpdate } from "@opencampingdb/apply/progress-update";
@@ -68,6 +70,7 @@ import {
   insertEvidence,
   listPlaces,
   MAX_BLOCKED_CONTRIBUTORS,
+  MAX_TRUSTED_CONTRIBUTORS,
   MAX_REMOVE_IDS,
   NEW_PLACE_DAILY_LIMIT,
   parseBbox,
@@ -75,6 +78,7 @@ import {
   markPlacesInData,
   isBlocked,
   setBlockList,
+  setTrustList,
   snapBbox,
   WITHDRAW_WINDOW_MS,
   type D1Like,
@@ -92,6 +96,7 @@ import {
   markInData,
   openDoubtCases,
   overrule,
+  recordFreezes,
   pruneDecisions,
   UNAVAILABLE,
   type DoubtCase,
@@ -755,6 +760,28 @@ function humanCheckOutcome(result: HumanCheckResult): { humanChecked: true } | {
 }
 
 /** Over a daily limit: 429, with the seconds until the counters reset. */
+/**
+ * The refusal for a fact report's source link on a host other than `.gov.au`
+ * or the place's website in the place index, or undefined when it passes. An
+ * intake without the index, or one that cannot read it, leaves the host to
+ * the apply run, which checks it again and never confirms a value from
+ * another host. A place the index does not hold has no website on record.
+ */
+async function sourceRefusal(db: D1Like | undefined, place: string | null, source: string): Promise<ItemAnswer | undefined> {
+  if (sourceLinkProblem(source, undefined) === null || db === undefined) return undefined;
+  let website: unknown;
+  if (place !== null) {
+    const indexed = await getIndexedPlace(db, place).then(
+      (p) => p ?? null,
+      () => undefined,
+    );
+    if (indexed === undefined) return undefined;
+    website = indexed?.facts.website;
+  }
+  const problem = sourceLinkProblem(source, website);
+  return problem === null ? undefined : { status: 400, body: { error: "source_not_allowed", details: [`report.source ${problem}`] } };
+}
+
 function rateLimited(retryAfter: number): ItemAnswer {
   return { status: 429, body: { error: "rate_limited" }, headers: { "retry-after": String(retryAfter) } };
 }
@@ -875,6 +902,7 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now"> & { roads?: Maj
         onModelFailure: (key, failures, error) =>
           console.warn(`the AI reviewer's model call failed on held case ${key} (${failures} of ${MAX_MODEL_FAILURES} runs), going on to the next case: ${String(error)}`),
         ...(deps.roads ? { roads: deps.roads } : {}),
+        fetchSite: deps.fetch,
       });
     } catch (error) {
       warn(error);
@@ -1619,6 +1647,24 @@ export function createHandler(deps: Deps) {
     return json(200, { blocked: new Set(contributors).size }, cors);
   }
 
+  /**
+   * `POST /v1/places/recent/trust`, for the apply run: `{ "contributors": [...] }`,
+   * every contributor trusted from their track record, as hashed contributor
+   * ids, with `authorization: Bearer <PLACES_TOKEN>`. It replaces the list the
+   * intake keeps, so a contributor left off it is no longer trusted.
+   */
+  async function trustRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_TRUSTED_CONTRIBUTORS * 24 + 1024);
+    if (call instanceof Response) return call;
+    const contributors = call.body.contributors;
+    const isHashed = (c: unknown) => typeof c === "string" && /^ctr_[0-9a-f]{16}$/.test(c);
+    if (!Array.isArray(contributors) || contributors.length > MAX_TRUSTED_CONTRIBUTORS || !contributors.every(isHashed)) {
+      return json(400, { error: "invalid", details: [`contributors must be up to ${MAX_TRUSTED_CONTRIBUTORS} hashed contributor ids`] }, cors);
+    }
+    await setTrustList(call.db, contributors as string[]);
+    return json(200, { trusted: new Set(contributors).size }, cors);
+  }
+
   /** The `ids` of a call from the apply run: 1 to 500 feedback ids. A Response when they are not. */
   function feedbackIds(body: Record<string, unknown>, cors: Record<string, string>): string[] | Response {
     const ids = body.ids;
@@ -1692,6 +1738,33 @@ export function createHandler(deps: Deps) {
       cases.map(({ place, fact, value, taken_down_at, feedback_id }) => ({ place, fact, value, taken_down_at, feedback_id })),
     );
     return json(200, { opened }, cors);
+  }
+
+  /**
+   * `POST /v1/places/recent/freezes`, for the apply run: `{ "freezes": [{
+   * "place", "fact", "frozen_at", "lifted_at"? }] }`, the places it froze over
+   * conflicting values in the last 90 days, with `lifted_at` once the
+   * reviewer's value is in the data, and `authorization: Bearer
+   * <PLACES_TOKEN>`. A frozen place's fact changes are held as `disputed`
+   * (see `recordFreezes`), and sending them again changes nothing.
+   */
+  async function freezesRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 16);
+    if (call instanceof Response) return call;
+    const freezes = call.body.freezes;
+    const isFreeze = (f: unknown): f is { place: string; fact: string; frozen_at: string; lifted_at?: string } => {
+      if (typeof f !== "object" || f === null) return false;
+      const { place, fact, frozen_at: frozenAt, lifted_at: liftedAt } = f as Record<string, unknown>;
+      return isPlaceId(place) && isFactName(fact) && isIsoSeconds(frozenAt) && (liftedAt === undefined || isIsoSeconds(liftedAt));
+    };
+    if (!Array.isArray(freezes) || freezes.length === 0 || freezes.length > MAX_REMOVE_IDS || !freezes.every(isFreeze)) {
+      return json(400, { error: "invalid", details: [`freezes must be 1 to ${MAX_REMOVE_IDS} frozen places`] }, cors);
+    }
+    const written = await recordFreezes(
+      call.db,
+      freezes.map(({ place, fact, frozen_at, lifted_at }) => ({ place, fact, frozen_at, ...(lifted_at !== undefined ? { lifted_at } : {}) })),
+    );
+    return json(200, { written }, cors);
   }
 
   /**
@@ -1848,6 +1921,10 @@ export function createHandler(deps: Deps) {
       return { status: 400, body: { error: "type_not_allowed_in_batch" } };
     }
     if (submission.type === "photo") return { status: 400, body: { error: "invalid", details: ["photos are sent to /v1/photos"] } };
+    if (submission.type === "report" && submission.report.source !== undefined) {
+      const refused = await sourceRefusal(env.RECENT_LIST, submission.place, submission.report.source);
+      if (refused) return refused;
+    }
     // Photo reports, removals and erasures belong to a photo service: an intake with a photo bucket.
     if (
       (submission.type === "photo_report" || submission.type === "photo_erasure" || submission.type === "photo_removal" || submission.type === "photo_vote") &&
@@ -1884,6 +1961,8 @@ export function createHandler(deps: Deps) {
 
     let proof: Proof | undefined;
     let contributor: string | undefined;
+    // The app sent the contributor, so the traveller is signed in: only such items earn and use trust.
+    let signedIn = false;
     let attestKey: string | undefined;
     let target: StoredPlace | undefined;
     let owner: "mine" | "theirs" | "unknown" | "unreadable" | undefined;
@@ -1904,8 +1983,11 @@ export function createHandler(deps: Deps) {
         }
         proof = result;
       }
-      if (feedback.contributor !== undefined) contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
-      else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
+      if (feedback.contributor !== undefined) {
+        contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
+        // A website's id is the browser's, which anyone can reset, so a human-checked item never counts as signed in.
+        signedIn = !humanChecked;
+      } else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
       if (proof?.keyId) attestKey = `ak_${await saltedHash(env.DEVICE_SALT, `key:${proof.keyId}`)}`;
       // A signed-out install attested by Play Integrity has neither. Its new places still need a
       // contributor to list and block them by, so the hashed install stands in.
@@ -2023,6 +2105,7 @@ export function createHandler(deps: Deps) {
       device,
       ...(origin ? { origin } : {}),
       ...(contributor ? { contributor } : {}),
+      ...(signedIn ? { signed_in: true } : {}),
       ...(proof ? { attested: proof.attested } : {}),
       ...(humanChecked ? { human_checked: true } : {}),
       ...(attestKey ? { attest_key: attestKey } : {}),
@@ -2432,9 +2515,17 @@ export function createHandler(deps: Deps) {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return doubtCasesRecent(request, env, cors);
     }
+    if (route === "/v1/places/recent/freezes") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return freezesRecent(request, env, cors);
+    }
     if (route === "/v1/places/recent/block") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return blockRecent(request, env, cors);
+    }
+    if (route === "/v1/places/recent/trust") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return trustRecent(request, env, cors);
     }
     if (route === "/v1/feedback/progress") {
       if (request.method === "GET") return getProgress(env, url, cors);

@@ -2,8 +2,9 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { isDoubtFact, isValidFactValue, type FactName, type FactValue, type StoredFeedback } from "@opencampingdb/feedback";
 import { sameValue } from "./decide.js";
-import { DataRepo, readHistory } from "./io.js";
-import { newPlaceIdOf, WINDOW_DAYS, WITHDRAWN, type DoubtedRecord } from "./rules.js";
+import { DataRepo, readHistory, readTrust } from "./io.js";
+import { liftOf, newPlaceIdOf, WINDOW_DAYS, WITHDRAWN, type DoubtedRecord, type FreezeRecord } from "./rules.js";
+import { trustedContributors } from "./trust.js";
 import type { ProgressStore } from "./progress.js";
 import type { PhotoProgressStore } from "./photo-progress.js";
 import type { Place } from "./types.js";
@@ -18,6 +19,8 @@ export interface RecentStore {
   remove(ids: readonly string[]): Promise<void>;
   /** Replaces the intake's block list with these hashed contributor ids. */
   block(contributors: readonly string[]): Promise<void>;
+  /** Replaces the intake's list of trusted contributors with these hashed contributor ids. */
+  trust(contributors: readonly string[]): Promise<void>;
 }
 
 /**
@@ -40,6 +43,23 @@ export interface RecentChangeStore {
    * travellers there too.
    */
   doubtCases(cases: readonly DoubtCase[]): Promise<void>;
+  /**
+   * Places the apply froze over conflicting values, and whether each freeze
+   * has lifted. The intake holds fact changes to a frozen place as
+   * `disputed`. A store without it is told nothing.
+   */
+  freezes?(freezes: readonly Freeze[]): Promise<void>;
+}
+
+/** A place the apply froze, as the intake's `POST /v1/places/recent/freezes` takes it. */
+export interface Freeze {
+  place: string;
+  /** The disputed fact. */
+  fact: FactName;
+  /** When the freeze started. */
+  frozen_at: string;
+  /** When the reviewer's value reached the data, which lifted it. Absent while the place is frozen. */
+  lifted_at?: string;
 }
 
 /** A fact the apply took down after doubts, as the intake's `POST /v1/places/recent/doubt-cases` takes it. */
@@ -91,11 +111,11 @@ export function intakeRecentList(baseUrl: string, fetcher: typeof fetch = fetch)
 const REMOVE_BATCH = 500;
 
 /**
- * The intake's `POST /v1/places/recent/remove` and `POST /v1/places/recent/block`,
+ * The intake's `POST /v1/places/recent/remove`, `POST /v1/places/recent/block` and `POST /v1/places/recent/trust`,
  * the recent change calls and `POST /v1/feedback/progress`,
  * authorised with the places token the intake keeps as `PLACES_TOKEN`.
- * Removing an id that is not in the store does nothing, and the block list
- * replaces the last one, so sending either again is safe.
+ * Removing an id that is not in the store does nothing, and the block and trusted lists
+ * each replace the last one, so sending any of them again is safe.
  */
 export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeof fetch = fetch): RecentStore & RecentChangeStore & ProgressStore & PhotoProgressStore {
   const url = new URL("/v1/places/recent/remove", baseUrl).toString();
@@ -130,6 +150,17 @@ export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeo
         if (!response.ok) throw new Error(`the intake refused the doubt cases: ${response.status} ${await response.text()}`);
       }
     },
+    async freezes(freezes) {
+      const target = new URL("/v1/places/recent/freezes", baseUrl).toString();
+      for (let start = 0; start < freezes.length; start += REMOVE_BATCH) {
+        const response = await fetcher(target, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ freezes: freezes.slice(start, start + REMOVE_BATCH) }),
+        });
+        if (!response.ok) throw new Error(`the intake refused the freezes: ${response.status} ${await response.text()}`);
+      }
+    },
     async progress(items) {
       // The caller sends at most 500 items a call (sendProgress).
       const response = await fetcher(new URL("/v1/feedback/progress", baseUrl).toString(), {
@@ -155,6 +186,14 @@ export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeo
         body: JSON.stringify({ contributors }),
       });
       if (!response.ok) throw new Error(`the intake refused the block list: ${response.status} ${await response.text()}`);
+    },
+    async trust(contributors) {
+      const response = await fetcher(new URL("/v1/places/recent/trust", baseUrl).toString(), {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ contributors }),
+      });
+      if (!response.ok) throw new Error(`the intake refused the trusted list: ${response.status} ${await response.text()}`);
     },
     async remove(ids) {
       for (let start = 0; start < ids.length; start += REMOVE_BATCH) {
@@ -212,6 +251,19 @@ export async function settleRecentPlaces(options: SettleOptions): Promise<string
 export async function sendBlockList(options: { main: string; store: RecentStore }): Promise<string[]> {
   const contributors = [...(await new DataRepo(options.main).blocked())].sort();
   await options.store.block(contributors);
+  return contributors;
+}
+
+/**
+ * Sends the intake every contributor the inbox's track records trust
+ * (`trust/contributors.json`), less those blocked on `main`, so it lists
+ * their new places straight away. The whole list goes each time, so
+ * withdrawn trust leaves the intake too. Returns it, sorted.
+ */
+export async function sendTrustList(options: { inbox: string; main: string; store: Pick<RecentStore, "trust"> }): Promise<string[]> {
+  const blocked = await new DataRepo(options.main).blocked();
+  const contributors = [...trustedContributors(await readTrust(options.inbox), blocked)].sort();
+  await options.store.trust(contributors);
   return contributors;
 }
 
@@ -302,9 +354,40 @@ export async function sendDoubtCases(options: { inbox: string; store: RecentChan
 }
 
 /**
+ * Sends the intake each place's latest freeze kept in the inbox in the last
+ * 90 days, with `lifted_at` once `main` has a value for the disputed fact set
+ * at or after the freeze (`liftOf`). All of them go on every run, so the
+ * intake can lift a freeze it learnt of from its own reports. Returns the
+ * freezes sent, by place.
+ */
+export async function sendFreezes(options: { inbox: string; main: string; store: RecentChangeStore; now?: Date }): Promise<Freeze[]> {
+  if (options.store.freezes === undefined) return [];
+  const now = options.now ?? new Date();
+  const since = now.getTime() - WINDOW_DAYS * DAY_MS;
+  const sinceDay = new Date(now.getTime() - (WINDOW_DAYS + 1) * DAY_MS).toISOString().slice(0, 10);
+  const latest = new Map<string, FreezeRecord>();
+  for (const item of await readHistory(options.inbox, sinceDay)) {
+    const frozen = (item as { outcome?: { frozen?: FreezeRecord } }).outcome?.frozen;
+    if (frozen === undefined || typeof item.place !== "string" || Date.parse(frozen.at) < since) continue;
+    const before = latest.get(item.place);
+    if (before === undefined || frozen.at > before.at) latest.set(item.place, frozen);
+  }
+  const onMain = await new DataRepo(options.main).places(latest.keys());
+  const freezes = [...latest]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([place, frozen]) => {
+      const record = onMain.get(place);
+      const lifted = record === undefined ? undefined : liftOf(record, frozen);
+      return { place, fact: frozen.fact, frozen_at: frozen.at, ...(lifted !== undefined ? { lifted_at: lifted } : {}) };
+    });
+  if (freezes.length > 0) await options.store.freezes(freezes);
+  return freezes;
+}
+
+/**
  * Everything a run tells the intake about the data, in order: new places now
- * on main, the block list, the items decided other than applied, applied
- * reports now on main and the doubt cases. Each call is safe to repeat, so a
+ * on main, the block list, the trusted list, the items decided other than applied, applied
+ * reports now on main, the doubt cases and the freezes. Each call is safe to repeat, so a
  * refused or failed call is logged and sent again next run, and never stops
  * the others or the run. The items decided other than applied are this run's
  * alone, so when that call fails they are kept in the inbox
@@ -336,6 +419,7 @@ export async function tellIntake(options: {
   };
   await tell("settling the recent places", () => settleRecentPlaces({ inbox, main, store, ...now }), (s) => `${s.length} new place(s) taken out of the recent places store`);
   await tell("sending the block list", () => sendBlockList({ main, store }), (s) => `block list of ${s.length} contributor(s) sent to the intake`);
+  await tell("sending the trusted list", () => sendTrustList({ inbox, main, store }), (s) => `trusted list of ${s.length} contributor(s) sent to the intake`);
   await tell(
     "sending the items decided other than applied",
     () => sendOverruled({ ids: notApplied, refused, store }),
@@ -345,6 +429,7 @@ export async function tellIntake(options: {
   const recorded = await writeUnsentOverruled(inbox, keep);
   await tell("settling the recent changes", () => settleRecentChanges({ inbox, main, store, ...now }), (s) => `${s.length} applied report(s) in the data on main sent to the intake`);
   await tell("sending the doubt cases", () => sendDoubtCases({ inbox, store, ...now }), (s) => `${s.length} fact(s) taken down after doubts sent to the intake`);
+  await tell("sending the freezes", () => sendFreezes({ inbox, main, store, ...now }), (s) => `${s.length} frozen place(s) sent to the intake`);
   return { failed, recorded };
 }
 

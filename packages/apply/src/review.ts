@@ -1,12 +1,12 @@
 import { contactProblem, isCommonsFileName, isContactFact, isDoubtFact, isFactName, isValidFactValue, tidyName, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
 import type { ContactCheckName } from "./contact-checks.js";
 import { byCodePoint } from "./data-check.js";
-import type { Settles } from "./decide.js";
+import { factsClearedBy, type Settles } from "./decide.js";
 import type { ImplausibleHit } from "./plausible.js";
 import { distanceM, majorRoads, type MajorRoads } from "./roads.js";
 import { dumpPlace, placePath } from "./serialise.js";
 import { dropSource, setSource } from "./sources.js";
-import type { Place } from "./types.js";
+import type { Place, Source } from "./types.js";
 
 /**
  * Held cases as a reviewer reads them from the `feedback/review` PR, and what
@@ -16,7 +16,7 @@ import type { Place } from "./types.js";
  * A reviewer decides `approve` (keep a held or hidden new place), `restore`
  * (put a withdrawn contact, or a fact doubts took down, back), `merge` (a
  * held new place into the place it duplicates, with `mergePlaces`),
- * `confirm` (a fact a case suggests), `take_down`
+ * `confirm` (a fact a case suggests, or one value for a disputed fact), `take_down`
  * (hide a new place that is clear spam), `keep_down` (leave a fact doubts
  * took down off the place), `dismiss` (doubts about a fact that stays) or
  * `leave` (a person decides). `settleByRules` settles what it can before
@@ -64,6 +64,16 @@ export type { Place };
  * merged into the place it duplicates. The note may say something the place
  * should carry, such as an address the app could not confirm on the map, so a
  * person reads it in the inbox and adds what it says by hand.
+ * `place_change`: a traveller's report that changes the place's `change`
+ * (its name, kind or location) from `from` to `to`, already written to the
+ * place on the review branch. `from_source` and `from_date` are where the
+ * value it replaces came from and when (`from_group` is the old kind's
+ * group), so a reviewer can put it back, and `distance_m` is how far a
+ * location moves. A reviewer keeps the change (`approve`) or puts the old
+ * value back (`revert`).
+ * `disputed`: a place frozen because `sources` independent sources sent
+ * conflicting values for `fact` within 24 hours. No fact on it changes until
+ * a reviewer sets the fact to one value, which lifts the freeze.
  * Contact values a traveller sent, notes and device ids are never in it.
  */
 export interface HeldCase {
@@ -79,7 +89,9 @@ export interface HeldCase {
     | "commons_mismatch"
     | "contact_check"
     | "implausible_location"
-    | "note";
+    | "note"
+    | "place_change"
+    | "disputed";
   place: string;
   /** The place's standing. Left out for a place travellers did not add. */
   standing?: "shown" | "confirmed" | "held" | "hidden";
@@ -109,17 +121,31 @@ export interface HeldCase {
    * out when it had none. On `vehicle_access_candidate`: the value its name suggests.
    */
   value?: FactValue;
+  /** On `disputed`: the values the sources sent, left out for a contact, the address or values with free words, which a person reads in the inbox. */
+  values?: FactValue[];
   /** On `fact_doubted`: the doubts took the fact off the place. */
   taken_down?: boolean;
   /** On `commons_mismatch`: the Commons file name, as `file` in `commons.ndjson.gz`. */
   file?: string;
-  /** On `fact_doubted`: independent sources among the doubts. On `commons_mismatch`: among the reports. */
+  /** On `fact_doubted`: independent sources among the doubts. On `commons_mismatch`: among the reports. On `disputed`: among the conflicting reports. */
   sources?: number;
   /** On `fact_doubted`: the doubts counted. */
   doubts?: string[];
   /** On `fact_doubted`: the confirmations of the value counted against them. */
   confirmations?: string[];
   contributor?: string;
+  /** On `place_change`: what the report changes. */
+  change?: PlaceChange;
+  /** On `place_change`: the value the change replaces, `null` for a place without a name. */
+  from?: string | null | { lat: number; lon: number };
+  /** On `place_change`: the value the report sets. */
+  to?: string | { lat: number; lon: number };
+  /** On `place_change`: where the replaced value came from, left out when it had no source. */
+  from_source?: Source;
+  /** On `place_change`: when the replaced value was accepted, left out for a value from OSM or with no date. */
+  from_date?: string;
+  /** On a `place_change` of the kind: the replaced kind's group. */
+  from_group?: string;
   /** The feedback ids the case comes from, to read in the inbox. Empty on `vehicle_access_candidate`, which comes from the data. */
   feedback: string[];
 }
@@ -139,6 +165,9 @@ export interface ClosedCase {
   feedback: string[];
 }
 
+/** What a `place_change` case changes. */
+export type PlaceChange = "name" | "kind" | "location";
+
 /** Every `case` a held-case line can have. */
 export const HELD_CASES: readonly HeldCase["case"][] = [
   "duplicate",
@@ -153,6 +182,8 @@ export const HELD_CASES: readonly HeldCase["case"][] = [
   "contact_check",
   "implausible_location",
   "note",
+  "place_change",
+  "disputed",
 ];
 
 /** Cases that come from the data rather than from feedback, so they name no feedback ids. */
@@ -164,6 +195,20 @@ const CLOSED_LINE = /^- closed-case (\{.*\})\s*$/;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === "string");
+
+const isPoint = (v: unknown): v is { lat: number; lon: number } =>
+  isObject(v) && typeof v.lat === "number" && typeof v.lon === "number" && Number.isFinite(v.lat) && Number.isFinite(v.lon);
+
+/** Whether a `place_change` case has a change and the values it needs, of the right type for it. */
+function isPlaceChange(v: Record<string, unknown>): boolean {
+  if (v.fact !== undefined) return false;
+  if (v.from_source !== undefined && typeof v.from_source !== "string") return false;
+  if (v.from_date !== undefined && typeof v.from_date !== "string") return false;
+  if (v.change === "name") return typeof v.to === "string" && (typeof v.from === "string" || v.from === null);
+  if (v.change === "kind") return typeof v.to === "string" && typeof v.from === "string" && typeof v.from_group === "string";
+  if (v.change === "location") return isPoint(v.to) && isPoint(v.from);
+  return false;
+}
 
 /** Whether `v` has the shape the apply writes for a held case. */
 export function isHeldCase(v: unknown): v is HeldCase {
@@ -178,6 +223,12 @@ export function isHeldCase(v: unknown): v is HeldCase {
     if (typeof v.file !== "string" || v.file.length === 0 || typeof v.sources !== "number" || v.fact !== undefined) return false;
   } else if (v.case === "vehicle_access_candidate") {
     if (v.fact !== "vehicle_access" || !isValidFactValue("vehicle_access", v.value)) return false;
+  } else if (v.case === "place_change") {
+    if (!isPlaceChange(v)) return false;
+  } else if (v.case === "disputed") {
+    const fact = v.fact;
+    if (!isFactName(fact) || typeof v.sources !== "number") return false;
+    if (v.values !== undefined && (!Array.isArray(v.values) || !v.values.every((value) => isValidFactValue(fact, value)))) return false;
   } else if (v.case === "fact_doubted") {
     if (!isDoubtFact(v.fact) || v.value === undefined || typeof v.taken_down !== "boolean") return false;
     if (typeof v.sources !== "number" || !isStrings(v.doubts) || !isStrings(v.confirmations)) return false;
@@ -244,7 +295,7 @@ export function heldCaseKey(c: HeldCase): string {
   return [c.case, c.place, c.fact ?? c.file ?? "", [...c.feedback].sort().join(",")].join(" ");
 }
 
-export type ReviewDecision = "approve" | "restore" | "take_down" | "keep_down" | "dismiss" | "leave" | "confirm" | "merge";
+export type ReviewDecision = "approve" | "restore" | "take_down" | "keep_down" | "dismiss" | "leave" | "confirm" | "merge" | "revert";
 
 /**
  * What a reviewer may decide on a case of each kind. `contacts` and
@@ -270,20 +321,69 @@ export function allowedDecisions(c: HeldCase): ReviewDecision[] {
       return ["confirm", "dismiss", "leave"];
     case "contact_check":
       return ["confirm", "dismiss", "leave"];
+    case "place_change":
+      return ["approve", "revert", "leave"];
+    case "disputed":
+      return ["confirm", "leave"];
     default:
       return ["leave"];
   }
 }
 
+/** The longest move of a place's location a reviewer decides. A longer one goes to a person. */
+export const MAX_REVIEWER_MOVE_M = 500;
+
+/** A name as names are compared: lower case, `&` as "and", and only letters and digits, one space apart. */
+const nameWords = (name: string) =>
+  ` ${tidyName(name).normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/&/g, " and ").replace(/[^\p{L}\p{N}]+/gu, " ").trim()} `;
+
+/**
+ * Whether `name` is confirmed: the same as the name from OSM, `osmName`, once
+ * case, accents and punctuation are set aside, or found whole among the words
+ * of one of `siteNames`, the title and headings of the place's own website.
+ */
+export function nameConfirmed(name: string, osmName: string | null | undefined, siteNames: readonly string[] = []): boolean {
+  const words = nameWords(name);
+  if (words.trim() === "") return false;
+  if (typeof osmName === "string" && nameWords(osmName) === words) return true;
+  return siteNames.some((text) => nameWords(text).includes(words));
+}
+
+/**
+ * `leave`, and why, when the rules settle a `place_change` case; null when a
+ * reviewer decides it. A person decides an owner's value, a place with a
+ * verified owner, a change no longer on the place, a move of more than
+ * MAX_REVIEWER_MOVE_M and a name `nameConfirmed` does not confirm.
+ */
+function settleChange(c: HeldCase, place: Place, siteNames: readonly string[] | undefined): { decision: "leave"; reason: string } | null {
+  const leave = (reason: string) => ({ decision: "leave" as const, reason });
+  if (c.from_source === "owner" || place.fact_sources[c.change!] === "owner") return leave("the owner set this value, so a person decides");
+  if (place.owner_verified === true) return leave("the place has a verified owner");
+  const current = c.change === "name" ? place.name : c.change === "kind" ? place.kind : place.location;
+  if (JSON.stringify(current) !== JSON.stringify(c.to)) return leave("the place has changed since the report");
+  if (c.change === "location") {
+    const moved = Math.round(distanceM(c.from as { lat: number; lon: number }, c.to as { lat: number; lon: number }));
+    if (moved > MAX_REVIEWER_MOVE_M) return leave(`a move of ${moved} m is more than ${MAX_REVIEWER_MOVE_M} m, so a person checks it`);
+  }
+  if (c.change === "name") {
+    const osmName = c.from_source === "osm" ? (c.from as string | null) : undefined;
+    if (!nameConfirmed(c.to as string, osmName, siteNames)) {
+      return leave("the new name matches neither the name from OSM nor the place's own website, so a person checks it");
+    }
+  }
+  return null;
+}
+
 /**
  * `leave`, and why, when the rules settle a case; null when a reviewer has to
  * look at it. `context.doNotMatch` is the do-not-match list, for a
- * `commons_mismatch` case.
+ * `commons_mismatch` case. `context.siteNames` is the title and headings of
+ * the place's own website, for a name change, when they could be read.
  */
 export function settleByRules(
   c: HeldCase,
   place: Place | undefined,
-  context: { doNotMatch?: readonly Pick<DoNotMatchEntry, "place" | "file">[] } = {},
+  context: { doNotMatch?: readonly Pick<DoNotMatchEntry, "place" | "file">[]; siteNames?: readonly string[] } = {},
 ): { decision: "leave"; reason: string } | null {
   const leave = (reason: string) => ({ decision: "leave" as const, reason });
   // Only a person reads a traveller's note: it is in the inbox, never in the case.
@@ -291,6 +391,7 @@ export function settleByRules(
   if (!place) return leave("the place record is not on the review branch");
   if (place.status === "merged") return leave("the place was merged into another");
   if (c.case === "contacts" || c.case === "description") return leave("what was left off the place is in the inbox, so a person decides");
+  if (c.case === "place_change") return settleChange(c, place, context.siteNames);
   if (c.case === "commons_mismatch") {
     if (context.doNotMatch?.some((p) => p.place === c.place && p.file === c.file)) return leave("the Commons photo is on the do-not-match list already");
     return null;
@@ -306,6 +407,13 @@ export function settleByRules(
     if (place.fact_sources[fact] === "osm") return leave("this fact came from OSM, so a person decides");
     if (c.taken_down && current !== undefined) return leave("the place has this fact again");
     if (!c.taken_down && (current === undefined || JSON.stringify(current) !== JSON.stringify(c.value))) return leave("the fact has changed since the doubt");
+    return null;
+  }
+  if (c.case === "disputed") {
+    // Owners keep control of their listings, whatever a model says.
+    if (place.fact_sources[c.fact!] === "owner") return leave("the owner set this fact");
+    if (place.owner_verified === true) return leave("the place has a verified owner");
+    if (c.values === undefined) return leave("the values are in the inbox, so a person decides");
     return null;
   }
   if (c.case === "contact_withdrawn") {
@@ -336,27 +444,56 @@ export function settleByRules(
 }
 
 /**
+ * The values a reviewer may set on a `disputed` case: those the sources sent
+ * and the value the place has now, each once, sorted by their JSON. None when
+ * the case carries no values.
+ */
+export function disputeChoices(c: HeldCase, place: Place): FactValue[] {
+  if (c.case !== "disputed" || c.values === undefined) return [];
+  const current = (place.facts as Record<string, FactValue | undefined>)[c.fact!];
+  const all = current === undefined ? c.values : [...c.values, current];
+  return [...new Map(all.map((v) => [JSON.stringify(v), v])).entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([, v]) => v);
+}
+
+/**
  * The place record after a reviewer's decision, at `at` (a UTC time), or null
  * when the decision changes nothing in the data. `approve` sets a held place's
  * standing to `shown`, and restores a hidden one with a `restore` decision;
  * on a published first place it changes nothing. `take_down` hides the place
  * with a `hide` decision, so reports can't bring it back. `restore` sets the
  * withdrawn contact, or a fact doubts took down, back to the value the place
- * published. `keep_down` and `dismiss` change nothing, and neither does
- * `merge` here: it writes two records, with `mergePlaces`. On a
- * `contact_check` case, `confirm` keeps the reported contact the review PR
- * set, and `dismiss` puts back the value the place had before, or takes the
- * contact off when it had none.
+ * published. `revert` puts back the name, kind or location a `place_change`
+ * replaced, and `approve` on one changes nothing, as the change is on the
+ * place already. `confirm` on a `disputed` case sets the fact to `value`, one
+ * of `disputeChoices`, dated `at` even when the place has that value already:
+ * the date lifts the freeze once it is in the data. `keep_down` and `dismiss`
+ * change nothing, and neither does `merge` here: it writes two records, with
+ * `mergePlaces`. On a `contact_check` case, `confirm` keeps the reported
+ * contact the review PR set, and `dismiss` puts back the value the place had
+ * before, or takes the contact off when it had none.
  */
-export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecision, at: string): Place | null {
+export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecision, at: string, value?: FactValue): Place | null {
   if (!allowedDecisions(c).includes(decision) || decision === "leave" || decision === "keep_down" || decision === "merge") return null;
   if (decision === "dismiss" && c.case !== "contact_check") return null;
   // A Commons photo goes on the do-not-match list (`withDoNotMatch`), not into the place record.
   if (c.case === "commons_mismatch") return null;
+  // An approved name, kind or location change is on the place already.
+  if (c.case === "place_change" && decision === "approve") return null;
   // A confirmed contact stays as the review PR has it.
   if (c.case === "contact_check" && decision === "confirm") return null;
   const next = structuredClone(place);
-  if (c.case === "contact_check") {
+  if (c.case === "disputed") {
+    const fact = c.fact!;
+    if (value === undefined || !disputeChoices(c, place).some((v) => JSON.stringify(v) === JSON.stringify(value))) return null;
+    for (const cleared of factsClearedBy(next.facts, fact, value)) {
+      delete (next.facts as Record<string, FactValue | undefined>)[cleared];
+      dropSource(next, cleared);
+    }
+    (next.facts as Record<string, FactValue>)[fact] = value;
+    setSource(next, fact, "feedback", at);
+  } else if (decision === "revert") {
+    revertChange(next, c);
+  } else if (c.case === "contact_check") {
     // Dismissed: the place's earlier value, or none.
     if (c.value !== undefined) {
       (next.facts as Record<string, FactValue>)[c.fact!] = c.value;
@@ -379,6 +516,23 @@ export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecisio
   }
   next.updated = at;
   return next;
+}
+
+/** Puts back the value a `place_change` case replaced, with its source and date as they were. */
+function revertChange(place: Place, c: HeldCase): void {
+  const key = c.change!;
+  if (key === "name") place.name = c.from as string | null;
+  else if (key === "kind") {
+    place.kind = c.from as Place["kind"];
+    place.group = c.from_group as Place["group"];
+  } else place.location = { ...(c.from as { lat: number; lon: number }) };
+  if (c.from_source === undefined) delete place.fact_sources[key];
+  else place.fact_sources[key] = c.from_source;
+  const dates = { ...place.fact_dates };
+  if (c.from_date === undefined) delete dates[key];
+  else dates[key] = c.from_date;
+  if (Object.keys(dates).length > 0) place.fact_dates = dates;
+  else delete place.fact_dates;
 }
 
 /** One key for a pair of places, whichever comes first, as `moderation/distinct_places.json` lists them. */
