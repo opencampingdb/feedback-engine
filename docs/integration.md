@@ -168,6 +168,8 @@ await feedback.reportFacts({
 
 A `note` is free text up to 2,000 characters on any report. It is kept for reviewers.
 
+**Closures.** One closed report marks the place `reported_closed`, and a closure from a second device within 90 days closes it. Evidence of closure counts as that second source: OSM newly tagging the place's object `disused:` or `abandoned:`, or the domain of the place's website not found in DNS (NXDOMAIN) on two checks at least a day apart. A website that answers with an HTTP error, or a DNS lookup that times out or fails, never counts. Evidence never closes a place no traveller reported closed, nor one whose owner manages its status, and the apply's notes name the evidence it used.
+
 ### Facts a report may name
 
 - `fee` (true, false or `donation`), `caravans` (true, false or `offroad`), `pets` (`yes`, `no`, `leashed`, `seasonal`)

@@ -41,6 +41,7 @@ import {
   type OpenDoubt,
   type Setter,
 } from "./decide.js";
+import { evidenceCounts } from "./closure-evidence.js";
 import { moderateReview } from "./moderation.js";
 import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase } from "./review.js";
 import type { EarlierFact } from "./io.js";
@@ -195,6 +196,36 @@ export interface RulesInput {
    * moves. They are decided as that run decided them. None when left out.
    */
   earlierFacts?: ReadonlyMap<string, ReadonlyMap<string, EarlierFact>>;
+  /**
+   * Evidence of closure found outside the inbox, by place id (see
+   * `closure-evidence.ts`). Each kind counts as one more source for a
+   * closure a traveller sent, never as a closure on its own. None when left out.
+   */
+  closureEvidence?: ReadonlyMap<string, readonly ClosureEvidence[]>;
+}
+
+/**
+ * Evidence that a place has closed, from outside the inbox:
+ * - `osm_lifecycle`: OSM tagged the place's object `disused:` or `abandoned:`
+ *   since the version the record follows, in `changeset`.
+ * - `nxdomain`: the domain of the place's website was not found in DNS
+ *   (NXDOMAIN) at `first` and again at `confirmed`, at least a day later.
+ */
+export type ClosureEvidence =
+  | { kind: "osm_lifecycle"; object: string; tags: readonly string[]; changeset: number }
+  | { kind: "nxdomain"; domain: string; first: string; confirmed: string };
+
+/** How a note names one piece of evidence of closure. */
+function describeEvidence(e: ClosureEvidence): string {
+  return e.kind === "osm_lifecycle"
+    ? `OSM tagged ${e.object} ${e.tags.join(", ")} in changeset ${e.changeset}`
+    : `${e.domain} was not found in DNS on ${e.first.slice(0, 10)} or ${e.confirmed.slice(0, 10)}`;
+}
+
+/** Why a closure counted: the travellers, then each piece of evidence. */
+function closureWhy(devices: number, evidence: readonly ClosureEvidence[]): string {
+  const travellers = `${devices} device${devices === 1 ? "" : "s"} within ${WINDOW_DAYS} days`;
+  return evidence.length === 0 ? travellers : `${travellers}, and ${evidence.map(describeEvidence).join(", and ")}`;
 }
 
 /**
@@ -1188,11 +1219,17 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   }
 
   function applyStatus(items: (ReportItem | CheckItem)[]): void {
-    for (const placeId of new Set(items.map((i) => i.place as string))) {
+    // Places with evidence of closure are looked at too, so evidence found after the closure's own run counts.
+    const withEvidence = [...(input.closureEvidence?.keys() ?? [])].filter((id) => {
+      const known = input.places.get(id);
+      return known !== undefined && evidenceCounts(known);
+    });
+    for (const placeId of new Set([...items.map((i) => i.place as string), ...withEvidence])) {
       const mine = items.filter((i) => i.place === placeId);
       const evidence = [...input.history.filter((h) => h.place === placeId), ...mine].sort(byReceived);
       const place = record(placeId);
       const statusBefore = place.status;
+      const found = input.closureEvidence?.get(placeId) ?? [];
 
       // Evidence one way counts only if it came after the latest evidence the other way.
       const latest = (at: number, test: (i: StoredFeedback) => boolean) =>
@@ -1243,10 +1280,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             continue;
           }
           // A closure from a human check (a website) is one source: the place stays open until a
-          // second source, or an attested report, agrees. It still counts towards closing.
+          // second source, an attested report or evidence of closure agrees. It still counts towards closing.
           if (place.status === "open" && isReport && item.human_checked === true) {
             const closing = supporting(at, isClosureEvidence, isReopenEvidence);
-            if (distinctDevices(closing) < 2 && !closing.some((e) => e.attested !== undefined)) {
+            if (distinctDevices(closing) < 2 && !closing.some((e) => e.attested !== undefined) && found.length === 0) {
               decide(item, "applied", "closure from a human check counted as one source: the place stays open until a second source agrees");
               continue;
             }
@@ -1256,14 +1293,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             note(placeId, "status open to reported_closed", true, [item]);
           }
           const devices = supporting(at, isClosureEvidence, isReopenEvidence);
-          if (place.status === "reported_closed" && distinctDevices(devices) >= 2) {
+          // Each kind of evidence of closure counts as one more source.
+          if (place.status === "reported_closed" && distinctDevices(devices) + found.length >= 2) {
             place.status = "closed";
-            note(
-              placeId,
-              `status reported_closed to closed (${distinctDevices(devices)} devices within ${WINDOW_DAYS} days)`,
-              true,
-              devices,
-            );
+            note(placeId, `status reported_closed to closed (${closureWhy(distinctDevices(devices), found)})`, true, devices);
           }
           decide(item, "applied", isReport ? `place is ${place.status}` : "check recorded");
           continue;
@@ -1298,6 +1331,15 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           decide(item, "waiting", "a closed place needs a second device to reopen it");
         } else {
           decide(item, "applied", "check recorded");
+        }
+      }
+      // Evidence of closure counts as one more source for a closure travellers sent, in this run or an
+      // earlier one, that nothing since has undone. It never closes a place on its own, nor one the owner manages.
+      if (found.length > 0 && evidenceCounts(place)) {
+        const devices = supporting(now, isClosureEvidence, isReopenEvidence);
+        if (distinctDevices(devices) >= 1 && distinctDevices(devices) + found.length >= 2) {
+          note(placeId, `status ${place.status} to closed (${closureWhy(distinctDevices(devices), found)})`, true, devices);
+          place.status = "closed";
         }
       }
       // Marks the status as coming from feedback, so the OSM notes can tell it from a contributed closure.

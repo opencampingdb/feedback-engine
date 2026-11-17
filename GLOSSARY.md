@@ -36,6 +36,10 @@ _Avoid_: instant place, pending place
 What travellers send about a new place: a check, a removal report or a withdraw.
 _Avoid_: votes, feedback (for these three on their own)
 
+**Evidence of closure**:
+A sign from outside the inbox that a place closed: OSM newly tagging its object `disused:` or `abandoned:`, or its website's domain not found in DNS on two checks a day apart. It counts as a second source for a traveller's closure, never as a closure on its own.
+_Avoid_: closure proof, evidence (on its own, which means what travellers send about a new place)
+
 **Check**:
 Evidence that a new place is there as described.
 _Avoid_: verification

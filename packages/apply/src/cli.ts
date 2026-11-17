@@ -14,7 +14,7 @@ const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>
                   [--photo-licence <id>] [--publish-first-photo]
                   [--main <dir> --intake <url>]
                   [--recent-places <url>] [--review-preview <url>]
-                  [--geometry <file>]
+                  [--geometry <file>] [--dns-resolver <url>]
 
 Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
@@ -67,6 +67,12 @@ merged into the place it duplicates only when the two have the same name once
 tidied, are in the same group and less than 50 m apart, and no major road runs
 between them. Without it the run has no road data and merges no duplicate on
 its own: each goes to a reviewer as a duplicate case.
+--dns-resolver looks up, through that DNS over HTTPS JSON endpoint (such as
+https://cloudflare-dns.com/dns-query), the website domain of each place a
+traveller reported closed. NXDOMAIN on two runs at least a day apart counts as
+a second source for the closure, and the first is kept in
+<inbox>/evidence/nxdomain.json. HTTP errors, timeouts and other DNS answers
+never count. Off when left out.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
 
@@ -95,6 +101,7 @@ async function main(): Promise<number> {
       "recent-places": { type: "string" },
       "review-preview": { type: "string" },
       geometry: { type: "string" },
+      "dns-resolver": { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -110,6 +117,10 @@ async function main(): Promise<number> {
 
   if (values["recent-places"] !== undefined && !URL.canParse(values["recent-places"])) {
     console.error(`--recent-places is not a URL: ${values["recent-places"]}`);
+    return 2;
+  }
+  if (values["dns-resolver"] !== undefined && !values["dns-resolver"].startsWith("https://")) {
+    console.error(`--dns-resolver is not an https URL: ${values["dns-resolver"]}`);
     return 2;
   }
   const previewSecret = process.env.REVIEW_PREVIEW_SECRET;
@@ -140,6 +151,7 @@ async function main(): Promise<number> {
     ...(values["photo-licence"] ? { photoLicence: values["photo-licence"] } : {}),
     ...(values["publish-first-photo"] ? { holdFirstPhoto: false } : {}),
     ...(values.geometry ? { geometry: values.geometry } : {}),
+    ...(values["dns-resolver"] ? { dns: { resolver: values["dns-resolver"] } } : {}),
     ...(values["recent-places"] ? { recentList: intakeRecentList(values["recent-places"]) } : {}),
     ...(values["review-preview"] && previewSecret ? { reviewPreview: { url: values["review-preview"], secret: previewSecret } } : {}),
   });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FEE_RETIRED, type StoredFeedback } from "@opencampingdb/feedback";
-import { applyEdit, applyHeldReview, applyRules, ratingOf, REPORTS_TO_HIDE, reviewIdOf, type RulesInput } from "../src/rules.js";
+import { applyEdit, applyHeldReview, applyRules, ratingOf, REPORTS_TO_HIDE, reviewIdOf, type ClosureEvidence, type RulesInput } from "../src/rules.js";
 import type { Place, Review } from "../src/types.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
@@ -1026,6 +1026,69 @@ describe("closed and reopened", () => {
     expect(out.outcome(a)).toBe("waiting");
     expect(out.outcome(b)).toBe("waiting");
     expect(out.edits).toEqual([]);
+  });
+});
+
+describe("evidence of closure", () => {
+  const osm: ClosureEvidence = { kind: "osm_lifecycle", object: "node/123456", tags: ["disused:tourism=camp_site"], changeset: 191000001 };
+  const evidence = (...found: ClosureEvidence[]) => ({ extra: { closureEvidence: new Map([[PLACE, found]]) } });
+
+  it("one traveller's closure and OSM tagging the object disused: close the place, naming the evidence", () => {
+    const a = closed(0, "dev-a");
+    const out = run([a], { ...evidence(osm) });
+    expect(out.after()?.status).toBe("closed");
+    expect(out.outcome(a)).toBe("applied");
+    expect(out.changes.map((c) => c.summary)).toContain(
+      "status reported_closed to closed (1 device within 90 days, and OSM tagged node/123456 disused:tourism=camp_site in changeset 191000001)",
+    );
+  });
+
+  it("a closure from a human check and the website's domain gone from DNS twice close the place", () => {
+    const web = { ...closed(0, "dev-a"), human_checked: true, origin: "net-a" } as StoredFeedback;
+    const dns: ClosureEvidence = { kind: "nxdomain", domain: "example.org", first: at(0), confirmed: at(1) };
+    const out = run([web], { ...evidence(dns) });
+    expect(out.after()?.status).toBe("closed");
+    expect(out.changes.map((c) => c.summary)).toContain(
+      "status reported_closed to closed (1 device within 90 days, and example.org was not found in DNS on 2026-07-01 or 2026-07-02)",
+    );
+  });
+
+  it("evidence found in a later run, with nothing pending, closes a place a traveller reported closed", () => {
+    const earlier = applied(closed(0, "dev-a"));
+    const out = run([], { now: 20, history: [earlier], places: [place({ status: "reported_closed" })], ...evidence(osm) });
+    expect(out.after()?.status).toBe("closed");
+    const change = out.changes.find((c) => c.summary.startsWith("status reported_closed to closed"));
+    expect(change?.feedback).toEqual([earlier.id]);
+  });
+
+  it("evidence found later also closes a place a human-checked closure left open", () => {
+    const earlier = applied({ ...closed(0, "dev-a"), human_checked: true, origin: "net-a" } as StoredFeedback);
+    const out = run([], { now: 3, history: [earlier], ...evidence(osm) });
+    expect(out.after()?.status).toBe("closed");
+  });
+
+  it("evidence with no traveller's closure changes nothing", () => {
+    const dns: ClosureEvidence = { kind: "nxdomain", domain: "example.org", first: at(0), confirmed: at(1) };
+    const out = run([], { now: 2, ...evidence(osm, dns) });
+    expect(out.after()).toBeUndefined();
+    expect(out.changes).toEqual([]);
+  });
+
+  it("evidence does not count for a closure a later reopened report undid", () => {
+    const out = run([], { now: 5, history: [applied(closed(0, "dev-a")), applied(reopened(2, "dev-b"))], ...evidence(osm) });
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("evidence does not count for a closure older than 90 days", () => {
+    const out = run([], { now: 91, history: [applied(closed(0, "dev-a"))], places: [place({ status: "reported_closed" })], ...evidence(osm) });
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("evidence leaves an owner-verified place's closure to a person", () => {
+    const a = closed(0, "dev-a");
+    const out = run([a], { places: [place({ owner_verified: true })], ...evidence(osm) });
+    expect(out.after()).toBeUndefined();
+    expect(out.outcome(a)).toBe("waiting");
   });
 });
 

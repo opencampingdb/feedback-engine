@@ -9,6 +9,10 @@
 # has merged. It needs Actions: Read and write on the bot App. Remove the line
 # to leave releases to their own schedule.
 #
+# dns-resolver looks up the website domain of each place a traveller reported
+# closed. NXDOMAIN on two runs a day apart counts as a second source for the
+# closure. Remove the line to turn it off.
+#
 # Add claim-reviewers (GitHub logins, separated by commas) under with: to have
 # the run mention those people on the review PR when owner claims arrive.
 #
@@ -37,6 +41,7 @@ jobs:
       engine-ref: REPLACE_WITH_ENGINE_SHA
       intake-url: REPLACE_WITH_INTAKE_URL
       release-workflow: release.yml
+      dns-resolver: https://cloudflare-dns.com/dns-query
     secrets:
       app-client-id: ${{ secrets.OCDB_BOT_CLIENT_ID }}
       app-private-key: ${{ secrets.OCDB_BOT_PRIVATE_KEY }}
