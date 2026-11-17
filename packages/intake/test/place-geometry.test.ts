@@ -175,3 +175,47 @@ describe("plausible locations for new places at send time", () => {
     expect(await send(newPlace({ lat: -25.3, lon: 131.0 }), env(store, bucket(tiled(), true)))).toMatchObject({ state: "held", held_reason: "check_unavailable" });
   });
 });
+
+/**
+ * Two tiles the data repository's real build cut, committed as they are in its
+ * `geometry` release (see fixtures/place-geometry-real/README.md): one cell of
+ * the Great Australian Bight, with the sea below the Bunda Cliffs and the Eyre
+ * Highway (A1, trunk) running along their top.
+ */
+function realTiles(): Map<string, string> {
+  const tiles = new Map<string, string>();
+  for (const key of ["water/-317/1294.ndjson", "roads/-317/1294.ndjson"]) {
+    tiles.set(key, readFileSync(new URL(`./fixtures/place-geometry-real/${key}`, import.meta.url), "utf8"));
+  }
+  return tiles;
+}
+
+describe("plausible locations against tiles from the real data build", () => {
+  let store: ReturnType<typeof fakeD1>;
+  let handle: ReturnType<typeof createHandler>;
+
+  beforeEach(() => {
+    store = fakeD1();
+    handle = createHandler({ fetch: fakeServices(), now: () => NOW, randomBytes: () => crypto.getRandomValues(new Uint8Array(16)) });
+  });
+
+  const send = async (location: { lat: number; lon: number }, geometry: BucketLike) => {
+    const res = await handle(newPlace(location), env(store, geometry));
+    expect(res.status).toBe(202);
+    return (await res.json()) as { state?: string; held_reason?: string };
+  };
+
+  it("holds a new place pinned in the Great Australian Bight, 6 km out from the cliffs", async () => {
+    const geometry = bucket(realTiles());
+    expect(await send({ lat: -31.69, lon: 129.45 }, geometry)).toMatchObject({ state: "held", held_reason: "implausible_location" });
+    expect(geometry.reads).toContain("water/-317/1294.ndjson");
+  });
+
+  it("holds a new place pinned on the Eyre Highway's carriageway", async () => {
+    expect(await send({ lat: -31.62886, lon: 129.453484 }, bucket(realTiles()))).toMatchObject({ state: "held", held_reason: "implausible_location" });
+  });
+
+  it("lists a new place on the land 220 m inland of the highway, 800 m from the shore", async () => {
+    expect(await send({ lat: -31.62686, lon: 129.453484 }, bucket(realTiles()))).toMatchObject({ state: "live" });
+  });
+});
