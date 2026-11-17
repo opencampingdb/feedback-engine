@@ -500,17 +500,40 @@ describe("POST /v1/feedback/batch with a human check", () => {
     expect(queued.every((q) => q.human_checked === true && q.attested === undefined)).toBe(true);
   });
 
-  it("refuses the whole batch when its token was made for another body", async () => {
-    const res = await handle(humanBatch([fact(PLACE, "toilets", true)], () => `ok:${sha("something else")}`), e);
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("human_check_failed");
-    expect(store.db.prepare("SELECT COUNT(*) AS n FROM inbox_queue").get()).toEqual({ n: 0 });
+  const count = (table: string) => (store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+
+  it("answers every item of a batch whose token was made for another body as taken, and stores none", async () => {
+    const items = [fact(PLACE, "toilets", true), fact(PLACE, "showers", true), report(PLACE, { kind: "closed" })];
+    const res = await handle(humanBatch(items, () => `ok:${sha("something else")}`), e);
+    expect(res.status).toBe(200);
+    const answers = ((await res.json()) as { items: ItemAnswer[] }).items;
+    expect(answers).toEqual([
+      { status: 202, id: expect.stringMatching(/^fb_/), state: "held", held_reason: "not_attested" },
+      { status: 202, id: expect.stringMatching(/^fb_/), state: "held", held_reason: "not_attested" },
+      { status: 202, id: expect.stringMatching(/^fb_/) },
+    ]);
+    expect(count("inbox_queue")).toBe(0);
+    expect(count("report_evidence")).toBe(0);
+    expect(count("rate_counts")).toBe(0);
+    expect(store.db.prepare("SELECT day, reason, count FROM silent_drops").all()).toEqual([{ day: "2026-11-07", reason: "human_check_failed", count: 3 }]);
+    const progress = await handle(new Request(`https://intake.example/v1/feedback/progress?ids=${answers.map((a) => a.id).join(",")}`), e);
+    const read = ((await progress.json()) as { items: { state: string }[] }).items;
+    expect(read.map((p) => p.state)).toEqual(["received", "received", "received"]);
   });
 
-  it("refuses a batch with no token", async () => {
+  it("answers a batch with no token as taken, never asks Turnstile, and stores none", async () => {
     const res = await handle(humanBatch([fact(PLACE, "toilets", true)]), e);
-    expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: "human_check_required" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { items: ItemAnswer[] }).items).toEqual([{ status: 202, id: expect.stringMatching(/^fb_/), state: "held", held_reason: "not_attested" }]);
     expect(asked).toEqual([]);
+    expect(count("inbox_queue")).toBe(0);
+    expect(store.db.prepare("SELECT reason, count FROM silent_drops").all()).toEqual([{ reason: "human_check_required", count: 1 }]);
+  });
+
+  it("still refuses, item by item, what the key may never send in a dropped batch", async () => {
+    const res = await handle(humanBatch([review(PLACE), fact(PLACE, "toilets", true)]), e);
+    const answers = ((await res.json()) as { items: ItemAnswer[] }).items;
+    expect(answers.map((a) => a.status)).toEqual([403, 202]);
+    expect(answers[0]).toEqual({ status: 403, error: "type_not_allowed_for_app_key" });
   });
 });

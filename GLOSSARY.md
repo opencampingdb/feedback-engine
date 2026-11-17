@@ -22,6 +22,10 @@ _Avoid_: rejection, failure (for a check that ran and said no)
 A Cloudflare Turnstile token showing that a person filled in the form that sent a request. It says nothing about the device or app, so the items it carries are weighed as unattested ones.
 _Avoid_: attestation, captcha, proof of a genuine app
 
+**Silent drop**:
+An item the intake answers exactly as it answers an accepted one, with an id and progress, but never stores, so whoever sent it cannot tell which check it failed. Used for abuse that cannot be traced to a genuine install, such as a missing or failed human check. Only a count per day and reason is kept.
+_Avoid_: refusal (which always gives its reason), shadow ban
+
 ## Between releases
 
 **New place**:
