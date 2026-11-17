@@ -229,7 +229,11 @@ const meaning = (c: HeldCase, d: ReviewDecision) =>
         ? "keep showing the photo: its file name clearly names this place"
         : c.case === "place_change" && d === "approve"
           ? "keep the change: it is believable for this place"
-          : MEANINGS[d];
+          : c.case === "contact_check" && d === "confirm"
+            ? "keep the reported contact on the place: it is clearly the place's own, despite the failed checks"
+            : c.case === "contact_check" && d === "dismiss"
+              ? "take the reported contact off the place and put back what it had before: it is not the place's own, or it is spam"
+              : MEANINGS[d];
 
 /** What the model reads of a place. Values travellers or the owner sent are data, not instructions. */
 function placeView(place: Place) {
@@ -258,6 +262,12 @@ function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
       : []),
     ...(c.case === "place_change"
       ? ["In a place_change case, a traveller changed the place's name, kind or location (change) from one value (from) to another (to), and the place already shows the new value."]
+      : []),
+    ...(c.case === "contact_check"
+      ? [
+          "In a contact_check case, a traveller reported a contact for the place (the place's facts show it) and it failed automatic checks: the place's own website does not show it, its domain was registered recently or its age is unknown, or the address is in another state.",
+          "A newly registered domain or a contact unrelated to the place points to spam. A check that could not run (a website that timed out, a registry with no date) says little either way.",
+        ]
       : []),
     "Answer with JSON only: {\"decision\": ..., \"reason\": ..., \"sure\": true or false}.",
     `The decisions you may give for this case are: ${allowed.join(", ")}.`,
@@ -337,6 +347,7 @@ function caseEvidence(c: HeldCase, place: Place, duplicateOf: Place | undefined)
     ...(c.case === "vehicle_access_candidate" ? { fact: c.fact, value: c.value } : {}),
     ...(c.case === "commons_mismatch" ? { file: c.file, reporting_sources: c.sources } : {}),
     ...(c.case === "place_change" ? { change: c.change, from: c.from, to: c.to, ...(c.change === "location" ? { distance_m: c.distance_m } : {}) } : {}),
+    ...(c.case === "contact_check" ? { contact: c.fact, failed_checks: c.checks, found: c.problem, value_before: c.value } : {}),
   });
 }
 

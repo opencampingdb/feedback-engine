@@ -88,6 +88,10 @@ _Avoid_: pending, queued, quarantined
 A person, bot or AI that the maintainers allow to decide held items, named on every decision it makes.
 _Avoid_: moderator, admin
 
+**Contact check**:
+An automatic check on a reported contact that stands in for a person: the place's own website shows it, its domain is not newly registered, or an address is in the place's state.
+_Avoid_: verification (owners verify), link check (the link rules and the malware check)
+
 **Merge**:
 Folding a new place added twice into the place it duplicates, leaving the new place as a tombstone that points at it.
 _Avoid_: dedupe, delete (for a merge)
