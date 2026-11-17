@@ -23,6 +23,9 @@ import {
   decideContactReport,
   decideDoubt,
   decideFact,
+  DISPUTE_HOURS,
+  disputeValuesShown,
+  findDispute,
   distinctSources as distinctDevices,
   factRefusal,
   factsClearedBy,
@@ -42,9 +45,10 @@ import {
   type OpenDoubt,
   type Setter,
 } from "./decide.js";
+import { evidenceCounts } from "./closure-evidence.js";
 import type { CheckOutcome } from "./contact-checks.js";
 import { moderateReview } from "./moderation.js";
-import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase } from "./review.js";
+import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase, type PlaceChange } from "./review.js";
 import type { EarlierFact } from "./io.js";
 import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
@@ -70,11 +74,25 @@ export type { ClosedCase, HeldCase };
  */
 
 /** The rules for one item against one place live in `decide.ts`, shared with the intake. */
-export { inWindow, REVIEWED_FACTS, WINDOW_DAYS };
+export { DISPUTE_HOURS, inWindow, REVIEWED_FACTS, WINDOW_DAYS };
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WINDOW_MS = WINDOW_DAYS * DAY_MS;
 
 /** Kind given to a draft record for a `new_place` report until a person sets it. */
+/** Report kinds that change a fact, which a freeze stops. */
+const FREEZES: ReadonlySet<string> = new Set(["fact", "doubt", "clear", "contact"]);
+
+/**
+ * When a freeze lifted: the date the data has on the disputed fact, when it
+ * is at or after the freeze. A reviewer's decision on the `disputed` case
+ * sets the fact with the time of the decision, and so does a person who sets
+ * it on the review PR. Undefined while the place is still frozen.
+ */
+export function liftOf(place: Place, freeze: FreezeRecord): string | undefined {
+  const date = place.fact_dates?.[freeze.fact];
+  return date !== undefined && date >= freeze.at ? date : undefined;
+}
+
 export const DRAFT_KIND = "campground";
 const DRAFT_GROUP = "overnight";
 
@@ -117,6 +135,19 @@ export interface Decision {
    * it back as the open `fact_doubted` case (see `openDoubt`).
    */
   doubted?: DoubtedRecord;
+  /**
+   * On the reports that froze a place: the disputed fact and when the freeze
+   * started. The inbox keeps it with the outcome, and later runs read it back
+   * (see `standingFreeze`) until the data has a value for the fact set at or
+   * after that time, which a reviewer's decision on the `disputed` case sets.
+   */
+  frozen?: FreezeRecord;
+}
+
+/** A freeze, as the inbox keeps it on the reports that froze the place. */
+export interface FreezeRecord {
+  fact: FactName;
+  at: string;
 }
 
 /** A fact doubts took down, as the inbox keeps it on the doubt that did it. */
@@ -209,11 +240,47 @@ export interface RulesInput {
    */
   contactChecks?: ReadonlyMap<string, readonly CheckOutcome[]>;
   /**
+   * Evidence of closure found outside the inbox, by place id (see
+   * `closure-evidence.ts`). Each kind counts as one more source for a
+   * closure a traveller sent, never as a closure on its own. None when left out.
+   */
+  closureEvidence?: ReadonlyMap<string, readonly ClosureEvidence[]>;
+  /**
+   * Fact reports whose source link shows their value (`confirmSourceLinks`).
+   * The page counts as one more source for that value (kind `source_link`):
+   * one report and its page are two sources. None when left out.
+   */
+  sourceConfirmed?: ReadonlySet<string>;
+  /**
    * Each signed-in contributor's track record (`trust/contributors.json` in
    * the inbox, trust.ts). Trust as it stands before the run decides this
    * run's items. Left out, no one is trusted yet.
    */
   trust?: TrustRecord;
+}
+
+/**
+ * Evidence that a place has closed, from outside the inbox:
+ * - `osm_lifecycle`: OSM tagged the place's object `disused:` or `abandoned:`
+ *   since the version the record follows, in `changeset`.
+ * - `nxdomain`: the domain of the place's website was not found in DNS
+ *   (NXDOMAIN) at `first` and again at `confirmed`, at least a day later.
+ */
+export type ClosureEvidence =
+  | { kind: "osm_lifecycle"; object: string; tags: readonly string[]; changeset: number }
+  | { kind: "nxdomain"; domain: string; first: string; confirmed: string };
+
+/** How a note names one piece of evidence of closure. */
+function describeEvidence(e: ClosureEvidence): string {
+  return e.kind === "osm_lifecycle"
+    ? `OSM tagged ${e.object} ${e.tags.join(", ")} in changeset ${e.changeset}`
+    : `${e.domain} was not found in DNS on ${e.first.slice(0, 10)} or ${e.confirmed.slice(0, 10)}`;
+}
+
+/** Why a closure counted: the travellers, then each piece of evidence. */
+function closureWhy(devices: number, evidence: readonly ClosureEvidence[]): string {
+  const travellers = `${devices} device${devices === 1 ? "" : "s"} within ${WINDOW_DAYS} days`;
+  return evidence.length === 0 ? travellers : `${travellers}, and ${evidence.map(describeEvidence).join(", and ")}`;
 }
 
 /**
@@ -508,6 +575,7 @@ function dataCheckFailures(input: RulesInput, out: RulesOutput): Map<string, str
 function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): RulesOutput {
   const now = Date.parse(input.now);
   const nowIso = new Date(now).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const sourceConfirmed = input.sourceConfirmed ?? new Set<string>();
   const decisions = new Map<string, Decision>();
   const working = new Map<string, Place>();
   const newReviews = new Map<string, Review[]>();
@@ -695,12 +763,15 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   );
   // Doubts before facts, so a confirmation sent after a takedown in this run can restore it.
   const downInRun = new Map<string, DoubtedRecord>();
-  applyDoubts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "doubt"));
-  applyFacts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
+  // A disputed place is frozen first: nothing below changes a fact on it.
+  const frozenOut = applyFreezes(known.filter((i): i is ReportItem => i.type === "report" && FREEZES.has(i.report.kind as string)));
+  const unfrozen = known.filter((i) => !frozenOut.has(i.id));
+  applyDoubts(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "doubt"));
+  applyFacts(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
   applyNewPlaces(known.filter((i): i is ReportItem => isNewPlaceReport(i)), newPlaceEvidence);
   // After facts and new places, so a value set in this run can be cleared by its sender in it too.
-  applyClears(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "clear"));
-  applyContactReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "contact"));
+  applyClears(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "clear"));
+  applyContactReports(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "contact"));
   applyCommonsReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "commons_mismatch"));
   routeToPerson(known.filter((i): i is ReportItem => i.type === "report"));
 
@@ -1253,11 +1324,17 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   }
 
   function applyStatus(items: (ReportItem | CheckItem)[]): void {
-    for (const placeId of new Set(items.map((i) => i.place as string))) {
+    // Places with evidence of closure are looked at too, so evidence found after the closure's own run counts.
+    const withEvidence = [...(input.closureEvidence?.keys() ?? [])].filter((id) => {
+      const known = input.places.get(id);
+      return known !== undefined && evidenceCounts(known);
+    });
+    for (const placeId of new Set([...items.map((i) => i.place as string), ...withEvidence])) {
       const mine = items.filter((i) => i.place === placeId);
       const evidence = [...input.history.filter((h) => h.place === placeId), ...mine].sort(byReceived);
       const place = record(placeId);
       const statusBefore = place.status;
+      const found = input.closureEvidence?.get(placeId) ?? [];
 
       // Evidence one way counts only if it came after the latest evidence the other way.
       const latest = (at: number, test: (i: StoredFeedback) => boolean) =>
@@ -1308,10 +1385,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             continue;
           }
           // A closure from a human check (a website) is one source: the place stays open until a
-          // second source, or an attested report, agrees. It still counts towards closing.
+          // second source, an attested report or evidence of closure agrees. It still counts towards closing.
           if (place.status === "open" && isReport && item.human_checked === true) {
             const closing = supporting(at, isClosureEvidence, isReopenEvidence);
-            if (distinctDevices(closing) < 2 && !closing.some((e) => e.attested !== undefined)) {
+            if (distinctDevices(closing) < 2 && !closing.some((e) => e.attested !== undefined) && found.length === 0) {
               decide(item, "applied", "closure from a human check counted as one source: the place stays open until a second source agrees");
               continue;
             }
@@ -1321,14 +1398,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             note(placeId, "status open to reported_closed", true, [item]);
           }
           const devices = supporting(at, isClosureEvidence, isReopenEvidence);
-          if (place.status === "reported_closed" && distinctDevices(devices) >= 2) {
+          // Each kind of evidence of closure counts as one more source.
+          if (place.status === "reported_closed" && distinctDevices(devices) + found.length >= 2) {
             place.status = "closed";
-            note(
-              placeId,
-              `status reported_closed to closed (${distinctDevices(devices)} devices within ${WINDOW_DAYS} days)`,
-              true,
-              devices,
-            );
+            note(placeId, `status reported_closed to closed (${closureWhy(distinctDevices(devices), found)})`, true, devices);
           }
           decide(item, "applied", isReport ? `place is ${place.status}` : "check recorded");
           continue;
@@ -1363,6 +1436,15 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           decide(item, "waiting", "a closed place needs a second device to reopen it");
         } else {
           decide(item, "applied", "check recorded");
+        }
+      }
+      // Evidence of closure counts as one more source for a closure travellers sent, in this run or an
+      // earlier one, that nothing since has undone. It never closes a place on its own, nor one the owner manages.
+      if (found.length > 0 && evidenceCounts(place)) {
+        const devices = supporting(now, isClosureEvidence, isReopenEvidence);
+        if (distinctDevices(devices) >= 1 && distinctDevices(devices) + found.length >= 2) {
+          note(placeId, `status ${place.status} to closed (${closureWhy(distinctDevices(devices), found)})`, true, devices);
+          place.status = "closed";
         }
       }
       // Marks the status as coming from feedback, so the OSM notes can tell it from a contributed closure.
@@ -1412,6 +1494,86 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     return input.history.filter(
       (h): h is ReportItem => h.type === "report" && h.report.kind === "fact" && h.place === placeId && h.report.fact === fact && wasApplied(h),
     );
+  }
+
+  /**
+   * Freezes a disputed place (`findDispute`): conflicting values for one fact
+   * from DISPUTE_SOURCES sources within DISPUTE_HOURS. The reports in the
+   * dispute go to the reviewer as one `disputed` case, and every other
+   * report that would change a fact on the place (a fact report, doubt,
+   * clear or contact report) waits. A later run keeps the place frozen
+   * (`standingFreeze`) until the data holds a value for the disputed fact set
+   * at or after the freeze, which the reviewer's decision writes; then
+   * reports of that fact sent before the decision are refused, and the rest
+   * are decided as usual. Answers the ids of the items decided here.
+   */
+  function applyFreezes(items: ReportItem[]): Set<string> {
+    const out = new Set<string>();
+    const byPlace = new Map<string, ReportItem[]>();
+    for (const item of items) byPlace.set(item.place as string, [...(byPlace.get(item.place as string) ?? []), item]);
+    for (const [placeId, mine] of byPlace) {
+      const place = input.places.get(placeId)!;
+      const standing = standingFreeze(placeId);
+      const liftedAt = standing === undefined ? undefined : liftOf(place, standing);
+      if (standing !== undefined && liftedAt === undefined) {
+        for (const item of mine) {
+          decide(item, "waiting", `the place is frozen while a reviewer settles conflicting values for ${standing.fact}`);
+          out.add(item.id);
+        }
+        continue;
+      }
+      // Reports of a fact a reviewer settled, sent before the decision, are over.
+      const settled = (r: StoredFeedback) =>
+        standing !== undefined && liftedAt !== undefined && r.type === "report" && r.report.fact === standing.fact && r.received <= liftedAt;
+      for (const item of mine) {
+        if (!settled(item)) continue;
+        decide(item, "refused", `a reviewer settled ${standing!.fact} after conflicting values`);
+        out.add(item.id);
+      }
+      const open = mine.filter((i) => !out.has(i.id));
+      const earlier = input.history.filter(
+        (h) => h.place === placeId && h.type === "report" && h.report.kind === "fact" && (h as { outcome?: { result?: string } }).outcome?.result !== "refused" && !settled(h),
+      );
+      const dispute = findDispute([...earlier, ...open], placeId);
+      const ids = new Set(dispute?.feedback ?? []);
+      if (dispute === null || !open.some((i) => ids.has(i.id))) continue;
+      const frozen: FreezeRecord = { fact: dispute.fact, at: dispute.at };
+      const counted = open.filter((i) => ids.has(i.id));
+      for (const item of open) {
+        out.add(item.id);
+        if (ids.has(item.id)) {
+          decide(item, "needs_review", `${dispute.sources} sources sent conflicting values for ${dispute.fact} within ${DISPUTE_HOURS} hours, so the place is frozen and a reviewer decides`);
+          decisions.get(item.id)!.frozen = frozen;
+        } else {
+          decide(item, "waiting", `the place is frozen while a reviewer settles conflicting values for ${dispute.fact}`);
+        }
+      }
+      // A note edit, so the run lists the case on the review PR although no file changes.
+      edits.push({ kind: "note", place: placeId, feedback: counted.at(-1)!.id });
+      note(placeId, `frozen: ${dispute.sources} sources sent conflicting values for ${dispute.fact} within ${DISPUTE_HOURS} hours, so no fact changes until a reviewer decides`, false, counted);
+      held.push({
+        case: "disputed",
+        place: placeId,
+        location: place.location,
+        kind: place.kind,
+        fact: dispute.fact,
+        ...(disputeValuesShown(dispute.fact, dispute.values) ? { values: dispute.values } : {}),
+        sources: dispute.sources,
+        feedback: dispute.feedback,
+      });
+    }
+    return out;
+  }
+
+  /** The latest freeze the inbox keeps for a place, on a report in the history. */
+  function standingFreeze(placeId: string): FreezeRecord | undefined {
+    let found: FreezeRecord | undefined;
+    for (const h of input.history) {
+      const kept = (h as { outcome?: { frozen?: FreezeRecord } }).outcome?.frozen;
+      if (h.place !== placeId || kept === undefined) continue;
+      if (found === undefined || kept.at > found.at) found = kept;
+    }
+    return found;
   }
 
   function applyFacts(items: ReportItem[]): void {
@@ -1494,8 +1656,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
               : decision.reason === "disagreement"
                 ? `${fact} set to ${JSON.stringify(value)}, which another device disagrees with (check before merging)`
                 : `${fact} set to ${JSON.stringify(value)} (check before merging)`;
+        // A person still decides a contact, but sees that its page shows it.
+        const shown = sourceConfirmed.has(item.id) ? ` A source link on ${new URL(item.report.source as string).hostname} shows it.` : "";
         edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
-        note(placeId, summary, false, [item]);
+        note(placeId, `${summary}${shown}`, false, [item]);
         decide(item, "needs_review", decision.why);
       };
 
@@ -1519,12 +1683,17 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           if (!open.has(item)) continue;
           const value = item.report.value as FactValue;
           const agreeing = [...open].filter((r) => sameValue(r.report.value, value) && inWindow(r, time(item)));
-          if (distinctDevices(agreeing) < 2) continue;
+          // A source link that shows the contact is one more source, as for any other fact.
+          const linked = agreeing.find((r) => sourceConfirmed.has(r.id));
+          if (distinctDevices(agreeing) + (linked ? 1 : 0) < 2) continue;
+          const counted = linked
+            ? `${distinctDevices(agreeing) === 1 ? "one device" : `${distinctDevices(agreeing)} devices`} and a source link (source_link) on ${new URL(linked.report.source as string).hostname}`
+            : `${distinctDevices(agreeing)} devices`;
           setFact(value);
-          note(placeId, `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days, contact checks passed)`, true, agreeing);
+          note(placeId, `${fact} set to ${JSON.stringify(value)} (${counted} within ${WINDOW_DAYS} days, contact checks passed)`, true, agreeing);
           for (const r of agreeing) {
             open.delete(r);
-            decide(r, "applied", `${fact} set to ${JSON.stringify(value)}`);
+            decide(r, "applied", `${fact} set to ${JSON.stringify(value)}${linked ? ` (${counted})` : ""}`);
           }
         }
         for (const item of open) decide(item, "waiting", `${fact} passed the contact checks, and waits for a second device to agree`);
@@ -1592,7 +1761,13 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         }
         const at = time(item);
         const agreeing = [...open].filter((r) => r.report.value === value && inWindow(r, at));
-        if (distinctDevices(agreeing) < 2) continue;
+        // A source link that shows the value is one more source, however many of the reports carry one.
+        const linked = agreeing.find((r) => sourceConfirmed.has(r.id));
+        const sources = distinctDevices(agreeing) + (linked ? 1 : 0);
+        if (sources < 2) continue;
+        const counted = linked
+          ? `${distinctDevices(agreeing) === 1 ? "one device" : `${distinctDevices(agreeing)} devices`} and a source link (source_link) on ${new URL(linked.report.source as string).hostname}`
+          : `${distinctDevices(agreeing)} devices`;
         if (place.fact_sources[fact] === "owner") {
           // The verified owner set this value. A person decides between them.
           edits.push({ kind: "fact", place: placeId, fact, value, feedback: agreeing[0]!.id });
@@ -1606,14 +1781,14 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         setFact(value);
         note(
           placeId,
-          `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days)${openCase !== undefined ? CLOSES_CASE : ""}`,
+          `${fact} set to ${JSON.stringify(value)} (${counted} within ${WINDOW_DAYS} days)${openCase !== undefined ? CLOSES_CASE : ""}`,
           true,
           agreeing,
         );
         if (openCase !== undefined) closeCase("replaced", agreeing);
         for (const r of agreeing) {
           open.delete(r);
-          decide(r, "applied", `${fact} set to ${JSON.stringify(value)}`);
+          decide(r, "applied", `${fact} set to ${JSON.stringify(value)}${linked ? ` (${counted})` : ""}`);
         }
         for (const r of [...open]) {
           if (time(r) <= at) {
@@ -2242,6 +2417,33 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     }
   }
 
+  /**
+   * The `place_change` case for a name, kind or location report on a place
+   * in the data, with the value it replaces as the data has it, where that
+   * value came from and when, for the AI reviewer to keep or put back.
+   */
+  function placeChange(item: ReportItem, change: PlaceChange, to: string | { lat: number; lon: number }): HeldCase {
+    const current = input.places.get(item.place as string)!;
+    const from = change === "name" ? current.name : change === "kind" ? current.kind : { ...current.location };
+    const source = current.fact_sources[change];
+    const date = current.fact_dates?.[change];
+    return {
+      case: "place_change",
+      place: current.id,
+      ...(current.standing !== undefined ? { standing: current.standing } : {}),
+      location: { lat: roundCoord(current.location.lat), lon: roundCoord(current.location.lon) },
+      kind: current.kind,
+      change,
+      from,
+      ...(change === "kind" ? { from_group: current.group } : {}),
+      to,
+      ...(source !== undefined ? { from_source: source } : {}),
+      ...(date !== undefined ? { from_date: date } : {}),
+      ...(change === "location" ? { distance_m: Math.round(distanceM(current.location, to as { lat: number; lon: number })) } : {}),
+      feedback: [item.id],
+    };
+  }
+
   function routeToPerson(items: ReportItem[]): void {
     for (const item of items) {
       const { kind, note: text, value } = item.report;
@@ -2252,11 +2454,13 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           edits.push({ kind: "location", place: item.place, location, feedback: item.id });
           const where = `${item.location.lat}, ${item.location.lon}`;
           note(item.place, `location moved to ${where}${quote(text)} (check before merging)`, false, [item]);
+          held.push(placeChange(item, "location", location));
+          decide(item, "needs_review", "location changes are checked by the AI reviewer or a person");
         } else {
           edits.push({ kind: "note", place: item.place, feedback: item.id });
           note(item.place, `location reported wrong, no new location given${quote(text)}`, false, [item]);
+          decide(item, "needs_review", "location reports are checked by a person");
         }
-        decide(item, "needs_review", "location reports are checked by a person");
       } else if (problem !== null && item.place) {
         // The value never reaches the review checkout: a person reads it in the inbox.
         edits.push({ kind: "note", place: item.place, feedback: item.id });
@@ -2265,7 +2469,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       } else if (kind === "name" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "name", place: item.place, name: item.report.value, feedback: item.id });
         note(item.place, `name changed to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
-        decide(item, "needs_review", "names are checked by a person");
+        held.push(placeChange(item, "name", item.report.value));
+        decide(item, "needs_review", "names are checked by the AI reviewer or a person");
       } else if (kind === "description" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "description", place: item.place, description: item.report.value, feedback: item.id });
         note(item.place, `description set to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
@@ -2279,7 +2484,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         }
         edits.push({ kind: "kind", place: item.place, placeKind: picked, group, feedback: item.id });
         note(item.place, `kind changed to ${picked}${quote(text)} (check before merging)`, false, [item]);
-        decide(item, "needs_review", "kind changes are checked by a person");
+        held.push(placeChange(item, "kind", picked));
+        decide(item, "needs_review", "kind changes are checked by the AI reviewer or a person");
       } else if (kind === "remove" && item.place) {
         // Only places added in the last 90 days come down on reports. On any other place a person decides.
         edits.push({ kind: "note", place: item.place, feedback: item.id });

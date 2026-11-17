@@ -102,6 +102,7 @@ npx wrangler secret put URLHAUS_KEY -c wrangler.deploy.toml
 - `GH_APP_PRIVATE_KEY` accepts the PEM GitHub gives you (PKCS#1) or PKCS#8.
 - `PLACES_TOKEN`, needed with `RECENT_LIST`, is a long random string (`openssl rand -hex 32`). The apply workflow and the data release send it to call the intake's operator routes. Keep the value: steps 9 and 10 need it again.
 - `URLHAUS_KEY`, needed with `RECENT_LIST`, is a free abuse.ch auth key from the abuse.ch authentication portal. The intake checks every link an item would publish with URLhaus. The `[ai]` binding in `wrangler.toml` gives the intake Workers AI for the Llama Guard check, so the Cloudflare account needs Workers AI. A check that isn't set up holds every item that needs it.
+- `CROWDSEC_BLOCKLIST_CREDENTIALS`, optional, turns on network reputation with the `CROWDSEC_BLOCKLIST_URL` variable ([Network reputation](#network-reputation)). It is the Basic auth username and password of a CrowdSec blocklist integration, as `username:password`. Without it, or without the variable, no list is fetched and no address is looked up.
 - `GOOGLE_SERVICE_ACCOUNT`, needed only for an app key with `android`, is the JSON key file of a Google Cloud service account in the project linked to the app in Play Console, allowed to decode integrity tokens: `npx wrangler secret put GOOGLE_SERVICE_ACCOUNT -c wrangler.deploy.toml < key.json`.
 
 Setting a secret deploys it at once. To revoke an app key, set `APP_KEYS` again without it.
@@ -330,8 +331,9 @@ The apply workflow keeps the list in step with these routes, each with `authoriz
 | `POST /v1/places/recent/in-data` | `{"ids": [...], "at": "<ISO time>"}`, 1 to 500 feedback ids | Says data `main` holds those items' changes as of `at` (the intake's own time when `at` is later). Each recent change keeps the first time it is told and is deleted 7 days later. | `{"marked"}` |
 | `POST /v1/places/recent/overruled` | `{"ids": [...], "refused": [...]}` | Names items the apply decided other than applying them, and among them the ones it refused. Their recent changes leave the list at once and their reports count as held. Only a refused item counts against its contributor's track record. `refused` may be left out. | `{"removed"}` |
 | `POST /v1/places/recent/doubt-cases` | `{"cases": [{"place", "fact", "value", "taken_down_at", "feedback_id"}]}`, 1 to 500 | Names facts the apply took down after doubts in the last 90 days, with the value each had, when the doubt that took it down was received (to the second, UTC) and that doubt. The intake opens the same case its own takedowns open, so a later report of the value is decided as a confirmation. A case replaces the one kept for its place and fact only when its takedown is later and that one was not closed after it. | `{"opened"}` |
+| `POST /v1/places/recent/freezes` | `{"freezes": [{"place", "fact", "frozen_at", "lifted_at"?}]}`, 1 to 500 | Names each place the apply froze over conflicting values in the last 90 days ([Frozen places](#frozen-places)), the disputed fact and when the freeze started, with `lifted_at` once the reviewer's value for the fact is in the data. A freeze replaces the one kept for its place when it started no earlier, or when it lifted at or after the kept one started. | `{"written"}` |
 
-`in-data` and `overruled` skip ids with no recent change, and the apply sends every doubt case on every run, so sending again changes nothing. A recent change the data never takes leaves the list 7 days after it was accepted.
+`in-data` and `overruled` skip ids with no recent change, and the apply sends every doubt case and freeze on every run, so sending again changes nothing. A recent change the data never takes leaves the list 7 days after it was accepted.
 
 ### Progress
 
@@ -358,6 +360,14 @@ With the place index loaded, the intake decides `fact`, `contact`, `doubt` and `
 
 A live fact, contact takedown or doubt takedown is a recent change, listed under `changes` (a takedown has a null `value`). A live new place is listed with its description, fee and contacts. The inbox item records the decision as `intake`, and the apply still writes the data. An attested contact goes live at send time only when the place's own website on record shows it, read for at most 3 seconds (the website check of the apply's contact checks, run from the Worker). Anything else is held as `contact_check`, and the apply run decides it with every contact check. It decides each item again with its own rules, but an item the intake held for a check (`text_check`, `link_check`, `ai_check`, `daily_cap`, `repeated_text` or `check_unavailable`) goes to a person on the review PR, never into the data on its own.
 
+#### Frozen places
+
+When three or more independent sources send three or more different values for one fact on one place within 24 hours, the place is frozen. A source counts once, with its latest value, so one source changing its mind is not a dispute, and neither is two sources disagreeing, which the disagreement rule sends to a person. While a place is frozen, no fact report, doubt, clear or contact report changes it: the intake holds each as `disputed`, and the apply leaves them waiting in the inbox.
+
+The apply sends the reports in the dispute to the reviewer as one `disputed` case, with the fact, the values (left out for a contact, the address or values with free words, which a person reads in the inbox) and the number of sources. The AI reviewer may set the fact to one of those values or the place's current one, dated at the decision, or leave it for a person. A dispute about an owner's value, or on a place with a verified owner, always goes to a person. The freeze lifts once the data holds a value for the disputed fact dated at or after the freeze: the reviewer's decision once the review PR merges, or a person setting the fact on the review PR. Reports of that fact sent before the decision are then refused, and the rest are decided as usual.
+
+The intake finds a dispute among the reports it decided itself and freezes the place at once, and the apply sends its own freezes, and their lifts, to `POST /v1/places/recent/freezes` on every run. The `frozen_places` table (migration `0020`) keeps one row a place, and the scheduled job deletes rows 90 days after the freeze. The constants are `DISPUTE_HOURS` and `DISPUTE_SOURCES` in `packages/apply/src/decide.ts`.
+
 ### Repeated text
 
 With `VECTORIZE`, the intake checks free text for repeats across sources, after the text checks, the daily cap and URLhaus, and before Llama Guard, since an embedding costs less. The free text is a report's name, description and note (with its contact details removed), the free words of a fact value, such as an opening hours comment or the operator, and a review's text. Texts shorter than 40 characters, such as most names, are not checked.
@@ -379,7 +389,7 @@ The AI reviewer runs from the scheduled job, at most once every 10 minutes, on t
 - `REVIEW_BOT_LOGINS` set to the bot logins whose PR comments count, comma separated: `<app slug>[bot]` for the apply's App and for the intake's (often one App does both);
 - the intake's App installed on `data` in the same installation as `inbox`, so `GH_INSTALLATION_ID` stays the same, with **Pull requests: Read and write**. Its token has only `contents: write` and `pull_requests: write` on `data`.
 
-It reads the `held-case` lines in the PR body and in comments from those bot logins and from the repository's owners, members and collaborators, never from anyone else, other GitHub Apps included. The rules settle what they can first, without the model: a contact or description that waits in the inbox, a new place's note, a place with a verified owner or a contact the owner set, a blocked contributor, a contact taken down after a `spam` report, a doubted fact the owner set or that came from OSM, a case the apply's rules closed and a case that is out of date are all left to a person.
+It reads the `held-case` lines in the PR body and in comments from those bot logins and from the repository's owners, members and collaborators, never from anyone else, other GitHub Apps included. The rules settle what they can first, without the model: a contact or description that waits in the inbox, a new place's note, a place with a verified owner or a contact the owner set, a blocked contributor, a contact taken down after a `spam` report, a doubted fact the owner set or that came from OSM, a case the apply's rules closed and a case that is out of date are all left to a person. So are a traveller's name, kind or location change to an owner's value, a move of more than 500 m, and a new name that matches neither the name from OSM nor the title or a heading of the place's own website. For a name change the reviewer fetches the website on record once (8 seconds and 200 KB at most, never following a redirect to another host); a site it can't read confirms nothing, so the case goes to a person. Names are compared without case, accents or punctuation, and a website confirms a name it shows whole in its title or an `h1` to `h3` heading.
 
 It asks the model (`REVIEW_MODEL`, by default `@cf/meta/llama-3.3-70b-instruct-fp8-fast`) about up to 5 of the rest a run. Each case allows only its own decisions:
 
@@ -392,11 +402,12 @@ It asks the model (`REVIEW_MODEL`, by default `@cf/meta/llama-3.3-70b-instruct-f
 | `fact_doubted`, still on the place | `dismiss`, `leave` |
 | `commons_mismatch` | `confirm`, `dismiss`, `leave` |
 | `contact_check` | `confirm`, `dismiss`, `leave` |
+| `place_change` | `approve`, `revert`, `leave` |
 | any other | `leave` |
 
 On a `contact_check` case the model reads the reported contact on the place, the checks it failed and what they found. `confirm` keeps the contact the review PR set, and `dismiss` puts back the value the place had before, or takes the contact off when it had none. A contact on a place with a verified owner, or one the owner set, is left to a person.
 
-An answer the model isn't sure of, or one that can't be read, is `leave`. A model call that fails or takes longer than 30 seconds is logged, and the run goes on to the next case. The case is asked about again next run. Its failure counts in the `review_failures` table only when another model call in the same run answered, so an outage counts nothing, or when it was the run's only model call and its last counted failure was at least 30 minutes earlier. Once a case has 3 counted failures it is `leave`, for a person, so a lone case is left only after its failures span at least an hour. The decisions that change a place go to `feedback/review` as one commit at the end of the run, through the Git Data API, with the reviewer (`ai:<model>`) and each reason in the message. A file another writer changed on the branch since the run read it is left out with its decisions, which are decided again next run. Each run adds one comment with a `review-decision` line per decision that landed. A case with a decision is not asked about again. A person can reverse any decision on the PR before merging it.
+A `place_change` is on the place in the PR already: `approve` keeps it and writes nothing, and `revert` puts the earlier name, kind or location back with its source and date. An answer the model isn't sure of, or one that can't be read, is `leave`. A model call that fails or takes longer than 30 seconds is logged, and the run goes on to the next case. The case is asked about again next run. Its failure counts in the `review_failures` table only when another model call in the same run answered, so an outage counts nothing, or when it was the run's only model call and its last counted failure was at least 30 minutes earlier. Once a case has 3 counted failures it is `leave`, for a person, so a lone case is left only after its failures span at least an hour. The decisions that change a place go to `feedback/review` as one commit at the end of the run, through the Git Data API, with the reviewer (`ai:<model>`) and each reason in the message. A file another writer changed on the branch since the run read it is left out with its decisions, which are decided again next run. Each run adds one comment with a `review-decision` line per decision that landed. A case with a decision is not asked about again. A person can reverse any decision on the PR before merging it.
 
 #### The second stage
 
@@ -425,7 +436,7 @@ A run that stops after it published its automatic changes, before it recorded it
 
 The workflow reads the recent bot PRs and their comments through GitHub's GraphQL API, which gives each author's account type. A PR or comment counts as the bot's only when its author is an account of type Bot with the bot App's login: a person's account with the same name never counts.
 
-The review PR body lists every held case under "Held cases", one line each: `- held-case` and a JSON object with `case` (`duplicate`, `hidden`, `contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `commons_mismatch`, `contact_check` or `note`), `place`, `standing` (left out for a place travellers did not add), `location`, `kind`, the case's details (`duplicate_of` and `distance_m`, `reports` and `reasons` or `blocked`, the facts left off in `contacts`, which may include `address`, the text check a description failed in `problem`, the `contributor`) and the `feedback` ids to read in the inbox. A `note` case is a new place whose traveller wrote a note, which may hold something the form had no field for: read it in the inbox item and add what it says to the place, or to the record it was merged into, by hand. A triage agent, a bot or the AI reviewer can read these lines instead of the prose.
+The review PR body lists every held case under "Held cases", one line each: `- held-case` and a JSON object with `case` (`duplicate`, `hidden`, `contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `commons_mismatch`, `contact_check`, `note` or `place_change`), `place`, `standing` (left out for a place travellers did not add), `location`, `kind`, the case's details (`duplicate_of` and `distance_m`, `reports` and `reasons` or `blocked`, the facts left off in `contacts`, which may include `address`, the text check a description failed in `problem`, the `contributor`) and the `feedback` ids to read in the inbox. A `place_change` case is a traveller's name, kind or location report on a place, with the edit already in the PR: `change` (`name`, `kind` or `location`), the value it replaces in `from` (with `from_group` for a kind), the new value in `to`, where the old value came from and when in `from_source` and `from_date`, and for a move `distance_m`. A name that fails the text checks, and a location report without a new location, are not listed: a person reads them in the inbox. A `note` case is a new place whose traveller wrote a note, which may hold something the form had no field for: read it in the inbox item and add what it says to the place, or to the record it was merged into, by hand. A triage agent, a bot or the AI reviewer can read these lines instead of the prose.
 
 - A `contact_withdrawn` case is a contact taken off a place after reports from two sources within 90 days, one of them attested. It carries `fact`, `value` and `reasons`. `value` is the place's own published contact, not something a traveller sent, so it is in the PR body. The contact is already off the place through `feedback/auto`. To restore it, set `facts.<fact>` back to `value` on the place in the review PR. Reports sent before the takedown no longer count against it.
 - A `contact_check` case is a traveller's contact that failed the automatic contact checks (`--contact-checks`). It carries `fact`, `checks` (the checks it failed: `website`, `domain_age` or `address`), `problem` (what they found, never the reported value) and `value`, what the place published before, when it had one. The reported contact is set on the place in the review PR. To refuse it, set `facts.<fact>` back to `value`, or remove it when there is no `value`.
@@ -436,6 +447,10 @@ The review PR body lists every held case under "Held cases", one line each: `- h
 New places are written with their `standing` from the SDK's `newPlaceStanding`. A `shown` or `confirmed` place goes on `feedback/auto` when its report was attested, has a contributor and its note passes the SDK's text checks, as the intake requires to list it. Checks, `remove` reports and the adder's `withdraw` on a place added in the last 90 days work its standing out again: reports from two devices on two client networks (three once confirmed) set it to `hidden`, and a place withdrawn within 24 hours is not written, or its record is deleted. A place within 150 m of another in the same group, a place hidden before it was published, and a place the intake would not list are drafted on `feedback/review` with standing `held` or `hidden`: set `standing` to `shown` to publish it, or close the PR. A published new place carries its description, fee, contacts and address. A contact or address that fails the SDK's `contactProblem` link checks, or a description that fails the text checks, stays in the inbox for a person.
 
 Reports set a place's `standing` again on later runs unless a person's decision is on its record. To restore a hidden place, set `"standing": "shown"` and `"moderator": {"action": "restore", "at": "<now>"}` on the record, on the review PR or in a PR to `main`. Reports up to `at` no longer count. To hide one, set `"standing": "hidden"` and `"moderator": {"action": "hide", "at": "<now>"}`: it stays hidden whatever travellers send. `at` is a UTC time such as `2026-11-03T09:00:00Z` or a day such as `2026-11-03`. Only the latest decision is kept. The note on a place hidden before it was published gives the line to paste.
+
+### Source links
+
+A fact report may carry a source link (`report.source`) on a `.gov.au` host or the host of the place's website in the data. Each run fetches the linked pages of the fact reports in `pending/`, at most four at a time and for at most 2 minutes, with the safeguards of the owner proof check: https on a public host only, every address checked before connecting, a 10 second timeout, 2 MB at most and three redirects, each checked against the host rule again. A value the page shows counts as a second source, and the run's PR and the item's reason name it as `source_link`. A page that cannot be read confirms nothing, and the item is tried again next run. It needs no secret or binding, only the network access the workflow already has for proof pages. The intake checks the host against its place index (`RECENT_LIST`) at send time; without the index it leaves the host to the run.
 
 ### What the workflow tells the intake
 
@@ -451,9 +466,14 @@ With `intake-url` set, each run passes `--main <checkout of data main> --intake 
 
 The workflow reads the 100 most recent `feedback/review` and `feedback/auto` PRs before it checks out `main`. A held change counts as refused by a reviewer when a merged or closed review PR names it, no open review PR names it and `main` lacks it. An applied change counts the same way when a closed automatic PR names it and no open one does. A call that fails is logged and the run goes on.
 
+### Evidence of closure from OSM
+
+The run reads the data checkout's `osm/history.ndjson`, which the data repository's nightly sync writes with `--osm-history` for objects that left its extract. A place a traveller reported closed whose OSM object is still in OSM, with a `disused:` or `abandoned:` tag in a version newer than the one the record follows, counts that as a second source for the closure. Other lifecycle prefixes (`was:`, `demolished:` and the like) and deleted objects stay with a person through the sync report. Without the file, OSM gives no evidence.
+
 ### Other workflow inputs
 
 - `recent-places-url`: an intake's base URL. Each run passes `--recent-places <url>` and reads that intake's public `GET /v1/places/recent`. Feedback about a new place on that list that is not in the data yet waits in `pending/` instead of being refused, and while the list can't be read, all feedback about places not in the data waits. An app's own photo inbox needs this ([photos.md](photos.md)).
+- `dns-resolver`: a DNS over HTTPS endpoint that answers in JSON (`application/dns-json`), such as Cloudflare's `https://cloudflare-dns.com/dns-query`. Each run passes `--dns-resolver <url>` and looks up the website domain (its host without `www.`) of each place a traveller reported closed in the last 90 days that its owner does not manage, one lookup per domain, each given 5 seconds. NXDOMAIN on two runs at least a day apart counts as a second source for the closure. The time of the first NXDOMAIN is kept in the inbox at `evidence/nxdomain.json`, and dropped when the domain is found again or 90 days later. An HTTP error, a timeout or any other DNS answer leaves it as it is and never counts. No key is needed. Off when empty.
 - `release-workflow`: the data repository's release workflow file (`release.yml`), which must run on `workflow_dispatch`. A run that opened or added to `feedback/auto` waits up to 10 minutes for it to merge, then starts the release on `data-base-branch`. A PR without auto-merge, one still waiting after 10 minutes, a missing Actions permission or a failed start leaves the change to the release's schedule, with a notice or warning, and never fails the run.
 - `claim-reviewers`: the GitHub logins of the people who approve owner claims, separated by commas (`octocat,hubot`). A run that sends owner claims or listings to the review PR adds a comment that mentions them, so GitHub notifies each one. Without it nobody is told: the claims show only as the PR's `owner-claim` label, and a claim with no decision within 60 days is refused. A name that is not a GitHub login is skipped with a warning.
 - `places-repository`, `photo-licence`, `hold-first-photo`, `review-preview-url` and the `review-preview-secret` secret: for an app's photo service ([photos.md](photos.md)).
@@ -508,9 +528,9 @@ npx wrangler kv namespace delete --namespace-id <RECENT_PLACES namespace id>
 
 ### Silent drops
 
-Some abuse is dropped silently instead of refused: a request from a key with `requires_human_check` that has no token, or whose token Turnstile refuses or made for another site, body or form. The intake answers it exactly as it answers an accepted item from that key, `202` with an id (and, for a report it decides at send time, `held` with `not_attested`, or `unknown_place` for a place it does not know), and writes its progress record as `received`, which never moves on. It stores nothing for the inbox or the recent list, counts nothing as a source, and counts nothing against a daily limit. Text and link refusals stay visible, so an honest traveller can fix what they typed. When Turnstile cannot answer, the intake still answers `503`.
+Some abuse is dropped silently instead of refused: a request from a key with `requires_human_check` that has no token, or whose token Turnstile refuses or made for another site, body or form, and a request without attestation from a network on the blocklist ([Network reputation](#network-reputation)). The intake answers it exactly as it answers an accepted item from that key, `202` with an id (and, for a report it decides at send time, `held` with `not_attested`, or `unknown_place` for a place it does not know), and writes its progress record as `received`, which never moves on. It stores nothing for the inbox or the recent list, counts nothing as a source, and counts nothing against a daily limit. Text and link refusals stay visible, so an honest traveller can fix what they typed. When Turnstile cannot answer, the intake still answers `503`.
 
-The intake counts silent drops per UTC day and reason (`human_check_required`, `human_check_failed`), with no item content, app, device or network. With `RECENT_LIST` they are rows in `silent_drops`, kept 90 days:
+The intake counts silent drops per UTC day and reason (`human_check_required`, `human_check_failed`, `network_reputation`), with no item content, app, device or network. With `RECENT_LIST` they are rows in `silent_drops`, kept 90 days:
 
 ```sh
 npx wrangler d1 execute RECENT_LIST --remote -c wrangler.deploy.toml \
@@ -518,6 +538,31 @@ npx wrangler d1 execute RECENT_LIST --remote -c wrangler.deploy.toml \
 ```
 
 Without `RECENT_LIST` they are KV keys `silent:<day>:<reason>` in `RATE_LIMIT`, which expire after 90 days. A steady count of `human_check_required` from a website you run usually means its page sends without calling Turnstile.
+
+### Network reputation
+
+With `CROWDSEC_BLOCKLIST_URL` (a variable) and `CROWDSEC_BLOCKLIST_CREDENTIALS` (a secret) set, the intake keeps a copy of a public IP blocklist and looks each feedback request's address up in it, with no outside call per request.
+
+To set it up, subscribe to a blocklist in the CrowdSec Console (the free community blocklist will do), create a **Raw IP List** integration for it with the output format `plain_text`, and note its content URL, `https://admin.api.crowdsec.net/v1/integrations/<integration id>/content`, and its username and password, which the Console shows once. Raise the integration's pull limit to the size of the list, since a pull returns no more than that. Then:
+
+```toml
+[vars]
+CROWDSEC_BLOCKLIST_URL = "https://admin.api.crowdsec.net/v1/integrations/<integration id>/content"
+```
+
+```sh
+npx wrangler secret put CROWDSEC_BLOCKLIST_CREDENTIALS -c wrangler.deploy.toml   # username:password
+```
+
+The scheduled job fetches the list once a day, `page_size` 100,000 lines a page until a short page (at most 20 pages), and stores it in `RATE_LIMIT` under `reputation:ranges` as sorted, merged ranges, IPv4 and IPv6 apart, with `reputation:state` saying when it was fetched. Each line is an address or a CIDR range; other lines are left out and logged. A fetch that fails, times out or finds no address at all is logged and tried again an hour later, and the last good list is used meanwhile. Each Worker reads the stored list at most once every 5 minutes, so a new list takes up to 5 minutes to reach every request. Until the first fetch, every address is clear.
+
+What a listed address does:
+
+- A feedback item from a key without `requires_attestation`, including a key with `requires_human_check`, is dropped silently ([Silent drops](#silent-drops)) with the reason `network_reputation`, before its human check is sent to Turnstile.
+- An attested item is never dropped, since a mobile carrier's shared address may be listed for someone else's abuse. A report the intake decides at send time is held as `network_reputation`, and the apply sends it to the review PR, never into the data on its own. Other kinds of item are taken as before.
+- When the stored list cannot be read, a report the intake decides at send time is held as `check_unavailable`.
+
+Owner requests, photo uploads and the attestation routes are not looked up.
 
 ## Abuse
 

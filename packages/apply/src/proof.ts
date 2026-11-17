@@ -113,7 +113,7 @@ export function isPrivateAddress(address: string): boolean {
 }
 
 /** A URL the check may fetch: https, a public host name, no IP literal. */
-function allowedUrl(url: URL): boolean {
+export function allowedUrl(url: URL): boolean {
   return isPublicHttpsUrl(url.href) && isIP(url.hostname.replace(/^\[|\]$/g, "")) === 0;
 }
 
@@ -158,7 +158,7 @@ export const httpsTransport: Transport = (url, options) =>
     req.end();
   });
 
-async function readCapped(body: AsyncIterable<Uint8Array>, maxBytes: number): Promise<string> {
+export async function readCapped(body: AsyncIterable<Uint8Array>, maxBytes: number): Promise<string> {
   const chunks: Uint8Array[] = [];
   let total = 0;
   for await (const chunk of body) {

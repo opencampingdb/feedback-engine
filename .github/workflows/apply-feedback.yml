@@ -99,6 +99,15 @@ on:
           own photo inbox sets it to Open Camping DB's intake. Off when empty.
         type: string
         default: ""
+      dns-resolver:
+        description: >-
+          DNS over HTTPS JSON endpoint, for example
+          https://cloudflare-dns.com/dns-query. Each run looks up the website
+          domain of every place a traveller reported closed, and NXDOMAIN on
+          two runs at least a day apart counts as a second source for the
+          closure. Off when empty.
+        type: string
+        default: ""
       review-preview-url:
         description: >-
           Base URL of the intake that serves held photos to the person
@@ -393,6 +402,7 @@ jobs:
           CONTACT_CHECK_ARGS: ${{ inputs.contact-checks && '--contact-checks' || '' }}
           INTAKE_URL: ${{ inputs.intake-url }}
           RECENT_PLACES_URL: ${{ inputs.recent-places-url }}
+          DNS_RESOLVER: ${{ inputs.dns-resolver }}
           PLACES_TOKEN: ${{ secrets.places-token }}
           REVIEW_PREVIEW_URL: ${{ inputs.review-preview-url }}
           REVIEW_PREVIEW_SECRET: ${{ secrets.review-preview-secret }}
@@ -403,6 +413,7 @@ jobs:
           $CONTACT_CHECK_ARGS
           ${INTAKE_URL:+--main data-main --intake "$INTAKE_URL"}
           ${RECENT_PLACES_URL:+--recent-places "$RECENT_PLACES_URL"}
+          ${DNS_RESOLVER:+--dns-resolver "$DNS_RESOLVER"}
           ${REVIEW_PREVIEW_URL:+--review-preview "$REVIEW_PREVIEW_URL"}
           --photo-licence "$PHOTO_LICENCE"
           --inbox inbox

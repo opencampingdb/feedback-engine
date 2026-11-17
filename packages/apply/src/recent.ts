@@ -3,8 +3,8 @@ import { dirname, join } from "node:path";
 import { isDoubtFact, isValidFactValue, type FactName, type FactValue, type StoredFeedback } from "@opencampingdb/feedback";
 import { sameValue } from "./decide.js";
 import { DataRepo, readHistory, readTrust } from "./io.js";
+import { liftOf, newPlaceIdOf, WINDOW_DAYS, WITHDRAWN, type DoubtedRecord, type FreezeRecord } from "./rules.js";
 import { trustedContributors } from "./trust.js";
-import { newPlaceIdOf, WINDOW_DAYS, WITHDRAWN, type DoubtedRecord } from "./rules.js";
 import type { ProgressStore } from "./progress.js";
 import type { PhotoProgressStore } from "./photo-progress.js";
 import type { Place } from "./types.js";
@@ -43,6 +43,23 @@ export interface RecentChangeStore {
    * travellers there too.
    */
   doubtCases(cases: readonly DoubtCase[]): Promise<void>;
+  /**
+   * Places the apply froze over conflicting values, and whether each freeze
+   * has lifted. The intake holds fact changes to a frozen place as
+   * `disputed`. A store without it is told nothing.
+   */
+  freezes?(freezes: readonly Freeze[]): Promise<void>;
+}
+
+/** A place the apply froze, as the intake's `POST /v1/places/recent/freezes` takes it. */
+export interface Freeze {
+  place: string;
+  /** The disputed fact. */
+  fact: FactName;
+  /** When the freeze started. */
+  frozen_at: string;
+  /** When the reviewer's value reached the data, which lifted it. Absent while the place is frozen. */
+  lifted_at?: string;
 }
 
 /** A fact the apply took down after doubts, as the intake's `POST /v1/places/recent/doubt-cases` takes it. */
@@ -131,6 +148,17 @@ export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeo
           body: JSON.stringify({ cases: cases.slice(start, start + REMOVE_BATCH) }),
         });
         if (!response.ok) throw new Error(`the intake refused the doubt cases: ${response.status} ${await response.text()}`);
+      }
+    },
+    async freezes(freezes) {
+      const target = new URL("/v1/places/recent/freezes", baseUrl).toString();
+      for (let start = 0; start < freezes.length; start += REMOVE_BATCH) {
+        const response = await fetcher(target, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ freezes: freezes.slice(start, start + REMOVE_BATCH) }),
+        });
+        if (!response.ok) throw new Error(`the intake refused the freezes: ${response.status} ${await response.text()}`);
       }
     },
     async progress(items) {
@@ -326,9 +354,40 @@ export async function sendDoubtCases(options: { inbox: string; store: RecentChan
 }
 
 /**
+ * Sends the intake each place's latest freeze kept in the inbox in the last
+ * 90 days, with `lifted_at` once `main` has a value for the disputed fact set
+ * at or after the freeze (`liftOf`). All of them go on every run, so the
+ * intake can lift a freeze it learnt of from its own reports. Returns the
+ * freezes sent, by place.
+ */
+export async function sendFreezes(options: { inbox: string; main: string; store: RecentChangeStore; now?: Date }): Promise<Freeze[]> {
+  if (options.store.freezes === undefined) return [];
+  const now = options.now ?? new Date();
+  const since = now.getTime() - WINDOW_DAYS * DAY_MS;
+  const sinceDay = new Date(now.getTime() - (WINDOW_DAYS + 1) * DAY_MS).toISOString().slice(0, 10);
+  const latest = new Map<string, FreezeRecord>();
+  for (const item of await readHistory(options.inbox, sinceDay)) {
+    const frozen = (item as { outcome?: { frozen?: FreezeRecord } }).outcome?.frozen;
+    if (frozen === undefined || typeof item.place !== "string" || Date.parse(frozen.at) < since) continue;
+    const before = latest.get(item.place);
+    if (before === undefined || frozen.at > before.at) latest.set(item.place, frozen);
+  }
+  const onMain = await new DataRepo(options.main).places(latest.keys());
+  const freezes = [...latest]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([place, frozen]) => {
+      const record = onMain.get(place);
+      const lifted = record === undefined ? undefined : liftOf(record, frozen);
+      return { place, fact: frozen.fact, frozen_at: frozen.at, ...(lifted !== undefined ? { lifted_at: lifted } : {}) };
+    });
+  if (freezes.length > 0) await options.store.freezes(freezes);
+  return freezes;
+}
+
+/**
  * Everything a run tells the intake about the data, in order: new places now
  * on main, the block list, the trusted list, the items decided other than applied, applied
- * reports now on main and the doubt cases. Each call is safe to repeat, so a
+ * reports now on main, the doubt cases and the freezes. Each call is safe to repeat, so a
  * refused or failed call is logged and sent again next run, and never stops
  * the others or the run. The items decided other than applied are this run's
  * alone, so when that call fails they are kept in the inbox
@@ -370,6 +429,7 @@ export async function tellIntake(options: {
   const recorded = await writeUnsentOverruled(inbox, keep);
   await tell("settling the recent changes", () => settleRecentChanges({ inbox, main, store, ...now }), (s) => `${s.length} applied report(s) in the data on main sent to the intake`);
   await tell("sending the doubt cases", () => sendDoubtCases({ inbox, store, ...now }), (s) => `${s.length} fact(s) taken down after doubts sent to the intake`);
+  await tell("sending the freezes", () => sendFreezes({ inbox, main, store, ...now }), (s) => `${s.length} frozen place(s) sent to the intake`);
   return { failed, recorded };
 }
 

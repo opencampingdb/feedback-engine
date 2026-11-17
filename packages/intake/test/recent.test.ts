@@ -887,6 +887,55 @@ describe("send-time decisions", () => {
     expectTypeOf<HeldReason>().toEqualTypeOf<Exclude<SdkHeldReason, "ai_cap">>();
   });
 
+  describe("a disputed place", () => {
+    const who = (i: number) => ({ device: otherDevice(i), contributor: `acct_person_${String(i).padStart(9, "0")}` });
+    const freezes = (body: unknown) =>
+      handle(
+        new Request("https://intake.example/v1/places/recent/freezes", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+          body: JSON.stringify({ freezes: body }),
+        }),
+        e,
+      );
+
+    it("holds the third conflicting value within 24 hours as disputed, and every fact change to the place after it", async () => {
+      expect(await send(fact(PLACE, "pets", "yes", who(1)))).toMatchObject({ state: "live" });
+      clock += 5 * HOUR;
+      expect(await send(fact(PLACE, "pets", "no", who(2)))).toMatchObject(held("disagreement"));
+      clock += 5 * HOUR;
+      expect(await send(fact(PLACE, "pets", "leashed", who(3)))).toMatchObject(held("disputed"));
+      clock += HOUR;
+      expect(await send(fact(PLACE, "toilets", true, who(4)))).toMatchObject(held("disputed"));
+      expect(await send(report(PLACE, { kind: "doubt", fact: "toilets" }, who(5)))).toMatchObject(held("disputed"));
+      // Another place is not frozen.
+      expect(await send(fact(ELSEWHERE, "toilets", true, who(6)))).toMatchObject({ state: "live" });
+      expect((await listing()).changes.filter((c) => c.place === PLACE)).toEqual([expect.objectContaining({ fact: "pets", value: "yes" })]);
+    });
+
+    it("holds fact changes to a place the apply froze, until the apply says the reviewer's value is in the data", async () => {
+      const res = await freezes([{ place: PLACE, fact: "pets", frozen_at: "2026-11-03T08:00:00Z" }]);
+      expect(res.status).toBe(200);
+      expect(await send(fact(PLACE, "toilets", true, who(1)))).toMatchObject(held("disputed"));
+      clock += HOUR;
+      expect((await freezes([{ place: PLACE, fact: "pets", frozen_at: "2026-11-03T08:00:00Z", lifted_at: "2026-11-03T09:30:00Z" }])).status).toBe(200);
+      expect(await send(fact(PLACE, "toilets", true, who(2)))).toMatchObject({ state: "live" });
+    });
+
+    it("refuses a freezes call without the places token or with a malformed freeze", async () => {
+      const bad = await handle(
+        new Request("https://intake.example/v1/places/recent/freezes", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer wrong" },
+          body: JSON.stringify({ freezes: [{ place: PLACE, fact: "pets", frozen_at: "2026-11-03T08:00:00Z" }] }),
+        }),
+        e,
+      );
+      expect(bad.status).toBe(401);
+      expect((await freezes([{ place: PLACE, fact: "not_a_fact", frozen_at: "2026-11-03T08:00:00Z" }])).status).toBe(400);
+    });
+  });
+
   it("puts an attested fact live at once, as a recent change, and still writes it to the inbox", async () => {
     const answer = await send(fact(PLACE, "toilets", true));
     expect(answer).toEqual({ id: written()[0]!.id, state: "live" });

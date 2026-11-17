@@ -17,6 +17,7 @@ import {
   type StoredOwnerSubmission,
   isPlaceId,
   isDoubtFact,
+  isFactName,
   isValidFactValue,
   FEE_RETIRED,
   isFeedbackId,
@@ -27,6 +28,7 @@ import {
   isProofPublicKey,
   verifyContributorProof,
   REPORT_KINDS,
+  sourceLinkProblem,
   type ReportKind,
 } from "@opencampingdb/feedback";
 import { placeOf, PROGRESS_UPDATE_STATES, type PhotoProgressUpdate, type ProgressUpdate } from "@opencampingdb/apply/progress-update";
@@ -93,6 +95,7 @@ import {
   markInData,
   openDoubtCases,
   overrule,
+  recordFreezes,
   pruneDecisions,
   UNAVAILABLE,
   type DoubtCase,
@@ -117,6 +120,7 @@ import {
 import { verifyPreview } from "@opencampingdb/apply/preview";
 import { IDEMPOTENCY_HEADER, isIdempotencyKey, keepAnswer, keptAnswers, pruneRequestKeys, requestKey } from "./idempotency.js";
 import { countSilentDrops, pruneSilentDrops, type SilentReason } from "./silent.js";
+import { createReputation, refreshBlocklist, reputationConfig, type Standing } from "./reputation.js";
 import {
   appVersionAtLeast,
   minimumAppVersion,
@@ -162,7 +166,8 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   /**
    * The daily counters of an intake without RECENT_LIST. With RECENT_LIST they
-   * are kept in D1 (`rate_counts`) and this namespace is not used.
+   * are kept in D1 (`rate_counts`). The network blocklist (reputation.ts) is
+   * kept here either way.
    */
   RATE_LIMIT: KVLike;
   /** Registered App Attest keys and open challenges. Needed when an app key has `ios`. */
@@ -270,6 +275,16 @@ export interface Env {
    * (src/repeated.ts), with AI and RECENT_LIST. Off without it.
    */
   VECTORIZE?: VectorizeLike;
+  /**
+   * Network reputation (reputation.ts): the content URL of a CrowdSec
+   * blocklist integration in plain text format,
+   * `https://admin.api.crowdsec.net/v1/integrations/<id>/content`. The
+   * scheduled job fetches it once a day into RATE_LIMIT. Off without
+   * CROWDSEC_BLOCKLIST_CREDENTIALS.
+   */
+  CROWDSEC_BLOCKLIST_URL?: string;
+  /** Secret. The integration's Basic auth credentials, as `username:password`. Off without CROWDSEC_BLOCKLIST_URL. */
+  CROWDSEC_BLOCKLIST_CREDENTIALS?: string;
   /** Workers AI, for the Llama Guard check on free text and the AI reviewer. Without it, free text from a contributor without a track record is held. */
   AI?: AiLike;
   /**
@@ -737,6 +752,28 @@ function humanCheckOutcome(result: HumanCheckResult): { humanChecked: true } | {
 }
 
 /** Over a daily limit: 429, with the seconds until the counters reset. */
+/**
+ * The refusal for a fact report's source link on a host other than `.gov.au`
+ * or the place's website in the place index, or undefined when it passes. An
+ * intake without the index, or one that cannot read it, leaves the host to
+ * the apply run, which checks it again and never confirms a value from
+ * another host. A place the index does not hold has no website on record.
+ */
+async function sourceRefusal(db: D1Like | undefined, place: string | null, source: string): Promise<ItemAnswer | undefined> {
+  if (sourceLinkProblem(source, undefined) === null || db === undefined) return undefined;
+  let website: unknown;
+  if (place !== null) {
+    const indexed = await getIndexedPlace(db, place).then(
+      (p) => p ?? null,
+      () => undefined,
+    );
+    if (indexed === undefined) return undefined;
+    website = indexed?.facts.website;
+  }
+  const problem = sourceLinkProblem(source, website);
+  return problem === null ? undefined : { status: 400, body: { error: "source_not_allowed", details: [`report.source ${problem}`] } };
+}
+
 function rateLimited(retryAfter: number): ItemAnswer {
   return { status: 429, body: { error: "rate_limited" }, headers: { "retry-after": String(retryAfter) } };
 }
@@ -857,6 +894,7 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now"> & { roads?: Maj
         onModelFailure: (key, failures, error) =>
           console.warn(`the AI reviewer's model call failed on held case ${key} (${failures} of ${MAX_MODEL_FAILURES} runs), going on to the next case: ${String(error)}`),
         ...(deps.roads ? { roads: deps.roads } : {}),
+        fetchSite: deps.fetch,
       });
     } catch (error) {
       warn(error);
@@ -937,8 +975,9 @@ export function createFlush(deps: Pick<Deps, "fetch" | "now">) {
 /**
  * The scheduled job, run every minute: writes the queued items to the inbox,
  * starts the inbox's apply workflow when it is due (see runs.ts), then runs
- * the AI reviewer and its Overture candidate check when they are on and due
- * (see reviewer.ts and overture-reviewer.ts). A failed start,
+ * fetches the network blocklist when it is a day old (reputation.ts), then
+ * runs the AI reviewer and its Overture candidate check when they are on and
+ * due (see reviewer.ts and overture-reviewer.ts). A failed start,
  * such as the GitHub App missing `actions: write`, is logged and tried again
  * on the next tick. Returns what became of the apply.
  */
@@ -974,6 +1013,7 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
           )
         : "off";
     await timed(env);
+    await refreshBlocklist(deps, env);
     await review(env);
     await reviewOverture(env);
     return outcome;
@@ -1018,6 +1058,13 @@ export function createHandler(deps: Deps) {
   const integrity = new PlayIntegrity(deps.fetch, deps.now);
   const safeSearch = new SafeSearch(deps.fetch, deps.now);
   const random = deps.randomBytes ?? ((n: number) => crypto.getRandomValues(new Uint8Array(n)));
+  const reputation = createReputation(deps.now);
+
+  /** Whether the client's address is on the network blocklist, or `off` when the intake has none. Never asks an outside service. */
+  async function standingOf(request: Request, env: Env): Promise<Standing | "off"> {
+    if (!reputationConfig(env)) return "off";
+    return reputation(env.RATE_LIMIT, request.headers.get("cf-connecting-ip") ?? "");
+  }
 
   /** Checks the human check header against the exact body text. */
   async function humanCheck(request: Request, app: AppEntry, body: string): Promise<HumanCheckResult> {
@@ -1686,6 +1733,33 @@ export function createHandler(deps: Deps) {
   }
 
   /**
+   * `POST /v1/places/recent/freezes`, for the apply run: `{ "freezes": [{
+   * "place", "fact", "frozen_at", "lifted_at"? }] }`, the places it froze over
+   * conflicting values in the last 90 days, with `lifted_at` once the
+   * reviewer's value is in the data, and `authorization: Bearer
+   * <PLACES_TOKEN>`. A frozen place's fact changes are held as `disputed`
+   * (see `recordFreezes`), and sending them again changes nothing.
+   */
+  async function freezesRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 16);
+    if (call instanceof Response) return call;
+    const freezes = call.body.freezes;
+    const isFreeze = (f: unknown): f is { place: string; fact: string; frozen_at: string; lifted_at?: string } => {
+      if (typeof f !== "object" || f === null) return false;
+      const { place, fact, frozen_at: frozenAt, lifted_at: liftedAt } = f as Record<string, unknown>;
+      return isPlaceId(place) && isFactName(fact) && isIsoSeconds(frozenAt) && (liftedAt === undefined || isIsoSeconds(liftedAt));
+    };
+    if (!Array.isArray(freezes) || freezes.length === 0 || freezes.length > MAX_REMOVE_IDS || !freezes.every(isFreeze)) {
+      return json(400, { error: "invalid", details: [`freezes must be 1 to ${MAX_REMOVE_IDS} frozen places`] }, cors);
+    }
+    const written = await recordFreezes(
+      call.db,
+      freezes.map(({ place, fact, frozen_at, lifted_at }) => ({ place, fact, frozen_at, ...(lifted_at !== undefined ? { lifted_at } : {}) })),
+    );
+    return json(200, { written }, cors);
+  }
+
+  /**
    * `GET /v1/feedback/progress?ids=fb_...,fb_...`: where each of 1 to 100
    * contributions is, by the id the intake answered when it was sent. Public,
    * like the recent list, and never cached at the edge. Answers `{ "items" }`
@@ -1804,7 +1878,9 @@ export function createHandler(deps: Deps) {
    * attestation is checked once the item is read. A batch has `batch.proof`,
    * its attestation already checked over the whole body.
    */
-  type IntakeHow = { text: string } | { batch: { proof: Proof | undefined; humanChecked: boolean; dropped: SilentReason | undefined } };
+  type IntakeHow =
+    | { text: string }
+    | { batch: { proof: Proof | undefined; humanChecked: boolean; dropped: SilentReason | undefined; standing: Standing | "off" } };
   type Intake = IntakeShared & IntakeHow;
 
   async function newIntake(request: Request, env: Env, app: AppEntry, nowMs: number, how: IntakeHow & { nextId: () => string }): Promise<Intake> {
@@ -1837,6 +1913,10 @@ export function createHandler(deps: Deps) {
       return { status: 400, body: { error: "type_not_allowed_in_batch" } };
     }
     if (submission.type === "photo") return { status: 400, body: { error: "invalid", details: ["photos are sent to /v1/photos"] } };
+    if (submission.type === "report" && submission.report.source !== undefined) {
+      const refused = await sourceRefusal(env.RECENT_LIST, submission.place, submission.report.source);
+      if (refused) return refused;
+    }
     // Photo reports, removals and erasures belong to a photo service: an intake with a photo bucket.
     if (
       (submission.type === "photo_report" || submission.type === "photo_erasure" || submission.type === "photo_removal" || submission.type === "photo_vote") &&
@@ -1854,9 +1934,14 @@ export function createHandler(deps: Deps) {
     if (app.requires_human_check && !humanCheckAllows(submission, app.human_check!)) {
       return { status: 403, body: { error: "type_not_allowed_for_app_key" } };
     }
+    // A network on the blocklist: an item from a key without attestation is dropped silently, before
+    // its human check is sent to Turnstile. An attested item is held (below), never dropped, as a
+    // shared carrier address may be listed for someone else's abuse.
+    const standing = "batch" in intake ? intake.batch.standing : isOwner ? "off" : await standingOf(request, env);
     let humanChecked = false;
     let dropped: SilentReason | undefined;
     if ("batch" in intake) ({ humanChecked, dropped } = intake.batch);
+    else if (standing === "listed" && !app.requires_attestation) dropped = "network_reputation";
     else if (app.requires_human_check) {
       const outcome = humanCheckOutcome(await humanCheck(request, app, intake.text));
       if ("status" in outcome) return outcome;
@@ -2054,9 +2139,16 @@ export function createHandler(deps: Deps) {
             ))
         : undefined;
 
-    // Decided before the item is stored, and recorded in the same D1 batch that queues it.
+    // Decided before the item is stored, and recorded in the same D1 batch that queues it. An
+    // attested item from a network on the blocklist is held as network_reputation, and any item
+    // whose network the intake could not look up is held as check_unavailable: the apply sends
+    // both to the review PR, never into the data on their own.
     let decision: SendTimeDecision | undefined;
-    if (env.RECENT_LIST && decidedHere(stored)) {
+    const reputationHold = standing === "listed" ? "network_reputation" : standing === "unknown" ? "check_unavailable" : undefined;
+    if (reputationHold && decidedHere(stored)) {
+      decision = { answer: { state: "held", held_reason: reputationHold }, writes: () => [] };
+      stored.intake = decision.answer;
+    } else if (env.RECENT_LIST && decidedHere(stored)) {
       const db = env.RECENT_LIST;
       // Without a contributor, the hashed install stands in for one, as it does for a signed-out install's new places.
       const who = contributor ?? `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
@@ -2194,7 +2286,8 @@ export function createHandler(deps: Deps) {
     let state: ItemState | undefined;
     if (db && decidedHere({ ...submission, id, received: intake.received } as unknown as StoredFeedback)) {
       const known = place !== null && (await getIndexedPlace(db, place).catch(() => undefined)) !== undefined;
-      state = { state: "held", held_reason: known ? "not_attested" : "unknown_place" };
+      const commons = submission.type === "report" && submission.report.kind === "commons_mismatch";
+      state = { state: "held", held_reason: commons ? "commons_report" : known ? "not_attested" : "unknown_place" };
     }
     return {
       dropped: reason,
@@ -2281,9 +2374,13 @@ export function createHandler(deps: Deps) {
       if ("error" in result) return refusedOrUnavailable(result, cors);
       proof = result;
     }
+    // Looked up once for the whole batch. A listed network's batch from a key without attestation is
+    // dropped silently, before its human check is sent to Turnstile.
+    const standing = await standingOf(request, env);
     let humanChecked = false;
     let dropped: SilentReason | undefined;
-    if (app.requires_human_check) {
+    if (standing === "listed" && !proof) dropped = "network_reputation";
+    else if (app.requires_human_check) {
       const outcome = humanCheckOutcome(await humanCheck(request, app, text));
       if ("status" in outcome) return json(outcome.status, outcome.body, { ...cors, ...outcome.headers });
       if ("dropped" in outcome) dropped = outcome.dropped;
@@ -2292,7 +2389,7 @@ export function createHandler(deps: Deps) {
     const nowMs = deps.now();
     // Items sent before, whose answers were lost, are answered as they were the first time.
     const kept = keys ? await keptAnswers(env.RECENT_LIST, app.app, keys as string[]) : new Map<string, never>();
-    const intake = await newIntake(request, env, app, nowMs, { batch: { proof, humanChecked, dropped }, nextId: orderedUlids(nowMs, deps.randomBytes) });
+    const intake = await newIntake(request, env, app, nowMs, { batch: { proof, humanChecked, dropped, standing }, nextId: orderedUlids(nowMs, deps.randomBytes) });
     // Each item is measured as sent, as POST /v1/feedback measures its body, so an item is too
     // large in a batch exactly when it would be alone.
     const sent = arrayElementTexts(text, "items");
@@ -2408,6 +2505,10 @@ export function createHandler(deps: Deps) {
     if (route === "/v1/places/recent/doubt-cases") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return doubtCasesRecent(request, env, cors);
+    }
+    if (route === "/v1/places/recent/freezes") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return freezesRecent(request, env, cors);
     }
     if (route === "/v1/places/recent/block") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });

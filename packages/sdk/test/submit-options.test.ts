@@ -131,6 +131,15 @@ describe("reportFacts", () => {
     expect(items.map((item) => item.report.first_hand)).toEqual(["seen_nearby", "seen_nearby"]);
   });
 
+  it("sends the edit's source link with every fact", async () => {
+    const { fetch, calls } = fakeFetch(accepted);
+    const { c } = client(fetch);
+    const source = "https://www.parks.vic.gov.au/places/example-camp";
+    await c.reportFacts({ place: PLACE, facts: { toilets: true, showers: false }, consent: true, source });
+    const items = (calls[0]!.body as { items: { report: { source?: string } }[] }).items;
+    expect(items.map((item) => item.report.source)).toEqual([source, source]);
+  });
+
   it("with wait: false answers each fact queued", async () => {
     const { fetch } = fakeFetch(accepted);
     const { c } = client(fetch);

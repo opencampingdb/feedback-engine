@@ -493,7 +493,7 @@ describe("itemDecision", () => {
     expect(itemDecision("fb_1")).toEqual({});
   });
 
-  it("lists the twenty-four codes the intake sends", () => {
+  it("lists the twenty-seven codes the intake sends", () => {
     expect(HELD_REASONS).toEqual([
       "not_attested",
       "owner_value",
@@ -519,6 +519,9 @@ describe("itemDecision", () => {
       "ai_cap",
       "repeated_text",
       "contact_check",
+      "network_reputation",
+      "source_link",
+      "disputed",
     ]);
   });
 });

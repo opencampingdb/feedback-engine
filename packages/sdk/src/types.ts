@@ -375,6 +375,14 @@ export interface ReportBody {
    * (`FirstHand`). Leave it out otherwise. The location itself is never sent.
    */
   first_hand?: FirstHand;
+  /**
+   * On `fact` only: a page that shows the reported value, an https address of
+   * up to 500 characters (`MAX_SOURCE_LENGTH`). It must be on a `.gov.au` host
+   * or on the host of the place's own website on record (`sourceLinkProblem`);
+   * the intake refuses any other host (`400 source_not_allowed`). The apply run
+   * fetches the page, and a value the page shows counts as a second source.
+   */
+  source?: string;
 }
 
 /** The contact facts a new place may carry. */
@@ -787,11 +795,11 @@ interface StoredFields {
   /**
    * What the intake decided at send time, on the fact reports, contact
    * reports and new places it decides. An item it held for a check
-   * (`text_check`, `link_check`, `ai_check`, `daily_cap`, `repeated_text` or
-   * `check_unavailable`) goes to a person, never into the data on its own.
-   * A review carries it only when the intake held it, for `repeated_text`
-   * or `check_unavailable`, and goes to a person. Absent on other items and
-   * on items stored before the intake decided any.
+   * (`text_check`, `link_check`, `ai_check`, `daily_cap`, `repeated_text`,
+   * `check_unavailable` or `network_reputation`) goes to a person, never
+   * into the data on its own. A review carries it only when the intake held
+   * it, for `repeated_text` or `check_unavailable`, and goes to a person.
+   * Absent on other items and on items stored before the intake decided any.
    */
   intake?: StoredIntakeDecision;
   /**

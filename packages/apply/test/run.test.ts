@@ -659,3 +659,140 @@ describe("run", () => {
     });
   });
 });
+
+describe("evidence of closure", () => {
+  const record = async () => JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
+  const closedEarlier = () =>
+    put(join(inbox, "applied", "2026-10-28", `${id(1)}.json`), {
+      ...item(1, "2026-10-28T00:00:00Z", "aaaa", { type: "report", report: { kind: "closed" } }),
+      outcome: { result: "applied", reason: "place is reported_closed", run: "2026-10-28T01:00:00Z" },
+    });
+  /** One line of the data repository's `osm/history.ndjson`, as its sync writes it. */
+  const historyLine = (extra: Record<string, unknown>) =>
+    `${JSON.stringify({ changeset: 191000001, checked: "2026-10-29", had: { tourism: "camp_site" }, object: "node/123456", successors: [], tags: {}, version: 8, visible: true, ...extra })}\n`;
+
+  it("closes a place one traveller reported closed once OSM newly tags its object disused:, naming it in the PR body", async () => {
+    await closedEarlier();
+    await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace({ ...place, status: "reported_closed" }));
+    await put(join(data, "osm", "history.ndjson"), historyLine({ tags: { "disused:tourism": "camp_site", name: "Lake Eppalock Camp" } }));
+
+    const summary = await run({ inbox, data, now: NOW });
+    expect((await record()).status).toBe("closed");
+    expect(summary.auto_pr_body).toContain("OSM tagged node/123456 disused:tourism=camp_site in changeset 191000001");
+  });
+
+  it("counts abandoned: too, but not other lifecycle prefixes, a deleted object or a tag the record already followed", async () => {
+    await closedEarlier();
+    await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace({ ...place, status: "reported_closed" }));
+    const cases: [Record<string, unknown>, string][] = [
+      [{ tags: { "abandoned:tourism": "camp_site" } }, "closed"],
+      [{ tags: { "was:tourism": "camp_site" } }, "reported_closed"],
+      [{ tags: { "demolished:tourism": "camp_site" } }, "reported_closed"],
+      [{ tags: {}, visible: false }, "reported_closed"],
+      [{ tags: { "disused:tourism": "camp_site" }, version: 7 }, "reported_closed"],
+      [{ tags: { "disused:tourism": "camp_site" }, object: "node/999" }, "reported_closed"],
+    ];
+    for (const [extra, status] of cases) {
+      await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace({ ...place, status: "reported_closed" }));
+      await put(join(data, "osm", "history.ndjson"), historyLine(extra));
+      await run({ inbox, data, now: NOW });
+      expect([extra, (await record()).status]).toEqual([extra, status]);
+    }
+  });
+
+  describe("the website's domain gone from DNS", () => {
+    const RESOLVER = "https://dns.example.net/dns-query";
+    /** A fake DNS over HTTPS resolver: each call answers with the next of `answers`, and every URL asked is kept. */
+    function resolver(...answers: (number | "http_503" | "timeout")[]) {
+      const asked: string[] = [];
+      const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        asked.push(url);
+        expect(new Headers(init?.headers).get("accept")).toBe("application/dns-json");
+        const answer = answers.shift() ?? 0;
+        if (answer === "timeout") throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+        if (answer === "http_503") return new Response("busy", { status: 503 });
+        return Response.json({ Status: answer, TC: false, RD: true, RA: true, Question: [{ name: "example.org", type: 1 }] });
+      });
+      return { fetch: fetch as unknown as typeof globalThis.fetch, asked };
+    }
+    const at = (hours: number) => new Date(NOW.getTime() + hours * 3_600_000);
+    const withWebsite = (status: Place["status"] = "reported_closed") =>
+      put(
+        join(data, "places", "za", `${PLACE}.json`),
+        dumpPlace({
+          ...place,
+          status,
+          facts: { ...place.facts, website: "https://www.example.org/camping" },
+          fact_sources: { ...place.fact_sources, website: "osm" },
+        }),
+      );
+
+    it("closes the place when the domain is NXDOMAIN on two checks a day apart, keeping the first in the inbox", async () => {
+      await closedEarlier();
+      await withWebsite();
+      const dns = resolver(3, 3);
+
+      const first = await run({ inbox, data, now: at(0), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      expect((await record()).status).toBe("reported_closed");
+      expect(first.inbox_changed).toBe(true);
+      expect(JSON.parse(await readFile(join(inbox, "evidence", "nxdomain.json"), "utf8"))).toEqual({
+        domains: { "example.org": { first: "2026-10-30T00:00:00Z" } },
+      });
+
+      const second = await run({ inbox, data, now: at(24), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      expect((await record()).status).toBe("closed");
+      expect(second.auto_pr_body).toContain("example.org was not found in DNS on 2026-10-30 or 2026-10-31");
+      // Only the resolver is asked, never the website itself.
+      expect(dns.asked).toEqual([`${RESOLVER}?name=example.org&type=A`, `${RESOLVER}?name=example.org&type=A`]);
+    });
+
+    it("does not count two NXDOMAIN answers less than a day apart", async () => {
+      await closedEarlier();
+      await withWebsite();
+      const dns = resolver(3, 3);
+      await run({ inbox, data, now: at(0), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      await run({ inbox, data, now: at(23), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      expect((await record()).status).toBe("reported_closed");
+    });
+
+    it("never counts an HTTP error, a timeout or a failed lookup as a check, and keeps the first NXDOMAIN for a later one", async () => {
+      await closedEarlier();
+      await withWebsite();
+      const dns = resolver(3, "http_503", "timeout", 2, 3);
+      for (const hours of [0, 24, 48, 72]) {
+        await run({ inbox, data, now: at(hours), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+        expect((await record()).status).toBe("reported_closed");
+      }
+      await run({ inbox, data, now: at(96), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      expect((await record()).status).toBe("closed");
+    });
+
+    it("an HTTP error or timeout on the first check is not a first NXDOMAIN", async () => {
+      await closedEarlier();
+      await withWebsite();
+      const dns = resolver("http_503", "timeout", 3);
+      for (const hours of [0, 24, 48]) await run({ inbox, data, now: at(hours), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      expect((await record()).status).toBe("reported_closed");
+    });
+
+    it("starts again when the domain is found between two NXDOMAIN answers", async () => {
+      await closedEarlier();
+      await withWebsite();
+      const dns = resolver(3, 0, 3);
+      for (const hours of [0, 24, 48]) await run({ inbox, data, now: at(hours), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      expect((await record()).status).toBe("reported_closed");
+    });
+
+    it("asks nothing without a resolver, or for a place no traveller reported closed", async () => {
+      await withWebsite("open");
+      const dns = resolver(3, 3);
+      await run({ inbox, data, now: at(0), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      await closedEarlier();
+      await withWebsite();
+      await run({ inbox, data, now: at(24) });
+      expect(dns.asked).toEqual([]);
+      expect((await record()).status).toBe("reported_closed");
+    });
+  });
+});
