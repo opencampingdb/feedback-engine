@@ -9,6 +9,7 @@ import {
   newPlaceFields,
   newPlaceListing,
   REVIEWED_FACTS,
+  sourceOf,
   WINDOW_DAYS,
   type HeldReason as RulesHeldReason,
   type ItemDecision,
@@ -20,6 +21,7 @@ import {
 } from "@opencampingdb/apply/decide";
 import { websiteCheck, websiteCheckApplies, type Fetch as CheckFetch } from "@opencampingdb/apply/contact-checks";
 import {
+  FREE_TEXT_FACTS,
   isContactFact,
   newPlaceId,
   tidyName,
@@ -29,6 +31,7 @@ import {
   type FeedbackSubmission,
   type RecentChange,
   type ReportBody,
+  type UnconfirmedValue,
   type StoredFeedback,
   type HeldReason as PublishedHeldReason,
 } from "@opencampingdb/feedback";
@@ -439,6 +442,45 @@ const live = (writes: SendTimeDecision["writes"], addToDecided: (decided: Decide
 /** A held item's evidence: written, and known to the items after it in the batch. */
 const heldWithEvidence = (reason: HeldReason, item: ReportItem): SendTimeDecision =>
   held(reason, (d) => [evidenceStatement(d, item, "held")], (p) => void p.evidence.push(evidenceRow(item, "held")));
+
+/** Facts an unconfirmed value may name: those with a fixed set of values, so never a contact, the address, a fact a person always reads, or one that can hold free words. */
+export const isConfirmableFact = (fact: string): boolean =>
+  !isContactFact(fact) && !REVIEWED_FACTS.has(fact as FactName) && !(FREE_TEXT_FACTS as readonly string[]).includes(fact);
+
+/**
+ * A held item's evidence, and when it is a fact report without attestation
+ * waiting for a second source (`not_attested` or `source_link`) that would
+ * change a confirmable fact, an unconfirmed value on the recent list too.
+ */
+function heldWaiting(reason: HeldReason, item: ReportItem, place: PlaceState & { cell: Cell }, contributor: string): SendTimeDecision {
+  const { kind, fact, value } = item.report;
+  const waits = reason === "not_attested" || reason === "source_link";
+  const changes = value !== undefined && !sameValue((place.facts as Record<string, unknown>)[fact as string], value);
+  if (!waits || kind !== "fact" || item.attested !== undefined || !changes || !isConfirmableFact(fact as string)) return heldWithEvidence(reason, item);
+  const [cellLon, cellLat] = place.cell;
+  return held(
+    reason,
+    (d) => [
+      evidenceStatement(d, item, "held"),
+      d
+        .prepare(
+          "INSERT OR IGNORE INTO unconfirmed_values (feedback_id, place, fact, value, received, source, contributor, cell_lon, cell_lat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(item.id, item.place, fact, JSON.stringify(value), item.received, sourceOf(item), contributor, cellLon, cellLat),
+    ],
+    (p) => void p.evidence.push(evidenceRow(item, "held")),
+  );
+}
+
+/** Takes the unconfirmed values a live change has settled off the list: those of the value the fact now has. */
+function settledUnconfirmed(db: D1Like, changes: readonly { place: string; fact: string; value: unknown }[]): D1Statement[] {
+  return changes
+    .filter((change) => change.value !== null)
+    .map((change) =>
+      db.prepare("DELETE FROM unconfirmed_values WHERE place = ? AND fact = ? AND value = ?").bind(change.place, change.fact, JSON.stringify(change.value)),
+    );
+}
+
 const countAccepted = (decided: DecidedInRequest, contributor: string) => decided.accepted.set(contributor, (decided.accepted.get(contributor) ?? 0) + 1);
 
 /**
@@ -495,9 +537,9 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
   // A report waiting for a second source that carries a source link waits for the apply run to read the page instead.
   const waiting = (reason: HeldReason) =>
     reason === "not_attested" && kind === "fact" && item.report.source !== undefined && !REVIEWED_FACTS.has(item.report.fact as FactName) ? "source_link" : reason;
-  if (decision.verdict === "held") return heldWithEvidence(waiting(decision.reason), item);
+  if (decision.verdict === "held") return heldWaiting(waiting(decision.reason), item, place, contributor);
   // An item without attestation is never live from the intake. The apply's two-device rule still runs.
-  if (item.attested === undefined) return heldWithEvidence(waiting("not_attested"), item);
+  if (item.attested === undefined) return heldWaiting(waiting("not_attested"), item, place, contributor);
   // The place already has the value: nothing to show, and nothing for the checks.
   if (decision.changes.length === 0) return live((d) => [evidenceStatement(d, item, "live")], (p) => void p.evidence.push(evidenceRow(item, "live")));
   // An attested contact goes live now only when the place's own website shows it, within the time
@@ -518,6 +560,7 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
   return live((d) => [
     evidenceStatement(d, item, "live"),
     ...caseStatements(d, item, decision),
+    ...settledUnconfirmed(d, decision.changes),
     ...decision.changes.map((change) =>
       d
         .prepare(
@@ -743,6 +786,45 @@ export async function listChanges(db: D1Like, now: number, bbox?: Bbox): Promise
   }));
 }
 
+interface UnconfirmedRow {
+  place: string;
+  fact: string;
+  value: string;
+  received: string;
+  sources: number;
+  facts: string | null;
+}
+
+/**
+ * The unconfirmed values apps can ask travellers to confirm: for each place,
+ * fact and value, when the intake received the earliest held report of it in
+ * the rules' 90 days, and how many independent sources sent one. Reports from
+ * a blocked contributor are left out, and so is a value the place already has
+ * in the place index. With `bbox` (already snapped to whole degrees), only
+ * places in the map cells it covers. In place, fact and value order.
+ */
+export async function listUnconfirmed(db: D1Like, now: number, bbox?: Bbox): Promise<UnconfirmedValue[]> {
+  const last = (low: number, high: number) => Math.max(Math.floor(low), Math.ceil(high) - 1);
+  const area = bbox ? "AND u.cell_lon BETWEEN ? AND ? AND u.cell_lat BETWEEN ? AND ?" : "";
+  const query = db.prepare(
+    `SELECT u.place, u.fact, u.value, MIN(u.received) AS received, COUNT(DISTINCT u.source) AS sources, i.facts
+     FROM unconfirmed_values u LEFT JOIN place_index i ON i.id = u.place
+     WHERE u.received >= ?
+       AND NOT EXISTS (SELECT 1 FROM blocked_contributors b WHERE b.contributor = u.contributor)
+       ${area}
+     GROUP BY u.place, u.fact, u.value
+     ORDER BY u.place, u.fact, u.value`,
+  );
+  const since = isoSeconds(now - WINDOW_DAYS * DAY_MS);
+  const bound = bbox ? query.bind(since, Math.floor(bbox[0]), last(bbox[0], bbox[2]), Math.floor(bbox[1]), last(bbox[1], bbox[3])) : query.bind(since);
+  const { results } = await bound.all<UnconfirmedRow>();
+  return results.flatMap((row) => {
+    const value = JSON.parse(row.value) as FactValue;
+    const current = row.facts === null ? undefined : (JSON.parse(row.facts) as Record<string, unknown>)[row.fact];
+    if (sameValue(current, value)) return [];
+    return [{ place: row.place, fact: row.fact, value, received: row.received, sources: row.sources }];
+  });
+}
 
 /** D1 allows 100 bound values in one statement. */
 const MAX_BOUND = 100;
@@ -756,12 +838,15 @@ const changesOf = (result: unknown) => (result as { meta?: { changes?: number } 
  * skipped. Returns the recent changes marked.
  */
 export async function markInData(db: D1Like, ids: readonly string[], at: string): Promise<number> {
-  const results = await db.batch(
-    chunks([...new Set(ids)], MAX_BOUND - 1).map((part) =>
+  const parts = chunks([...new Set(ids)], MAX_BOUND - 1);
+  const results = await db.batch([
+    ...parts.map((part) =>
       db.prepare(`UPDATE recent_changes SET in_data_at = ? WHERE in_data_at IS NULL AND feedback_id IN (${marks(part.length)})`).bind(at, ...part),
     ),
-  );
-  return results.reduce<number>((sum, result) => sum + changesOf(result), 0);
+    // A held report the apply put into the data is no longer unconfirmed.
+    ...parts.map((part) => db.prepare(`DELETE FROM unconfirmed_values WHERE feedback_id IN (${marks(part.length)})`).bind(...part)),
+  ]);
+  return results.slice(0, parts.length).reduce<number>((sum, result) => sum + changesOf(result), 0);
 }
 
 /**
@@ -790,9 +875,14 @@ export async function overrule(db: D1Like, ids: readonly string[], takenDown: re
     db.prepare(`UPDATE report_evidence SET state = 'held' WHERE state = 'live' AND feedback_id IN (${marks(part.length)})`).bind(...part),
     db.prepare(`DELETE FROM recent_changes WHERE feedback_id IN (${marks(part.length)})`).bind(...part),
   ]);
+  // A refused report is no longer unconfirmed. One the apply sent to a person still waits, and stays listed.
+  const unlisted = chunks(counted, MAX_BOUND).map((part) => db.prepare(`DELETE FROM unconfirmed_values WHERE feedback_id IN (${marks(part.length)})`).bind(...part));
   // The track records are counted before the changes they count are deleted.
-  const results = await db.batch([...records, ...removals]);
-  return results.slice(records.length).filter((_, i) => i % 2 === 1).reduce<number>((sum, result) => sum + changesOf(result), 0);
+  const results = await db.batch([...records, ...removals, ...unlisted]);
+  return results
+    .slice(records.length, records.length + removals.length)
+    .filter((_, i) => i % 2 === 1)
+    .reduce<number>((sum, result) => sum + changesOf(result), 0);
 }
 
 /**
@@ -807,6 +897,7 @@ export async function pruneDecisions(db: D1Like, now: number): Promise<void> {
     db.prepare("DELETE FROM recent_changes WHERE in_data_at IS NOT NULL AND in_data_at < ?").bind(isoSeconds(now - KEEP_IN_DATA_DAYS * DAY_MS)),
     db.prepare("DELETE FROM recent_changes WHERE in_data_at IS NULL AND accepted < ?").bind(isoSeconds(now - KEEP_NOT_IN_DATA_DAYS * DAY_MS)),
     db.prepare("DELETE FROM report_evidence WHERE received < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
+    db.prepare("DELETE FROM unconfirmed_values WHERE received < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
     db.prepare("DELETE FROM doubt_cases WHERE taken_down_at < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
     db.prepare("DELETE FROM frozen_places WHERE frozen_at < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
     ...prunePlaceStatements(db, now),
