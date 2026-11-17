@@ -37,13 +37,19 @@ export const HUMAN_CHECK_REPORT_KINDS: readonly ReportKind[] = ["fact", "doubt",
  * Whether a key that requires a human check may send this submission: a
  * report of one of HUMAN_CHECK_REPORT_KINDS, whose fact report sets no contact
  * or address, and no fact that holds free words unless the key allows them.
+ * A first-hand report may only be `says_so`: `seen_nearby` needs the
+ * device's location, which a web form does not have.
  * Every other type, reviews, photos, new places and owner submissions among
  * them, is refused whatever the key's other settings.
  */
-export function humanCheckAllows(submission: { type: string; report?: { kind: string; fact?: string } }, config: HumanCheckConfig): boolean {
+export function humanCheckAllows(
+  submission: { type: string; report?: { kind: string; fact?: string; first_hand?: string } },
+  config: HumanCheckConfig,
+): boolean {
   if (submission.type !== "report" || !submission.report) return false;
-  const { kind, fact } = submission.report;
+  const { kind, fact, first_hand } = submission.report;
   if (!(HUMAN_CHECK_REPORT_KINDS as readonly string[]).includes(kind)) return false;
+  if (first_hand !== undefined && first_hand !== "says_so") return false;
   if (kind !== "fact") return true;
   if (fact === undefined || isContactFact(fact)) return false;
   return config.free_text_facts === true || !(FREE_TEXT_FACTS as readonly string[]).includes(fact);

@@ -652,6 +652,8 @@ If `humanCheck` throws, the item stays queued and is tried on a later send or fl
 
 A human check shows that a person filled in the form, not that the device or app is genuine. So a website key may send only fact reports of fixed-value facts, doubts, contact reports (a phone, website or address is wrong) and closed, name, kind and wrong_location reports, and the intake weighs them as unattested: a fact waits for a second source on another network, and a closed report leaves the place open until a second source agrees. Reviews, photos, new places, contacts and addresses, and facts that hold free words (opening hours, the operator and charges) answer `403 type_not_allowed_for_app_key`.
 
+A website report may be first-hand with `first_hand: "says_so"`, when the traveller answered yes to the question in "First-hand reports". A website has no device location to go on, so `seen_nearby` from a website key answers `403 type_not_allowed_for_app_key`, before the intake checks the token.
+
 ## 8. Flush, answers and the queue
 
 ### Flush when the app comes back
