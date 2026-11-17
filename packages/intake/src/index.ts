@@ -25,11 +25,14 @@ import {
   MAX_PROGRESS_IDS,
   isProofPublicKey,
   verifyContributorProof,
+  REPORT_KINDS,
+  type ReportKind,
 } from "@opencampingdb/feedback";
 import { placeOf, PROGRESS_UPDATE_STATES, type PhotoProgressUpdate, type ProgressUpdate } from "@opencampingdb/apply/progress-update";
 import { withRequestLog } from "./requestlog.js";
 import { AttestError, verifyAssertion, verifyAttestation, type AttestedKey, type IosConfig } from "./appattest.js";
 import { refuse, type RefusalBody } from "./refusal.js";
+import { HUMAN_CHECK_HEADER, humanCheckAllows, parseHumanCheck, verifyHumanCheck, type HumanCheckConfig, type HumanCheckResult } from "./humancheck.js";
 import { fromBase64, hex, sha256, toBase64, toBase64Url } from "./bytes.js";
 import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
 import type { MajorRoads } from "@opencampingdb/apply/review";
@@ -135,7 +138,10 @@ export interface Env {
    * Secret. JSON map of app key to `{ "app": "<name>", "daily_limit": <number> }`,
    * optionally with `owner_daily_limit`, `kinds` (`["feedback"]`, `["owner"]`
    * or both), `requires_attestation`, `ios`, `android`,
-   * `requires_visited_nearby` and `contributor_daily_limit`.
+   * `requires_visited_nearby` and `contributor_daily_limit`. A key for a
+   * website sets `requires_human_check` with `human_check` (its Turnstile
+   * secret and hostnames) in place of attestation, and may limit itself to
+   * some report kinds with `report_kinds`.
    */
   APP_KEYS: string;
   /** Secret. Salt for hashing device ids. */
@@ -343,6 +349,20 @@ interface AppEntry {
   requires_attestation?: boolean;
   ios?: IosConfig;
   android?: AndroidConfig;
+  /**
+   * Every submission must carry a human check: a Turnstile token in
+   * `x-human-check` whose `cdata` is the SHA-256 of the body. Never with
+   * `requires_attestation`: a human check is not attestation, and the items
+   * are weighed as unattested ones.
+   */
+  requires_human_check?: boolean;
+  /** The Turnstile widget behind `requires_human_check`. */
+  human_check?: HumanCheckConfig;
+  /**
+   * The only submissions the key may send: reports of these kinds. Any other
+   * type or kind is refused with `type_not_allowed_for_app_key`.
+   */
+  report_kinds?: ReportKind[];
   /** Reviews must carry `visited_nearby: true`. */
   requires_visited_nearby?: boolean;
   /** Feedback per contributor per day. Defaults to CONTRIBUTOR_DAILY_LIMIT. */
@@ -361,6 +381,8 @@ interface AppEntry {
    */
   contributor_proof_key?: string;
 }
+
+const REPORT_KIND_SET: ReadonlySet<string> = new Set(REPORT_KINDS);
 
 const isLimit = (v: unknown): v is number => typeof v === "number" && v > 0;
 
@@ -475,6 +497,16 @@ export function parseAppKeys(raw: string): Map<string, AppEntry> {
       entry.requires_attestation === undefined ||
       entry.requires_attestation === false ||
       (entry.requires_attestation === true && (entry.ios !== undefined || entry.android !== undefined));
+    // A human check needs its widget, and is never mixed with attestation.
+    const humanCheck = entry.human_check === undefined ? undefined : parseHumanCheck(entry.human_check);
+    const humanValid =
+      (entry.human_check === undefined || humanCheck !== undefined) &&
+      (entry.requires_human_check === undefined ||
+        entry.requires_human_check === false ||
+        (entry.requires_human_check === true && humanCheck !== undefined && entry.requires_attestation !== true));
+    const reportKindsValid =
+      entry.report_kinds === undefined ||
+      (Array.isArray(entry.report_kinds) && entry.report_kinds.length > 0 && entry.report_kinds.every((k) => typeof k === "string" && REPORT_KIND_SET.has(k)));
     if (
       key.length >= 16 &&
       typeof entry.app === "string" &&
@@ -488,7 +520,9 @@ export function parseAppKeys(raw: string): Map<string, AppEntry> {
       kindsValid &&
       iosValid &&
       androidValid &&
-      attestValid
+      attestValid &&
+      humanValid &&
+      reportKindsValid
     ) {
       out.set(key, {
         app: entry.app,
@@ -505,6 +539,9 @@ export function parseAppKeys(raw: string): Map<string, AppEntry> {
               },
             }
           : {}),
+        ...(entry.requires_human_check ? { requires_human_check: true } : {}),
+        ...(humanCheck ? { human_check: humanCheck } : {}),
+        ...(entry.report_kinds !== undefined ? { report_kinds: [...entry.report_kinds] } : {}),
         ...(entry.requires_visited_nearby ? { requires_visited_nearby: true } : {}),
         ...(entry.contributor_daily_limit !== undefined ? { contributor_daily_limit: entry.contributor_daily_limit } : {}),
         ...(entry.photo_pass_unattested ? { photo_pass_unattested: true } : {}),
@@ -651,6 +688,13 @@ interface Admitted {
   slot?: LiveSlot;
   answer: Record<string, unknown>;
   after: () => Promise<void>;
+}
+
+/** The answer to a human check that did not pass, or undefined when it passed. */
+function humanCheckRefusal(result: HumanCheckResult): ItemAnswer | undefined {
+  if (result.ok) return undefined;
+  if (result.error === "unavailable") return { status: 503, body: { error: "unavailable" }, headers: { "retry-after": "60" } };
+  return { status: 401, body: result.error === "human_check_failed" ? { error: result.error, details: result.details } : { error: result.error } };
 }
 
 /** Over a daily limit: 429, with the seconds until the counters reset. */
@@ -930,6 +974,17 @@ export function createHandler(deps: Deps) {
   const safeSearch = new SafeSearch(deps.fetch, deps.now);
   const random = deps.randomBytes ?? ((n: number) => crypto.getRandomValues(new Uint8Array(n)));
 
+  /** Checks the human check header against the exact body text. */
+  async function humanCheck(request: Request, app: AppEntry, body: string): Promise<HumanCheckResult> {
+    return verifyHumanCheck({
+      fetch: deps.fetch,
+      token: request.headers.get(HUMAN_CHECK_HEADER),
+      bodySha256: hex(await sha256(body)),
+      config: app.human_check!,
+      remoteip: request.headers.get("cf-connecting-ip") ?? undefined,
+    });
+  }
+
   /** Checks the attestation headers against the exact body text. */
   async function attest(request: Request, env: Env, app: AppEntry, body: string): Promise<Attested> {
     const platform = request.headers.get("x-attest-platform");
@@ -1099,6 +1154,7 @@ export function createHandler(deps: Deps) {
   async function photo(request: Request, env: Env, app: AppEntry, cors: Record<string, string>): Promise<Response> {
     if (!env.PHOTOS_PENDING) return json(404, { error: "not_found" }, cors);
     if (app.kinds && !app.kinds.includes("feedback")) return json(403, { error: "type_not_allowed_for_app_key" }, cors);
+    if (app.report_kinds || app.requires_human_check) return json(403, { error: "type_not_allowed_for_app_key" }, cors);
     const declared = Number(request.headers.get("content-length") ?? 0);
     if (declared > MAX_PHOTO_BODY_BYTES) return json(413, { error: "too_large" }, cors);
     const header = request.headers.get("x-photo-meta") ?? "";
@@ -1685,7 +1741,7 @@ export function createHandler(deps: Deps) {
    * attestation is checked once the item is read. A batch has `batch.proof`,
    * its attestation already checked over the whole body.
    */
-  type IntakeHow = { text: string } | { batch: { proof: Proof | undefined } };
+  type IntakeHow = { text: string } | { batch: { proof: Proof | undefined; humanChecked: boolean } };
   type Intake = IntakeShared & IntakeHow;
 
   async function newIntake(request: Request, env: Env, app: AppEntry, nowMs: number, how: IntakeHow & { nextId: () => string }): Promise<Intake> {
@@ -1729,6 +1785,19 @@ export function createHandler(deps: Deps) {
     const isOwner = isOwnerSubmission(submission);
     const kind: SubmissionKind = isOwner ? "owner" : "feedback";
     if (app.kinds && !app.kinds.includes(kind)) return { status: 403, body: { error: "type_not_allowed_for_app_key" } };
+    if (app.report_kinds && (submission.type !== "report" || !app.report_kinds.includes((submission as FeedbackSubmission & { type: "report" }).report.kind))) {
+      return { status: 403, body: { error: "type_not_allowed_for_app_key" } };
+    }
+    if (app.requires_human_check && !humanCheckAllows(submission, app.human_check!)) {
+      return { status: 403, body: { error: "type_not_allowed_for_app_key" } };
+    }
+    let humanChecked = false;
+    if ("batch" in intake) humanChecked = intake.batch.humanChecked;
+    else if (app.requires_human_check) {
+      const refused = humanCheckRefusal(await humanCheck(request, app, intake.text));
+      if (refused) return refused;
+      humanChecked = true;
+    }
 
     let proof: Proof | undefined;
     let contributor: string | undefined;
@@ -1872,6 +1941,7 @@ export function createHandler(deps: Deps) {
       ...(origin ? { origin } : {}),
       ...(contributor ? { contributor } : {}),
       ...(proof ? { attested: proof.attested } : {}),
+      ...(humanChecked ? { human_checked: true } : {}),
       ...(attestKey ? { attest_key: attestKey } : {}),
       ...(proved ? { proved: true } : {}),
       app_version,
@@ -2079,10 +2149,16 @@ export function createHandler(deps: Deps) {
       if ("error" in result) return refusedOrUnavailable(result, cors);
       proof = result;
     }
+    let humanChecked = false;
+    if (app.requires_human_check) {
+      const answer = humanCheckRefusal(await humanCheck(request, app, text));
+      if (answer) return json(answer.status, answer.body, { ...cors, ...answer.headers });
+      humanChecked = true;
+    }
     const nowMs = deps.now();
     // Items sent before, whose answers were lost, are answered as they were the first time.
     const kept = keys ? await keptAnswers(env.RECENT_LIST, app.app, keys as string[]) : new Map<string, never>();
-    const intake = await newIntake(request, env, app, nowMs, { batch: { proof }, nextId: orderedUlids(nowMs, deps.randomBytes) });
+    const intake = await newIntake(request, env, app, nowMs, { batch: { proof, humanChecked }, nextId: orderedUlids(nowMs, deps.randomBytes) });
     // Each item is measured as sent, as POST /v1/feedback measures its body, so an item is too
     // large in a batch exactly when it would be alone.
     const sent = arrayElementTexts(text, "items");
@@ -2159,7 +2235,7 @@ export function createHandler(deps: Deps) {
         headers: {
           ...cors,
           "access-control-allow-methods": "GET, POST, OPTIONS",
-          "access-control-allow-headers": "content-type, x-app-key, x-attest-platform, x-attest-key-id, x-attest-assertion, x-attest-token, x-photo-meta, idempotency-key",
+          "access-control-allow-headers": "content-type, x-app-key, x-attest-platform, x-attest-key-id, x-attest-assertion, x-attest-token, x-human-check, x-photo-meta, idempotency-key",
           "access-control-max-age": "86400",
         },
       });

@@ -624,6 +624,34 @@ When your app sends no `contributor`, an attested iOS install gets one from its 
 
 **Android, Play Integrity.** Use a standard request with `bodySha256` as the `requestHash` (with `@expo/app-integrity`, `requestIntegrityCheckAsync(bodySha256)`), and return `x-attest-platform: android` and `x-attest-token: <token>`. The intake asks Google to decode the token and checks that it is for this request, from your package (and signing certificate, when the app key lists them), made within the last 5 minutes, that Play recognises the app and that the device meets device integrity. Google's default is "up to 10,000 total requests per day across all installs" for each app, and batches keep an app well under it ([Batches](#batches)).
 
+### Websites: a human check
+
+A website cannot attest, so its app key sets `requires_human_check` with a Cloudflare Turnstile widget made for the site ([self-hosting.md](self-hosting.md)). The SDK runs in the browser with `localStorage` as its storage, and calls your `humanCheck` function each time it sends, with the exact body and its SHA-256 (lower case hex). Return a fresh Turnstile token made with that SHA-256 as its `cData`. The SDK sends it in `x-human-check`, and the intake checks with Turnstile that the token is good, was served on one of the key's hostnames, and was made for this body. Each token works once, so make a new one on every call. With an invisible widget:
+
+```ts
+import { createFeedbackClient } from "@opencampingdb/feedback";
+
+export const feedback = createFeedbackClient({
+  // ...the options from section 3, with a storage adapter over localStorage
+  // A widget made for each send, since its cData is the body's hash, and removed once it answers.
+  humanCheck: ({ bodySha256 }) =>
+    new Promise((resolve, reject) => {
+      const id = turnstile.render("#human-check", {
+        sitekey: SITE_KEY,
+        execution: "execute",
+        cData: bodySha256,
+        callback: (token) => (turnstile.remove(id), resolve(token)),
+        "error-callback": () => (turnstile.remove(id), reject(new Error("no human check"))),
+      });
+      turnstile.execute(id);
+    }),
+});
+```
+
+If `humanCheck` throws, the item stays queued and is tried on a later send or flush, which may be on a later visit. Call `flush()` once the widget is ready on each page, so waiting items go. The intake answers `401 human_check_required` without a token and `401 human_check_failed` (with `details`) when Turnstile refuses it, and the item stays queued for a fresh token. `503` means Turnstile could not be reached.
+
+A human check shows that a person filled in the form, not that the device or app is genuine. So a website key may send only fact reports of fixed-value facts, doubts, contact reports (a phone, website or address is wrong) and closed, name, kind and wrong_location reports, and the intake weighs them as unattested: a fact waits for a second source on another network, and a closed report leaves the place open until a second source agrees. Reviews, photos, new places, contacts and addresses, and facts that hold free words (opening hours, the operator and charges) answer `403 type_not_allowed_for_app_key`.
+
 ## 8. Flush, answers and the queue
 
 ### Flush when the app comes back

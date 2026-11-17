@@ -453,3 +453,64 @@ describe("POST /v1/feedback/batch with requests in flight together", () => {
     expect(sent.filter((r) => r.status === 429)).toHaveLength(60);
   });
 });
+
+describe("POST /v1/feedback/batch with a human check", () => {
+  const WIDGET = { secret: "0x4AAAAAAAtest-secret", hostnames: ["places.example.org"] };
+  const asked: string[] = [];
+  let handle: ReturnType<typeof createHandler>;
+  let store: ReturnType<typeof fakeD1>;
+  let e: Env;
+
+  beforeEach(() => {
+    asked.length = 0;
+    const services = fakeServices();
+    // Turnstile answers a token `ok:<hash>` as good for the body with that hash.
+    const fetch = async (url: string, init?: RequestInit) => {
+      if (url !== "https://challenges.cloudflare.com/turnstile/v0/siteverify") return services.fetch(url, init);
+      const token = String((JSON.parse(String(init?.body)) as { response: string }).response);
+      asked.push(token);
+      const good = token.startsWith("ok:");
+      return new Response(JSON.stringify(good ? { success: true, hostname: "places.example.org", cdata: token.slice(3) } : { success: false, "error-codes": ["invalid-input-response"] }));
+    };
+    store = fakeD1();
+    e = env(store, { requires_attestation: false, android: undefined, requires_human_check: true, human_check: WIDGET });
+    handle = createHandler({ fetch, now: () => NOW, randomBytes: () => crypto.getRandomValues(new Uint8Array(16)) });
+    store.db
+      .prepare("INSERT INTO place_index (id, cell_lon, cell_lat, facts, fact_sources, fact_dates) VALUES (?, ?, ?, '{\"toilets\":false}', '{}', '{}')")
+      .run(PLACE, 146, -37);
+  });
+
+  const humanBatch = (items: unknown[], token?: (text: string) => string) => {
+    const text = JSON.stringify({ items });
+    return new Request("https://intake.example/v1/feedback/batch", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-app-key": APP_KEY, ...(token ? { "x-human-check": token(text) } : {}) },
+      body: text,
+    });
+  };
+
+  it("checks one token over the whole batch and weighs its items as unattested", async () => {
+    const res = await handle(humanBatch([fact(PLACE, "toilets", true), fact(PLACE, "showers", true)], (text) => `ok:${sha(text)}`), e);
+    expect(res.status).toBe(200);
+    const answers = ((await res.json()) as { items: ItemAnswer[] }).items;
+    expect(asked).toHaveLength(1);
+    expect(answers.map((a) => a.status)).toEqual([202, 202]);
+    expect(answers[0]).toMatchObject({ state: "held", held_reason: "not_attested" });
+    const queued = (store.db.prepare("SELECT content FROM inbox_queue").all() as { content: string }[]).map((r) => JSON.parse(r.content) as Record<string, unknown>);
+    expect(queued.every((q) => q.human_checked === true && q.attested === undefined)).toBe(true);
+  });
+
+  it("refuses the whole batch when its token was made for another body", async () => {
+    const res = await handle(humanBatch([fact(PLACE, "toilets", true)], () => `ok:${sha("something else")}`), e);
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe("human_check_failed");
+    expect(store.db.prepare("SELECT COUNT(*) AS n FROM inbox_queue").get()).toEqual({ n: 0 });
+  });
+
+  it("refuses a batch with no token", async () => {
+    const res = await handle(humanBatch([fact(PLACE, "toilets", true)]), e);
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "human_check_required" });
+    expect(asked).toEqual([]);
+  });
+});

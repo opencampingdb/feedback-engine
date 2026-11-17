@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createFeedbackClient, MAX_BATCH_SIZE, newPlaceId, type Answer, type FeedbackClientOptions, type FetchLike, type StorageAdapter } from "../src/index.js";
+import { createFeedbackClient, humanCheckErrorIn, MAX_BATCH_SIZE, newPlaceId, type Answer, type FeedbackClientOptions, type FetchLike, type StorageAdapter } from "../src/index.js";
 
 /** A clock in December 2026, after every visit date the tests send. */
 const T0 = Date.UTC(2026, 11, 1);
@@ -64,10 +64,15 @@ function setup(intake: ReturnType<typeof fakeIntake>, extra: Partial<FeedbackCli
     now: () => clock,
     random: () => 0,
     randomUUID: () => `00000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
-    attest: async ({ body }) => {
-      attests.push(body);
-      return { "x-attest-platform": "android", "x-attest-token": `t${attests.length}` };
-    },
+    // A website's client proves a person instead of the install.
+    ...(extra.humanCheck
+      ? {}
+      : {
+          attest: async ({ body }: { body: string }) => {
+            attests.push(body);
+            return { "x-attest-platform": "android", "x-attest-token": `t${attests.length}` };
+          },
+        }),
     onAnswered: (answer) => void answers.push(answer),
     ...extra,
   });
@@ -291,5 +296,48 @@ describe("batched flush", () => {
     await client.flush();
     expect(answers.map((a) => a.ref)).toEqual(["c0", "c1", "c2", "c3", "c4", "c5", "c6"]);
     expect(answers.map((a) => (a.outcome as { id: string }).id)).toEqual([1, 2, 3, 4, 5, 6, 7].map(fb));
+  });
+});
+
+describe("human check", () => {
+  const check = { place: place(1), check: { still_there: true, visited: "2026-11-01" }, consent: true } as const;
+
+  it("sends a token for the exact body in x-human-check, with no attestation headers", async () => {
+    const intake = fakeIntake();
+    const asked: { body: string; bodySha256: string }[] = [];
+    const { client } = setup(intake, { humanCheck: async (r) => (asked.push(r), `tok-${asked.length}`) });
+    expect(await client.check(check)).toMatchObject({ status: "sent" });
+    const call = intake.calls[0]!;
+    expect(call.headers["x-human-check"]).toBe("tok-1");
+    expect(call.headers["x-attest-token"]).toBeUndefined();
+    expect(asked[0]!.body).toBe(JSON.stringify(call.body));
+    expect(asked[0]!.bodySha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("keeps the item queued when no token can be had, or the intake refuses it, and sends it with a fresh token later", async () => {
+    let tokens = 0;
+    let give = false;
+    const intake = fakeIntake((call, n) => (n === 1 ? { status: 401, body: { error: "human_check_failed", details: ["timeout-or-duplicate"] } } : undefined));
+    const { client, advance } = setup(intake, {
+      humanCheck: async () => {
+        if (!give) throw new Error("widget not ready");
+        return `tok-${++tokens}`;
+      },
+    });
+    expect(await client.check(check)).toEqual({ status: "queued" });
+    expect(intake.calls).toHaveLength(0);
+    give = true;
+    advance(24 * 60 * 60 * 1000);
+    expect(await client.flush()).toEqual({ sent: 0, dropped: 0, remaining: 1 });
+    advance(24 * 60 * 60 * 1000);
+    expect(await client.flush()).toEqual({ sent: 1, dropped: 0, remaining: 0 });
+    expect(intake.calls.map((c) => c.headers["x-human-check"])).toEqual(["tok-1", "tok-2"]);
+  });
+
+  it("names the intake's human check refusals", () => {
+    expect(humanCheckErrorIn(401, { error: "human_check_required" })).toBe("human_check_required");
+    expect(humanCheckErrorIn(401, { error: "human_check_failed" })).toBe("human_check_failed");
+    expect(humanCheckErrorIn(401, { error: "attestation_invalid" })).toBeUndefined();
+    expect(humanCheckErrorIn(403, { error: "human_check_failed" })).toBeUndefined();
   });
 });

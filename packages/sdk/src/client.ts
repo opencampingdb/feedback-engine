@@ -127,6 +127,19 @@ export interface FeedbackClientOptions {
    */
   onAttestationRejected?: (error: AttestationError, refusal?: AttestationRefusal) => Promise<void> | void;
   /**
+   * Gives a human check to an intake whose app key requires one: a website,
+   * which cannot attest. Called each time a report, review, check or review
+   * report is sent, and once for each batch of them, with the exact body text
+   * and its SHA-256 (lower case hex). Return a fresh Cloudflare Turnstile
+   * token from the app key's widget, made with the body's SHA-256 as its
+   * `cData`, for example from `turnstile.execute` on a widget rendered with
+   * `cData: bodySha256`. The token goes in `x-human-check`. Each token works
+   * once, so return a new one on every call. If it throws, the item stays
+   * queued and is tried later. A human check is not attestation: the intake
+   * weighs these items as unattested ones.
+   */
+  humanCheck?: (request: { body: string; bodySha256: string }) => Promise<string>;
+  /**
    * Called once for each queued item when it is settled: sent, or dropped
    * without being sent. It runs whether the call that queued the item sent it
    * or a later `flush` did, after the queue is saved. Errors it throws are
@@ -195,6 +208,19 @@ function attestationErrorIn(status: number, answer: unknown): AttestationError |
   if (status !== 401) return undefined;
   const error = (answer as { error?: unknown } | null | undefined)?.error;
   return error === "attestation_required" || error === "attestation_invalid" ? error : undefined;
+}
+
+/** The header that carries a human check token. */
+export const HUMAN_CHECK_HEADER = "x-human-check";
+
+/** What the intake answers when a human check is missing or does not pass. */
+export type HumanCheckError = "human_check_required" | "human_check_failed";
+
+/** The human check error in a `401` answer, or undefined when the answer is not one. */
+export function humanCheckErrorIn(status: number, answer: unknown): HumanCheckError | undefined {
+  if (status !== 401) return undefined;
+  const error = (answer as { error?: unknown } | null | undefined)?.error;
+  return error === "human_check_required" || error === "human_check_failed" ? error : undefined;
 }
 
 /** The reason and details from a refusal's body, or undefined when it has neither. */
@@ -1253,6 +1279,8 @@ function createClient(
       await callRefusalHook(options.onAttestationRejected, error, answer);
       return { result: "stop" };
     }
+    // A refused human check keeps the item too: the next try brings a fresh token.
+    if (humanCheckErrorIn(status, answer)) return { result: "stop" };
     // Only the intake's own refusal (JSON with a string `error`) drops an item. Anything
     // else, such as a firewall's or proxy's HTML page or an unbound route, is kept to try again.
     if (!isIntakeRefusal(answer)) return { result: "stop" };
@@ -1266,7 +1294,7 @@ function createClient(
     return sha256Hex(`${id}:${now()}:${Math.random()}`).slice(0, 32);
   }
 
-  /** Posts `body` with its attestation. Undefined when it could not be attested or sent: try again later. */
+  /** Posts `body` with its attestation or human check. Undefined when it could not be proven or sent: try again later. */
   async function post(to: string, body: string, key?: string): Promise<{ status: number; answer: unknown; retryAfter: number } | undefined> {
     let attestation: Record<string, string> = {};
     if (options.attest) {
@@ -1275,6 +1303,16 @@ function createClient(
         attestation = await withTimeout(() => Promise.resolve(attest({ body, bodySha256: sha256Hex(body) })));
       } catch {
         return undefined; // the platform could not attest now, so try again later
+      }
+    }
+    if (options.humanCheck) {
+      try {
+        const check = options.humanCheck;
+        const token = await withTimeout(() => Promise.resolve(check({ body, bodySha256: sha256Hex(body) })));
+        if (typeof token !== "string" || token.length === 0) return undefined;
+        attestation = { ...attestation, [HUMAN_CHECK_HEADER]: token };
+      } catch {
+        return undefined; // no human check now, so try again later
       }
     }
     let res: Awaited<ReturnType<FetchLike>>;
