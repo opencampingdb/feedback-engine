@@ -290,7 +290,7 @@ export function reviewPrBody(
 
 const HELD_INTRO =
   "Cases a person, a bot or an AI reviewer should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
-  "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate`, `commons_mismatch`, `contact_check`, `implausible_location`, `note`, `place_change` or `disputed`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
+  "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate`, `commons_mismatch`, `contact_check`, `implausible_location`, `note`, `place_change`, `disputed` or `unattested_place`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
   "set its `standing` to `shown` in this PR. `contacts` and `description` name what was left off a published new place: " +
   "contact details, addresses and descriptions travellers sent are in the inbox items, never here. " +
   "`contact_withdrawn` is a contact taken off a place after reports from two sources: its `value` is the place's own published contact, " +
@@ -299,6 +299,8 @@ const HELD_INTRO =
   "and to refuse it, set `facts.<fact>` back to `value` (what the place had before), or remove it when there is no `value`. " +
   "`implausible_location` is a new place drafted as held because the map data puts it where `problem` says: in the sea or a lake, on a major road's carriageway or inside a building (`hit`). " +
   "To keep it, set its `standing` to `shown`, or move its `location` first. " +
+  "`unattested_place` is a new place from an install without attestation, drafted as held after it passed the location, duplicate and text checks. " +
+  "`candidates` are places in its group nearby. To keep it, set its `standing` to `shown`, or merge it into the candidate it duplicates. " +
   "`fact_doubted` is a fact travellers say is wrong without giving the right value: with `taken_down` doubts from two sources took it off the place, " +
   "otherwise one traveller doubts it and it stays. `value` is what the place published, and `doubts` and `confirmations` name the reports weighed. " +
   "To restore it, set `facts.<fact>` back to `value`. Doubt notes are in the inbox, never here. " +

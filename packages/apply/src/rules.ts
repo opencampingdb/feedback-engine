@@ -33,6 +33,7 @@ import {
   inWindow,
   newPlaceFields,
   newPlaceListing,
+  reviewerDecidesNewPlace,
   protectedSource,
   restoreWeight,
   REVIEWED_FACTS,
@@ -48,7 +49,7 @@ import {
 import { evidenceCounts } from "./closure-evidence.js";
 import type { CheckOutcome } from "./contact-checks.js";
 import { moderateReview } from "./moderation.js";
-import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase, type PlaceChange } from "./review.js";
+import { CANDIDATE_DISTANCE_M, MAX_CANDIDATES, mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase, type PlaceChange } from "./review.js";
 import type { EarlierFact } from "./io.js";
 import { implausibleLocation, type Implausible, type PlaceGeometry } from "./plausible.js";
 import type { MajorRoads } from "./roads.js";
@@ -1819,7 +1820,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
    * withdrawals sent about them. Each is written with its standing from
    * `newPlaceStanding`: `shown` and `confirmed` places go straight into the
    * data, much as trusted reviews do. A `held` or `hidden` place that is not
-   * in the data yet is drafted for a person instead, a `withdrawn` one is
+   * in the data yet is drafted for a person instead, or for the AI reviewer
+   * when only a lack of attestation keeps it off the list (`unattested_place`), a `withdrawn` one is
    * not written and is removed if it was. Every case a person should look
    * at is listed in `held`.
    */
@@ -1879,6 +1881,9 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       // A new place in the water, on a major road or inside a building is held for the AI reviewer.
       const implausible = existing || !isPending ? null : implausibleOf(origin);
       const published = (standing === "shown" || standing === "confirmed") && unlisted === undefined && implausible === null;
+      // Kept off the list only for want of attestation, past the plausibility, duplicate and text checks: the AI reviewer decides it.
+      const forReviewer =
+        isPending && !existing && unlisted !== undefined && implausible === null && (standing === "shown" || standing === "confirmed") && reviewerDecidesNewPlace(origin, isTrusted(origin, trusted));
       // Contact facts and the address. A published place carries those that pass
       // the link and spam checks; the rest wait for a person. A draft for a person carries them all.
       const { contacts: heldFacts, failing, descriptionProblem } = newPlaceFields(origin);
@@ -1891,8 +1896,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       const caseFor = (kind: HeldCase["case"], feedback: readonly StoredFeedback[]): HeldCase => ({
         case: kind,
         place: id,
-        // An implausible place is drafted as held, unless reports hid it.
-        standing: (kind === "implausible_location" && standing !== "hidden" ? "held" : standing) as NonNullable<HeldCase["standing"]>,
+        // An implausible or unattested place is drafted as held, unless reports hid it.
+        standing: ((kind === "implausible_location" || kind === "unattested_place") && standing !== "hidden" ? "held" : standing) as NonNullable<HeldCase["standing"]>,
         location: { lat: roundCoord(origin.location!.lat), lon: roundCoord(origin.location!.lon) },
         kind: (existing ?? draftOf(origin)).kind,
         ...(kind === "duplicate" && duplicate ? { duplicate_of: duplicate.place, distance_m: duplicate.distance } : {}),
@@ -1901,6 +1906,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         ...(kind === "description" && descriptionProblem !== null ? { problem: descriptionProblem } : {}),
         ...(kind === "first_place" && origin.contributor ? { contributor: origin.contributor } : {}),
         ...(kind === "implausible_location" && implausible !== null ? { hit: implausible.hit, problem: implausible.problem } : {}),
+        ...(kind === "unattested_place" ? { candidates: mergeCandidates(id, origin) } : {}),
         feedback: feedback.map((f) => f.id),
       });
 
@@ -1967,6 +1973,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             ? "possible duplicate, so a person checks it"
             : unlisted === undefined
             ? `implausible location: ${implausible!.problem}, so the AI reviewer checks it`
+            : forReviewer
+            ? `${unlisted}, so the AI reviewer checks it`
             : `${unlisted}, so a person checks it`,
         );
       } else if (before !== standing) {
@@ -1986,6 +1994,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       if (isPending && firstPlace) held.push(caseFor("first_place", [origin]));
       if (isPending && hasNote) held.push(caseFor("note", [origin]));
       if (implausible !== null && !published) held.push(caseFor("implausible_location", [origin]));
+      if (forReviewer) held.push(caseFor("unattested_place", [origin]));
     }
   }
 
@@ -2378,6 +2387,23 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     // Without road data, two places on opposite sides of a road look the same, so a reviewer decides.
     if (!input.roads || input.roads.between(item.location!, other.location)) return undefined;
     return { place: other, distance: Math.round(distance) };
+  }
+
+  /**
+   * The places a reviewer may merge an unattested new place into: up to
+   * MAX_CANDIDATES in the same group within CANDIDATE_DISTANCE_M, nearest
+   * first, from the same records as `nearestDuplicate`, without those
+   * `mergeProblem` rules out.
+   */
+  function mergeCandidates(id: string, item: ReportItem): { place: string; distance_m: number }[] {
+    const draft = draftOf(item);
+    const out: { place: string; distance_m: number }[] = [];
+    for (const other of [...(input.everyPlace ?? []), ...[...working.values()].filter((p) => p.standing !== undefined)]) {
+      if (other.id === id || other.standing === "hidden" || mergeProblem(draft, other, input.distinct) !== null) continue;
+      const distance = Math.round(distanceM(item.location!, other.location));
+      if (distance <= CANDIDATE_DISTANCE_M && !out.some((c) => c.place === other.id)) out.push({ place: other.id, distance_m: distance });
+    }
+    return out.sort((a, b) => a.distance_m - b.distance_m || (a.place < b.place ? -1 : 1)).slice(0, MAX_CANDIDATES);
   }
 
   /**

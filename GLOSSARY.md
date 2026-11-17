@@ -112,6 +112,10 @@ _Avoid_: verification (owners verify), link check (the link rules and the malwar
 A new place the map data puts in the sea or a lake, on a major road's carriageway or inside a building footprint, held for the AI reviewer. Remoteness never makes a location implausible.
 _Avoid_: suspicious location, invalid location (it is held, not refused)
 
+**Unattested new place**:
+A new place from an install without attestation, held for the AI reviewer once it passes the plausibility, duplicate and text checks. The reviewer publishes it, merges it into a nearby place it duplicates, or takes it down.
+_Avoid_: unverified place, anonymous place (it has a contributor)
+
 **Trusted contributor**:
 A signed-in contributor five of whose edits other sources have confirmed, with no upheld doubt about any of their edits since. Their new places list at once, and their contacts go live once they pass the contact checks, without a second source.
 _Avoid_: verified contributor, trusted reviewer (a contributor whose reviews publish)

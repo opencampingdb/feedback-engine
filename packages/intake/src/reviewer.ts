@@ -11,7 +11,9 @@
  * its own the model may approve a held or hidden new place, merge a held
  * duplicate into the place it duplicates (never into a place with a verified
  * owner, a pair on `moderation/distinct_places.json` or a pair across a major
- * road; without road data, only the same name less than 25 m apart), restore a
+ * road; without road data, only the same name less than 25 m apart), approve,
+ * take down or merge an unattested new place (into one of the candidates its
+ * case lists, by the same rules, named as `target`), restore a
  * withdrawn contact, take down a new place that is clear spam, restore or
  * keep down a fact doubts took down, dismiss doubts about a fact that
  * stays, and confirm `vehicle_access` on a place whose name says only heavy
@@ -143,6 +145,8 @@ export interface ReviewRecord {
   held?: "ai_cap";
   /** On `confirm` of a `disputed` case: the value set. */
   value?: FactValue;
+  /** On `merge` of an `unattested_place` case: the candidate it was merged into. */
+  target?: string;
 }
 
 export type ReviewResult =
@@ -243,6 +247,10 @@ const meaning = (c: HeldCase, d: ReviewDecision) =>
               ? "take the reported contact off the place and put back what it had before: it is not the place's own, or it is spam"
               : c.case === "implausible_location" && d === "approve"
                 ? "publish the place where it is: the location is believable for its kind, such as a camp on a sand spit or an island the map has as water"
+                : c.case === "unattested_place" && d === "approve"
+                  ? "publish the place: it is believable as a real place of its kind, here"
+                : c.case === "unattested_place" && d === "merge"
+                  ? "merge the new place into the candidate you give as target: the two are clearly one place added twice, with the same or nearly the same name and nothing to tell them apart"
                 : c.case === "implausible_location" && d === "take_down"
                   ? "hide the place: only when it is clearly spam or not a place at all. A real place pinned in the wrong spot is leave, so a person can move it"
                   : MEANINGS[d];
@@ -292,6 +300,13 @@ function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
           "In an implausible_location case, a traveller added a new place whose location the map data puts in the sea or a lake, on a major road's carriageway or inside a building footprint (hit and found say which). Map data can be out of date or coarse near a shore. Remoteness is never a reason to doubt a place.",
         ]
       : []),
+    ...(c.case === "unattested_place"
+      ? [
+          "In an unattested_place case, a traveller added a new place from an app that could not prove it runs on a genuine device. It passed the automatic location, duplicate and text checks. candidates are places of the same group nearby, with how far each is.",
+          "A sparse or remote place is normal for camping. Take it down only when it is clearly spam or not a place at all.",
+          "With merge, give target: the id of the candidate it duplicates, one of those listed as mergeable.",
+        ]
+      : []),
     "Answer with JSON only: {\"decision\": ..., \"reason\": ..., \"sure\": true or false}.",
     `The decisions you may give for this case are: ${allowed.join(", ")}.`,
     ...allowed.map((d) => `- ${d}: ${meaning(c, d)}.`),
@@ -301,19 +316,36 @@ function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
   ].join("\n");
 }
 
-/** The answer's schema. With `choices` (a disputed case), the answer also gives `value`, the JSON of one of them. */
-function decisionSchema(allowed: readonly ReviewDecision[], choices: readonly FactValue[] = []) {
+/**
+ * The answer's schema. With `choices` (a disputed case), the answer also
+ * gives `value`, the JSON of one of them. With `candidates` it may merge
+ * into, it gives `target`, the id of one of them.
+ */
+function decisionSchema(allowed: readonly ReviewDecision[], choices: readonly FactValue[] = [], candidates: readonly Candidate[] = []) {
+  const targets = mergeTargets(allowed, candidates);
   return {
     type: "object",
     properties: {
       decision: { type: "string", enum: allowed },
       ...(choices.length > 0 ? { value: { type: "string", enum: choices.map((v) => JSON.stringify(v)) } } : {}),
+      ...(targets.length > 0 ? { target: { type: "string", enum: targets } } : {}),
       reason: { type: "string" },
       sure: { type: "boolean" },
     },
     required: ["decision", "reason", "sure"],
   };
 }
+
+/** A place an `unattested_place` case lists nearby, and whether a reviewer may merge the case's place into it. */
+export interface Candidate {
+  place: Place;
+  distance_m: number;
+  mergeable: boolean;
+}
+
+/** The ids of the candidates a reviewer may merge into, when `merge` is allowed. */
+const mergeTargets = (allowed: readonly ReviewDecision[], candidates: readonly Candidate[]) =>
+  allowed.includes("merge") ? candidates.filter((c) => c.mergeable).map((c) => c.place.id) : [];
 
 /** A model call that failed or took too long. */
 export class ModelUnavailable extends Error {}
@@ -358,10 +390,12 @@ export interface ModelDecision {
   unsure: boolean;
   /** On `confirm` of a disputed case: the value, one of its choices. */
   value?: FactValue;
+  /** On `merge` of an `unattested_place` case: the candidate to merge into. */
+  target?: string;
 }
 
 /** What a model reads about a case, as JSON. */
-function caseEvidence(c: HeldCase, place: Place, duplicateOf: Place | undefined, choices: readonly FactValue[] = []): string {
+function caseEvidence(c: HeldCase, place: Place, duplicateOf: Place | undefined, choices: readonly FactValue[] = [], candidates: readonly Candidate[] = []): string {
   return JSON.stringify({
     case: c.case,
     place: placeView(place),
@@ -377,11 +411,14 @@ function caseEvidence(c: HeldCase, place: Place, duplicateOf: Place | undefined,
     ...(c.case === "contact_check" ? { contact: c.fact, failed_checks: c.checks, found: c.problem, value_before: c.value } : {}),
     ...(c.case === "implausible_location" ? { hit: c.hit, found: c.problem } : {}),
     ...(c.case === "disputed" ? { fact: c.fact, values: choices, sources: c.sources } : {}),
+    ...(c.case === "unattested_place"
+      ? { candidates: candidates.map((n) => ({ ...placeView(n.place), distance_m: n.distance_m, mergeable: n.mergeable })) }
+      : {}),
   });
 }
 
 /** A model's answer object as a decision: `leave`, and unsure, unless it is a sure decision the case allows. */
-function decisionOf(answer: Record<string, unknown> | null, allowed: readonly ReviewDecision[], choices: readonly FactValue[] = []): ModelDecision {
+function decisionOf(answer: Record<string, unknown> | null, allowed: readonly ReviewDecision[], choices: readonly FactValue[] = [], candidates: readonly Candidate[] = []): ModelDecision {
   if (!answer || typeof answer.decision !== "string") return { decision: "leave", reason: "the model's answer could not be read", unsure: true };
   const reason = typeof answer.reason === "string" ? answer.reason : "";
   if (!allowed.includes(answer.decision as ReviewDecision)) return { decision: "leave", reason: `the model answered ${safeReason(answer.decision)}, which this case does not allow`, unsure: true };
@@ -390,6 +427,11 @@ function decisionOf(answer: Record<string, unknown> | null, allowed: readonly Re
     const value = choices.find((v) => JSON.stringify(v) === answer.value);
     if (value === undefined) return { decision: "leave", reason: "the model gave a value that is not among the choices", unsure: true };
     return { decision: "confirm", reason, unsure: false, value };
+  }
+  if (candidates.length > 0 && answer.decision === "merge") {
+    const target = mergeTargets(allowed, candidates).find((t) => t === answer.target);
+    if (target === undefined) return { decision: "leave", reason: "the model gave a target that is not among the candidates it may merge into", unsure: true };
+    return { decision: "merge", reason, unsure: false, target };
   }
   return { decision: answer.decision as ReviewDecision, reason, unsure: answer.decision === "leave" };
 }
@@ -407,6 +449,7 @@ export async function askModel(
   duplicateOf: Place | undefined,
   allowed: readonly ReviewDecision[] = allowedDecisions(c),
   choices: readonly FactValue[] = disputeChoices(c, place),
+  candidates: readonly Candidate[] = [],
 ): Promise<ModelDecision> {
   let out: unknown;
   try {
@@ -415,17 +458,17 @@ export async function askModel(
       ai.run(model, {
         messages: [
           { role: "system", content: systemPrompt(c, allowed) },
-          { role: "user", content: caseEvidence(c, place, duplicateOf, choices) },
+          { role: "user", content: caseEvidence(c, place, duplicateOf, choices, candidates) },
         ],
         temperature: 0,
         max_tokens: 256,
-        response_format: { type: "json_schema", json_schema: decisionSchema(allowed, choices) },
+        response_format: { type: "json_schema", json_schema: decisionSchema(allowed, choices, candidates) },
       }),
     );
   } catch (error) {
     throw error instanceof ModelUnavailable ? error : new ModelUnavailable(String(error));
   }
-  return decisionOf(answerOf(out), allowed, choices);
+  return decisionOf(answerOf(out), allowed, choices, candidates);
 }
 
 /** The second stage's decision on a case the first model was unsure of, with who made it. */
@@ -435,6 +478,7 @@ interface SecondDecision {
   reviewer: string;
   held?: "ai_cap";
   value?: FactValue;
+  target?: string;
 }
 
 /** The second model's name on a decision. */
@@ -455,6 +499,7 @@ async function askSecondStage(
   place: Place,
   duplicateOf: Place | undefined,
   allowed: readonly ReviewDecision[],
+  candidates: readonly Candidate[] = [],
 ): Promise<SecondDecision> {
   const month = monthOf(deps.now());
   let spent: number;
@@ -470,7 +515,7 @@ async function askSecondStage(
   let answer: Awaited<ReturnType<typeof askSecondModel>>;
   try {
     const choices = disputeChoices(c, place);
-    answer = await askSecondModel(deps.second, systemPrompt(c, allowed), caseEvidence(c, place, duplicateOf, choices), decisionSchema(allowed, choices));
+    answer = await askSecondModel(deps.second, systemPrompt(c, allowed), caseEvidence(c, place, duplicateOf, choices, candidates), decisionSchema(allowed, choices, candidates));
   } catch (error) {
     if (!(error instanceof SecondModelUnavailable)) throw error;
     onError(deps, error);
@@ -482,9 +527,37 @@ async function askSecondStage(
     onError(deps, error);
     return { decision: "leave", reason: "the second model's spending could not be recorded, so a person decides", reviewer: SECOND_REVIEWER };
   }
-  const second = decisionOf(answer.answer, allowed, disputeChoices(c, place));
+  const second = decisionOf(answer.answer, allowed, disputeChoices(c, place), candidates);
   if (second.unsure) return { decision: "leave", reason: `both models were unsure: ${first.reason}; ${second.reason}`, reviewer: SECOND_REVIEWER };
-  return { decision: second.decision, reason: second.reason, reviewer: SECOND_REVIEWER, ...(second.value !== undefined ? { value: second.value } : {}) };
+  return {
+    decision: second.decision,
+    reason: second.reason,
+    reviewer: SECOND_REVIEWER,
+    ...(second.value !== undefined ? { value: second.value } : {}),
+    ...(second.target !== undefined ? { target: second.target } : {}),
+  };
+}
+
+/**
+ * The candidates an `unattested_place` case lists, read from the branch:
+ * those whose file is there and is a place, each marked `mergeable` when
+ * `reviewerMergeProblem` allows a merge into it.
+ */
+async function readCandidates(
+  c: HeldCase,
+  place: Place,
+  read: (path: string) => Promise<{ text: string } | null>,
+  pairs: ReadonlySet<string>,
+  roads: MajorRoads | undefined,
+): Promise<(Candidate & { file: { text: string } })[]> {
+  const out: (Candidate & { file: { text: string } })[] = [];
+  for (const { place: id, distance_m } of c.candidates ?? []) {
+    const file = await read(placePath(id));
+    const other = file ? parsePlace(file.text) : undefined;
+    if (!file || !other) continue;
+    out.push({ place: other, file, distance_m, mergeable: reviewerMergeProblem(place, other, pairs, roads) === null });
+  }
+  return out;
 }
 
 /** A place record from its file, or undefined when the file is not one. */
@@ -613,8 +686,11 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       let by = reviewer;
       let held: "ai_cap" | undefined;
       let value: FactValue | undefined;
+      let target: string | undefined;
       let otherFile: { text: string } | null = null;
       let other: Place | undefined;
+      // On an unattested_place case: its candidates as the branch has them, with their files.
+      let candidates: (Candidate & { file: { text: string } })[] = [];
       const failed = failures.get(key)?.failures ?? 0;
       if (settled) {
         ({ decision, reason } = settled);
@@ -628,21 +704,26 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         otherFile = c.case === "duplicate" && c.duplicate_of ? await read(placePath(c.duplicate_of)) : null;
         other = otherFile ? parsePlace(otherFile.text) : undefined;
         // A merge only where the rules allow one: never into an owner's place or a pair a person found separate.
-        const pairs = c.case === "duplicate" ? await distinctPairs() : undefined;
-        const allowed = allowedDecisions(c).filter((d) => d !== "merge" || reviewerMergeProblem(place!, other, pairs, deps.roads) === null);
+        const pairs = c.case === "duplicate" || c.case === "unattested_place" ? await distinctPairs() : undefined;
+        if (c.case === "unattested_place") candidates = await readCandidates(c, place!, read, pairs!, deps.roads);
+        const mergeable = c.case === "unattested_place" ? candidates.some((n) => n.mergeable) : reviewerMergeProblem(place!, other, pairs, deps.roads) === null;
+        const allowed = allowedDecisions(c).filter((d) => d !== "merge" || mergeable);
         let first: ModelDecision;
         try {
-          first = await askModel(deps.ai, deps.model, c, place!, other, allowed);
+          first = await askModel(deps.ai, deps.model, c, place!, other, allowed, disputeChoices(c, place!), candidates);
           answered++;
         } catch (error) {
           if (!(error instanceof ModelUnavailable)) throw error;
           failedNow.push({ key, c, error });
           continue;
         }
-        ({ decision, reason, value } = first);
+        ({ decision, reason, value, target } = first);
         if (first.unsure && deps.second) {
-          ({ decision, reason, reviewer: by, held, value } = await askSecondStage({ ...deps, second: deps.second }, reviewer, first, c, place!, other, allowed));
+          ({ decision, reason, reviewer: by, held, value, target } = await askSecondStage({ ...deps, second: deps.second }, reviewer, first, c, place!, other, allowed, candidates));
         }
+        // The candidate merged into is the other place of the merge.
+        const into = candidates.find((n) => n.place.id === target);
+        if (into) ({ place: other, file: otherFile } = into);
       }
       reason = safeReason(reason);
       const at = new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -674,6 +755,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
           committed: writes.length > 0,
           ...(held ? { held } : {}),
           ...(value !== undefined ? { value } : {}),
+          ...(decision === "merge" && target !== undefined ? { target } : {}),
         },
         paths: writes.map((w) => w.path),
         title: `${by}: ${decision} held case ${c.case} on ${c.place}`,

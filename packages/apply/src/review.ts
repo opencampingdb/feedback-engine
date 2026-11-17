@@ -15,7 +15,8 @@ import type { Place, Source } from "./types.js";
  *
  * A reviewer decides `approve` (keep a held or hidden new place), `restore`
  * (put a withdrawn contact, or a fact doubts took down, back), `merge` (a
- * held new place into the place it duplicates, with `mergePlaces`),
+ * held new place into the place it duplicates, or an unattested new place
+ * into one of its candidates, with `mergePlaces`),
  * `confirm` (a fact a case suggests, or one value for a disputed fact), `take_down`
  * (hide a new place that is clear spam), `keep_down` (leave a fact doubts
  * took down off the place), `dismiss` (doubts about a fact that stays) or
@@ -71,6 +72,12 @@ export type { Place };
  * group), so a reviewer can put it back, and `distance_m` is how far a
  * location moves. A reviewer keeps the change (`approve`) or puts the old
  * value back (`revert`).
+ * `unattested_place`: a new place from an install without attestation,
+ * drafted as held, that passed the plausibility, duplicate and text checks.
+ * `candidates` are the nearest places in its group within
+ * CANDIDATE_DISTANCE_M, nearest first, which a reviewer may merge it into.
+ * A reviewer approves it (standing `shown`), merges it into one of them or
+ * takes it down.
  * `disputed`: a place frozen because `sources` independent sources sent
  * conflicting values for `fact` within 24 hours. No fact on it changes until
  * a reviewer sets the fact to one value, which lifts the freeze.
@@ -91,7 +98,8 @@ export interface HeldCase {
     | "implausible_location"
     | "note"
     | "place_change"
-    | "disputed";
+    | "disputed"
+    | "unattested_place";
   place: string;
   /** The place's standing. Left out for a place travellers did not add. */
   standing?: "shown" | "confirmed" | "held" | "hidden";
@@ -134,6 +142,8 @@ export interface HeldCase {
   /** On `fact_doubted`: the confirmations of the value counted against them. */
   confirmations?: string[];
   contributor?: string;
+  /** On `unattested_place`: places in its group nearby, nearest first, with how far each is. */
+  candidates?: { place: string; distance_m: number }[];
   /** On `place_change`: what the report changes. */
   change?: PlaceChange;
   /** On `place_change`: the value the change replaces, `null` for a place without a name. */
@@ -184,7 +194,13 @@ export const HELD_CASES: readonly HeldCase["case"][] = [
   "note",
   "place_change",
   "disputed",
+  "unattested_place",
 ];
+
+/** How far from an `unattested_place` its merge candidates may be. */
+export const CANDIDATE_DISTANCE_M = 500;
+/** The most merge candidates an `unattested_place` case lists. */
+export const MAX_CANDIDATES = 3;
 
 /** Cases that come from the data rather than from feedback, so they name no feedback ids. */
 const FROM_DATA: readonly HeldCase["case"][] = ["vehicle_access_candidate"];
@@ -238,6 +254,10 @@ export function isHeldCase(v: unknown): v is HeldCase {
     const names: readonly unknown[] = ["website", "domain_age", "address"];
     if (v.fact === undefined || !Array.isArray(v.checks) || v.checks.length === 0 || !v.checks.every((c) => names.includes(c))) return false;
   }
+  if (v.case === "unattested_place") {
+    const ok = (c: unknown) => isObject(c) && typeof c.place === "string" && PLACE_ID.test(c.place) && c.place !== v.place && typeof c.distance_m === "number";
+    if (!Array.isArray(v.candidates) || v.candidates.length > MAX_CANDIDATES || !v.candidates.every(ok)) return false;
+  } else if (v.candidates !== undefined) return false;
   if (v.case === "implausible_location") {
     const hits: readonly unknown[] = ["water", "road", "building", "intake"];
     if (!hits.includes(v.hit) || typeof v.problem !== "string") return false;
@@ -306,6 +326,8 @@ export type ReviewDecision = "approve" | "restore" | "take_down" | "keep_down" |
 export function allowedDecisions(c: HeldCase): ReviewDecision[] {
   switch (c.case) {
     case "duplicate":
+      return ["approve", "merge", "take_down", "leave"];
+    case "unattested_place":
       return ["approve", "merge", "take_down", "leave"];
     case "hidden":
     case "first_place":
@@ -440,6 +462,7 @@ export function settleByRules(
   if (c.case === "hidden" && place.standing !== "hidden") return leave("the place is no longer hidden");
   if (c.case === "first_place" && place.standing === "hidden") return leave("the place is already hidden");
   if (c.case === "implausible_location" && place.standing !== "held") return leave("the place is no longer held");
+  if (c.case === "unattested_place" && place.standing !== "held") return leave("the place is no longer held");
   return null;
 }
 

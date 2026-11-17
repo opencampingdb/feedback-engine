@@ -7,6 +7,7 @@ import {
   isFactName,
   isValidFactValue,
   parseCharge,
+  tidyName,
   tidyText,
   type ContactFactName,
   type ContactReportReason,
@@ -420,6 +421,22 @@ export function newPlaceListing(item: ReportItem, trusted = false): { reason: "n
   if (item.contributor === undefined) return { reason: "no_contributor", why: "no contributor" };
   const problem = item.report.note === undefined ? null : firstProblem(tidyText(item.report.note));
   return problem === null ? null : { reason: "text_check", why: `note fails the text checks (${problem})` };
+}
+
+/**
+ * Whether the AI reviewer decides a new place the intake does not list: one
+ * that only a lack of attestation keeps off the list. It has a contributor,
+ * its name and note pass the text checks, its description passes them and
+ * its contacts pass the link rules, and the intake did not hold it for one
+ * of its checks (`heldForCheck`). Anything else waits for a person.
+ */
+export function reviewerDecidesNewPlace(item: ReportItem, trusted = false): boolean {
+  if (newPlaceListing(item, trusted)?.reason !== "not_attested" || item.contributor === undefined) return false;
+  const { name, note } = item.report;
+  if (note !== undefined && firstProblem(tidyText(note)) !== null) return false;
+  if (name !== undefined && firstProblem(tidyName(name)) !== null) return false;
+  const fields = newPlaceFields(item);
+  return fields.failing.length === 0 && fields.descriptionProblem === null && heldForCheck(item) === null;
 }
 
 /** The fields a `new_place` report carries, and which of them a published place holds back. */

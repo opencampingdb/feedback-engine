@@ -206,3 +206,30 @@ describe("contact_check cases", () => {
     expect(allowedDecisions(checked)).toEqual(["confirm", "dismiss", "leave"]);
   });
 });
+
+describe("unattested_place cases", () => {
+  const unattested: HeldCase = { ...base, case: "unattested_place", standing: "held", candidates: [{ place: OTHER, distance_m: 320 }] };
+
+  it("reads them from the review PR body, with their candidates", () => {
+    const body = reviewPrBody(AT, [], new Map(), [], [unattested]);
+    expect(parseHeldCases(body)).toEqual([unattested]);
+    // A candidate that is the place itself, or a case with no candidates field, is not one the apply writes.
+    expect(parseHeldCases(body.replace(OTHER, PLACE))).toEqual([]);
+    const { candidates: _, ...bare } = unattested;
+    expect(parseHeldCases(reviewPrBody(AT, [], new Map(), [], [bare as HeldCase]))).toEqual([]);
+  });
+
+  it("may be approved, merged or taken down, and goes to a person once it is no longer held", () => {
+    expect(allowedDecisions(unattested)).toEqual(["approve", "merge", "take_down", "leave"]);
+    expect(settleByRules(unattested, place())).toBeNull();
+    expect(settleByRules(unattested, place({ standing: "shown" }))).toEqual({ decision: "leave", reason: "the place is no longer held" });
+    expect(settleByRules(unattested, place({ owner_verified: true }))).toEqual({ decision: "leave", reason: "the place has a verified owner" });
+  });
+
+  it("is shown on approve and hidden on take_down", () => {
+    expect(applyDecision(place(), unattested, "approve", AT)).toMatchObject({ standing: "shown", updated: AT });
+    expect(applyDecision(place(), unattested, "approve", AT)?.moderator).toBeUndefined();
+    expect(applyDecision(place(), unattested, "take_down", AT)).toMatchObject({ standing: "hidden", moderator: { action: "hide", at: AT } });
+    expect(applyDecision(place(), unattested, "merge", AT)).toBeNull();
+  });
+});

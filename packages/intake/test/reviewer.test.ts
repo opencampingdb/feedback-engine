@@ -687,6 +687,91 @@ describe("the AI reviewer", () => {
     });
   });
 
+  describe("unattested_place cases", () => {
+    const unattested = (n: number, candidates: { place: string; distance_m: number }[] = []) => heldCase(n, { case: "unattested_place", standing: "held", candidates });
+    const nearby = (n: number, overrides: Partial<Place> = {}) =>
+      place(n, { standing: undefined, name: "Creek Bend 0", facts: { toilets: true }, fact_sources: { name: "osm", toilets: "osm" }, fact_dates: undefined, ...overrides });
+    const schemaOf = (input: Record<string, unknown>) =>
+      (input.response_format as { json_schema: { properties: { decision: { enum: string[] }; target?: { enum: string[] } } } }).json_schema.properties;
+
+    it("tells the model about the place and its candidates, and approves one it is sure of: standing shown", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [unattested(0, [{ place: id(1), distance_m: 320 }])]));
+      gh.put(place(0));
+      gh.put(nearby(1, { name: "Lakeside Park", kind: "caravan_park" }));
+      const { ai, asked } = fakeAi(() => reply("approve", "A believable free camp, unlike the caravan park nearby."));
+
+      const result = await run(gh, ai);
+      expect(result).toMatchObject({ decisions: [{ case: "unattested_place", decision: "approve", reviewer: REVIEWER, committed: true }] });
+      expect(caseOf(asked[0]!.input)).toMatchObject({ case: "unattested_place", place: { id: id(0) }, candidates: [{ id: id(1), name: "Lakeside Park", distance_m: 320 }] });
+      expect(JSON.stringify((asked[0]!.input.messages as { content: string }[])[0]!.content)).toContain("unattested_place");
+      // Different names and no road data: no candidate may be merged into, so a merge is not offered.
+      expect(schemaOf(asked[0]!.input).decision.enum).toEqual(["approve", "take_down", "leave"]);
+      expect(schemaOf(asked[0]!.input).target).toBeUndefined();
+      expect(gh.read(0)).toMatchObject({ standing: "shown", updated: AT });
+    });
+
+    it("takes down one that is clear spam", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [unattested(0)]));
+      gh.put(place(0, { name: "CHEAP PILLS BUY NOW" }));
+      const { ai } = fakeAi(() => reply("take_down", "Advertising, not a place."));
+      await run(gh, ai);
+      expect(gh.read(0)).toMatchObject({ standing: "hidden", moderator: { action: "hide", at: AT } });
+      expect(gh.commits()[0]!.body!.message as string).toContain(`${REVIEWER}: take_down held case unattested_place on ${id(0)}`);
+    });
+
+    it("merges it into the candidate the model names: the kept place and the tombstone in one commit", async () => {
+      const roads = majorRoads(['{"coords":[[144.549,-36.9],[144.551,-36.9]],"highway":"primary","name":"Example Road","road":5}']);
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [unattested(0, [{ place: id(1), distance_m: 220 }, { place: id(2), distance_m: 400 }])]));
+      gh.put(place(0, { facts: { fee: false }, fact_sources: { name: "feedback", location: "feedback", fee: "feedback" }, fact_dates: { name: AT, location: AT, fee: AT } }));
+      gh.put(nearby(1, { location: { lat: -36.852, lon: 144.55 } }));
+      gh.put(nearby(2, { location: { lat: -36.8536, lon: 144.55 } }));
+      const { ai, asked } = fakeAi(() => ({ response: { decision: "merge", target: id(2), reason: "The same camp as the one 400 m south.", sure: true } }));
+
+      const result = await createReviewer({ fetch: gh.fetch, now: () => clock, roads })({ ...env, AI: ai });
+      expect(schemaOf(asked[0]!.input).decision.enum).toEqual(["approve", "merge", "take_down", "leave"]);
+      expect(schemaOf(asked[0]!.input).target!.enum).toEqual([id(1), id(2)]);
+      expect(result).toMatchObject({ decisions: [{ decision: "merge", target: id(2), committed: true }] });
+      expect(gh.commits()).toHaveLength(1);
+      expect(gh.read(2)).toMatchObject({ facts: { toilets: true, fee: false }, fact_sources: { fee: "feedback" }, updated: AT });
+      expect(gh.read(0)).toMatchObject({ status: "merged", merged_into: id(2) });
+      expect(gh.read(1)).toEqual(nearby(1, { location: { lat: -36.852, lon: 144.55 } }));
+    });
+
+    it("leaves a merge to a person when the model names no candidate it may merge into", async () => {
+      const roads = majorRoads(['{"coords":[[144.549,-36.9],[144.551,-36.9]],"highway":"primary","name":"Example Road","road":5}']);
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [unattested(0, [{ place: id(1), distance_m: 220 }])]));
+      gh.put(place(0));
+      gh.put(nearby(1, { location: { lat: -36.852, lon: 144.55 } }));
+      const { ai } = fakeAi(() => ({ response: { decision: "merge", target: id(5), reason: "The same camp.", sure: true } }));
+      const result = await createReviewer({ fetch: gh.fetch, now: () => clock, roads })({ ...env, AI: ai });
+      expect(result).toMatchObject({ decisions: [{ decision: "leave", committed: false }] });
+      expect(gh.commits()).toHaveLength(0);
+    });
+
+    it("never offers a merge into a candidate with a verified owner or across a major road", async () => {
+      // A primary road between the place and candidate 2.
+      const roads = majorRoads(['{"coords":[[144.549,-36.853],[144.551,-36.853]],"highway":"primary","name":"Example Road","road":5}']);
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [unattested(0, [{ place: id(1), distance_m: 220 }, { place: id(2), distance_m: 400 }])]));
+      gh.put(place(0));
+      gh.put(nearby(1, { location: { lat: -36.852, lon: 144.55 }, owner_verified: true }));
+      gh.put(nearby(2, { location: { lat: -36.8536, lon: 144.55 } }));
+      const { ai, asked } = fakeAi(() => reply("leave", "unsure", false));
+      await createReviewer({ fetch: gh.fetch, now: () => clock, roads })({ ...env, AI: ai });
+      expect(schemaOf(asked[0]!.input).decision.enum).toEqual(["approve", "take_down", "leave"]);
+    });
+
+    it("leaves one the model is unsure of to a person, and one no longer held without asking", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [unattested(0), unattested(1)]));
+      gh.put(place(0));
+      gh.put(place(1, { standing: "shown" }));
+      const { ai, asked } = fakeAi(() => reply("approve", "Maybe a camp.", false));
+      const result = await run(gh, ai);
+      expect(asked).toHaveLength(1);
+      expect(result).toMatchObject({ decisions: [{ decision: "leave", by_rules: false }, { decision: "leave", by_rules: true }] });
+      expect(gh.commits()).toHaveLength(0);
+    });
+  });
+
   describe("merging a duplicate", () => {
     const dup = (n: number, of: number) => heldCase(n, { case: "duplicate", standing: "held", duplicate_of: id(of), distance_m: 70 });
     const existing = (n: number, overrides: Partial<Place> = {}) =>
@@ -1147,7 +1232,7 @@ interface ClaudeCall {
  * a decision, an HTTP error status, or "hang" for a call that never answers
  * until it is aborted. Usage is a usage block as the API reports it.
  */
-function fakeClaude(answer: (body: Record<string, unknown>) => { decision: string; reason: string; sure: boolean } | number | "hang", usage = { input_tokens: 812, output_tokens: 95 }) {
+function fakeClaude(answer: (body: Record<string, unknown>) => { decision: string; reason: string; sure: boolean; target?: string } | number | "hang", usage = { input_tokens: 812, output_tokens: 95 }) {
   const calls: ClaudeCall[] = [];
   async function fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
     const request = new Request(input, init);
@@ -1253,6 +1338,20 @@ describe("the second AI stage", () => {
     ]);
     expect(gh.read(0).standing).toBe("shown");
     expect(gh.commits()[0]!.body!.message).toContain(`${SECOND}: approve held case duplicate on ${id(0)}`);
+  });
+
+  it("asks the second model about an unattested new place the first is unsure of, and merges it into the candidate it names", async () => {
+    const roads = majorRoads(['{"coords":[[144.549,-36.9],[144.551,-36.9]],"highway":"primary","name":"Example Road","road":5}']);
+    const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [heldCase(0, { case: "unattested_place", standing: "held", candidates: [{ place: id(1), distance_m: 220 }] })]));
+    gh.put(place(0));
+    gh.put(place(1, { standing: undefined, location: { lat: -36.852, lon: 144.55 } }));
+    const { ai } = fakeAi(() => reply("approve", "Maybe its own camp.", false));
+    const claude = fakeClaude(() => ({ decision: "merge", target: id(1), reason: "The same camp, added again.", sure: true }));
+    const result = await createReviewer({ fetch: both(gh, claude), now: () => clock, roads })({ ...env, AI: ai });
+    const schema = (claude.calls[0]!.body.output_config as { format: { schema: { properties: { target: { enum: string[] } } } } }).format.schema;
+    expect(schema.properties.target.enum).toEqual([id(1)]);
+    expect(result).toMatchObject({ decisions: [{ decision: "merge", target: id(1), reviewer: SECOND, committed: true }] });
+    expect(gh.read(0)).toMatchObject({ status: "merged", merged_into: id(1) });
   });
 
   it("leaves a case both models are unsure of to a person", async () => {
