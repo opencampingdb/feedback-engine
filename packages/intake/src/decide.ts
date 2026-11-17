@@ -8,6 +8,7 @@ import {
   findDispute,
   newPlaceFields,
   newPlaceListing,
+  REVIEWED_FACTS,
   WINDOW_DAYS,
   type HeldReason as RulesHeldReason,
   type ItemDecision,
@@ -23,6 +24,7 @@ import {
   newPlaceId,
   tidyName,
   type ContactFactName,
+  type FactName,
   type FactValue,
   type FeedbackSubmission,
   type RecentChange,
@@ -74,10 +76,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * block list; `no_value` and `invalid_value`, the rules would refuse it (a
  * contact report or doubt about a fact the place does not have, as the index
  * has it). `commons_report`: a report that a Commons photo is not of the
- * place, which the apply decides. The apply decides each of these again when
- * it runs.
+ * place, which the apply decides. `source_link`: a fact report without
+ * attestation that carries a source link, waiting for the apply run to read
+ * the page. The apply decides each of these again when it runs.
  */
-export type HeldReason = RulesHeldReason | ChecksHeldReason | RefusedReason | "unknown_place" | "blocked" | "commons_report";
+export type HeldReason = RulesHeldReason | ChecksHeldReason | RefusedReason | "unknown_place" | "blocked" | "commons_report" | "source_link";
 
 /** What the answer to an accepted item adds. */
 export type ItemState = { state: "live" } | { state: "held"; held_reason: HeldReason };
@@ -474,9 +477,12 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
       ? decideFact({ item, place, earlier, ...(openCase === undefined ? {} : { openCase }) })
       : kind === "doubt" ? decideDoubt({ item, place, earlier }) : decideContactReport({ item, place, earlier });
   if (decision.verdict === "refused") return held(decision.reason);
-  if (decision.verdict === "held") return heldWithEvidence(decision.reason, item);
+  // A report waiting for a second source that carries a source link waits for the apply run to read the page instead.
+  const waiting = (reason: HeldReason) =>
+    reason === "not_attested" && kind === "fact" && item.report.source !== undefined && !REVIEWED_FACTS.has(item.report.fact as FactName) ? "source_link" : reason;
+  if (decision.verdict === "held") return heldWithEvidence(waiting(decision.reason), item);
   // An item without attestation is never live from the intake. The apply's two-device rule still runs.
-  if (item.attested === undefined) return heldWithEvidence("not_attested", item);
+  if (item.attested === undefined) return heldWithEvidence(waiting("not_attested"), item);
   // The place already has the value: nothing to show, and nothing for the checks.
   if (decision.changes.length === 0) return live((d) => [evidenceStatement(d, item, "live")], (p) => void p.evidence.push(evidenceRow(item, "live")));
   // An attested contact goes live now only when the place's own website shows it, within the time

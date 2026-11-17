@@ -244,6 +244,12 @@ export interface RulesInput {
    * closure a traveller sent, never as a closure on its own. None when left out.
    */
   closureEvidence?: ReadonlyMap<string, readonly ClosureEvidence[]>;
+  /**
+   * Fact reports whose source link shows their value (`confirmSourceLinks`).
+   * The page counts as one more source for that value (kind `source_link`):
+   * one report and its page are two sources. None when left out.
+   */
+  sourceConfirmed?: ReadonlySet<string>;
 }
 
 /**
@@ -560,6 +566,7 @@ function dataCheckFailures(input: RulesInput, out: RulesOutput): Map<string, str
 function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): RulesOutput {
   const now = Date.parse(input.now);
   const nowIso = new Date(now).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const sourceConfirmed = input.sourceConfirmed ?? new Set<string>();
   const decisions = new Map<string, Decision>();
   const working = new Map<string, Place>();
   const newReviews = new Map<string, Review[]>();
@@ -1596,8 +1603,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
               : decision.reason === "disagreement"
                 ? `${fact} set to ${JSON.stringify(value)}, which another device disagrees with (check before merging)`
                 : `${fact} set to ${JSON.stringify(value)} (check before merging)`;
+        // A person still decides a contact, but sees that its page shows it.
+        const shown = sourceConfirmed.has(item.id) ? ` A source link on ${new URL(item.report.source as string).hostname} shows it.` : "";
         edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
-        note(placeId, summary, false, [item]);
+        note(placeId, `${summary}${shown}`, false, [item]);
         decide(item, "needs_review", decision.why);
       };
 
@@ -1621,12 +1630,17 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           if (!open.has(item)) continue;
           const value = item.report.value as FactValue;
           const agreeing = [...open].filter((r) => sameValue(r.report.value, value) && inWindow(r, time(item)));
-          if (distinctDevices(agreeing) < 2) continue;
+          // A source link that shows the contact is one more source, as for any other fact.
+          const linked = agreeing.find((r) => sourceConfirmed.has(r.id));
+          if (distinctDevices(agreeing) + (linked ? 1 : 0) < 2) continue;
+          const counted = linked
+            ? `${distinctDevices(agreeing) === 1 ? "one device" : `${distinctDevices(agreeing)} devices`} and a source link (source_link) on ${new URL(linked.report.source as string).hostname}`
+            : `${distinctDevices(agreeing)} devices`;
           setFact(value);
-          note(placeId, `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days, contact checks passed)`, true, agreeing);
+          note(placeId, `${fact} set to ${JSON.stringify(value)} (${counted} within ${WINDOW_DAYS} days, contact checks passed)`, true, agreeing);
           for (const r of agreeing) {
             open.delete(r);
-            decide(r, "applied", `${fact} set to ${JSON.stringify(value)}`);
+            decide(r, "applied", `${fact} set to ${JSON.stringify(value)}${linked ? ` (${counted})` : ""}`);
           }
         }
         for (const item of open) decide(item, "waiting", `${fact} passed the contact checks, and waits for a second device to agree`);
@@ -1694,7 +1708,13 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         }
         const at = time(item);
         const agreeing = [...open].filter((r) => r.report.value === value && inWindow(r, at));
-        if (distinctDevices(agreeing) < 2) continue;
+        // A source link that shows the value is one more source, however many of the reports carry one.
+        const linked = agreeing.find((r) => sourceConfirmed.has(r.id));
+        const sources = distinctDevices(agreeing) + (linked ? 1 : 0);
+        if (sources < 2) continue;
+        const counted = linked
+          ? `${distinctDevices(agreeing) === 1 ? "one device" : `${distinctDevices(agreeing)} devices`} and a source link (source_link) on ${new URL(linked.report.source as string).hostname}`
+          : `${distinctDevices(agreeing)} devices`;
         if (place.fact_sources[fact] === "owner") {
           // The verified owner set this value. A person decides between them.
           edits.push({ kind: "fact", place: placeId, fact, value, feedback: agreeing[0]!.id });
@@ -1708,14 +1728,14 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         setFact(value);
         note(
           placeId,
-          `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days)${openCase !== undefined ? CLOSES_CASE : ""}`,
+          `${fact} set to ${JSON.stringify(value)} (${counted} within ${WINDOW_DAYS} days)${openCase !== undefined ? CLOSES_CASE : ""}`,
           true,
           agreeing,
         );
         if (openCase !== undefined) closeCase("replaced", agreeing);
         for (const r of agreeing) {
           open.delete(r);
-          decide(r, "applied", `${fact} set to ${JSON.stringify(value)}`);
+          decide(r, "applied", `${fact} set to ${JSON.stringify(value)}${linked ? ` (${counted})` : ""}`);
         }
         for (const r of [...open]) {
           if (time(r) <= at) {

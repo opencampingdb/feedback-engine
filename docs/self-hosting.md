@@ -447,6 +447,10 @@ New places are written with their `standing` from the SDK's `newPlaceStanding`. 
 
 Reports set a place's `standing` again on later runs unless a person's decision is on its record. To restore a hidden place, set `"standing": "shown"` and `"moderator": {"action": "restore", "at": "<now>"}` on the record, on the review PR or in a PR to `main`. Reports up to `at` no longer count. To hide one, set `"standing": "hidden"` and `"moderator": {"action": "hide", "at": "<now>"}`: it stays hidden whatever travellers send. `at` is a UTC time such as `2026-11-03T09:00:00Z` or a day such as `2026-11-03`. Only the latest decision is kept. The note on a place hidden before it was published gives the line to paste.
 
+### Source links
+
+A fact report may carry a source link (`report.source`) on a `.gov.au` host or the host of the place's website in the data. Each run fetches the linked pages of the fact reports in `pending/`, at most four at a time and for at most 2 minutes, with the safeguards of the owner proof check: https on a public host only, every address checked before connecting, a 10 second timeout, 2 MB at most and three redirects, each checked against the host rule again. A value the page shows counts as a second source, and the run's PR and the item's reason name it as `source_link`. A page that cannot be read confirms nothing, and the item is tried again next run. It needs no secret or binding, only the network access the workflow already has for proof pages. The intake checks the host against its place index (`RECENT_LIST`) at send time; without the index it leaves the host to the run.
+
 ### What the workflow tells the intake
 
 With `intake-url` set, each run passes `--main <checkout of data main> --intake <intake URL>` and the `places-token` secret to `ocdb-apply`. The run then:
