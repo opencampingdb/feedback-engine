@@ -2407,6 +2407,16 @@ describe("gap fills", () => {
     expect(out.changes).toEqual([expect.objectContaining({ automatic: true, feedback: [r.id], summary: "toilets set to true (filled a gap: the place had no value)" })]);
   });
 
+  it("never fills a gap with nudist: one report without attestation waits for a second source", () => {
+    const r = web(fact(0, "dev-a", "nudist", true));
+    const out = run([r]);
+    expect(out.outcome(r)).toBe("waiting");
+    expect(out.after()?.facts?.nudist).toBeUndefined();
+    const second = web(fact(1, "dev-b", "nudist", true), "net-2");
+    const both = run([r, second], { now: 2 });
+    expect(both.after()?.facts).toMatchObject({ nudist: true });
+  });
+
   it("keeps the two-source rule for a fact with free words, a contact and a change to a value the place has", () => {
     const operator = web(fact(0, "dev-a", "operator", "Example Shire Council"));
     const hours = web(fact(0, "dev-a", "opening_hours", "Mo-Su 08:00-18:00"));
