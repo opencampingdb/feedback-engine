@@ -712,6 +712,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `daily_cap` | The contributor, their network or their install's App Attest key has had 50 live changes today (UTC). |
 | `ai_check` | The AI check flagged its free text. |
 | `check_unavailable` | A check could not run, so it waits rather than going live unchecked. |
+| `repeated_text` | Its free text is nearly the same as text three other sources sent in the last 30 days, so a person reads it. |
 | `unknown_place` | The intake does not have the place yet, such as a place newer than the last release. |
 | `blocked` | The contributor is blocked. |
 | `no_value` | A contact report or doubt about a fact the place does not have. |

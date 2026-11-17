@@ -81,6 +81,7 @@ import {
 } from "./recent.js";
 import { cellHashes, getIndexedPlace, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
 import { createChecks, pruneLiveCounts, releaseLive, type AiLike, type LiveSlot } from "./checks.js";
+import { checkRepeated, pruneTextVectors, repeatedTextOf, type RepeatedResult, type VectorizeLike } from "./repeated.js";
 import {
   decideAtSendTime,
   decidedHere,
@@ -258,6 +259,12 @@ export interface Env {
   TIMED_INSTALLATION_ID?: string;
   /** Secret. The abuse.ch auth key for the URLhaus check on links. Without it, an item with a link is held. */
   URLHAUS_KEY?: string;
+  /**
+   * Vectorize index (768 dimensions, cosine, with number metadata index `at`
+   * and string metadata index `source`) for the repeated text check
+   * (src/repeated.ts), with AI and RECENT_LIST. Off without it.
+   */
+  VECTORIZE?: VectorizeLike;
   /** Workers AI, for the Llama Guard check on free text and the AI reviewer. Without it, free text from a contributor without a track record is held. */
   AI?: AiLike;
   /**
@@ -915,6 +922,11 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
       await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs), pruneProgress(db, nowMs), pruneRateCounts(db, nowMs), pruneRequestKeys(db, nowMs)]).catch((error: unknown) => {
         console.warn(`pruning the recent list failed: ${String(error)}`);
       });
+      if (env.VECTORIZE) {
+        await pruneTextVectors(db, env.VECTORIZE, nowMs).catch((error: unknown) => {
+          console.warn(`deleting old text vectors failed: ${String(error)}`);
+        });
+      }
     }
     // Before the apply is started, so a run that starts now finds this minute's items.
     await flush(env);
@@ -1969,6 +1981,18 @@ export function createHandler(deps: Deps) {
         stored.type === "photo_erasure");
     if (withhold) stored.withheld = true;
 
+    // The repeated text check, with the AI and VECTORIZE bindings and RECENT_LIST, run once for the item.
+    // One source is one client network, or the device when the network is not known.
+    let repeatedOnce: Promise<RepeatedResult> | undefined;
+    const repeated =
+      env.RECENT_LIST && env.AI && env.VECTORIZE
+        ? () =>
+            (repeatedOnce ??= checkRepeated(
+              { ai: env.AI!, index: env.VECTORIZE!, db: env.RECENT_LIST!, now: deps.now },
+              { id, source: stored.origin ?? stored.device, text: repeatedTextOf(submission as FeedbackSubmission) },
+            ))
+        : undefined;
+
     // Decided before the item is stored, and recorded in the same D1 batch that queues it.
     let decision: SendTimeDecision | undefined;
     if (env.RECENT_LIST && decidedHere(stored)) {
@@ -1984,7 +2008,7 @@ export function createHandler(deps: Deps) {
                 (r) => r.allowed,
                 () => false,
               );
-      const checks = createChecks({ db, fetch: deps.fetch, urlhausKey: env.URLHAUS_KEY, ai: env.AI, now: deps.now, linkLookup });
+      const checks = createChecks({ db, fetch: deps.fetch, urlhausKey: env.URLHAUS_KEY, ai: env.AI, now: deps.now, linkLookup, repeated });
       decision = await decideAtSendTime({
         db,
         checks,
@@ -2001,7 +2025,13 @@ export function createHandler(deps: Deps) {
       stored.intake = decision.linksPassed && answer.state === "held" ? { ...answer, links: "passed" } : answer;
       // The items after it in a batch are decided as if it were stored already.
       decision.addToDecided?.(intake.decided);
+    } else if (stored.type === "review" && repeated) {
+      // The apply decides a review. One repeated across sources, or one the check could not read, goes to a person.
+      const found = await repeated();
+      if (found === "repeated_text" || found === "check_unavailable") stored.intake = { state: "held", held_reason: found };
     }
+    // An item decided without the checks still leaves its text for the items after it.
+    if (repeated) await repeated();
 
     const writes = env.RECENT_LIST
       ? [

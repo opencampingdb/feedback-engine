@@ -113,9 +113,21 @@ migrations_dir = "migrations"
 # namespace_id = "1002"
 # simple = { limit = 120, period = 60 }
 
+# Optional: the repeated text check (src/repeated.ts). Free text nearly the
+# same as text from three other sources in the last 30 days is held as
+# repeated_text. Needs the AI binding below and RECENT_LIST. Create the index,
+# and its two metadata indexes before anything is stored in it:
+#   npx wrangler vectorize create ocdb-repeated-text --dimensions=768 --metric=cosine
+#   npx wrangler vectorize create-metadata-index ocdb-repeated-text --property-name=at --type=number
+#   npx wrangler vectorize create-metadata-index ocdb-repeated-text --property-name=source --type=string
+# Off without it.
+# [[vectorize]]
+# binding = "VECTORIZE"
+# index_name = "ocdb-repeated-text"
+
 # Workers AI, for the Llama Guard check on free text (src/checks.ts), which
 # the send-time decision runs with RECENT_LIST (src/decide.ts), and for the AI
-# reviewer (src/reviewer.ts) when AI_REVIEWER is on. The account needs Workers
-# AI. Without it, free text from a contributor without a track record is held.
+# reviewer (src/reviewer.ts) when AI_REVIEWER is on, and for the embeddings of
+# the repeated text check with VECTORIZE. The account needs Workers AI. Without it, free text from a contributor without a track record is held.
 [ai]
 binding = "AI"
