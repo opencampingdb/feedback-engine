@@ -1202,8 +1202,12 @@ const feedback = createFeedbackClient({
 
 ## What changed by version
 
-What an app moving to 0.39.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
+What an app moving to 0.40.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
 
+- **0.40.0.** Gap fills and unconfirmed values:
+  - A fact report without attestation (from a website after a human check, or an app key without attestation) of a fixed-value fact the place has no value for now goes into the data at the next apply run, without a second source ([gap fills](#reports)). The intake still answers `held` (`not_attested`). Any other change still waits for a second source, and after 7 days goes to the AI reviewer.
+  - `RecentList` gains `unconfirmed_values`, the values waiting for a second source, typed `UnconfirmedValue`, and `unconfirmedValuesFor(place, unconfirmedValues)` gives one place's entries less any value it already has ([Values waiting for confirmation](#the-recent-list)). Ask travellers to confirm them with an ordinary `fact` report (Yes) or a `doubt` (No). An older intake leaves `unconfirmed_values` out.
+  - `HELD_REASONS` gains `waiting_value`: a doubt about a fact while another source's report of a new value for it waits. It counts against that report, and the place's fact stays.
 - **0.39.0.** Source links, sign-in and new held reasons:
   - A `fact` report may carry `source`, a link to a page that shows the value, on a `.gov.au` host or the host of the place's own website ([Source links](#source-links)), and `reportFacts` takes it for the whole edit. `MAX_SOURCE_LENGTH` (500) and `sourceLinkProblem(source, website)` are exported, so an app can check a link before sending. The intake refuses a link on another host with `400 source_not_allowed`. `websiteHost(url)` gives a website's host as the rule compares it: lower case, without final dots or a leading `www.`.
   - Stored items gain `signed_in: true` when the app sent `contributor`. Only such items earn and use [trust from a track record](#trust-from-a-track-record), so send `contributor` with every report from a signed-in traveller.
