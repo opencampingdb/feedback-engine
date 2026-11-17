@@ -942,7 +942,7 @@ export type AnswerOutcome =
  * - `daily_cap`: the contributor has had 50 live changes this UTC day.
  * - `ai_check`: the AI check flagged free text.
  * - `repeated_text`: free text nearly the same as text three other sources
- *   sent in the last 30 days, so a person reads it.
+ *   sent in the last 30 days, so the AI reviewer reads it.
  * - `check_unavailable`: a check could not run, so the item waits.
  * - `unknown_place`: the intake does not have the place yet.
  * - `blocked`: the contributor is blocked.
@@ -961,14 +961,15 @@ export type AnswerOutcome =
  * - `source_link`: a fact report without attestation that carries a source link. The apply run
  *   reads the page, and the value goes live when the page shows it or a second source agrees.
  * - `disputed`: the place is frozen because three or more sources sent conflicting values for one of
- *   its facts within 24 hours. No fact on it changes until a reviewer settles the value.
+ *   its facts within 24 hours. No fact on it changes until a reviewer settles the value, or for
+ *   14 days when no one does.
  * - `ai_cap`: never given at send time. On an item's progress: the AI reviewer was unsure, and its
  *   second model's monthly spending cap was reached, so a person decides.
  * - `contact_check`: a contact the automatic contact checks have not passed yet. At send time an
  *   attested contact goes live only when the place's own website shows it; otherwise the apply run
  *   checks it in full, and one that fails a check goes to the AI reviewer.
- * - `network_reputation`: an attested report from a network on the intake's blocklist, which a
- *   reviewer reads before it goes live.
+ * - `network_reputation`: an attested item from a network on the intake's blocklist, which the AI
+ *   reviewer reads before it counts. The intake gives it at send time only on the items it decides.
  * - `implausible_location`: a new place the map data puts in the sea or a lake, on a major road's
  *   carriageway or inside a building footprint, so the AI reviewer checks it before it is listed.
  *   Remoteness is never a reason.

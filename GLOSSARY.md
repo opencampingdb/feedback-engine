@@ -23,11 +23,11 @@ A Cloudflare Turnstile token showing that a person filled in the form that sent 
 _Avoid_: attestation, captcha, proof of a genuine app
 
 **Silent drop**:
-An item the intake answers exactly as it answers an accepted one, with an id and progress, but never stores, so whoever sent it cannot tell which check it failed. Used for abuse that cannot be traced to a genuine install, such as a missing or failed human check, or a request without attestation from a network on the blocklist. Only a count per day and reason is kept.
+An item the intake answers exactly as it answers an accepted one, with an id and progress, but never stores, so whoever sent it cannot tell which check it failed. Used for abuse that cannot be traced to a genuine install, such as a missing or failed human check, or a request without attestation from a network with a poor network reputation. Only a count per day and reason is kept.
 _Avoid_: refusal (which always gives its reason), shadow ban
 
 **Network reputation**:
-Whether a request's address is on a public IP blocklist the intake fetches once a day and keeps itself. A listed address drops an item without attestation silently, and holds an attested one for a reviewer.
+Whether a request's address is on a public list of abusive addresses, which the intake fetches once a day and keeps itself. A listed address drops an item without attestation silently, and holds an attested one for the AI reviewer.
 _Avoid_: IP ban, firewall
 
 ## Between releases
@@ -97,7 +97,7 @@ Accepted, but kept from apps until a reviewer decides.
 _Avoid_: pending, queued, quarantined
 
 **Frozen place**:
-A place where three or more sources sent conflicting values for one fact within 24 hours, so no fact on it changes until a reviewer settles the value.
+A place where three or more sources sent conflicting values for one fact within 24 hours, so no fact on it changes until a reviewer settles the value, or for 14 days when no one does.
 _Avoid_: locked place, edit war (for the state)
 
 **Reviewer**:
@@ -117,7 +117,7 @@ A new place from an install without attestation, held for the AI reviewer once i
 _Avoid_: unverified place, anonymous place (it has a contributor)
 
 **Trusted contributor**:
-A signed-in contributor five of whose edits other sources have confirmed, with no upheld doubt about any of their edits since. Their new places list at once, and their contacts go live once they pass the contact checks, without a second source.
+A signed-in contributor five of whose edits other sources have confirmed, with no upheld doubt about any of their edits since. Only an attested or signed-in item this run applied, from another device, network and contributor, confirms an edit. A doubt is upheld when doubts take the value down, the AI reviewer keeps it down, dismisses or reverts the edit or takes the place down, or a person leaves the edit out of a merged review PR. Their new places list at once, and their contacts go live once they pass the contact checks, without a second source.
 _Avoid_: verified contributor, trusted reviewer (a contributor whose reviews publish)
 
 **Merge**:
