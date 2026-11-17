@@ -200,7 +200,7 @@ The OSM notes workflow (`osm-notes.yml`) is retired, so don't add it. [osm.md](o
    ```
 
 2. If the diff adds a binding or variable to `wrangler.toml`, add it to your deploy copy by hand. Don't regenerate the copy.
-3. Apply any new migrations, then deploy. Code newer than its schema answers `500`: without `0010` and `0011` to every submission, without `0012` to a photo service's progress calls, and without `0013` to every request with an idempotency key, which every SDK from 0.21.0 sends. Without `0014` the AI reviewer still goes on past a case whose model call fails, but never counts its failed runs, so it never leaves that case to a person. Without `0015` a new place report the intake would put on the recent list answers `500`, because the intake keeps the adder's client network with the place.
+3. Apply any new migrations, then deploy. Code newer than its schema answers `500`: without `0010` and `0011` to every submission, without `0012` to a photo service's progress calls, and without `0013` to every request with an idempotency key, which every SDK from 0.21.0 sends. Without `0014` the AI reviewer still goes on past a case whose model call fails, but never counts its failed runs, so it never leaves that case to a person. Without `0015` a new place report the intake would put on the recent list answers `500`, because the intake keeps the adder's client network with the place. Without `0016` the intake still answers a silently dropped item as accepted, but logs a warning and records neither its progress nor its count.
 
    ```sh
    cd packages/intake
@@ -469,6 +469,19 @@ Check that `diff` shows only that block, and that the binding list Wrangler prin
 rm wrangler.deploy.toml.bak
 npx wrangler kv namespace delete --namespace-id <RECENT_PLACES namespace id>
 ```
+
+### Silent drops
+
+Some abuse is dropped silently instead of refused: a request from a key with `requires_human_check` that has no token, or whose token Turnstile refuses or made for another site, body or form. The intake answers it exactly as it answers an accepted item from that key, `202` with an id (and, for a report it decides at send time, `held` with `not_attested`, or `unknown_place` for a place it does not know), and writes its progress record as `received`, which never moves on. It stores nothing for the inbox or the recent list, counts nothing as a source, and counts nothing against a daily limit. Text and link refusals stay visible, so an honest traveller can fix what they typed. When Turnstile cannot answer, the intake still answers `503`.
+
+The intake counts silent drops per UTC day and reason (`human_check_required`, `human_check_failed`), with no item content, app, device or network. With `RECENT_LIST` they are rows in `silent_drops`, kept 90 days:
+
+```sh
+npx wrangler d1 execute RECENT_LIST --remote -c wrangler.deploy.toml \
+  --command "SELECT day, reason, count FROM silent_drops ORDER BY day DESC, reason"
+```
+
+Without `RECENT_LIST` they are KV keys `silent:<day>:<reason>` in `RATE_LIMIT`, which expire after 90 days. A steady count of `human_check_required` from a website you run usually means its page sends without calling Turnstile.
 
 ## Abuse
 

@@ -135,8 +135,11 @@ export interface FeedbackClientOptions {
    * `cData`, for example from `turnstile.execute` on a widget rendered with
    * `cData: bodySha256`. The token goes in `x-human-check`. Each token works
    * once, so return a new one on every call. If it throws, the item stays
-   * queued and is tried later. A human check is not attestation: the intake
-   * weighs these items as unattested ones.
+   * queued and is tried later. A missing token, or one Turnstile refuses or
+   * that was made for another site, body or form, is dropped silently: the
+   * intake answers as if it took the item, so the SDK settles it as sent and
+   * it is lost. A human check is not attestation: the intake weighs these
+   * items as unattested ones.
    */
   humanCheck?: (request: { body: string; bodySha256: string }) => Promise<string>;
   /**
@@ -213,7 +216,11 @@ function attestationErrorIn(status: number, answer: unknown): AttestationError |
 /** The header that carries a human check token. */
 export const HUMAN_CHECK_HEADER = "x-human-check";
 
-/** What the intake answers when a human check is missing or does not pass. */
+/**
+ * What an intake from before silent drops answers when a human check is
+ * missing or does not pass. A current intake drops such an item silently and
+ * answers as if it took it.
+ */
 export type HumanCheckError = "human_check_required" | "human_check_failed";
 
 /** The human check error in a `401` answer, or undefined when the answer is not one. */
