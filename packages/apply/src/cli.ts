@@ -2,6 +2,7 @@
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { botPrs, type ReviewPr } from "./owners.js";
+import { transportFetch } from "./proof.js";
 import { intakeRecentList, intakeRecentStore, tellIntake } from "./recent.js";
 import { sendPhotoProgress } from "./photo-progress.js";
 import { sendProgress } from "./progress.js";
@@ -14,7 +15,7 @@ const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>
                   [--photo-licence <id>] [--publish-first-photo]
                   [--main <dir> --intake <url>]
                   [--recent-places <url>] [--review-preview <url>]
-                  [--geometry <file>]
+                  [--geometry <file>] [--contact-checks]
 
 Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
@@ -67,6 +68,13 @@ merged into the place it duplicates only when the two have the same name once
 tidied, are in the same group and less than 50 m apart, and no major road runs
 between them. Without it the run has no road data and merges no duplicate on
 its own: each goes to a reviewer as a duplicate case.
+--contact-checks runs the automatic contact checks on each contact fact
+report: the place's own website shows the phone, email or social link, the
+domain of a website or email was not registered in the last 90 days (RDAP),
+and an address's state and postcode belong where the place is. A contact that
+fails one is held for the AI reviewer as a contact_check case, and one that
+passes them all follows the two-source rule. Without it, an attested contact
+goes live and one without attestation goes to a person.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
 
@@ -95,6 +103,7 @@ async function main(): Promise<number> {
       "recent-places": { type: "string" },
       "review-preview": { type: "string" },
       geometry: { type: "string" },
+      "contact-checks": { type: "boolean" },
       help: { type: "boolean" },
     },
   });
@@ -140,6 +149,7 @@ async function main(): Promise<number> {
     ...(values["photo-licence"] ? { photoLicence: values["photo-licence"] } : {}),
     ...(values["publish-first-photo"] ? { holdFirstPhoto: false } : {}),
     ...(values.geometry ? { geometry: values.geometry } : {}),
+    ...(values["contact-checks"] ? { contactChecks: { fetch: transportFetch() } } : {}),
     ...(values["recent-places"] ? { recentList: intakeRecentList(values["recent-places"]) } : {}),
     ...(values["review-preview"] && previewSecret ? { reviewPreview: { url: values["review-preview"], secret: previewSecret } } : {}),
   });

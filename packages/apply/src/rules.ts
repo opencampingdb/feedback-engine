@@ -2,6 +2,7 @@ import {
   FEE_RETIRED,
   firstProblem,
   isCommonsFileName,
+  isContactFact,
   isValidFactValue,
   newPlaceStanding,
   safeSearchVerdict,
@@ -41,6 +42,7 @@ import {
   type OpenDoubt,
   type Setter,
 } from "./decide.js";
+import type { CheckOutcome } from "./contact-checks.js";
 import { moderateReview } from "./moderation.js";
 import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase } from "./review.js";
 import type { EarlierFact } from "./io.js";
@@ -195,6 +197,16 @@ export interface RulesInput {
    * moves. They are decided as that run decided them. None when left out.
    */
   earlierFacts?: ReadonlyMap<string, ReadonlyMap<string, EarlierFact>>;
+  /**
+   * What the automatic contact checks found for each pending contact fact
+   * report, by feedback id (`checkContacts`). Given, a contact that fails
+   * any check is held for the AI reviewer as a `contact_check` case, one that
+   * passes them all follows the two-source rule, and one with no entry (the
+   * checks ran out of time) waits for a later run. Left out, the checks are
+   * off: an attested contact goes live and one without attestation goes to a
+   * person.
+   */
+  contactChecks?: ReadonlyMap<string, readonly CheckOutcome[]>;
 }
 
 /**
@@ -1401,6 +1413,26 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           decide(item, "applied", decision.why);
           return;
         }
+        if (decision.reason === "contact_check") {
+          const failed = decision.failed ?? [];
+          const before = current();
+          edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
+          note(placeId, `${fact} set to ${JSON.stringify(value)}, which failed the contact checks: ${failed.map((c) => c.detail).join("; ")} (check before merging)`, false, [item]);
+          held.push({
+            case: "contact_check",
+            place: placeId,
+            ...(place.standing !== undefined ? { standing: place.standing } : {}),
+            location: { lat: roundCoord(place.location.lat), lon: roundCoord(place.location.lon) },
+            kind: place.kind,
+            fact,
+            ...(before !== undefined ? { value: before as FactValue } : {}),
+            checks: failed.map((c) => c.check),
+            problem: failed.map((c) => c.detail).join("; "),
+            feedback: [item.id],
+          });
+          decide(item, "needs_review", decision.why);
+          return;
+        }
         const summary =
           decision.reason === "owner_value"
             ? `${fact}: a device reports ${JSON.stringify(value)}, the owner set ${JSON.stringify(current())}`
@@ -1415,7 +1447,34 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       };
 
       if (REVIEWED_FACTS.has(fact)) {
-        for (const item of reports) settle(item, decideFact({ item, place, earlier: evidence }));
+        const checks = isContactFact(fact) ? input.contactChecks : undefined;
+        // Contacts without attestation that passed every contact check, waiting for a second device to agree.
+        const agreeable: ReportItem[] = [];
+        for (const item of reports) {
+          const found = checks?.get(item.id);
+          if (checks !== undefined && found === undefined) {
+            decide(item, "waiting", `the contact checks have not run on ${fact} yet`);
+            continue;
+          }
+          const decision = decideFact({ item, place, earlier: evidence, ...(found !== undefined ? { contactChecks: found } : {}) });
+          if (found !== undefined && decision.verdict === "held" && decision.reason === "not_attested") agreeable.push(item);
+          else settle(item, decision);
+        }
+        // The two-source rule: two devices that agree within 90 days set the contact.
+        const open = new Set(agreeable);
+        for (const item of agreeable) {
+          if (!open.has(item)) continue;
+          const value = item.report.value as FactValue;
+          const agreeing = [...open].filter((r) => sameValue(r.report.value, value) && inWindow(r, time(item)));
+          if (distinctDevices(agreeing) < 2) continue;
+          setFact(value);
+          note(placeId, `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days, contact checks passed)`, true, agreeing);
+          for (const r of agreeing) {
+            open.delete(r);
+            decide(r, "applied", `${fact} set to ${JSON.stringify(value)}`);
+          }
+        }
+        for (const item of open) decide(item, "waiting", `${fact} passed the contact checks, and waits for a second device to agree`);
         continue;
       }
 

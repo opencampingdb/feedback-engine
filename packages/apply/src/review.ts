@@ -1,9 +1,10 @@
 import { contactProblem, isCommonsFileName, isContactFact, isDoubtFact, isFactName, isValidFactValue, tidyName, type ContactFactName, type FactName, type FactValue } from "@opencampingdb/feedback";
+import type { ContactCheckName } from "./contact-checks.js";
 import { byCodePoint } from "./data-check.js";
 import type { Settles } from "./decide.js";
 import { distanceM, majorRoads, type MajorRoads } from "./roads.js";
 import { dumpPlace, placePath } from "./serialise.js";
-import { setSource } from "./sources.js";
+import { dropSource, setSource } from "./sources.js";
 import type { Place } from "./types.js";
 
 /**
@@ -50,6 +51,10 @@ export type { Place };
  * `commons_mismatch`: travellers say the
  * Commons photo `file` shown for the place is not of it, from `sources`
  * independent sources, not yet enough to put it on the do-not-match list.
+ * `contact_check`: a traveller's contact `fact` that failed the automatic
+ * contact checks named in `checks`, with what they found in `problem`; it is
+ * set on the place in the review PR, and `value` is what the place published
+ * before, if anything.
  * `note`: a new place whose report carries a note, published, drafted or
  * merged into the place it duplicates. The note may say something the place
  * should carry, such as an address the app could not confirm on the map, so a
@@ -57,7 +62,18 @@ export type { Place };
  * Contact values a traveller sent, notes and device ids are never in it.
  */
 export interface HeldCase {
-  case: "duplicate" | "hidden" | "contacts" | "description" | "first_place" | "contact_withdrawn" | "fact_doubted" | "vehicle_access_candidate" | "commons_mismatch" | "note";
+  case:
+    | "duplicate"
+    | "hidden"
+    | "contacts"
+    | "description"
+    | "first_place"
+    | "contact_withdrawn"
+    | "fact_doubted"
+    | "vehicle_access_candidate"
+    | "commons_mismatch"
+    | "contact_check"
+    | "note";
   place: string;
   /** The place's standing. Left out for a place travellers did not add. */
   standing?: "shown" | "confirmed" | "held" | "hidden";
@@ -69,11 +85,17 @@ export interface HeldCase {
   reasons?: string[];
   blocked?: true;
   contacts?: string[];
-  /** On `description`: the text check it failed. */
+  /** On `description`: the text check it failed. On `contact_check`: what the failed contact checks found. */
   problem?: string;
+  /** On `contact_check`: the contact checks it failed. */
+  checks?: ContactCheckName[];
   /** On `contact_withdrawn`: the contact taken off the place. On `fact_doubted`: the fact doubted. On `vehicle_access_candidate`: `vehicle_access`. */
   fact?: FactName;
-  /** On `contact_withdrawn` and `fact_doubted`: the value the place published. On `vehicle_access_candidate`: the value its name suggests. */
+  /**
+   * On `contact_withdrawn` and `fact_doubted`: the value the place published.
+   * On `contact_check`: the value the place published before the report, left
+   * out when it had none. On `vehicle_access_candidate`: the value its name suggests.
+   */
   value?: FactValue;
   /** On `fact_doubted`: the doubts took the fact off the place. */
   taken_down?: boolean;
@@ -116,6 +138,7 @@ export const HELD_CASES: readonly HeldCase["case"][] = [
   "fact_doubted",
   "vehicle_access_candidate",
   "commons_mismatch",
+  "contact_check",
   "note",
 ];
 
@@ -147,6 +170,10 @@ export function isHeldCase(v: unknown): v is HeldCase {
     if (typeof v.sources !== "number" || !isStrings(v.doubts) || !isStrings(v.confirmations)) return false;
   } else if (v.fact !== undefined && (typeof v.fact !== "string" || !isContactFact(v.fact))) return false;
   if (v.case === "contact_withdrawn" && (v.fact === undefined || v.value === undefined)) return false;
+  if (v.case === "contact_check") {
+    const names: readonly unknown[] = ["website", "domain_age", "address"];
+    if (v.fact === undefined || !Array.isArray(v.checks) || v.checks.length === 0 || !v.checks.every((c) => names.includes(c))) return false;
+  }
   if (v.reasons !== undefined && !isStrings(v.reasons)) return false;
   if (v.contacts !== undefined && !isStrings(v.contacts)) return false;
   return true;
@@ -223,6 +250,8 @@ export function allowedDecisions(c: HeldCase): ReviewDecision[] {
       return ["leave"];
     case "commons_mismatch":
       return ["confirm", "dismiss", "leave"];
+    case "contact_check":
+      return ["confirm", "dismiss", "leave"];
     default:
       return ["leave"];
   }
@@ -271,6 +300,12 @@ export function settleByRules(
     if (c.reasons?.includes("spam")) return leave("it was reported as spam, so only a person restores it");
     return null;
   }
+  if (c.case === "contact_check") {
+    // Owners keep control of their listings: a person decides.
+    if (place.owner_verified === true) return leave("the place has a verified owner");
+    if (place.fact_sources[c.fact!] === "owner") return leave("the owner set this contact");
+    return null;
+  }
   if (place.owner_verified === true) return leave("the place has a verified owner");
   if (place.standing === undefined) return leave("travellers did not add this place");
   if (place.moderator !== undefined) return leave("a person has already decided on this place");
@@ -289,14 +324,29 @@ export function settleByRules(
  * with a `hide` decision, so reports can't bring it back. `restore` sets the
  * withdrawn contact, or a fact doubts took down, back to the value the place
  * published. `keep_down` and `dismiss` change nothing, and neither does
- * `merge` here: it writes two records, with `mergePlaces`.
+ * `merge` here: it writes two records, with `mergePlaces`. On a
+ * `contact_check` case, `confirm` keeps the reported contact the review PR
+ * set, and `dismiss` puts back the value the place had before, or takes the
+ * contact off when it had none.
  */
 export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecision, at: string): Place | null {
-  if (!allowedDecisions(c).includes(decision) || decision === "leave" || decision === "keep_down" || decision === "dismiss" || decision === "merge") return null;
+  if (!allowedDecisions(c).includes(decision) || decision === "leave" || decision === "keep_down" || decision === "merge") return null;
+  if (decision === "dismiss" && c.case !== "contact_check") return null;
   // A Commons photo goes on the do-not-match list (`withDoNotMatch`), not into the place record.
   if (c.case === "commons_mismatch") return null;
+  // A confirmed contact stays as the review PR has it.
+  if (c.case === "contact_check" && decision === "confirm") return null;
   const next = structuredClone(place);
-  if (decision === "restore") {
+  if (c.case === "contact_check") {
+    // Dismissed: the place's earlier value, or none.
+    if (c.value !== undefined) {
+      (next.facts as Record<string, FactValue>)[c.fact!] = c.value;
+      setSource(next, c.fact!, "feedback", at);
+    } else {
+      delete (next.facts as Record<string, FactValue | undefined>)[c.fact!];
+      dropSource(next, c.fact!);
+    }
+  } else if (decision === "restore") {
     (next.facts as Record<string, FactValue>)[c.fact!] = c.value as FactValue;
     setSource(next, c.fact!, "feedback", at);
   } else if (decision === "take_down") {

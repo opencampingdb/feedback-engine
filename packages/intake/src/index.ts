@@ -1,3 +1,4 @@
+import { SEND_TIME_BUDGET_MS } from "@opencampingdb/apply/contact-checks";
 import {
   isJpeg,
   jpegMetadata,
@@ -445,6 +446,8 @@ export interface Deps {
   appAttestRoot?: string;
   /** Edge cache for the recent places list. Workers' default cache in production; none when left out. */
   cache?: CacheLike;
+  /** How long the website check on an attested contact may take at send time. SEND_TIME_BUDGET_MS by default. */
+  contactCheckMs?: number;
 }
 
 /** The part of the Workers Cache API the recent list uses. */
@@ -2083,6 +2086,7 @@ export function createHandler(deps: Deps) {
         submission: submission as FeedbackSubmission,
         contributor: who,
         decided: intake.decided,
+        website: { fetch: (url, init) => deps.fetch(url, init), timeoutMs: deps.contactCheckMs ?? SEND_TIME_BUDGET_MS },
       }).catch((error: unknown) => {
         console.warn(`deciding ${id} failed: ${String(error)}`);
         return { answer: UNAVAILABLE, writes: () => [] };

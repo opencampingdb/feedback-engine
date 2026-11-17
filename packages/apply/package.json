@@ -14,6 +14,10 @@
       "types": "./dist/review.d.ts",
       "default": "./dist/review.js"
     },
+    "./contact-checks": {
+      "types": "./dist/contact-checks.d.ts",
+      "default": "./dist/contact-checks.js"
+    },
     "./preview": {
       "types": "./dist/preview.d.ts",
       "default": "./dist/preview.js"
