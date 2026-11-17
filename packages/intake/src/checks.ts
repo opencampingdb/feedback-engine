@@ -35,7 +35,8 @@ import {
   type ContactFactName,
   type FeedbackSubmission,
 } from "@opencampingdb/feedback";
-import { LINK_FACTS } from "@opencampingdb/apply/decide";
+import { LINK_FACTS, type CheckHold } from "@opencampingdb/apply/decide";
+import { timeLimit, TimedOut } from "@opencampingdb/apply/pages";
 import type { Fetch } from "./github.js";
 import type { D1Like } from "./recent.js";
 import type { RepeatedResult } from "./repeated.js";
@@ -54,7 +55,7 @@ export const URLHAUS_HOST_ENDPOINT = "https://urlhaus-api.abuse.ch/v1/host/";
 export const GUARD_MODEL = "@cf/meta/llama-guard-3-8b";
 
 /** Why the checks held an item. */
-export type HeldReason = "text_check" | "link_check" | "daily_cap" | "repeated_text" | "ai_check" | "check_unavailable" | "network_reputation";
+export type HeldReason = CheckHold;
 
 /** The live change an item that passed took from each of its daily caps, to give back if it is not recorded after all. */
 export interface LiveSlot {
@@ -146,22 +147,12 @@ const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
 class Unavailable extends Error {}
 
-/** `work`, or `Unavailable` when it fails or takes longer than `ms`. The signal aborts a fetch that runs over. */
+/** `work`, or `Unavailable` when it fails or takes longer than `ms` (`timeLimit`). The signal aborts a fetch that runs over. */
 export async function withTimeout<T>(ms: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(new Unavailable("timed out"));
-    }, ms);
-  });
   try {
-    return await Promise.race([work(controller.signal), timeout]);
+    return await timeLimit(ms, work);
   } catch (error) {
-    throw error instanceof Unavailable ? error : new Unavailable(String(error));
-  } finally {
-    clearTimeout(timer);
+    throw error instanceof Unavailable ? error : new Unavailable(error instanceof TimedOut ? "timed out" : String(error));
   }
 }
 

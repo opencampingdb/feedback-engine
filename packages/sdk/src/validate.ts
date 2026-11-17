@@ -1133,12 +1133,17 @@ export function isPublicHttpsUrl(value: unknown): value is string {
 /** Longest source link a fact report may carry. */
 export const MAX_SOURCE_LENGTH = 500;
 
-/** A host name as the source link rule compares it: lower case, without a final dot or a leading `www.`. */
-const sourceHost = (url: string) =>
-  new URL(url).hostname
+/**
+ * A website's host as Open Camping DB compares hosts: lower case, without
+ * final dots or a leading `www.`. `https://WWW.Example.org./camp` is
+ * `example.org`. Throws for text that is not a URL.
+ */
+export function websiteHost(url: string | URL): string {
+  return (typeof url === "string" ? new URL(url) : url).hostname
     .toLowerCase()
-    .replace(/\.$/, "")
+    .replace(/\.+$/, "")
     .replace(/^www\./, "");
+}
 
 /**
  * What is wrong with a fact report's source link, or null when it passes: an
@@ -1149,9 +1154,9 @@ const sourceHost = (url: string) =>
  */
 export function sourceLinkProblem(source: unknown, website: unknown): string | null {
   if (!isPublicHttpsUrl(source)) return "must be an https address on a public website";
-  const host = sourceHost(source);
+  const host = websiteHost(source);
   if (host.endsWith(".gov.au")) return null;
-  if (isPublicHttpsUrl(website) && sourceHost(website) === host) return null;
+  if (isPublicHttpsUrl(website) && websiteHost(website) === host) return null;
   return "must be on a .gov.au host or the place's own website";
 }
 

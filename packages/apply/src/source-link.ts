@@ -1,4 +1,5 @@
 import { parseCharge, sourceLinkProblem, type FactName, type PlaceAddress } from "@opencampingdb/feedback";
+import { escapeRegExp, visibleText } from "./pages.js";
 import { allowedUrl, httpsTransport, readCapped, USER_AGENT, type Transport, type TransportResponse } from "./proof.js";
 
 /**
@@ -39,30 +40,13 @@ interface PageText {
   html: string;
 }
 
-const ENTITIES: Record<string, string> = { amp: "&", nbsp: " ", quot: '"', apos: "'", lt: "<", gt: ">", ndash: "-", mdash: "-", rsquo: "'", lsquo: "'" };
-
-/** The visible text of `html`: no scripts, styles or comments, tags replaced with spaces, common entities decoded. */
-function visibleText(html: string): string {
-  return html
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<(script|style|noscript|template)\b[\s\S]*?<\/\1\s*>/gi, " ")
-    .replace(/<[^>]*>/g, " ")
-    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
-    .replace(/&#(\d+);/g, (_, dec: string) => String.fromCodePoint(Number(dec)))
-    .replace(/&([a-z]+);/gi, (whole, name: string) => ENTITIES[name.toLowerCase()] ?? whole)
-    .replace(/\s+/g, " ")
-    .toLowerCase()
-    .trim();
+/** A page's text for the checks: what a visitor reads (`visibleText`) and its whole source, both in lower case. */
+export function pageTextOf(html: string): PageText {
+  return { text: visibleText(html).toLowerCase(), html: html.toLowerCase() };
 }
 
-/** A page's text for the checks. */
-export function readPage(html: string): PageText {
-  return { text: visibleText(html), html: html.toLowerCase() };
-}
-
-const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** `text` as a pattern that matches it ignoring spacing, between word boundaries. */
-const literal = (text: string) => `\\b${text.trim().toLowerCase().split(/\s+/).map(escape).join("\\s+")}\\b`;
+const literal = (text: string) => `\\b${text.trim().toLowerCase().split(/\s+/).map(escapeRegExp).join("\\s+")}\\b`;
 const found = (pattern: string, text: string) => new RegExp(pattern, "i").test(text);
 
 // Yes or no facts. Each names the fact in words that mean yes. Before them, `no`, `not`, `without`,
@@ -165,14 +149,14 @@ const bareLink = (url: string) =>
 
 function amountPattern(amount: number): string {
   const whole = Number.isInteger(amount);
-  const text = whole ? `${amount}(\\.00)?` : escape(amount.toFixed(2));
+  const text = whole ? `${amount}(\\.00)?` : escapeRegExp(amount.toFixed(2));
   return `(\\$\\s?${text}(?![\\d.])|\\b${text}\\s?aud\\b)`;
 }
 
 const STAY_UNITS: Record<string, string> = { h: "hours?|hrs?", d: "days?|nights?", w: "weeks?" };
 
 /** Whether `page` shows `value` for `fact`, read as the module comment says. */
-export function pageShows(fact: FactName, value: unknown, page: PageText): boolean {
+export function pageConfirmsValue(fact: FactName, value: unknown, page: PageText): boolean {
   const { text, html } = page;
   const yesNo = YES_NO[fact];
   if (yesNo !== undefined && typeof value === "boolean") {
@@ -201,7 +185,7 @@ export function pageShows(fact: FactName, value: unknown, page: PageText): boole
       case "operator":
         return found(literal(value.replace(/&/g, "and")), text.replace(/&/g, "and"));
       case "email":
-        return new RegExp(`(^|[^\\w.+-])${escape(value.toLowerCase())}($|[^\\w.-])`).test(html);
+        return new RegExp(`(^|[^\\w.+-])${escapeRegExp(value.toLowerCase())}($|[^\\w.-])`).test(html);
       case "phone":
       case "phone_2": {
         const wanted = nationalDigits(value);
@@ -214,7 +198,7 @@ export function pageShows(fact: FactName, value: unknown, page: PageText): boole
       case "tiktok":
       case "x": {
         const link = bareLink(value);
-        return new RegExp(`(https?://)?(www\\.)?${escape(link)}/?(?=$|["'<\\s?#])`).test(html);
+        return new RegExp(`(https?://)?(www\\.)?${escapeRegExp(link)}/?(?=$|["'<\\s?#])`).test(html);
       }
       default:
         return false;
@@ -272,7 +256,7 @@ export async function fetchSourcePage(source: string, website: unknown, transpor
     const type = (res.headers["content-type"] ?? "").toLowerCase();
     if (!/^text\/(html|plain)\b/.test(type) && !/^application\/xhtml\+xml\b/.test(type)) return null;
     try {
-      return readPage(await readCapped(res.body, MAX_BYTES));
+      return pageTextOf(await readCapped(res.body, MAX_BYTES));
     } catch {
       return null;
     }
@@ -311,7 +295,7 @@ export async function confirmSourceLinks(
         const key = `${report.source}\u0000${String(report.website)}`;
         if (!pages.has(key)) pages.set(key, fetchSourcePage(report.source, report.website, options.transport));
         const page = await pages.get(key)!;
-        if (page !== null && pageShows(report.fact as FactName, report.value, page)) confirmed.add(report.id);
+        if (page !== null && pageConfirmsValue(report.fact as FactName, report.value, page)) confirmed.add(report.id);
       }
     }),
   );

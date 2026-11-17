@@ -747,6 +747,16 @@ interface Dropped {
   answer: Record<string, unknown>;
 }
 
+/** What `screen` found: the network's standing, whether a human check passed, and why the item is dropped silently, if it is. */
+interface Screened {
+  standing: Standing | "off";
+  humanChecked: boolean;
+  dropped: SilentReason | undefined;
+}
+
+/** An owner submission is not screened: it is never from a listed network's silent drops, nor human checked. */
+const NOT_SCREENED: Screened = { standing: "off", humanChecked: false, dropped: undefined };
+
 /**
  * What a human check settles: the item goes on, human checked; it is
  * dropped silently, when the token is missing or did not pass, so a sender
@@ -1083,6 +1093,24 @@ export function createHandler(deps: Deps) {
       config: app.human_check!,
       remoteip: request.headers.get("cf-connecting-ip") ?? undefined,
     });
+  }
+
+  /**
+   * The network blocklist, then the human check, for one item or a whole
+   * batch, before anything is stored. A sender from a listed network that is
+   * not `attested` is dropped silently, before its human check is sent to
+   * Turnstile. An attested one goes on, to be held (a shared carrier address
+   * may be listed for someone else's abuse). A key with a human check then
+   * has the token checked: a missing or failed token drops the item
+   * silently, and Turnstile not answering is a 503.
+   */
+  async function screen(request: Request, env: Env, app: AppEntry, text: string, attested: boolean): Promise<Screened | ItemAnswer> {
+    const standing = await standingOf(request, env);
+    if (standing === "listed" && !attested) return { standing, humanChecked: false, dropped: "network_reputation" };
+    if (!app.requires_human_check) return { standing, humanChecked: false, dropped: undefined };
+    const outcome = humanCheckOutcome(await humanCheck(request, app, text));
+    if ("status" in outcome) return outcome;
+    return "dropped" in outcome ? { standing, humanChecked: false, dropped: outcome.dropped } : { standing, humanChecked: true, dropped: undefined };
   }
 
   /** Checks the attestation headers against the exact body text. */
@@ -1888,7 +1916,7 @@ export function createHandler(deps: Deps) {
    */
   type IntakeHow =
     | { text: string }
-    | { batch: { proof: Proof | undefined; humanChecked: boolean; dropped: SilentReason | undefined; standing: Standing | "off" } };
+    | { batch: { proof: Proof | undefined } & Screened };
   type Intake = IntakeShared & IntakeHow;
 
   async function newIntake(request: Request, env: Env, app: AppEntry, nowMs: number, how: IntakeHow & { nextId: () => string }): Promise<Intake> {
@@ -1942,20 +1970,10 @@ export function createHandler(deps: Deps) {
     if (app.requires_human_check && !humanCheckAllows(submission, app.human_check!)) {
       return { status: 403, body: { error: "type_not_allowed_for_app_key" } };
     }
-    // A network on the blocklist: an item from a key without attestation is dropped silently, before
-    // its human check is sent to Turnstile. An attested item is held (below), never dropped, as a
-    // shared carrier address may be listed for someone else's abuse.
-    const standing = "batch" in intake ? intake.batch.standing : isOwner ? "off" : await standingOf(request, env);
-    let humanChecked = false;
-    let dropped: SilentReason | undefined;
-    if ("batch" in intake) ({ humanChecked, dropped } = intake.batch);
-    else if (standing === "listed" && !app.requires_attestation) dropped = "network_reputation";
-    else if (app.requires_human_check) {
-      const outcome = humanCheckOutcome(await humanCheck(request, app, intake.text));
-      if ("status" in outcome) return outcome;
-      if ("dropped" in outcome) dropped = outcome.dropped;
-      else humanChecked = true;
-    }
+    // The blocklist and the human check (`screen`). A batch was screened once for all its items.
+    const screened = "batch" in intake ? intake.batch : isOwner ? NOT_SCREENED : await screen(request, env, app, intake.text, app.requires_attestation === true);
+    if ("status" in screened) return screened;
+    const { standing, humanChecked, dropped } = screened;
     // A human-check key sends only reports (humanCheckAllows), so the submission is feedback.
     if (dropped) return dropSilently(intake, submission as FeedbackSubmission, dropped);
 
@@ -2383,22 +2401,14 @@ export function createHandler(deps: Deps) {
       if ("error" in result) return refusedOrUnavailable(result, cors);
       proof = result;
     }
-    // Looked up once for the whole batch. A listed network's batch from a key without attestation is
-    // dropped silently, before its human check is sent to Turnstile.
-    const standing = await standingOf(request, env);
-    let humanChecked = false;
-    let dropped: SilentReason | undefined;
-    if (standing === "listed" && !proof) dropped = "network_reputation";
-    else if (app.requires_human_check) {
-      const outcome = humanCheckOutcome(await humanCheck(request, app, text));
-      if ("status" in outcome) return json(outcome.status, outcome.body, { ...cors, ...outcome.headers });
-      if ("dropped" in outcome) dropped = outcome.dropped;
-      else humanChecked = true;
-    }
+    // Screened once for the whole batch (`screen`).
+    const screened = await screen(request, env, app, text, proof !== undefined);
+    if ("status" in screened) return json(screened.status, screened.body, { ...cors, ...screened.headers });
+    const { humanChecked, dropped } = screened;
     const nowMs = deps.now();
     // Items sent before, whose answers were lost, are answered as they were the first time.
     const kept = keys ? await keptAnswers(env.RECENT_LIST, app.app, keys as string[]) : new Map<string, never>();
-    const intake = await newIntake(request, env, app, nowMs, { batch: { proof, humanChecked, dropped, standing }, nextId: orderedUlids(nowMs, deps.randomBytes) });
+    const intake = await newIntake(request, env, app, nowMs, { batch: { proof, ...screened }, nextId: orderedUlids(nowMs, deps.randomBytes) });
     // Each item is measured as sent, as POST /v1/feedback measures its body, so an item is too
     // large in a batch exactly when it would be alone.
     const sent = arrayElementTexts(text, "items");

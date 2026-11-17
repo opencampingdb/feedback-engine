@@ -14,6 +14,7 @@ import {
   type FactName,
   type FactValue,
   type FeeValue,
+  type HeldReason as PublishedHeldReason,
   type StoredFeedback,
   type TextProblem,
 } from "@opencampingdb/feedback";
@@ -80,27 +81,40 @@ export type PlaceState = Pick<Place, "facts" | "fact_sources" | "fact_dates">;
  * (`decideClear`). `contact_check`: a contact that failed one of the
  * automatic contact checks (contact-checks.ts), for the AI reviewer.
  * `disputed`: the place is frozen while a reviewer settles conflicting
- * values for one of its facts (`findDispute`).
+ * values for one of its facts (`findDispute`). Each is in the SDK's
+ * published list of held reasons, which the compiler checks.
  */
-export type HeldReason =
-  | "not_attested"
-  | "owner_value"
-  | "disagreement"
-  | "link_check"
-  | "text_check"
-  | "unconfirmed"
-  | "no_contributor"
-  | "single_doubt"
-  | "protected_source"
-  | "taken_down"
-  | "not_seasonal"
-  | "unlikely_charge"
-  | "not_own_value"
-  | "contact_check"
-  | "disputed";
+const RULE_HOLDS = [
+  "not_attested",
+  "owner_value",
+  "disagreement",
+  "link_check",
+  "text_check",
+  "unconfirmed",
+  "no_contributor",
+  "single_doubt",
+  "protected_source",
+  "taken_down",
+  "not_seasonal",
+  "unlikely_charge",
+  "not_own_value",
+  "contact_check",
+  "disputed",
+] as const satisfies readonly PublishedHeldReason[];
+export type HeldReason = (typeof RULE_HOLDS)[number];
 
-/** The reasons the intake holds an item for one of its checks rather than for these rules. */
-export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "repeated_text", "check_unavailable", "network_reputation"];
+/** The reasons the intake holds an item for one of its checks rather than for these rules. Each is in the SDK's published list. */
+export const CHECK_HOLDS = [
+  "text_check",
+  "link_check",
+  "ai_check",
+  "daily_cap",
+  "repeated_text",
+  "check_unavailable",
+  "network_reputation",
+] as const satisfies readonly PublishedHeldReason[];
+/** One of CHECK_HOLDS. */
+export type CheckHold = (typeof CHECK_HOLDS)[number];
 
 /** Contact facts that are links, which URLhaus checks at the intake. */
 export const LINK_FACTS: readonly ContactFactName[] = ["website", "facebook", "instagram", "tiktok", "x"];
@@ -124,12 +138,12 @@ export function setsLink(item: StoredFeedback): boolean {
  * up, so it is held as `link_check`. Items without the field are decided here
  * as before.
  */
-export function heldForCheck(item: StoredFeedback): string | null {
+export function heldForCheck(item: StoredFeedback): CheckHold | null {
   const intake: unknown = (item as { intake?: unknown }).intake;
   if (typeof intake !== "object" || intake === null) return null;
   const { state, held_reason: reason, links } = intake as { state?: unknown; held_reason?: unknown; links?: unknown };
   if (state !== "held" || typeof reason !== "string") return null;
-  if (CHECK_HOLDS.includes(reason)) return reason;
+  if ((CHECK_HOLDS as readonly string[]).includes(reason)) return reason as CheckHold;
   return links !== "passed" && setsLink(item) ? "link_check" : null;
 }
 

@@ -924,8 +924,9 @@ export type AnswerOutcome =
     };
 
 /**
- * The intake's codes for why it held an item at send time. Adding a code is
- * additive; renaming or removing one is a breaking change.
+ * The codes for why an item is held: most are given by the intake at send
+ * time, and some (`ai_cap`) only later, on the item's progress. Adding a code
+ * is additive; renaming or removing one is a breaking change.
  *
  * - `not_attested`: the report was not from an attested install, so a person
  *   reads it (a contact) or a second device has to agree (any other fact). On a
@@ -1003,7 +1004,7 @@ export const HELD_REASONS = [
   "implausible_location",
 ] as const;
 
-/** Why the intake held an item at send time. */
+/** Why an item is held: at send time by the intake, or later on its progress (`ai_cap`). */
 export type HeldReason = (typeof HELD_REASONS)[number];
 
 const KNOWN_HELD_REASONS: ReadonlySet<string> = new Set<string>(HELD_REASONS);

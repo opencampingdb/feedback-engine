@@ -30,6 +30,7 @@ import {
   type RecentChange,
   type ReportBody,
   type StoredFeedback,
+  type HeldReason as PublishedHeldReason,
 } from "@opencampingdb/feedback";
 import type { CheckContributor, Checks, HeldReason as ChecksHeldReason, LiveSlot } from "./checks.js";
 import { implausibleLocation, type PlaceGeometry } from "@opencampingdb/apply/plausible";
@@ -84,6 +85,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * reviewer checks. The apply decides each of these again when it runs.
  */
 export type HeldReason = RulesHeldReason | ChecksHeldReason | RefusedReason | "unknown_place" | "blocked" | "commons_report" | "source_link" | "implausible_location";
+// Every reason the intake answers is in the SDK's published list: this fails to compile otherwise.
+const PUBLISHED: readonly PublishedHeldReason[] = [] as HeldReason[];
+void PUBLISHED;
 
 /** What the answer to an accepted item adds. */
 export type ItemState = { state: "live" } | { state: "held"; held_reason: HeldReason };
@@ -449,7 +453,7 @@ const countAccepted = (decided: DecidedInRequest, contributor: string) => decide
 export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDecision> {
   const decision = await decideByRulesAndChecks(input);
   const { answer } = decision;
-  if (answer.state !== "held" || CHECK_HOLDS.includes(answer.held_reason) || answer.held_reason === "blocked") return decision;
+  if (answer.state !== "held" || (CHECK_HOLDS as readonly string[]).includes(answer.held_reason) || answer.held_reason === "blocked") return decision;
   // The rules held it, so the checks never ran: its text still counts, and a repeat goes to a person.
   const repeated = await input.checks.repeated();
   if (repeated === "repeated_text" || repeated === "check_unavailable") return { ...decision, answer: { state: "held", held_reason: repeated } };

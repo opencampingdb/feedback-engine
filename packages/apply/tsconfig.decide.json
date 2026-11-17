@@ -6,5 +6,5 @@
     "paths": { "@opencampingdb/feedback": ["./../sdk/src/index.ts"] },
     "noEmit": true
   },
-  "files": ["src/decide.ts", "src/review.ts", "src/contact-checks.ts", "src/plausible.ts", "src/progress-update.ts"]
+  "files": ["src/decide.ts", "src/review.ts", "src/contact-checks.ts", "src/pages.ts", "src/plausible.ts", "src/progress-update.ts"]
 }

@@ -1,4 +1,4 @@
-import type { StoredFeedback } from "@opencampingdb/feedback";
+import { websiteHost, type StoredFeedback } from "@opencampingdb/feedback";
 import type { ClosureEvidence } from "./rules.js";
 import type { Place } from "./types.js";
 
@@ -108,12 +108,12 @@ const NXDOMAIN_APART_MS = 24 * 60 * 60 * 1000;
 /** A record this old is dropped: a closure it could confirm is past the 90 day window. */
 const NXDOMAIN_KEEP_MS = 90 * 24 * 60 * 60 * 1000;
 
-/** The domain of a website on record: its host in lower case, without a leading `www.`. Undefined for a value that is not an https link. */
+/** The domain of a website on record: its host as `websiteHost` gives it. Undefined for a value that is not an https link. */
 export function websiteDomain(website: unknown): string | undefined {
   if (typeof website !== "string" || !URL.canParse(website)) return undefined;
   const url = new URL(website);
   if (url.protocol !== "https:" || !url.hostname.includes(".")) return undefined;
-  return url.hostname.toLowerCase().replace(/^www\./, "");
+  return websiteHost(url);
 }
 
 /**

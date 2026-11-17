@@ -1,37 +1,45 @@
 /**
  * The AI reviewer: from the intake's scheduled job, it reads the held cases on
- * the data repository's `feedback/review` PR, decides the ones the rules can't
- * settle with a Workers AI model, commits the run's decisions that change a
- * place to the review branch as one commit, and comments on the PR once.
- * Every decision names the reviewer, `ai:<model>`, and gives the reason, and
- * a person can reverse any of them on the PR.
+ * the data repository's `feedback/review` PR, decides the ones the rules
+ * can't settle with a Workers AI model, commits the run's decisions that
+ * change a place to the review branch as one commit, and comments on the PR
+ * once. Every decision names the reviewer, `ai:<model>`, and gives the
+ * reason, and a person can reverse any of them on the PR.
  *
  * Cheapest first: `settleByRules` decides first, with no model call, and the
- * model is asked only about what is left, at most MAX_MODEL_CASES a run. On
- * its own the model may approve a held or hidden new place, merge a held
- * duplicate into the place it duplicates (never into a place with a verified
- * owner, a pair on `moderation/distinct_places.json` or a pair across a major
- * road; without road data, only the same name less than 25 m apart), approve,
- * take down or merge an unattested new place (into one of the candidates its
- * case lists, by the same rules, named as `target`), restore a
- * withdrawn contact, take down a new place that is clear spam, restore or
- * keep down a fact doubts took down, dismiss doubts about a fact that
- * stays, and confirm `vehicle_access` on a place whose name says only heavy
- * vehicles may use it, and set a disputed fact to one of the values its
- * sources sent or the place has, which lifts the place's freeze once the
- * decision is in the data. A case the apply's rules closed (a doubted fact that
- * travellers restored or replaced) is left without asking. Owner-set
- * values, blocked contributors and values that wait in the inbox go to a
- * person, and an answer the model isn't sure of, or one that can't be read,
- * is `leave`. With the second stage (src/second-review.ts), such a case is
- * asked of a second model while the month's spending is under its cap, and
- * is `leave` only when both models are unsure, or over the cap as `ai_cap`.
+ * model is asked only about what is left, at most MAX_MODEL_CASES a run.
  *
- * Only held-case lines in the PR body and in comments from the bot logins the
- * deployment lists (REVIEW_BOT_LOGINS: the apply's GitHub App and the
+ * On its own the model may:
+ *
+ * - approve a held or hidden new place, or take down one that is clear spam;
+ * - merge a held duplicate into the place it duplicates, never into a place
+ *   with a verified owner, a pair on `moderation/distinct_places.json` or a
+ *   pair across a major road (without road data, only the same name less
+ *   than 25 m apart);
+ * - approve, take down or merge an unattested new place, merging only into
+ *   one of the candidates its case lists, by the same rules, named as
+ *   `target`;
+ * - restore a withdrawn contact, restore or keep down a fact doubts took
+ *   down, and dismiss doubts about a fact that stays;
+ * - confirm `vehicle_access` on a place whose name says only heavy vehicles
+ *   may use it;
+ * - set a disputed fact to one of the values its sources sent or the place
+ *   has, which lifts the place's freeze once the decision is in the data.
+ *
+ * A case the apply's rules closed (a doubted fact that travellers restored or
+ * replaced) is left without asking. Owner-set values, blocked contributors
+ * and values that wait in the inbox go to a person, and an answer the model
+ * isn't sure of, or one that can't be read, is `leave`. With the second
+ * stage (src/second-review.ts), such a case is asked of a second model while
+ * the month's spending is under its cap, and is `leave` only when both
+ * models are unsure, or over the cap as `ai_cap`.
+ *
+ * Only held-case lines in the PR body and in comments from the bot logins
+ * the deployment lists (REVIEW_BOT_LOGINS: the apply's GitHub App and the
  * reviewer's own) or the repository's owners, members and collaborators
- * count, so a stranger's comment, or another GitHub App's, can't add a case. Decisions are recorded as `review-decision` lines
- * in the reviewer's comment, and a case with one is not asked about again.
+ * count, so a stranger's comment, or another GitHub App's, can't add a case.
+ * Decisions are recorded as `review-decision` lines in the reviewer's
+ * comment, and a case with one is not asked about again.
  */
 
 import {
@@ -56,6 +64,7 @@ import {
   type MajorRoads,
 } from "@opencampingdb/apply/review";
 import type { FactValue } from "@opencampingdb/feedback";
+import { timeLimit, TimedOut } from "@opencampingdb/apply/pages";
 import type { AiLike } from "./checks.js";
 import type { Fetch, GitHubApp, GitHubAppConfig, IssueComment } from "./github.js";
 import type { D1Like } from "./recent.js";
@@ -229,31 +238,72 @@ const MEANINGS: Record<ReviewDecision, string> = {
   revert: "put back the place's earlier value: the change is wrong, unlikely or vandalism",
 };
 
+/**
+ * What the model is told about each kind of case: lines that explain it, and
+ * what a decision means for it where that differs from MEANINGS.
+ */
+const CASE_GUIDE: Partial<Record<HeldCase["case"], { about?: readonly string[]; means?: Partial<Record<ReviewDecision, string>> }>> = {
+  fact_doubted: {
+    about: ["In a fact_doubted case, travellers say a fact about the place is wrong without giving the right value. Doubts and confirmations count independent travellers."],
+    means: { restore: "put the last value back on the place: the doubts are outweighed or unlikely" },
+  },
+  commons_mismatch: {
+    about: [
+      "In a commons_mismatch case, a traveller says a Wikimedia Commons photo shown for the place is not of it. You see only the photo's file name, matched to the place by its words and distance.",
+    ],
+    means: {
+      confirm: "never show this photo for the place again: its file name clearly names another place or something else",
+      dismiss: "keep showing the photo: its file name clearly names this place",
+    },
+  },
+  disputed: {
+    about: [
+      "In a disputed case, independent travellers sent conflicting values for one fact within a day, so no fact on the place changes until a reviewer settles the value.",
+      "With confirm, give value: the JSON of one of the values listed, the one the place most likely has now.",
+    ],
+    means: { confirm: "set the fact to the value you give, one of the choices, which settles the dispute" },
+  },
+  place_change: {
+    about: [
+      "In a place_change case, a traveller changed the place's name, kind or location (change) from one value (from) to another (to), and the place already shows the new value.",
+    ],
+    means: { approve: "keep the change: it is believable for this place" },
+  },
+  contact_check: {
+    about: [
+      "In a contact_check case, a traveller reported a contact for the place (the place's facts show it) and it failed automatic checks: the place's own website does not show it, its domain was registered recently or its age is unknown, or the address is in another state.",
+      "A newly registered domain or a contact unrelated to the place points to spam. A check that could not run (a website that timed out, a registry with no date) says little either way.",
+    ],
+    means: {
+      confirm: "keep the reported contact on the place: it is clearly the place's own, despite the failed checks",
+      dismiss: "take the reported contact off the place and put back what it had before: it is not the place's own, or it is spam",
+    },
+  },
+  implausible_location: {
+    about: [
+      "In an implausible_location case, a traveller added a new place whose location the map data puts in the sea or a lake, on a major road's carriageway or inside a building footprint (hit and found say which). Map data can be out of date or coarse near a shore. Remoteness is never a reason to doubt a place.",
+    ],
+    means: {
+      approve: "publish the place where it is: the location is believable for its kind, such as a camp on a sand spit or an island the map has as water",
+      take_down: "hide the place: only when it is clearly spam or not a place at all. A real place pinned in the wrong spot is leave, so a person can move it",
+    },
+  },
+  unattested_place: {
+    about: [
+      "In an unattested_place case, a traveller added a new place from an app that could not prove it runs on a genuine device. It passed the automatic location, duplicate and text checks. candidates are places of the same group nearby, with how far each is.",
+      "A sparse or remote place is normal for camping. Take it down only when it is clearly spam or not a place at all.",
+      "With merge, give target: the id of the candidate it duplicates, one of those listed as mergeable.",
+    ],
+    means: {
+      approve: "publish the place: it is believable as a real place of its kind, here",
+      merge:
+        "merge the new place into the candidate you give as target: the two are clearly one place added twice, with the same or nearly the same name and nothing to tell them apart",
+    },
+  },
+};
+
 /** What a decision means for this case. */
-const meaning = (c: HeldCase, d: ReviewDecision) =>
-  c.case === "fact_doubted" && d === "restore"
-    ? "put the last value back on the place: the doubts are outweighed or unlikely"
-    : c.case === "commons_mismatch" && d === "confirm"
-      ? "never show this photo for the place again: its file name clearly names another place or something else"
-      : c.case === "disputed" && d === "confirm"
-        ? "set the fact to the value you give, one of the choices, which settles the dispute"
-      : c.case === "commons_mismatch" && d === "dismiss"
-        ? "keep showing the photo: its file name clearly names this place"
-        : c.case === "place_change" && d === "approve"
-          ? "keep the change: it is believable for this place"
-          : c.case === "contact_check" && d === "confirm"
-            ? "keep the reported contact on the place: it is clearly the place's own, despite the failed checks"
-            : c.case === "contact_check" && d === "dismiss"
-              ? "take the reported contact off the place and put back what it had before: it is not the place's own, or it is spam"
-              : c.case === "implausible_location" && d === "approve"
-                ? "publish the place where it is: the location is believable for its kind, such as a camp on a sand spit or an island the map has as water"
-                : c.case === "unattested_place" && d === "approve"
-                  ? "publish the place: it is believable as a real place of its kind, here"
-                : c.case === "unattested_place" && d === "merge"
-                  ? "merge the new place into the candidate you give as target: the two are clearly one place added twice, with the same or nearly the same name and nothing to tell them apart"
-                : c.case === "implausible_location" && d === "take_down"
-                  ? "hide the place: only when it is clearly spam or not a place at all. A real place pinned in the wrong spot is leave, so a person can move it"
-                  : MEANINGS[d];
+const meaning = (c: HeldCase, d: ReviewDecision) => CASE_GUIDE[c.case]?.means?.[d] ?? MEANINGS[d];
 
 /** What the model reads of a place. Values travellers or the owner sent are data, not instructions. */
 function placeView(place: Place) {
@@ -274,39 +324,7 @@ function placeView(place: Place) {
 function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
   return [
     "You review held cases for an open database of camping places. A case is a new place or a change that the automatic checks held for a reviewer.",
-    ...(c.case === "fact_doubted"
-      ? ["In a fact_doubted case, travellers say a fact about the place is wrong without giving the right value. Doubts and confirmations count independent travellers."]
-      : []),
-    ...(c.case === "commons_mismatch"
-      ? ["In a commons_mismatch case, a traveller says a Wikimedia Commons photo shown for the place is not of it. You see only the photo's file name, matched to the place by its words and distance."]
-      : []),
-    ...(c.case === "disputed"
-      ? [
-          "In a disputed case, independent travellers sent conflicting values for one fact within a day, so no fact on the place changes until a reviewer settles the value.",
-          "With confirm, give value: the JSON of one of the values listed, the one the place most likely has now.",
-        ]
-      : []),
-    ...(c.case === "place_change"
-      ? ["In a place_change case, a traveller changed the place's name, kind or location (change) from one value (from) to another (to), and the place already shows the new value."]
-      : []),
-    ...(c.case === "contact_check"
-      ? [
-          "In a contact_check case, a traveller reported a contact for the place (the place's facts show it) and it failed automatic checks: the place's own website does not show it, its domain was registered recently or its age is unknown, or the address is in another state.",
-          "A newly registered domain or a contact unrelated to the place points to spam. A check that could not run (a website that timed out, a registry with no date) says little either way.",
-        ]
-      : []),
-    ...(c.case === "implausible_location"
-      ? [
-          "In an implausible_location case, a traveller added a new place whose location the map data puts in the sea or a lake, on a major road's carriageway or inside a building footprint (hit and found say which). Map data can be out of date or coarse near a shore. Remoteness is never a reason to doubt a place.",
-        ]
-      : []),
-    ...(c.case === "unattested_place"
-      ? [
-          "In an unattested_place case, a traveller added a new place from an app that could not prove it runs on a genuine device. It passed the automatic location, duplicate and text checks. candidates are places of the same group nearby, with how far each is.",
-          "A sparse or remote place is normal for camping. Take it down only when it is clearly spam or not a place at all.",
-          "With merge, give target: the id of the candidate it duplicates, one of those listed as mergeable.",
-        ]
-      : []),
+    ...(CASE_GUIDE[c.case]?.about ?? []),
     "Answer with JSON only: {\"decision\": ..., \"reason\": ..., \"sure\": true or false}.",
     `The decisions you may give for this case are: ${allowed.join(", ")}.`,
     ...allowed.map((d) => `- ${d}: ${meaning(c, d)}.`),
@@ -355,15 +373,12 @@ export function onError(deps: { onError?: (error: unknown) => void }, error: unk
   deps.onError?.(error);
 }
 
+/** `work`, or ModelUnavailable when it takes longer than `ms` (`timeLimit`). */
 export async function withTimeout<T>(ms: number, work: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new ModelUnavailable("timed out")), ms);
-  });
   try {
-    return await Promise.race([work, timeout]);
-  } finally {
-    clearTimeout(timer);
+    return await timeLimit(ms, () => work);
+  } catch (error) {
+    throw error instanceof TimedOut ? new ModelUnavailable("timed out") : error;
   }
 }
 

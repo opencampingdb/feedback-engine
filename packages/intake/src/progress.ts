@@ -1,4 +1,4 @@
-import { MAX_PROGRESS_IDS, type Progress, type RefusedBy } from "@opencampingdb/feedback";
+import { MAX_PROGRESS_IDS, type HeldReason, type Progress, type RefusedBy } from "@opencampingdb/feedback";
 import type { PhotoProgressUpdate, ProgressUpdate } from "@opencampingdb/apply/progress-update";
 import type { ItemState } from "./decide.js";
 import { chunks, isoSeconds, type D1Like, type D1Statement } from "./recent.js";
@@ -94,7 +94,7 @@ export async function recordProgress(db: D1Like, items: readonly ProgressUpdate[
  * `refused`. An item with no row gets one, received at the time in its id.
  * The apply run's updates keep the held reason.
  */
-export async function recordReviewerHold(db: D1Like, ids: readonly string[], place: string, heldReason: string, now: number): Promise<void> {
+export async function recordReviewerHold(db: D1Like, ids: readonly string[], place: string, heldReason: HeldReason, now: number): Promise<void> {
   const at = isoSeconds(now);
   const statements = ids.map((id) =>
     db

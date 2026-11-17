@@ -1,4 +1,5 @@
-import { isContactFact, isValidFactValue, type AddressState, type ContactFactName, type FactValue, type PlaceAddress, type StoredFeedback } from "@opencampingdb/feedback";
+import { isContactFact, isValidFactValue, websiteHost, type AddressState, type ContactFactName, type FactValue, type PlaceAddress, type StoredFeedback } from "@opencampingdb/feedback";
+import { decodeEntities, escapeRegExp, fetchPage, PageProblem, publicUrl, readLimited, withDeadline, type Fetch } from "./pages.js";
 
 /**
  * The automatic contact checks, which stand in for a person on a reported
@@ -14,11 +15,11 @@ import { isContactFact, isValidFactValue, type AddressState, type ContactFactNam
  * - `address`: the address's state and postcode belong where the place is.
  *
  * Every check fails safe: a timeout, an error or an answer that cannot be read
- * fails it, so the contact is held rather than accepted.
+ * fails it, so the contact is held rather than accepted. Pages are read
+ * through pages.ts, which the fetch given decides the reach of.
  */
 
-/** A fetch as Workers and Node have it. The checks only ever pass these options. */
-export type Fetch = (url: string, init: { signal: AbortSignal; redirect: "manual"; headers: Record<string, string> }) => Promise<Response>;
+export type { Fetch };
 
 export type ContactCheckName = "website" | "domain_age" | "address";
 
@@ -47,7 +48,6 @@ export const MAX_PAGE_BYTES = 1_000_000;
 /** How far, in degrees (about 33 km), the place may be from a state border and still count in either state. */
 export const BORDER_DEGREES = 0.3;
 
-const MAX_REDIRECTS = 3;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const USER_AGENT = "OpenCampingDB/1.0 (+https://github.com/opencampingdb; contact check)";
 
@@ -68,111 +68,30 @@ export const failedChecks = (outcomes: readonly CheckOutcome[]) => outcomes.filt
 
 // ------------------------------------------------------------------ fetching
 
-/** The URL when it is an http or https address on a public host name and the default port, or null. */
-function publicUrl(text: string, base?: URL): URL | null {
-  let url: URL;
-  try {
-    url = new URL(text, base);
-  } catch {
-    return null;
-  }
-  const host = url.hostname.toLowerCase().replace(/\.+$/, "");
-  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  if (url.username || url.password || url.port) return null;
-  if (!host.includes(".") || host.startsWith("[") || /^[\d.]+$/.test(host)) return null;
-  if (["localhost", "local", "internal", "home.arpa"].some((name) => host === name || host.endsWith(`.${name}`))) return null;
-  return url;
-}
-
-const bareHost = (url: URL) => url.hostname.toLowerCase().replace(/\.+$/, "").replace(/^www\./, "");
-
-/** Reads at most `max` bytes of a response's body, and stops the rest. */
-async function readLimited(res: Response, max: number): Promise<string> {
-  if (!res.body) return "";
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  while (size < max) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value.subarray(0, max - size));
-    size += Math.min(value.byteLength, max - size);
-  }
-  await reader.cancel().catch(() => undefined);
-  const all = new Uint8Array(size);
-  let at = 0;
-  for (const chunk of chunks) {
-    all.set(chunk, at);
-    at += chunk.byteLength;
-  }
-  return new TextDecoder().decode(all);
-}
-
+/** A check that could not finish, with what to say about it. */
 class CheckFailed extends Error {}
 
-/**
- * The text of one page, following redirects on the same host (with or
- * without `www.`), at most MAX_REDIRECTS. Throws CheckFailed with why it could
- * not be read.
- */
-async function getPage(fetch: Fetch, start: URL, signal: AbortSignal, accept: string): Promise<string> {
-  let url = start;
-  for (let hops = 0; ; hops++) {
-    const res = await fetch(url.href, { redirect: "manual", signal, headers: { accept, "user-agent": USER_AGENT } });
-    if (res.status >= 300 && res.status < 400) {
-      await res.body?.cancel().catch(() => undefined);
-      const location = res.headers.get("location");
-      const next = location ? publicUrl(location, url) : null;
-      if (!next || bareHost(next) !== bareHost(start)) throw new CheckFailed(`${bareHost(start)} redirects to another host`);
-      if (hops >= MAX_REDIRECTS) throw new CheckFailed(`${bareHost(start)} redirects too many times`);
-      url = next;
-      continue;
-    }
-    if (!res.ok) {
-      await res.body?.cancel().catch(() => undefined);
-      throw new CheckFailed(`${url.href} answered ${res.status}`);
-    }
-    return readLimited(res, MAX_PAGE_BYTES);
+/** The text of one page (`fetchPage`). Throws CheckFailed with why it could not be read. */
+async function getPage(fetch: Fetch, url: URL, signal: AbortSignal): Promise<string> {
+  try {
+    return await fetchPage(fetch, url, { signal, userAgent: USER_AGENT, maxBytes: MAX_PAGE_BYTES });
+  } catch (error) {
+    if (error instanceof PageProblem) throw new CheckFailed(`${websiteHost(url)} ${error.message.replace(/^it /, "")}`);
+    throw error;
   }
 }
 
-/**
- * Runs `work` with an abort signal that fires after `ms`, and gives `fallback`
- * with "timed out" when it does, or with the reason it failed.
- */
-async function timeBoxed(ms: number, work: (signal: AbortSignal) => Promise<CheckOutcome>, fail: (detail: string) => CheckOutcome): Promise<CheckOutcome> {
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = new Promise<CheckOutcome>((resolve) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      resolve(fail("timed out"));
-    }, ms);
-  });
-  try {
-    return await Promise.race([
-      work(controller.signal).catch((error: unknown) =>
-        fail(error instanceof CheckFailed ? error.message : controller.signal.aborted ? "timed out" : "could not be read"),
-      ),
-      timedOut,
-    ]);
-  } finally {
-    clearTimeout(timer);
-    controller.abort();
-  }
+/** Runs one check within `ms`: "timed out" when it runs out, or the reason it failed. */
+function timeBoxed(ms: number, work: (signal: AbortSignal) => Promise<CheckOutcome>, fail: (detail: string) => CheckOutcome): Promise<CheckOutcome> {
+  return withDeadline(
+    ms,
+    work,
+    () => fail("timed out"),
+    (error) => fail(error instanceof CheckFailed ? error.message : "could not be read"),
+  );
 }
 
 // ------------------------------------------------------------------ website
-
-const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", commat: "@", period: "." };
-const decode = (text: string) =>
-  text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, code: string) => {
-    if (code[0] === "#") {
-      const n = code[1] === "x" || code[1] === "X" ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
-      return Number.isFinite(n) && n > 31 && n < 0x110000 ? String.fromCodePoint(n) : " ";
-    }
-    return ENTITIES[code.toLowerCase()] ?? whole;
-  });
 
 /** A phone number's digits as dialled in Australia: +61 becomes the trunk 0. */
 function phoneDigits(text: string): string {
@@ -180,11 +99,9 @@ function phoneDigits(text: string): string {
   return digits.startsWith("61") && digits.length === 11 ? `0${digits.slice(2)}` : digits;
 }
 
-const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
 /** Whether a page's HTML shows the contact `value` of `fact`. */
-function pageShows(html: string, fact: ContactFactName, value: string): boolean {
-  const page = decode(html);
+function pageShowsContact(html: string, fact: ContactFactName, value: string): boolean {
+  const page = decodeEntities(html);
   if (fact === "email") return page.toLowerCase().includes(value.trim().toLowerCase());
   if (fact === "phone" || fact === "phone_2") {
     const wanted = phoneDigits(value);
@@ -196,7 +113,7 @@ function pageShows(html: string, fact: ContactFactName, value: string): boolean 
   const url = publicUrl(value);
   if (!url) return false;
   const path = url.pathname.replace(/\/+$/, "");
-  const pattern = new RegExp(`//(?:www\\.|m\\.)?${escapeRegExp(bareHost(url))}${escapeRegExp(path)}(?![\\w.-])`, "i");
+  const pattern = new RegExp(`//(?:www\\.|m\\.)?${escapeRegExp(websiteHost(url))}${escapeRegExp(path)}(?![\\w.-])`, "i");
   return pattern.test(page);
 }
 
@@ -205,8 +122,8 @@ function contactLinks(html: string, page: URL): URL[] {
   const found = new Map<string, URL>();
   for (const [, href, words] of html.matchAll(/<a\b[^>]*?\bhref\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
     if (!/contact/i.test(`${href} ${words}`)) continue;
-    const url = publicUrl(decode(href!), page);
-    if (!url || bareHost(url) !== bareHost(page)) continue;
+    const url = publicUrl(decodeEntities(href!), page);
+    if (!url || websiteHost(url) !== websiteHost(page)) continue;
     url.hash = "";
     if (url.href !== page.href) found.set(url.href, url);
     if (found.size >= MAX_CONTACT_PAGES) break;
@@ -228,17 +145,16 @@ export async function websiteCheck(fetch: Fetch, website: unknown, fact: Contact
   return timeBoxed(
     timeoutMs,
     async (signal) => {
-      const accept = "text/html,text/plain;q=0.9";
-      const html = await getPage(fetch, home, signal, accept);
-      if (pageShows(html, fact, value)) return { check: "website", passed: true, detail: `${bareHost(home)} shows it` };
+      const html = await getPage(fetch, home, signal);
+      if (pageShowsContact(html, fact, value)) return { check: "website", passed: true, detail: `${websiteHost(home)} shows it` };
       for (const page of contactLinks(html, home)) {
-        const text = await getPage(fetch, page, signal, accept).catch((error: unknown) => {
+        const text = await getPage(fetch, page, signal).catch((error: unknown) => {
           if (signal.aborted) throw error;
           return "";
         });
-        if (pageShows(text, fact, value)) return { check: "website", passed: true, detail: `${page.href} shows it` };
+        if (pageShowsContact(text, fact, value)) return { check: "website", passed: true, detail: `${page.href} shows it` };
       }
-      return fail(`${bareHost(home)} does not show it`);
+      return fail(`${websiteHost(home)} does not show it`);
     },
     fail,
   );
