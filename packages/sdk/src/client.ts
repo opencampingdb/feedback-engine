@@ -953,6 +953,8 @@ export type AnswerOutcome =
  *   traveller at once, a reviewer gets the case, and two sources hide it for everyone.
  * - `not_own_value`: a `clear` of a value another traveller set, or one the intake cannot tie to
  *   this install, so a person decides.
+ * - `network_reputation`: an attested report from a network on the intake's blocklist, which a
+ *   reviewer reads before it goes live.
  */
 export const HELD_REASONS = [
   "not_attested",
@@ -976,6 +978,7 @@ export const HELD_REASONS = [
   "unlikely_charge",
   "commons_report",
   "not_own_value",
+  "network_reputation",
 ] as const;
 
 /** Why the intake held an item at send time. */

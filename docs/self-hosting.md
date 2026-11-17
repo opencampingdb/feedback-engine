@@ -93,6 +93,7 @@ npx wrangler secret put URLHAUS_KEY -c wrangler.deploy.toml
 - `GH_APP_PRIVATE_KEY` accepts the PEM GitHub gives you (PKCS#1) or PKCS#8.
 - `PLACES_TOKEN`, needed with `RECENT_LIST`, is a long random string (`openssl rand -hex 32`). The apply workflow and the data release send it to call the intake's operator routes. Keep the value: steps 9 and 10 need it again.
 - `URLHAUS_KEY`, needed with `RECENT_LIST`, is a free abuse.ch auth key from the abuse.ch authentication portal. The intake checks every link an item would publish with URLhaus. The `[ai]` binding in `wrangler.toml` gives the intake Workers AI for the Llama Guard check, so the Cloudflare account needs Workers AI. A check that isn't set up holds every item that needs it.
+- `CROWDSEC_BLOCKLIST_CREDENTIALS`, optional, turns on network reputation with the `CROWDSEC_BLOCKLIST_URL` variable ([Network reputation](#network-reputation)). It is the Basic auth username and password of a CrowdSec blocklist integration, as `username:password`. Without it, or without the variable, no list is fetched and no address is looked up.
 - `GOOGLE_SERVICE_ACCOUNT`, needed only for an app key with `android`, is the JSON key file of a Google Cloud service account in the project linked to the app in Play Console, allowed to decode integrity tokens: `npx wrangler secret put GOOGLE_SERVICE_ACCOUNT -c wrangler.deploy.toml < key.json`.
 
 Setting a secret deploys it at once. To revoke an app key, set `APP_KEYS` again without it.
@@ -472,9 +473,9 @@ npx wrangler kv namespace delete --namespace-id <RECENT_PLACES namespace id>
 
 ### Silent drops
 
-Some abuse is dropped silently instead of refused: a request from a key with `requires_human_check` that has no token, or whose token Turnstile refuses or made for another site, body or form. The intake answers it exactly as it answers an accepted item from that key, `202` with an id (and, for a report it decides at send time, `held` with `not_attested`, or `unknown_place` for a place it does not know), and writes its progress record as `received`, which never moves on. It stores nothing for the inbox or the recent list, counts nothing as a source, and counts nothing against a daily limit. Text and link refusals stay visible, so an honest traveller can fix what they typed. When Turnstile cannot answer, the intake still answers `503`.
+Some abuse is dropped silently instead of refused: a request from a key with `requires_human_check` that has no token, or whose token Turnstile refuses or made for another site, body or form, and a request without attestation from a network on the blocklist ([Network reputation](#network-reputation)). The intake answers it exactly as it answers an accepted item from that key, `202` with an id (and, for a report it decides at send time, `held` with `not_attested`, or `unknown_place` for a place it does not know), and writes its progress record as `received`, which never moves on. It stores nothing for the inbox or the recent list, counts nothing as a source, and counts nothing against a daily limit. Text and link refusals stay visible, so an honest traveller can fix what they typed. When Turnstile cannot answer, the intake still answers `503`.
 
-The intake counts silent drops per UTC day and reason (`human_check_required`, `human_check_failed`), with no item content, app, device or network. With `RECENT_LIST` they are rows in `silent_drops`, kept 90 days:
+The intake counts silent drops per UTC day and reason (`human_check_required`, `human_check_failed`, `network_reputation`), with no item content, app, device or network. With `RECENT_LIST` they are rows in `silent_drops`, kept 90 days:
 
 ```sh
 npx wrangler d1 execute RECENT_LIST --remote -c wrangler.deploy.toml \
@@ -482,6 +483,31 @@ npx wrangler d1 execute RECENT_LIST --remote -c wrangler.deploy.toml \
 ```
 
 Without `RECENT_LIST` they are KV keys `silent:<day>:<reason>` in `RATE_LIMIT`, which expire after 90 days. A steady count of `human_check_required` from a website you run usually means its page sends without calling Turnstile.
+
+### Network reputation
+
+With `CROWDSEC_BLOCKLIST_URL` (a variable) and `CROWDSEC_BLOCKLIST_CREDENTIALS` (a secret) set, the intake keeps a copy of a public IP blocklist and looks each feedback request's address up in it, with no outside call per request.
+
+To set it up, subscribe to a blocklist in the CrowdSec Console (the free community blocklist will do), create a **Raw IP List** integration for it with the output format `plain_text`, and note its content URL, `https://admin.api.crowdsec.net/v1/integrations/<integration id>/content`, and its username and password, which the Console shows once. Raise the integration's pull limit to the size of the list, since a pull returns no more than that. Then:
+
+```toml
+[vars]
+CROWDSEC_BLOCKLIST_URL = "https://admin.api.crowdsec.net/v1/integrations/<integration id>/content"
+```
+
+```sh
+npx wrangler secret put CROWDSEC_BLOCKLIST_CREDENTIALS -c wrangler.deploy.toml   # username:password
+```
+
+The scheduled job fetches the list once a day, `page_size` 100,000 lines a page until a short page (at most 20 pages), and stores it in `RATE_LIMIT` under `reputation:ranges` as sorted, merged ranges, IPv4 and IPv6 apart, with `reputation:state` saying when it was fetched. Each line is an address or a CIDR range; other lines are left out and logged. A fetch that fails, times out or finds no address at all is logged and tried again an hour later, and the last good list is used meanwhile. Each Worker reads the stored list at most once every 5 minutes, so a new list takes up to 5 minutes to reach every request. Until the first fetch, every address is clear.
+
+What a listed address does:
+
+- A feedback item from a key without `requires_attestation`, including a key with `requires_human_check`, is dropped silently ([Silent drops](#silent-drops)) with the reason `network_reputation`, before its human check is sent to Turnstile.
+- An attested item is never dropped, since a mobile carrier's shared address may be listed for someone else's abuse. A report the intake decides at send time is held as `network_reputation`, and the apply sends it to the review PR, never into the data on its own. Other kinds of item are taken as before.
+- When the stored list cannot be read, a report the intake decides at send time is held as `check_unavailable`.
+
+Owner requests, photo uploads and the attestation routes are not looked up.
 
 ## Abuse
 

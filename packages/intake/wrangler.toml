@@ -10,6 +10,8 @@
 #   PLACES_TOKEN        lets the apply run remove places from RECENT_LIST and send the block list, and the data
 #                       release load the place index. Only with RECENT_LIST
 #   URLHAUS_KEY         abuse.ch auth key, for the URLhaus check on links (src/checks.ts)
+#   CROWDSEC_BLOCKLIST_CREDENTIALS  username:password of a CrowdSec blocklist integration, for network
+#                       reputation (src/reputation.ts). Only with CROWDSEC_BLOCKLIST_URL
 
 name = "ocdb-feedback-intake"
 main = "src/index.ts"
@@ -49,9 +51,16 @@ SAFESEARCH = "off"
 # decisions to overture/decisions.ndjson on that branch. It fetches each
 # candidate's own website. Off when left out.
 # OVERTURE_REVIEWER = "on"
+# Network reputation (src/reputation.ts): the content URL of a CrowdSec blocklist
+# integration in plain_text format. The job below fetches it once a day into
+# RATE_LIMIT. A feedback item without attestation from a listed address is
+# dropped silently, and an attested one is held as network_reputation. Off
+# without the CROWDSEC_BLOCKLIST_CREDENTIALS secret.
+# CROWDSEC_BLOCKLIST_URL = "https://admin.api.crowdsec.net/v1/integrations/REPLACE_ME/content"
 
 # Every minute: writes the queued items to the inbox, starts the apply when it
-# is due, runs the AI reviewer when it is on and due, and checks Overture
+# is due, fetches the network blocklist when it is a day old, runs the AI
+# reviewer when it is on and due, and checks Overture
 # candidates when OVERTURE_REVIEWER is on and due. Does nothing without
 # RECENT_LIST, APPLY_WORKFLOW, AI_REVIEWER or OVERTURE_REVIEWER.
 # Workers Logs: one line per request from src/requestlog.ts (method, path,
@@ -68,7 +77,7 @@ invocation_logs = false
 crons = ["* * * * *"]
 
 # The daily counters of an intake without RECENT_LIST. With RECENT_LIST bound
-# they are kept in D1 (rate_counts) and this namespace is no longer read or written.
+# they are kept in D1 (rate_counts). The network blocklist is kept here either way.
 [[kv_namespaces]]
 binding = "RATE_LIMIT"
 id = "REPLACE_ME_KV_NAMESPACE_ID"

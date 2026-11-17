@@ -2102,7 +2102,7 @@ describe("items the intake held for a check", () => {
     }) as StoredFeedback;
   const idOf = (item: StoredFeedback) => `ocdb_${item.id.slice(3)}`;
 
-  for (const reason of ["text_check", "link_check", "ai_check", "daily_cap", "check_unavailable"]) {
+  for (const reason of ["text_check", "link_check", "ai_check", "daily_cap", "check_unavailable", "network_reputation"]) {
     it(`sends an attested fact held for ${reason} to a person instead of applying it`, () => {
       const r = heldFor(attested(fact(0, "dev-a", "power", true)), reason);
       const out = run([r]);
