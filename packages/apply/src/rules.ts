@@ -51,6 +51,7 @@ import type { CheckOutcome } from "./contact-checks.js";
 import { moderateReview } from "./moderation.js";
 import {
   CANDIDATE_DISTANCE_M,
+  FREEZE_EXPIRY_DAYS,
   MAX_CANDIDATES,
   mergePlaces,
   mergeProblem,
@@ -96,15 +97,22 @@ const WINDOW_MS = WINDOW_DAYS * DAY_MS;
 /** Report kinds that change a fact, which a freeze stops. */
 const FREEZES: ReadonlySet<string> = new Set(["fact", "doubt", "clear", "contact"]);
 
+/** When a freeze expires (FREEZE_EXPIRY_DAYS after it started) if no one has set the disputed fact by then. */
+export const expiryOf = (freeze: FreezeRecord) => new Date(Date.parse(freeze.at) + FREEZE_EXPIRY_DAYS * DAY_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
+
 /**
- * When a freeze lifted: the date the data has on the disputed fact, when it
- * is at or after the freeze. A reviewer's decision on the `disputed` case
- * sets the fact with the time of the decision, and so does a person who sets
- * it on the review PR. Undefined while the place is still frozen.
+ * When a freeze lifted, by `now`: the date the data has on the disputed
+ * fact, when it is at or after the freeze, or else its expiry once that has
+ * passed (a person who keeps the place's value sets no date). A reviewer's
+ * decision on the `disputed` case sets the fact with the time of the
+ * decision, and so does a person who sets it on the review PR. Undefined
+ * while the place is still frozen.
  */
-export function liftOf(place: Place, freeze: FreezeRecord): string | undefined {
+export function liftOf(place: Place, freeze: FreezeRecord, now: string): string | undefined {
   const date = place.fact_dates?.[freeze.fact];
-  return date !== undefined && date >= freeze.at ? date : undefined;
+  if (date !== undefined && date >= freeze.at) return date;
+  const expiry = expiryOf(freeze);
+  return now >= expiry ? expiry : undefined;
 }
 
 export const DRAFT_KIND = "campground";
@@ -1660,7 +1668,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     for (const [placeId, mine] of byPlace) {
       const place = input.places.get(placeId)!;
       const standing = standingFreeze(placeId);
-      const liftedAt = standing === undefined ? undefined : liftOf(place, standing);
+      const liftedAt = standing === undefined ? undefined : liftOf(place, standing, nowIso);
+      const expired = standing !== undefined && liftedAt !== undefined && liftedAt === expiryOf(standing) && (place.fact_dates?.[standing.fact] ?? "") < standing.at;
       if (standing !== undefined && liftedAt === undefined) {
         for (const item of mine) {
           decide(item, "waiting", `the place is frozen while a reviewer settles conflicting values for ${standing.fact}`);
@@ -1673,7 +1682,13 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         standing !== undefined && liftedAt !== undefined && r.type === "report" && r.report.fact === standing.fact && r.received <= liftedAt;
       for (const item of mine) {
         if (!settled(item)) continue;
-        decide(item, "refused", `a reviewer settled ${standing!.fact} after conflicting values`);
+        decide(
+          item,
+          "refused",
+          expired
+            ? `the freeze on ${standing!.fact} expired after ${FREEZE_EXPIRY_DAYS} days with the place's value kept`
+            : `a reviewer settled ${standing!.fact} after conflicting values`,
+        );
         out.add(item.id);
       }
       const open = mine.filter((i) => !out.has(i.id));
@@ -1705,6 +1720,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         fact: dispute.fact,
         ...(disputeValuesShown(dispute.fact, dispute.values) ? { values: dispute.values } : {}),
         sources: dispute.sources,
+        frozen_at: dispute.at,
         feedback: dispute.feedback,
       });
     }

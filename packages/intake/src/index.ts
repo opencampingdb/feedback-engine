@@ -97,6 +97,7 @@ import {
   openDoubtCases,
   overrule,
   recordFreezes,
+  liftUnheld,
   pruneDecisions,
   UNAVAILABLE,
   type DoubtCase,
@@ -1770,29 +1771,38 @@ export function createHandler(deps: Deps) {
 
   /**
    * `POST /v1/places/recent/freezes`, for the apply run: `{ "freezes": [{
-   * "place", "fact", "frozen_at", "lifted_at"? }] }`, the places it froze over
-   * conflicting values in the last 90 days, with `lifted_at` once the
-   * reviewer's value is in the data, and `authorization: Bearer
-   * <PLACES_TOKEN>`. A frozen place's fact changes are held as `disputed`
-   * (see `recordFreezes`), and sending them again changes nothing.
+   * "place", "fact", "frozen_at", "lifted_at"? }], "complete"? }`, the places
+   * it froze over conflicting values in the last 90 days, with `lifted_at`
+   * once the reviewer's value is in the data or the freeze expired, and
+   * `authorization: Bearer <PLACES_TOKEN>`. A frozen place's fact changes
+   * are held as `disputed` (see `recordFreezes`), and sending them again
+   * changes nothing. With `complete: true` the list is all the apply holds
+   * (it may be empty), and a freeze the intake found at send time that is
+   * not on it is lifted once it is a day old (`liftUnheld`).
    */
   async function freezesRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
     const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 16);
     if (call instanceof Response) return call;
-    const freezes = call.body.freezes;
+    const { freezes, complete } = call.body;
     const isFreeze = (f: unknown): f is { place: string; fact: string; frozen_at: string; lifted_at?: string } => {
       if (typeof f !== "object" || f === null) return false;
       const { place, fact, frozen_at: frozenAt, lifted_at: liftedAt } = f as Record<string, unknown>;
       return isPlaceId(place) && isFactName(fact) && isIsoSeconds(frozenAt) && (liftedAt === undefined || isIsoSeconds(liftedAt));
     };
-    if (!Array.isArray(freezes) || freezes.length === 0 || freezes.length > MAX_REMOVE_IDS || !freezes.every(isFreeze)) {
-      return json(400, { error: "invalid", details: [`freezes must be 1 to ${MAX_REMOVE_IDS} frozen places`] }, cors);
+    const least = complete === true ? 0 : 1;
+    if (
+      (complete !== undefined && typeof complete !== "boolean") ||
+      !Array.isArray(freezes) ||
+      freezes.length < least ||
+      freezes.length > MAX_REMOVE_IDS ||
+      !freezes.every(isFreeze)
+    ) {
+      return json(400, { error: "invalid", details: [`freezes must be ${least} to ${MAX_REMOVE_IDS} frozen places`] }, cors);
     }
-    const written = await recordFreezes(
-      call.db,
-      freezes.map(({ place, fact, frozen_at, lifted_at }) => ({ place, fact, frozen_at, ...(lifted_at !== undefined ? { lifted_at } : {}) })),
-    );
-    return json(200, { written }, cors);
+    const sent = freezes.map(({ place, fact, frozen_at, lifted_at }) => ({ place, fact, frozen_at, ...(lifted_at !== undefined ? { lifted_at } : {}) }));
+    const written = await recordFreezes(call.db, sent);
+    const lifted = complete === true ? await liftUnheld(call.db, sent, deps.now()) : 0;
+    return json(200, { written, lifted }, cors);
   }
 
   /**

@@ -233,3 +233,33 @@ describe("unattested_place cases", () => {
     expect(applyDecision(place(), unattested, "merge", AT)).toBeNull();
   });
 });
+
+describe("disputed cases", () => {
+  const disputed: HeldCase = { ...base, case: "disputed", fact: "pets", values: ["yes", "no", "leashed"], sources: 3, frozen_at: "2026-11-01T00:00:00Z" };
+
+  it("reads the time a freeze started, and closes the case once the freeze has expired", () => {
+    expect(parseHeldCases(reviewPrBody(AT, [], new Map(), [], [disputed]))).toEqual([disputed]);
+    const record = place({ standing: undefined });
+    expect(settleByRules(disputed, record, { now: Date.parse("2026-11-14T00:00:00Z") })).toBeNull();
+    expect(settleByRules(disputed, record, { now: Date.parse("2026-11-15T00:00:00Z") })?.reason).toContain("expired after 14 days");
+  });
+});
+
+describe("intake_check cases", () => {
+  const ofFact: HeldCase = { ...base, case: "intake_check", held_for: "network_reputation", about: "fact", fact: "toilets", value: false };
+  const ofStatus: HeldCase = { ...base, case: "intake_check", held_for: "repeated_text", about: "status", says: "closed" };
+
+  it("reads only the checks the AI reviewer decides, and the item each case is about", () => {
+    expect(parseHeldCases(reviewPrBody(AT, [], new Map(), [], [ofFact, ofStatus]))).toEqual([ofFact, ofStatus]);
+    expect(parseHeldCases(`- held-case ${JSON.stringify({ ...ofFact, held_for: "text_check" })}`)).toEqual([]);
+    expect(parseHeldCases(`- held-case ${JSON.stringify({ ...ofStatus, says: undefined })}`)).toEqual([]);
+  });
+
+  it("lets a reviewer keep or take back a fact, approve or dismiss a status report, and puts back the earlier value on a dismissed fact", () => {
+    expect(allowedDecisions(ofFact)).toEqual(["confirm", "dismiss", "leave"]);
+    expect(allowedDecisions(ofStatus)).toEqual(["approve", "dismiss", "leave"]);
+    expect(applyDecision(place(), ofFact, "dismiss", AT)?.facts).toMatchObject({ toilets: false });
+    expect(applyDecision(place(), ofFact, "confirm", AT)).toBeNull();
+    expect(applyDecision(place(), ofStatus, "approve", AT)).toBeNull();
+  });
+});

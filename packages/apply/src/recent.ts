@@ -46,9 +46,10 @@ export interface RecentChangeStore {
   /**
    * Places the apply froze over conflicting values, and whether each freeze
    * has lifted. The intake holds fact changes to a frozen place as
-   * `disputed`. A store without it is told nothing.
+   * `disputed`. With `complete`, `freezes` is every freeze the apply holds.
+   * A store without it is told nothing.
    */
-  freezes?(freezes: readonly Freeze[]): Promise<void>;
+  freezes?(freezes: readonly Freeze[], options?: { complete: boolean }): Promise<void>;
 }
 
 /** A place the apply froze, as the intake's `POST /v1/places/recent/freezes` takes it. */
@@ -58,7 +59,7 @@ export interface Freeze {
   fact: FactName;
   /** When the freeze started. */
   frozen_at: string;
-  /** When the reviewer's value reached the data, which lifted it. Absent while the place is frozen. */
+  /** When the reviewer's value reached the data, or the freeze expired, which lifted it. Absent while the place is frozen. */
   lifted_at?: string;
 }
 
@@ -150,13 +151,15 @@ export function intakeRecentStore(baseUrl: string, token: string, fetcher: typeo
         if (!response.ok) throw new Error(`the intake refused the doubt cases: ${response.status} ${await response.text()}`);
       }
     },
-    async freezes(freezes) {
+    async freezes(freezes, options) {
       const target = new URL("/v1/places/recent/freezes", baseUrl).toString();
-      for (let start = 0; start < freezes.length; start += REMOVE_BATCH) {
+      // A full list that fits one call says so, and the intake lifts its own freezes the list does not hold.
+      const complete = options?.complete === true && freezes.length <= REMOVE_BATCH;
+      for (let start = 0; start < Math.max(freezes.length, complete ? 1 : 0); start += REMOVE_BATCH) {
         const response = await fetcher(target, {
           method: "POST",
           headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-          body: JSON.stringify({ freezes: freezes.slice(start, start + REMOVE_BATCH) }),
+          body: JSON.stringify({ freezes: freezes.slice(start, start + REMOVE_BATCH), ...(complete ? { complete: true } : {}) }),
         });
         if (!response.ok) throw new Error(`the intake refused the freezes: ${response.status} ${await response.text()}`);
       }
@@ -356,14 +359,16 @@ export async function sendDoubtCases(options: { inbox: string; store: RecentChan
 /**
  * Sends the intake each place's latest freeze kept in the inbox in the last
  * 90 days, with `lifted_at` once `main` has a value for the disputed fact set
- * at or after the freeze (`liftOf`). All of them go on every run, so the
- * intake can lift a freeze it learnt of from its own reports. Returns the
- * freezes sent, by place.
+ * at or after the freeze, or once the freeze expired (`liftOf`). All of them
+ * go on every run, as the full list (even when empty), so the intake can
+ * lift a freeze it found from its own reports that the apply does not hold.
+ * Returns the freezes sent, by place.
  */
 export async function sendFreezes(options: { inbox: string; main: string; store: RecentChangeStore; now?: Date }): Promise<Freeze[]> {
   if (options.store.freezes === undefined) return [];
   const now = options.now ?? new Date();
   const since = now.getTime() - WINDOW_DAYS * DAY_MS;
+  const nowIso = now.toISOString().replace(/\.\d{3}Z$/, "Z");
   const sinceDay = new Date(now.getTime() - (WINDOW_DAYS + 1) * DAY_MS).toISOString().slice(0, 10);
   const latest = new Map<string, FreezeRecord>();
   for (const item of await readHistory(options.inbox, sinceDay)) {
@@ -377,10 +382,10 @@ export async function sendFreezes(options: { inbox: string; main: string; store:
     .sort(([a], [b]) => (a < b ? -1 : 1))
     .map(([place, frozen]) => {
       const record = onMain.get(place);
-      const lifted = record === undefined ? undefined : liftOf(record, frozen);
+      const lifted = record === undefined ? undefined : liftOf(record, frozen, nowIso);
       return { place, fact: frozen.fact, frozen_at: frozen.at, ...(lifted !== undefined ? { lifted_at: lifted } : {}) };
     });
-  if (freezes.length > 0) await options.store.freezes(freezes);
+  await options.store.freezes(freezes, { complete: true });
   return freezes;
 }
 

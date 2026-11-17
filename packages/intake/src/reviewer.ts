@@ -750,7 +750,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         ? { decision: "leave" as const, reason: `the rules closed this case: travellers ${closed.settles} the fact` }
         : c.case === "intake_check" && c.about === "review" && place && review === undefined
           ? { decision: "leave" as const, reason: "the review is not on the review branch, so a person decides" }
-          : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [], ...(siteNames ? { siteNames } : {}) });
+          : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [], ...(siteNames ? { siteNames } : {}), now: deps.now() });
       const extra: CaseExtra = review ? { review } : {};
       let decision: ReviewDecision;
       let reason: string;

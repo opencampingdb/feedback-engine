@@ -444,11 +444,13 @@ function settleChange(c: HeldCase, place: Place, siteNames: readonly string[] | 
  * look at it. `context.doNotMatch` is the do-not-match list, for a
  * `commons_mismatch` case. `context.siteNames` is the title and headings of
  * the place's own website, for a name change, when they could be read.
+ * `context.now` (a time in ms) closes a `disputed` case whose freeze has
+ * expired.
  */
 export function settleByRules(
   c: HeldCase,
   place: Place | undefined,
-  context: { doNotMatch?: readonly Pick<DoNotMatchEntry, "place" | "file">[]; siteNames?: readonly string[] } = {},
+  context: { doNotMatch?: readonly Pick<DoNotMatchEntry, "place" | "file">[]; siteNames?: readonly string[]; now?: number } = {},
 ): { decision: "leave"; reason: string } | null {
   const leave = (reason: string) => ({ decision: "leave" as const, reason });
   // Only a person reads a traveller's note: it is in the inbox, never in the case.
@@ -475,6 +477,10 @@ export function settleByRules(
     return null;
   }
   if (c.case === "disputed") {
+    // The freeze lifted after FREEZE_EXPIRY_DAYS with the place's value kept, and the case closed with it.
+    if (c.frozen_at !== undefined && context.now !== undefined && context.now - Date.parse(c.frozen_at) >= FREEZE_EXPIRY_DAYS * 24 * 60 * 60 * 1000) {
+      return leave(`the freeze expired after ${FREEZE_EXPIRY_DAYS} days with the place's value kept`);
+    }
     // Owners keep control of their listings, whatever a model says.
     if (place.fact_sources[c.fact!] === "owner") return leave("the owner set this fact");
     if (place.owner_verified === true) return leave("the place has a verified owner");

@@ -582,6 +582,28 @@ export async function recordFreezes(db: D1Like, freezes: readonly Freeze[]): Pro
   return results.reduce<number>((sum, result) => sum + changesOf(result), 0);
 }
 
+/** How long a freeze the intake found at send time stands before the apply's full list can lift it. */
+export const FREEZE_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Lifts, at `now`, each freeze the intake holds that is not among `held`
+ * (by place and fact) and started FREEZE_GRACE_MS ago or more. `held` is the
+ * apply's full list: the intake's own freeze outlives the apply's view only
+ * for the day the apply may take to see the same reports. Returns how many
+ * it lifted.
+ */
+export async function liftUnheld(db: D1Like, held: readonly Freeze[], now: number): Promise<number> {
+  const { results } = await db
+    .prepare("SELECT place, fact FROM frozen_places WHERE lifted_at IS NULL AND frozen_at <= ?")
+    .bind(isoSeconds(now - FREEZE_GRACE_MS))
+    .all<{ place: string; fact: string }>();
+  const keep = new Set(held.map((f) => `${f.place} ${f.fact}`));
+  const lift = results.filter((r) => !keep.has(`${r.place} ${r.fact}`));
+  if (lift.length === 0) return 0;
+  await db.batch(lift.map((r) => db.prepare("UPDATE frozen_places SET lifted_at = ? WHERE place = ? AND lifted_at IS NULL").bind(isoSeconds(now), r.place)));
+  return lift.length;
+}
+
 /**
  * A clear. It is live, with the fact (and any fact that goes with it) off the
  * place on the recent list, when the rules put it live and the checks pass.

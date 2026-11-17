@@ -268,14 +268,28 @@ describe("sendFreezes", () => {
     await report(5, PLACE, "2026-10-29T00:00:00Z");
     await put(join(main, "places", OTHER.slice(-2).toLowerCase(), `${OTHER}.json`), { id: OTHER, facts: { pets: "no" }, fact_dates: { pets: "2026-10-26T00:00:00Z" } });
     await put(join(main, "places", PLACE.slice(-2).toLowerCase(), `${PLACE}.json`), { id: PLACE, facts: { pets: "no" }, fact_dates: { pets: "2026-10-01T00:00:00Z" } });
-    const freezes = vi.fn(async (_freezes: readonly unknown[]) => {});
+    const freezes = vi.fn(async (_freezes: readonly unknown[], _options?: { complete: boolean }) => {});
     const store = { inData: async () => {}, overruled: async () => {}, doubtCases: async () => {}, freezes };
     const expected = [
       { place: PLACE, fact: "pets", frozen_at: "2026-10-28T00:00:00Z" },
       { place: OTHER, fact: "pets", frozen_at: "2026-10-25T00:00:00Z", lifted_at: "2026-10-26T00:00:00Z" },
     ];
     expect(await sendFreezes({ inbox, main, store, now: NOW })).toEqual(expected);
-    expect(freezes).toHaveBeenCalledWith(expected);
+    expect(freezes).toHaveBeenCalledWith(expected, { complete: true });
+  });
+
+  it("lifts a freeze 14 days old that no one decided, and sends the full list even when it holds none", async () => {
+    await report(1, PLACE, "2026-10-10T00:00:00Z", { fact: "pets", at: "2026-10-10T00:00:00Z" });
+    await put(join(main, "places", PLACE.slice(-2).toLowerCase(), `${PLACE}.json`), { id: PLACE, facts: { pets: "no" }, fact_dates: { pets: "2026-10-01T00:00:00Z" } });
+    const freezes = vi.fn(async (_freezes: readonly unknown[], _options?: { complete: boolean }) => {});
+    const store = { inData: async () => {}, overruled: async () => {}, doubtCases: async () => {}, freezes };
+    expect(await sendFreezes({ inbox, main, store, now: NOW })).toEqual([
+      { place: PLACE, fact: "pets", frozen_at: "2026-10-10T00:00:00Z", lifted_at: "2026-10-24T00:00:00Z" },
+    ]);
+    const empty = await mkdtemp(join(tmpdir(), "ocdb-empty-"));
+    expect(await sendFreezes({ inbox: empty, main, store, now: NOW })).toEqual([]);
+    expect(freezes).toHaveBeenLastCalledWith([], { complete: true });
+    await rm(empty, { recursive: true, force: true });
   });
 });
 

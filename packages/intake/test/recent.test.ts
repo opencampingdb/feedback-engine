@@ -922,6 +922,31 @@ describe("send-time decisions", () => {
       expect(await send(fact(PLACE, "toilets", true, who(2)))).toMatchObject({ state: "live" });
     });
 
+    it("lifts a freeze of its own that the apply's full list does not hold, a day after it started, and not sooner", async () => {
+      const complete = (body: unknown) =>
+        handle(
+          new Request("https://intake.example/v1/places/recent/freezes", {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+            body: JSON.stringify({ freezes: body, complete: true }),
+          }),
+          e,
+        );
+      await send(fact(PLACE, "pets", "yes", who(1)));
+      await send(fact(PLACE, "pets", "no", who(2)));
+      expect(await send(fact(PLACE, "pets", "leashed", who(3)))).toMatchObject(held("disputed"));
+      // The apply holds no freeze of this place: a partial list lifts nothing, and nor does the full one within the day.
+      clock += 23 * HOUR;
+      expect((await freezes([{ place: ELSEWHERE, fact: "pets", frozen_at: "2026-11-03T08:00:00Z" }])).status).toBe(200);
+      expect((await complete([])).status).toBe(200);
+      expect(await send(fact(PLACE, "toilets", true, who(4)))).toMatchObject(held("disputed"));
+      clock += 2 * HOUR;
+      expect(await (await complete([{ place: ELSEWHERE, fact: "pets", frozen_at: "2026-11-03T08:00:00Z" }])).json()).toMatchObject({ lifted: 1 });
+      expect(await send(fact(PLACE, "toilets", true, who(5)))).toMatchObject({ state: "live" });
+      // The place the apply froze stays frozen.
+      expect(await send(fact(ELSEWHERE, "toilets", true, who(6)))).toMatchObject(held("disputed"));
+    });
+
     it("refuses a freezes call without the places token or with a malformed freeze", async () => {
       const bad = await handle(
         new Request("https://intake.example/v1/places/recent/freezes", {

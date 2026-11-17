@@ -147,4 +147,23 @@ describe("while frozen", () => {
     expect(out.outcome(pets)).toBe("refused");
     expect(out.after()?.facts.pets).toBe("leashed");
   });
+
+  it("lifts after 14 days with the place's value kept when no reviewer decides, and closes the case", () => {
+    const power = fact(14 * 24 + 1, "dev-d", "power", true);
+    const pets = fact(14 * 24 + 2, "dev-e", "pets", "no");
+    const kept = place({ facts: { power: false, fee: true, pets: "yes" }, fact_dates: { pets: at(0) }, fact_sources: { power: "osm", fee: "osm", pets: "feedback" } });
+    // A day before the freeze is 14 days old, the place is still frozen.
+    const early = run([power], { now: 13 * 24, history: freeze(0), places: [kept] });
+    expect(early.outcome(power)).toBe("waiting");
+    const out = run([power, pets], { now: 14 * 24 + 3, history: freeze(0), places: [kept] });
+    expect(out.outcome(power)).toBe("applied");
+    expect(out.outcome(pets)).toBe("refused");
+    expect(out.decisions.find((d) => d.id === pets.id)?.reason).toContain("expired");
+    expect(out.after()?.facts.pets).toBe("yes");
+  });
+
+  it("dates the disputed case with when the freeze started", () => {
+    const out = run([fact(0, "dev-a", "pets", "yes"), fact(5, "dev-b", "pets", "no"), fact(20, "dev-c", "pets", "leashed")]);
+    expect(out.held[0]).toMatchObject({ case: "disputed", frozen_at: at(20) });
+  });
 });
