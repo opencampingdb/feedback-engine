@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { reviewPrBody } from "../../apply/src/prbody.js";
 import type { HeldCase } from "../../apply/src/review.js";
 import { majorRoads } from "../../apply/src/roads.js";
-import { dumpPlace, placePath } from "../../apply/src/serialise.js";
+import { dumpPlace, placePath, reviewPath } from "../../apply/src/serialise.js";
 import type { Place } from "../../apply/src/types.js";
 import type { AiLike } from "../src/checks.js";
 import { createHandler, createReviewer, createScheduled, type Env } from "../src/index.js";
@@ -467,6 +467,56 @@ describe("the AI reviewer", () => {
       expect(asked).toHaveLength(0);
       if (result === "off" || result === "failed" || result.outcome !== "reviewed") throw new Error("expected a review");
       expect(result.decisions.map((d) => [d.decision, d.by_rules])).toEqual([["leave", true], ["leave", true]]);
+    });
+  });
+
+  describe("intake_check cases", () => {
+    const REVIEW_ID = (n: number) => `rev_01JC00000000000000000000${String(n).padStart(2, "0")}`;
+
+    it("puts back the earlier value on a fact it dismisses, and keeps one it confirms, telling the model why the intake held it", async () => {
+      const cases = [
+        heldCase(0, { case: "intake_check", held_for: "network_reputation", about: "fact", fact: "toilets", value: false }),
+        heldCase(1, { case: "intake_check", held_for: "repeated_text", about: "fact", fact: "toilets" }),
+      ];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      for (const n of [0, 1]) gh.put(place(n, { standing: undefined, facts: { toilets: true }, fact_sources: { toilets: "feedback" } }));
+      const { ai, asked } = fakeAi((input) => ((caseOf(input).place as { id: string }).id === id(0) ? reply("confirm", "Toilets are usual here.") : reply("dismiss", "Spam.")));
+      await run(gh, ai);
+      expect(caseOf(asked[0]!.input)).toMatchObject({ case: "intake_check", held_for: "network_reputation", about: "fact", fact: "toilets", value_before: false });
+      expect(JSON.stringify((asked[0]!.input.messages as { content: string }[])[0]!.content)).toContain("public list of abusive addresses");
+      expect(gh.read(0).facts).toMatchObject({ toilets: true });
+      expect(gh.read(1).facts).not.toHaveProperty("toilets");
+    });
+
+    it("shows the model a held review as the review branch has it, and leaves one that is not there to a person", async () => {
+      const cases = [
+        heldCase(0, { case: "intake_check", held_for: "network_reputation", about: "review", review: REVIEW_ID(0) }),
+        heldCase(1, { case: "intake_check", held_for: "network_reputation", about: "review", review: REVIEW_ID(1) }),
+      ];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(place(0, { standing: undefined }));
+      gh.put(place(1, { standing: undefined }));
+      const line = { id: REVIEW_ID(0), place: id(0), stars: 4, text: "Quiet bend with shade.", visited: "2026-10", created: AT, app: "example-app", contributor: "ctr_0000000000000001" };
+      gh.files.set(reviewPath(id(0)), { text: `${JSON.stringify(line)}\n`, sha: "blob-review" });
+      const { ai, asked } = fakeAi(() => reply("approve", "A believable review."));
+      const result = await run(gh, ai);
+      expect(asked).toHaveLength(1);
+      expect(caseOf(asked[0]!.input)).toMatchObject({ case: "intake_check", about: "review", review: { stars: 4, text: "Quiet bend with shade." } });
+      if (result === "off" || result === "failed" || result.outcome !== "reviewed") throw new Error("expected a review");
+      expect(result.decisions.map((d) => [d.place, d.decision, d.committed])).toEqual([
+        [id(0), "approve", false],
+        [id(1), "leave", false],
+      ]);
+    });
+
+    it("leaves a held closure on a place with a verified owner, or whose status the owner set, to a person", async () => {
+      const cases = [0, 1].map((n) => heldCase(n, { case: "intake_check", held_for: "network_reputation", about: "status", says: "closed" }));
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(place(0, { standing: undefined, owner_verified: true }));
+      gh.put(place(1, { standing: undefined, fact_sources: { status: "owner" } }));
+      const { ai, asked } = fakeAi(() => reply("approve", "fine"));
+      await run(gh, ai);
+      expect(asked).toHaveLength(0);
     });
   });
 

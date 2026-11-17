@@ -33,6 +33,8 @@ import {
   type NxdomainState,
 } from "./closure-evidence.js";
 import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
+import { idsOnPrs } from "./progress.js";
+import { reviewerDecisions } from "./reviewer-decisions.js";
 import { autoPrBody, jobSummary, reviewPrTexts } from "./prbody.js";
 import { previewUrl, PREVIEW_TTL_SECONDS } from "./preview.js";
 import { checkProof as realCheckProof, type ProofResult, type Transport } from "./proof.js";
@@ -71,6 +73,12 @@ export interface RunOptions {
   reviewPrs?: readonly ReviewPr[];
   /** Logins whose comments on those PRs count: the bot's. */
   botLogins?: readonly string[];
+  /**
+   * The AI reviewer's GitHub App logins (`<slug>`), when it is not the bot.
+   * Its `review-decision` comments on the review PRs are read too: an item
+   * it let through counts, and a doubt it upheld withdraws trust.
+   */
+  reviewerLogins?: readonly string[];
   /** Checks a proof page. Defaults to fetching it. */
   checkProof?: (url: string, code: string) => Promise<ProofResult>;
   /** Time the run may spend on proof checks, and how many run at once. Defaults to 3 minutes and 4. */
@@ -256,6 +264,14 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   // Every photo line, when anything in this run is about photos, or any helpful vote counts (its photo's counts age).
   const photoVotes = await readPhotoVotes(options.inbox);
   const trust = await readTrust(options.inbox);
+  // The AI reviewer's decisions on the review PRs, and the items a person turned down on a merged one.
+  const botLogins = options.botLogins ?? [];
+  const decidedByReviewer = reviewerDecisions(options.reviewPrs ?? [], botLogins, [...botLogins, ...(options.reviewerLogins ?? [])]);
+  const mentioned = idsOnPrs(options.reviewPrs ?? [], botLogins);
+  const turnedDown = new Set([...mentioned.merged].filter((id) => !mentioned.open.has(id)));
+  const turnedDownPlaces = history
+    .filter((h) => turnedDown.has(h.id))
+    .flatMap((h) => (h.type === "report" && h.report.kind === "new_place" ? [newPlaceIdOf(h)] : [h.place]));
   const photos = crowd.some((p) => photoTypes.has(p.type)) || Object.keys(photoVotes.photos).length > 0 ? await auto.allPhotos() : [];
   // The place a photo named by a removal is filed under, which may have been merged since.
   const removing = new Set(crowd.map((p) => (p.type === "photo_removal" ? p.photo_removal.photo : undefined)));
@@ -276,6 +292,9 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     ...owners.keys(),
     // Places travellers reported closed in earlier runs: evidence found since may close them.
     ...(photosOnly ? [] : history.filter(isClosureReport).map((h) => h.place)),
+    // Places of edits a person turned down, and of held reports the AI reviewer let through.
+    ...(photosOnly ? [] : turnedDownPlaces),
+    ...(photosOnly ? [] : decidedByReviewer.map((d) => d.case.place)),
   ].filter((p): p is string => typeof p === "string"));
   const places = new Map<string, Place>();
   for (let round = 0; round < 10 && wanted.size > 0; round++) {
@@ -388,6 +407,8 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     photos,
     photoVotes,
     trust,
+    ...(decidedByReviewer.length > 0 ? { reviewerDecisions: decidedByReviewer } : {}),
+    ...(turnedDown.size > 0 ? { turnedDown } : {}),
     ...(options.photoLicence ? { photoLicence: options.photoLicence } : {}),
     ...(options.holdFirstPhoto === false ? { holdFirstPhoto: false } : {}),
     ...(everyPlace ? { everyPlace } : {}),

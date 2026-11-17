@@ -49,14 +49,26 @@ import {
 import { evidenceCounts } from "./closure-evidence.js";
 import type { CheckOutcome } from "./contact-checks.js";
 import { moderateReview } from "./moderation.js";
-import { CANDIDATE_DISTANCE_M, MAX_CANDIDATES, mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase, type PlaceChange } from "./review.js";
+import {
+  CANDIDATE_DISTANCE_M,
+  MAX_CANDIDATES,
+  mergePlaces,
+  mergeProblem,
+  REVIEWER_CHECKS,
+  type ClosedCase,
+  type DoNotMatchEntry,
+  type HeldCase,
+  type IntakeCheckHold,
+  type PlaceChange,
+} from "./review.js";
+import { releasedByReviewer, upheldByReviewer, type ReviewerDecision } from "./reviewer-decisions.js";
 import type { EarlierFact } from "./io.js";
 import { implausibleLocation, type Implausible, type PlaceGeometry } from "./plausible.js";
 import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
 import { doNotMatchProblems, newProblems, placeProblems, reviewProblems, textProblems } from "./data-check.js";
 import { dropSource, setSource } from "./sources.js";
-import { emptyTrust, isTrusted, nextTrust, trustedContributors, type Confirmation, type TrustRecord, type UpheldDoubt } from "./trust.js";
+import { confirms, earnsTrust, emptyTrust, isTrusted, nextTrust, trustedContributors, type Confirmation, type TrustRecord, type UpheldDoubt, type Withdrawal } from "./trust.js";
 import type { Photo, PhotoVote, PhotoVotes, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
 
 export type { ClosedCase, HeldCase };
@@ -269,6 +281,20 @@ export interface RulesInput {
    * run's items. Left out, no one is trusted yet.
    */
   trust?: TrustRecord;
+  /**
+   * The AI reviewer's decisions on the review PRs (reviewer-decisions.ts).
+   * An item it approved on an `intake_check` case counts from this run as if
+   * the intake had not held it, and a doubt it upheld withdraws trust from
+   * the contributor whose edit it was about. None when left out.
+   */
+  reviewerDecisions?: readonly ReviewerDecision[];
+  /**
+   * Items a person turned down on a merged review PR: named on it, on no
+   * open one, held for review by an earlier run. A signed-in contributor's
+   * fact report or new place among them that the data does not hold loses
+   * its sender's trust (see `trustAfter`). None when left out.
+   */
+  turnedDown?: ReadonlySet<string>;
 }
 
 /**
@@ -615,6 +641,25 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   };
 
   const pending = [...input.pending].sort(byReceived);
+  // Items the AI reviewer let through after the intake held them for a check.
+  const released = releasedByReviewer(input.reviewerDecisions ?? []);
+  /** The check the intake held `item` for (`heldForCheck`), unless the AI reviewer has since let it through. */
+  const heldNow = (item: StoredFeedback) => (released.has(item.id) ? null : heldForCheck(item));
+  /** An `intake_check` case for an item the intake held for a check the AI reviewer decides, or null for a check a person decides. */
+  const intakeCheckCase = (item: StoredFeedback, place: Place, fields: Pick<HeldCase, "about"> & Partial<Pick<HeldCase, "fact" | "value" | "review" | "says">>): HeldCase | null => {
+    const check = heldNow(item);
+    if (check === null || !(REVIEWER_CHECKS as readonly string[]).includes(check)) return null;
+    return {
+      case: "intake_check",
+      place: place.id,
+      ...(place.standing !== undefined ? { standing: place.standing } : {}),
+      location: { lat: roundCoord(place.location.lat), lon: roundCoord(place.location.lon) },
+      kind: place.kind,
+      held_for: check as IntakeCheckHold,
+      ...fields,
+      feedback: [item.id],
+    };
+  };
   const blocked = input.blocked ?? new Set<string>();
   const trusted = trustedContributors(input.trust ?? emptyTrust(), blocked);
   // Doubts this run upheld, which withdraw trust from whoever sent the value.
@@ -842,8 +887,13 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
    * a new place, with each contact it carries, applied in an earlier run or
    * not refused in this one. A fact report this run did not refuse confirms
    * earlier edits of the same value from other sources, and a check that
-   * found a new place there, sent nearby, confirms the place. Items the
-   * intake held for a check confirm nothing.
+   * found a new place there, sent nearby, confirms the place. Only an item
+   * this run applied confirms, and only one that is attested or signed in,
+   * never one from a human check, and never one the intake held for a check
+   * (`confirms` in trust.ts). Trust is withdrawn for a doubt this run upheld,
+   * for a doubt the AI reviewer upheld on a review PR (`upheldByReviewer`)
+   * and for an edit a person turned down on a merged review PR that the
+   * data does not hold (`input.turnedDown`).
    */
   function trustAfter(): TrustRecord {
     const counts = (i: StoredFeedback) => (decisions.has(i.id) ? decisions.get(i.id)!.outcome !== "refused" : wasApplied(i));
@@ -861,7 +911,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     }
     const confirmations: Confirmation[] = [];
     for (const by of [...known, ...newPlaceEvidence]) {
-      if (!decisions.has(by.id) || !counts(by) || heldForCheck(by) !== null) continue;
+      if (decisions.get(by.id)?.outcome !== "applied" || !confirms(by) || heldNow(by) !== null) continue;
       if (by.type === "report" && by.report.kind === "fact") {
         const fact = by.report.fact as string;
         for (const e of edits) {
@@ -874,7 +924,51 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         if (origin !== undefined && inWindow(origin, time(by))) confirmations.push({ edit: origin, place: by.place, by });
       }
     }
-    return nextTrust(input.trust ?? emptyTrust(), confirmations, upheld, edits);
+    // The items the inbox keeps, by id, to find who sent what a reviewer or a person turned down.
+    const byId = new Map([...input.history, ...known].map((i) => [i.id, i]));
+    const doubts = [...upheld];
+    const withdrawn: Withdrawal[] = [];
+    const withdrawFrom = (item: StoredFeedback | undefined) => {
+      if (item !== undefined && earnsTrust(item)) withdrawn.push({ contributor: item.contributor!, at: item.received });
+    };
+    for (const decided of upheldByReviewer(input.reviewerDecisions ?? [])) {
+      if (decided.fact !== undefined && decided.value !== undefined) {
+        // keep_down: the doubts are the case's items, and whoever sent the value loses trust.
+        const latest = decided.feedback.map((id) => byId.get(id)?.received).filter((t): t is string => t !== undefined).sort().at(-1);
+        if (latest !== undefined) doubts.push({ place: decided.place, fact: decided.fact, value: decided.value, at: latest });
+      } else if (decided.newPlace) {
+        // A new place taken down: its sender, never the travellers who reported it.
+        withdrawFrom(origins.get(decided.place));
+      } else {
+        for (const id of decided.feedback) withdrawFrom(byId.get(id));
+      }
+    }
+    for (const id of input.turnedDown ?? []) {
+      const item = byId.get(id);
+      if (item !== undefined && turnedDownEdit(item)) withdrawFrom(item);
+    }
+    return nextTrust(input.trust ?? emptyTrust(), confirmations, doubts, edits, withdrawn);
+  }
+
+  /**
+   * Whether an edit a person turned down on a merged review PR is missing
+   * from the data: a fact report whose value the place lacks with no date
+   * from that run or later (a later change did not replace it), or a new
+   * place that is not in the data or is hidden.
+   */
+  function turnedDownEdit(item: StoredFeedback): boolean {
+    if (item.type !== "report") return false;
+    const run = (item as { outcome?: { run?: string } }).outcome?.run ?? item.received;
+    const report = item.report;
+    if (report.kind === "new_place") {
+      const placed = input.places.get(newPlaceIdOf(item));
+      return placed === undefined || placed.standing === "hidden";
+    }
+    if (report.kind !== "fact" || typeof item.place !== "string") return false;
+    const placed = input.places.get(item.place);
+    if (placed === undefined) return false;
+    const fact = report.fact as FactName;
+    return !sameValue((placed.facts as Record<string, unknown>)[fact], report.value) && (placed.fact_dates?.[fact] ?? "") < run;
   }
 
   /**
@@ -953,7 +1047,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         reviewsSent.some((other) => other.place !== item.place && other.id !== item.id && sameText(other.review.text) === text);
       const unproved = item.proved !== true && lines.some((r) => r.contributor === item.contributor && !sameSender(item, r));
       // The intake marks a review whose text other sources sent too, or whose text it could not check.
-      const check = heldForCheck(item);
+      const check = heldNow(item);
       if (check !== null || repeated || !trusted.has(item.contributor) || unproved) {
         const why =
           check !== null
@@ -966,7 +1060,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         edits.push({ kind: "review", place: item.place, review, feedback: item.id });
         // The public PR names the inbox item and never quotes the text, so an erasure or removal leaves no copy there.
         note(item.place, `${item.review.stars} star review, ${why} (read its text in the inbox item before merging)`, false, [item]);
-        decide(item, "needs_review", `${why}, so a person checks it`);
+        // Held only for a check the AI reviewer decides: it reads the review on the review branch.
+        const forReviewer = !repeated && trusted.has(item.contributor) && !unproved ? intakeCheckCase(item, input.places.get(item.place)!, { about: "review", review: reviewId }) : null;
+        if (forReviewer) held.push(forReviewer);
+        decide(item, "needs_review", `${why}, so ${forReviewer ? "the AI reviewer" : "a person"} checks it`);
         continue;
       }
       // One review per contributor per place: the newer replaces the older.
@@ -1341,9 +1438,26 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       const known = input.places.get(id);
       return known !== undefined && evidenceCounts(known);
     });
-    for (const placeId of new Set([...items.map((i) => i.place as string), ...withEvidence])) {
-      const mine = items.filter((i) => i.place === placeId);
-      const evidence = [...input.history.filter((h) => h.place === placeId), ...mine].sort(byReceived);
+    // So are places with a status report or check the AI reviewer let through after the intake held it.
+    const releasedHere = (placeId: string) =>
+      input.history.filter((h) => h.place === placeId && released.has(h.id) && heldForCheck(h) !== null && (isClosureEvidence(h) || isReopenEvidence(h)) && inWindow(h, now));
+    const withReleased = [...new Set(input.history.filter((h) => released.has(h.id) && typeof h.place === "string").map((h) => h.place as string))].filter(
+      (id) => input.places.has(id) && releasedHere(id).length > 0,
+    );
+    for (const placeId of new Set([...items.map((i) => i.place as string), ...withEvidence, ...withReleased])) {
+      const all = items.filter((i) => i.place === placeId);
+      // A report or check the intake held for a check changes nothing and counts for nothing until a reviewer lets it through.
+      const mine = all.filter((i) => heldNow(i) === null);
+      for (const item of all.filter((i) => heldNow(i) !== null)) {
+        const check = heldNow(item)!;
+        const says = item.type === "check" ? (item.check.still_there ? "there" : "gone") : item.report.kind === "closed" ? "closed" : "reopened";
+        const forReviewer = intakeCheckCase(item, input.places.get(placeId)!, { about: "status", says });
+        if (forReviewer) held.push(forReviewer);
+        edits.push({ kind: "note", place: placeId, feedback: item.id });
+        note(placeId, `${item.type === "check" ? "check" : `${item.report.kind} report`} held by the intake for ${check}, so it counts once a reviewer lets it through`, false, [item]);
+        decide(item, "needs_review", `the intake held it for ${check}, so ${forReviewer ? "the AI reviewer" : "a person"} decides whether it counts`);
+      }
+      const evidence = [...input.history.filter((h) => h.place === placeId && heldNow(h) === null), ...mine].sort(byReceived);
       const place = record(placeId);
       const statusBefore = place.status;
       const found = input.closureEvidence?.get(placeId) ?? [];
@@ -1448,6 +1562,26 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           decide(item, "waiting", "a closed place needs a second device to reopen it");
         } else {
           decide(item, "applied", "check recorded");
+        }
+      }
+      // A held report or check a reviewer let through counts now, as it would have counted when it came,
+      // unless something since has undone it. Never on a place the owner manages.
+      const lettingThrough = releasedHere(placeId);
+      if (lettingThrough.length > 0 && evidenceCounts(place)) {
+        const closing = supporting(now, isClosureEvidence, isReopenEvidence);
+        const freed = lettingThrough.filter((h) => closing.includes(h));
+        if (freed.length > 0 && place.status === "open") {
+          place.status = "reported_closed";
+          note(placeId, "status open to reported_closed (a report the intake held, let through by a reviewer)", true, freed);
+        }
+        if (freed.length > 0 && place.status === "reported_closed" && distinctDevices(closing) + found.length >= 2) {
+          place.status = "closed";
+          note(placeId, `status reported_closed to closed (${closureWhy(distinctDevices(closing), found)})`, true, closing);
+        }
+        const reopening = supporting(now, isReopenEvidence, isClosureEvidence).filter((h) => lettingThrough.includes(h));
+        if (reopening.length > 0 && place.status === "reported_closed") {
+          place.status = "open";
+          note(placeId, "status reported_closed to open (a report the intake held, let through by a reviewer)", true, reopening);
         }
       }
       // Evidence of closure counts as one more source for a closure travellers sent, in this run or an
@@ -1625,17 +1759,20 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           decide(item, "refused", decision.why);
           return;
         }
-        const check = heldForCheck(item);
+        const check = heldNow(item);
         if (decision.verdict === "live" && decision.changes.length > 0 && check !== null) {
+          const before = current();
           edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
           note(placeId, `${fact} set to ${JSON.stringify(value)}, which the intake held for ${check} (check before merging)`, false, [item]);
-          decide(item, "needs_review", `the intake held it for ${check}, so a person checks it`);
+          const forReviewer = intakeCheckCase(item, place, { about: "fact", fact, ...(before !== undefined ? { value: before as FactValue } : {}) });
+          if (forReviewer) held.push(forReviewer);
+          decide(item, "needs_review", `the intake held it for ${check}, so ${forReviewer ? "the AI reviewer" : "a person"} checks it`);
           return;
         }
         if (decision.verdict === "live") {
           if (decision.changes.length > 0) {
             setFact(value);
-            note(placeId, `${fact} set to ${JSON.stringify(value)} (one attested report)`, true, [item]);
+            note(placeId, `${fact} set to ${JSON.stringify(value)} (${decision.byTrust ? "a trusted contributor, past the contact checks" : "one attested report"})`, true, [item]);
           }
           decide(item, "applied", decision.why);
           return;
@@ -1741,7 +1878,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             continue;
           }
           const decision = decideFact({ item, place, earlier: restoreEvidence, openCase });
-          if (decision.verdict === "live" && decision.settles === "restored" && heldForCheck(item) === null) {
+          if (decision.verdict === "live" && decision.settles === "restored" && heldNow(item) === null) {
             const weight = restoreWeight({ place: placeId, fact, value, at: item.received, reports: restoreEvidence, takenDownAt: openCase.at });
             const counted = new Set(weight.confirmations.feedback);
             const confirming = reports.filter((r) => counted.has(r.id));
@@ -1943,8 +2080,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             setSource(draft, fact, "feedback", nowIso);
           }
           working.set(id, draft);
-          note(id, `new place at ${where}, published as ${standing}`, true, [origin]);
-          decide(origin, "applied", `new place published as ${standing}`);
+          // Listed without attestation only because its contributor is trusted.
+          const byTrust = origin.attested === undefined ? ", from a trusted contributor" : "";
+          note(id, `new place at ${where}, published as ${standing}${byTrust}`, true, [origin]);
+          decide(origin, "applied", `new place published as ${standing}${byTrust}`);
         }
       } else if (isPending) {
         // Held or hidden before it was ever published: a person decides, with the contacts in the draft.
@@ -2019,7 +2158,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
 
   /** Why the intake would not list a new place or did not, or undefined when it would. */
   function whyNotListed(item: ReportItem): string | undefined {
-    const check = heldForCheck(item);
+    const check = heldNow(item);
     return newPlaceListing(item, isTrusted(item, trusted))?.why ?? (check === null ? undefined : `held by the intake for ${check}`);
   }
 
@@ -2102,7 +2241,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         decide(item, "refused", decision.why);
         continue;
       }
-      const check = heldForCheck(item);
+      const check = heldNow(item);
       if (decision.verdict === "live" && (decision.changes.length === 0 || check === null)) {
         if (decision.changes.length > 0) {
           takeDown(place, fact);
@@ -2123,7 +2262,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     const again = replayTakedowns(items, (item, place) => {
       const earlier = [...input.history, ...items].filter((r) => r === item || decisions.get(r.id)?.outcome !== "refused");
       const decision = decideContactReport({ item, place, earlier });
-      return decision.verdict === "live" && decision.takedown !== undefined && heldForCheck(item) === null;
+      return decision.verdict === "live" && decision.takedown !== undefined && heldNow(item) === null;
     });
     // What a single report sent to a person, to take back if a later report in this run takes the contact down.
     const sentToPerson = new Map<string, { edit: ReviewEdit; change: Change }>();
@@ -2155,7 +2294,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         continue;
       }
       // A report the intake held for a check takes nothing down on its own, though it still counts as a source.
-      const check = heldForCheck(item);
+      const check = heldNow(item);
       if (decision.verdict === "live" && decision.takedown && check === null) {
         const { value, sources, reasons, feedback } = decision.takedown;
         const reports = earlier.filter((r) => feedback.includes(r.id));
@@ -2163,7 +2302,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         takeDown(place, fact);
         note(placeId, `${fact} taken down after reports from ${sources} sources within ${WINDOW_DAYS} days (${reasons.join(", ")})`, true, reports);
         for (const r of reports) {
-          if (!items.includes(r as ReportItem) || heldForCheck(r) !== null) continue;
+          if (!items.includes(r as ReportItem) || heldNow(r) !== null) continue;
           const sent = sentToPerson.get(r.id);
           if (sent) {
             edits.splice(edits.indexOf(sent.edit), 1);
@@ -2227,7 +2366,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       return (
         decision.verdict === "live" &&
         decision.doubtTakedown !== undefined &&
-        heldForCheck(item) === null &&
+        heldNow(item) === null &&
         isValidFactValue(decision.doubtTakedown.fact as ReportFactName, decision.doubtTakedown.value)
       );
     };
@@ -2256,7 +2395,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         continue;
       }
       // A doubt the intake held for a check takes nothing down on its own, though it still counts as a source.
-      const check = heldForCheck(item);
+      const check = heldNow(item);
       if (decision.verdict === "live" && decision.doubtTakedown && check === null) {
         const { value, sources, doubts, confirmations } = decision.doubtTakedown;
         upheld.push({ place: placeId, fact, value, at: item.received });
@@ -2264,7 +2403,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         const counted = earlier.filter((r) => doubts.includes(r.id));
         note(placeId, `${fact} taken down after doubts from ${sources} sources within ${WINDOW_DAYS} days`, true, counted);
         for (const r of counted) {
-          if (!items.includes(r as ReportItem) || heldForCheck(r) !== null) continue;
+          if (!items.includes(r as ReportItem) || heldNow(r) !== null) continue;
           const sent = sentToPerson.get(r.id);
           if (sent) {
             edits.splice(edits.indexOf(sent.edit), 1);
@@ -2452,7 +2591,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       const earlier = input.history.filter(
         (h): h is ReportItem => h.type === "report" && h.report.kind === "commons_mismatch" && h.place === placeId && h.report.file === file,
       );
-      const counted = [...earlier, ...reports].filter((r) => inWindow(r, latest) && heldForCheck(r) === null);
+      const counted = [...earlier, ...reports].filter((r) => inWindow(r, latest) && heldNow(r) === null);
       const sources = distinctDevices(counted);
       if (sources >= 2 && counted.some((r) => r.attested !== undefined)) {
         doNotMatch.push({ place: placeId, file, added: nowIso.slice(0, 10), source: "reports" });
@@ -2485,6 +2624,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
    */
   function placeChange(item: ReportItem, change: PlaceChange, to: string | { lat: number; lon: number }): HeldCase {
     const current = input.places.get(item.place as string)!;
+    const check = heldNow(item);
     const from = change === "name" ? current.name : change === "kind" ? current.kind : { ...current.location };
     const source = current.fact_sources[change];
     const date = current.fact_dates?.[change];
@@ -2501,8 +2641,19 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       ...(source !== undefined ? { from_source: source } : {}),
       ...(date !== undefined ? { from_date: date } : {}),
       ...(change === "location" ? { distance_m: Math.round(distanceM(current.location, to as { lat: number; lon: number })) } : {}),
+      ...(check !== null && (REVIEWER_CHECKS as readonly string[]).includes(check) ? { held_for: check as IntakeCheckHold } : {}),
       feedback: [item.id],
     };
+  }
+
+  /**
+   * The `place_change` case for a name, kind or location report, for the AI
+   * reviewer, or null when the intake held the report for a check a person
+   * decides: then only the note on the review PR names it.
+   */
+  function changeCase(item: ReportItem, change: PlaceChange, to: string | { lat: number; lon: number }): HeldCase | null {
+    const check = heldNow(item);
+    return check === null || (REVIEWER_CHECKS as readonly string[]).includes(check) ? placeChange(item, change, to) : null;
   }
 
   function routeToPerson(items: ReportItem[]): void {
@@ -2515,7 +2666,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           edits.push({ kind: "location", place: item.place, location, feedback: item.id });
           const where = `${item.location.lat}, ${item.location.lon}`;
           note(item.place, `location moved to ${where}${quote(text)} (check before merging)`, false, [item]);
-          held.push(placeChange(item, "location", location));
+          const c = changeCase(item, "location", location);
+          if (c) held.push(c);
           decide(item, "needs_review", "location changes are checked by the AI reviewer or a person");
         } else {
           edits.push({ kind: "note", place: item.place, feedback: item.id });
@@ -2530,7 +2682,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       } else if (kind === "name" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "name", place: item.place, name: item.report.value, feedback: item.id });
         note(item.place, `name changed to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
-        held.push(placeChange(item, "name", item.report.value));
+        const c = changeCase(item, "name", item.report.value);
+        if (c) held.push(c);
         decide(item, "needs_review", "names are checked by the AI reviewer or a person");
       } else if (kind === "description" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "description", place: item.place, description: item.report.value, feedback: item.id });
@@ -2545,7 +2698,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         }
         edits.push({ kind: "kind", place: item.place, placeKind: picked, group, feedback: item.id });
         note(item.place, `kind changed to ${picked}${quote(text)} (check before merging)`, false, [item]);
-        held.push(placeChange(item, "kind", picked));
+        const c = changeCase(item, "kind", picked);
+        if (c) held.push(c);
         decide(item, "needs_review", "kind changes are checked by the AI reviewer or a person");
       } else if (kind === "remove" && item.place) {
         // Only places added in the last 90 days come down on reports. On any other place a person decides.

@@ -54,6 +54,7 @@ import {
   parseClosedCases,
   parseHeldCases,
   placePath,
+  reviewPath,
   settleByRules,
   type ClosedCase,
   type HeldCase,
@@ -288,6 +289,18 @@ const CASE_GUIDE: Partial<Record<HeldCase["case"], { about?: readonly string[]; 
       take_down: "hide the place: only when it is clearly spam or not a place at all. A real place pinned in the wrong spot is leave, so a person can move it",
     },
   },
+  intake_check: {
+    about: [
+      "In an intake_check case, an app that proved it runs on a genuine device sent the item, but the intake held it for held_for: network_reputation means it came from a network on a public list of abusive addresses (a shared mobile carrier address can be listed for someone else's abuse), and repeated_text means its text is nearly the same as text other sources sent in the last 30 days, as in a spam campaign.",
+      "about says what the item is: a fact the place now shows (value_before is what it had), a review (stars and text), or a status report or check (closed, reopened, or found there or gone).",
+      "Judge the item itself: keep or approve it when it is believable for this place, and give leave when it reads like spam or you cannot tell.",
+    ],
+    means: {
+      confirm: "keep the reported value on the place: it is believable for this place",
+      dismiss: "take the reported value off and put back what the place had: it is spam or not believable; for a status report, it never counts",
+      approve: "let the item count as an ordinary report: it is believable for this place",
+    },
+  },
   unattested_place: {
     about: [
       "In an unattested_place case, a traveller added a new place from an app that could not prove it runs on a genuine device. It passed the automatic location, duplicate and text checks. candidates are places of the same group nearby, with how far each is.",
@@ -410,7 +423,14 @@ export interface ModelDecision {
 }
 
 /** What a model reads about a case, as JSON. */
-function caseEvidence(c: HeldCase, place: Place, duplicateOf: Place | undefined, choices: readonly FactValue[] = [], candidates: readonly Candidate[] = []): string {
+function caseEvidence(
+  c: HeldCase,
+  place: Place,
+  duplicateOf: Place | undefined,
+  choices: readonly FactValue[] = [],
+  candidates: readonly Candidate[] = [],
+  extra: CaseExtra = {},
+): string {
   return JSON.stringify({
     case: c.case,
     place: placeView(place),
@@ -429,7 +449,22 @@ function caseEvidence(c: HeldCase, place: Place, duplicateOf: Place | undefined,
     ...(c.case === "unattested_place"
       ? { candidates: candidates.map((n) => ({ ...placeView(n.place), distance_m: n.distance_m, mergeable: n.mergeable })) }
       : {}),
+    ...(c.case === "place_change" && c.held_for !== undefined ? { held_for: c.held_for } : {}),
+    ...(c.case === "intake_check"
+      ? {
+          held_for: c.held_for,
+          about: c.about,
+          ...(c.about === "fact" ? { fact: c.fact, value_before: c.value ?? null } : {}),
+          ...(c.about === "review" && extra.review ? { review: extra.review } : {}),
+          ...(c.about === "status" ? { says: c.says } : {}),
+        }
+      : {}),
   });
+}
+
+/** What a case's evidence adds that is read from the branch: on an `intake_check` of a review, the review's stars and text. */
+interface CaseExtra {
+  review?: { stars: number; text: string };
 }
 
 /** A model's answer object as a decision: `leave`, and unsure, unless it is a sure decision the case allows. */
@@ -465,6 +500,7 @@ export async function askModel(
   allowed: readonly ReviewDecision[] = allowedDecisions(c),
   choices: readonly FactValue[] = disputeChoices(c, place),
   candidates: readonly Candidate[] = [],
+  extra: CaseExtra = {},
 ): Promise<ModelDecision> {
   let out: unknown;
   try {
@@ -473,7 +509,7 @@ export async function askModel(
       ai.run(model, {
         messages: [
           { role: "system", content: systemPrompt(c, allowed) },
-          { role: "user", content: caseEvidence(c, place, duplicateOf, choices, candidates) },
+          { role: "user", content: caseEvidence(c, place, duplicateOf, choices, candidates, extra) },
         ],
         temperature: 0,
         max_tokens: 256,
@@ -515,6 +551,7 @@ async function askSecondStage(
   duplicateOf: Place | undefined,
   allowed: readonly ReviewDecision[],
   candidates: readonly Candidate[] = [],
+  extra: CaseExtra = {},
 ): Promise<SecondDecision> {
   const month = monthOf(deps.now());
   let spent: number;
@@ -530,7 +567,7 @@ async function askSecondStage(
   let answer: Awaited<ReturnType<typeof askSecondModel>>;
   try {
     const choices = disputeChoices(c, place);
-    answer = await askSecondModel(deps.second, systemPrompt(c, allowed), caseEvidence(c, place, duplicateOf, choices, candidates), decisionSchema(allowed, choices, candidates));
+    answer = await askSecondModel(deps.second, systemPrompt(c, allowed), caseEvidence(c, place, duplicateOf, choices, candidates, extra), decisionSchema(allowed, choices, candidates));
   } catch (error) {
     if (!(error instanceof SecondModelUnavailable)) throw error;
     onError(deps, error);
@@ -573,6 +610,20 @@ async function readCandidates(
     out.push({ place: other, file, distance_m, mergeable: reviewerMergeProblem(place, other, pairs, roads) === null });
   }
   return out;
+}
+
+/** A review's stars and text from the place's review file on the branch, or undefined when it is not there. */
+async function readReview(read: (path: string) => Promise<{ text: string } | null>, place: string, id: string): Promise<{ stars: number; text: string } | undefined> {
+  const file = await read(reviewPath(place));
+  for (const line of file?.text.split("\n") ?? []) {
+    try {
+      const value = JSON.parse(line) as { id?: unknown; stars?: unknown; text?: unknown };
+      if (value.id === id && typeof value.stars === "number" && typeof value.text === "string") return { stars: value.stars, text: value.text };
+    } catch {
+      // Not a review line.
+    }
+  }
+  return undefined;
 }
 
 /** A place record from its file, or undefined when the file is not one. */
@@ -693,9 +744,14 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       const list = c.case === "commons_mismatch" ? await read(DO_NOT_MATCH_PATH) : null;
       // A new name the place's own website may confirm.
       const siteNames = c.case === "place_change" && c.change === "name" && place && deps.fetchSite ? await readSiteNames(deps.fetchSite, place.facts.website) : undefined;
+      // A held review, as the review branch has it.
+      const review = c.case === "intake_check" && c.about === "review" && place ? await readReview(read, c.place, c.review!) : undefined;
       const settled = closed
         ? { decision: "leave" as const, reason: `the rules closed this case: travellers ${closed.settles} the fact` }
-        : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [], ...(siteNames ? { siteNames } : {}) });
+        : c.case === "intake_check" && c.about === "review" && place && review === undefined
+          ? { decision: "leave" as const, reason: "the review is not on the review branch, so a person decides" }
+          : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [], ...(siteNames ? { siteNames } : {}) });
+      const extra: CaseExtra = review ? { review } : {};
       let decision: ReviewDecision;
       let reason: string;
       let by = reviewer;
@@ -725,7 +781,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         const allowed = allowedDecisions(c).filter((d) => d !== "merge" || mergeable);
         let first: ModelDecision;
         try {
-          first = await askModel(deps.ai, deps.model, c, place!, other, allowed, disputeChoices(c, place!), candidates);
+          first = await askModel(deps.ai, deps.model, c, place!, other, allowed, disputeChoices(c, place!), candidates, extra);
           answered++;
         } catch (error) {
           if (!(error instanceof ModelUnavailable)) throw error;
@@ -734,7 +790,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         }
         ({ decision, reason, value, target } = first);
         if (first.unsure && deps.second) {
-          ({ decision, reason, reviewer: by, held, value, target } = await askSecondStage({ ...deps, second: deps.second }, reviewer, first, c, place!, other, allowed, candidates));
+          ({ decision, reason, reviewer: by, held, value, target } = await askSecondStage({ ...deps, second: deps.second }, reviewer, first, c, place!, other, allowed, candidates, extra));
         }
         // The candidate merged into is the other place of the merge.
         const into = candidates.find((n) => n.place.id === target);

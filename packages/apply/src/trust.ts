@@ -47,6 +47,20 @@ export function earnsTrust(item: StoredFeedback): boolean {
   return item.contributor !== undefined && item.signed_in === true && item.human_checked === undefined;
 }
 
+/**
+ * Whether `by` may confirm someone else's edit: attested or signed in, and
+ * never through a human check, whose browser id anyone can reset.
+ */
+export function confirms(by: StoredFeedback): boolean {
+  return by.human_checked === undefined && (by.attested !== undefined || by.signed_in === true);
+}
+
+/** Trust withdrawn from `contributor` for an edit a reviewer or a person turned down, sent at `at`. */
+export interface Withdrawal {
+  contributor: string;
+  at: string;
+}
+
 /** The trusted contributors in `record`, leaving out blocked ones. */
 export function trustedContributors(record: TrustRecord, blocked: ReadonlySet<string> = new Set()): Set<string> {
   return new Set(
@@ -78,7 +92,7 @@ export interface UpheldDoubt {
   at: string;
 }
 
-/** Whether `by` is an independent source for `edit`: another device, network and contributor. */
+/** Whether `by` is an independent source for `edit`: another device, network and contributor (one it does not name is another). */
 export function independentOf(edit: StoredFeedback, by: StoredFeedback): boolean {
   return by.device !== edit.device && sourceOf(by) !== sourceOf(edit) && (by.contributor === undefined || by.contributor !== edit.contributor);
 }
@@ -88,12 +102,15 @@ export function independentOf(edit: StoredFeedback, by: StoredFeedback): boolean
  * its upheld doubts applied. `edits` are the items a doubt may be about (fact
  * reports and new places, with the value each set), so trust is withdrawn
  * from every signed-in contributor who sent the value taken down.
+ * `withdrawn` withdraws trust from a contributor directly, for an edit of
+ * theirs sent at its `at`: edits sent at or before it never count.
  */
 export function nextTrust(
   record: TrustRecord,
   confirmations: readonly Confirmation[],
   upheld: readonly UpheldDoubt[],
   edits: readonly { item: StoredFeedback; place: string; fact?: string; value?: FactValue }[],
+  withdrawn: readonly Withdrawal[] = [],
 ): TrustRecord {
   const next: TrustRecord = {
     contributors: Object.fromEntries(
@@ -103,7 +120,7 @@ export function nextTrust(
   const entry = (contributor: string) => (next.contributors[contributor] ??= { confirmed: [] });
 
   for (const { edit, place, fact, value, by } of confirmations) {
-    if (!earnsTrust(edit) || !independentOf(edit, by) || Date.parse(by.received) <= Date.parse(edit.received)) continue;
+    if (!earnsTrust(edit) || !confirms(by) || !independentOf(edit, by) || Date.parse(by.received) <= Date.parse(edit.received)) continue;
     const mine = entry(edit.contributor!);
     if (mine.confirmed.some((c) => c.feedback === edit.id)) continue;
     mine.confirmed.push({ feedback: edit.id, received: edit.received, place, ...(fact !== undefined ? { fact } : {}), ...(value !== undefined ? { value } : {}) });
@@ -123,6 +140,11 @@ export function nextTrust(
       const mine = entry(contributor);
       if (mine.withdrawn === undefined || Date.parse(mine.withdrawn) < Date.parse(doubt.at)) mine.withdrawn = doubt.at;
     }
+  }
+
+  for (const { contributor, at } of withdrawn) {
+    const mine = entry(contributor);
+    if (mine.withdrawn === undefined || Date.parse(mine.withdrawn) < Date.parse(at)) mine.withdrawn = at;
   }
 
   // Edits sent at or before a withdrawal never count.

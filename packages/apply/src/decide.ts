@@ -177,7 +177,16 @@ export type ItemDecision =
    * change closes an open `fact_doubted` case, by restoring the value or
    * replacing it with another.
    */
-  | { verdict: "live"; changes: FactChange[]; why: string; takedown?: Takedown; doubtTakedown?: DoubtTakedown; settles?: Settles }
+  | {
+      verdict: "live";
+      changes: FactChange[];
+      why: string;
+      takedown?: Takedown;
+      doubtTakedown?: DoubtTakedown;
+      settles?: Settles;
+      /** Live only because a trusted contributor sent it (trust.ts), with no second source. */
+      byTrust?: true;
+    }
   /** `problem`: on `link_check`, the check the value failed. `failed`: on `contact_check`, the contact checks it failed. */
   | { verdict: "held"; reason: HeldReason; why: string; problem?: string; failed?: CheckOutcome[] }
   | { verdict: "refused"; reason: RefusedReason; why: string };
@@ -352,10 +361,13 @@ export function decideFact({ item, place, earlier, openCase, contactChecks, trus
   if (disagrees) {
     return { verdict: "held", reason: "disagreement", why: `another device reported a different ${fact}, so a person decides` };
   }
+  // A contact without attestation that passed the contact checks gets here only from a trusted contributor.
+  const byTrust = checked && item.attested === undefined;
   return {
     verdict: "live",
     changes: [{ place: item.place as string, fact, value }, ...factsClearedBy(place.facts, fact, value).map((cleared) => ({ place: item.place as string, fact: cleared, value: null }))],
-    why: `${fact} set to ${show(value)}`,
+    why: byTrust ? `${fact} set to ${show(value)} by a trusted contributor, past the contact checks` : `${fact} set to ${show(value)}`,
+    ...(byTrust ? { byTrust: true as const } : {}),
     ...(down !== undefined ? { settles: "replaced" as const } : {}),
   };
 }

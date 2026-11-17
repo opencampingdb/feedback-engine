@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReviewPr } from "../src/owners.js";
+import { heldCaseKey, type HeldCase } from "../src/review.js";
 import { run } from "../src/run.js";
 import { dumpPlace } from "../src/serialise.js";
 import type { Place } from "../src/types.js";
@@ -117,6 +119,34 @@ describe("run", () => {
     expect(summary.inbox_changed).toBe(true);
     const kept = JSON.parse(await readFile(join(inbox, "trust", "contributors.json"), "utf8")) as { contributors: Record<string, { confirmed: unknown[] }> };
     expect(kept.contributors[TRUSTED]?.confirmed).toHaveLength(5);
+  });
+
+  it("reads the AI reviewer's decisions on the review PRs, and counts a held closure it approved", async () => {
+    const held = item(1, "2026-10-28T01:00:00Z", "aaaa", {
+      type: "report",
+      attested: "app_attest",
+      contributor: NEWCOMER,
+      report: { kind: "closed" },
+      intake: { state: "held", held_reason: "network_reputation" },
+      outcome: { result: "needs_review", reason: "", run: "2026-10-28T02:00:00Z" },
+    });
+    await put(join(inbox, "applied", "2026-10-28", `${id(1)}.json`), held);
+    const c: HeldCase = { case: "intake_check", place: PLACE, location: place.location, kind: "free_camp", held_for: "network_reputation", about: "status", says: "closed", feedback: [id(1)] };
+    const pr = (reviewer: string): ReviewPr => ({
+      number: 3,
+      state: "OPEN",
+      body: `- held-case ${JSON.stringify(c)}`,
+      isCrossRepository: false,
+      author: { login: "example-bot", type: "Bot" },
+      comments: [{ author: { login: reviewer, type: "Bot" }, body: `- review-decision ${JSON.stringify({ key: heldCaseKey(c), decision: "approve" })}` }],
+    });
+    const record = async () => JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
+
+    // A comment from a login the run does not know counts for nothing.
+    await run({ inbox, data, now: NOW, reviewPrs: [pr("someone-else")], botLogins: ["example-bot"], reviewerLogins: ["example-reviewer"] });
+    expect((await record()).status).toBe("open");
+    await run({ inbox, data, now: NOW, reviewPrs: [pr("example-reviewer")], botLogins: ["example-bot"], reviewerLogins: ["example-reviewer"] });
+    expect((await record()).status).toBe("reported_closed");
   });
 
   it("stops on a trust file that is not JSON", async () => {

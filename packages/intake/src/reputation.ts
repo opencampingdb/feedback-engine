@@ -9,7 +9,8 @@ import type { KVLike } from "./ratelimit.js";
  * own credentials) and keeps it in KV as sorted, merged integer ranges, IPv4
  * and IPv6 apart. Each request looks its address up in that table, read from
  * KV at most once every few minutes per Worker, with no outside call. A fetch
- * that fails keeps the last good list.
+ * that fails keeps the last good list. The first fetch runs on the scheduled
+ * job's first minute, and until a list exists every address is `unknown`.
  */
 
 /** The KV key (in RATE_LIMIT) that holds the ranges. */
@@ -20,6 +21,8 @@ export const BLOCKLIST_STATE_KEY = "reputation:state";
 export const REFRESH_EVERY_MS = 24 * 60 * 60 * 1000;
 /** How long a failed fetch waits before it is tried again. The last good list is used meanwhile. */
 export const RETRY_AFTER_MS = 60 * 60 * 1000;
+/** How long a failed fetch waits while there is no list yet, and attested items are held for want of one. */
+export const FIRST_RETRY_AFTER_MS = 5 * 60 * 1000;
 /** Lines asked for per page. The integration truncates an uncompressed page of about 5 MB, some 300,000 lines. */
 export const PAGE_SIZE = 100_000;
 /** Pages fetched at most, so a list that never ends cannot use up the job's subrequests. */
@@ -236,24 +239,26 @@ export function isListed(ranges: Ranges, address: string): boolean {
 
 /**
  * Looks addresses up in the list KV holds. Each Worker keeps the ranges in
- * memory for MEMORY_TTL_MS, so most requests read nothing at all. An intake
- * whose list has not been fetched yet finds every address clear. A list that
- * cannot be read gives `unknown`.
+ * memory for MEMORY_TTL_MS, so most requests read nothing at all. Until the
+ * first list is fetched every address is `unknown`, and KV is read again on
+ * each request, so the list counts as soon as it is there. A list that
+ * cannot be read gives `unknown` too.
  */
 export function createReputation(now: () => number) {
-  let cached: { ranges: Ranges | null; at: number } | undefined;
+  let cached: { ranges: Ranges; at: number } | undefined;
   return async function standing(kv: KVLike, address: string): Promise<Standing> {
     const nowMs = now();
     if (!cached || nowMs - cached.at >= MEMORY_TTL_MS) {
       try {
         const text = await kv.get(BLOCKLIST_KEY);
-        cached = { ranges: text === null ? null : decode(text), at: nowMs };
+        if (text === null) return "unknown";
+        cached = { ranges: decode(text), at: nowMs };
       } catch (error) {
         console.warn(`reading the blocklist failed: ${String(error)}`);
         return "unknown";
       }
     }
-    if (cached.ranges === null || address === "") return "clear";
+    if (address === "") return "clear";
     return isListed(cached.ranges, address) ? "listed" : "clear";
   };
 }
@@ -274,7 +279,8 @@ async function fetchPage(fetchFn: Fetch, config: ReputationConfig, page: number)
 
 /**
  * Fetches the list when it is a day old (or was never fetched) and the last
- * failed try was at least RETRY_AFTER_MS ago, and stores its ranges. A fetch
+ * failed try was at least RETRY_AFTER_MS ago (FIRST_RETRY_AFTER_MS while
+ * there is no list yet), and stores its ranges. A fetch
  * that fails, or that finds no address at all, keeps the last good list.
  * Never throws. Returns what it did.
  */
@@ -295,7 +301,8 @@ export async function refreshBlocklist(
     return "failed";
   }
   if (state?.fetched !== undefined && nowMs - state.fetched < REFRESH_EVERY_MS) return "fresh";
-  if (state && state.attempted !== state.fetched && nowMs - state.attempted < RETRY_AFTER_MS) return "waiting";
+  const retryAfter = state?.fetched === undefined ? FIRST_RETRY_AFTER_MS : RETRY_AFTER_MS;
+  if (state && state.attempted !== state.fetched && nowMs - state.attempted < retryAfter) return "waiting";
   try {
     const lines: string[] = [];
     for (let page = 1; page <= MAX_PAGES; page += 1) {

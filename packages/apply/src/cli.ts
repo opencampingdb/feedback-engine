@@ -11,6 +11,7 @@ import { run } from "./run.js";
 const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>]
                   [--auto-pr-body <file>] [--review-pr-body <file>] [--job-summary <file>]
                   [--review-prs <file>] [--auto-prs <file>] [--bot-login <login>]
+                  [--reviewer-login <login>]
                   [--summary <file>] [--now <ISO time>] [--places <dir>]
                   [--photo-licence <id>] [--publish-first-photo]
                   [--main <dir> --intake <url>]
@@ -31,6 +32,10 @@ or <login>[bot], or app/<login> as the GitHub CLI writes it, never the bare
 login alone. Held and closed cases the review PR body has no room for are
 written to <file>.2, <file>.3 and so on beside --review-pr-body, to post as
 comments in that order.
+--reviewer-login names the AI reviewer's GitHub App when it is not the
+--bot-login App: its review-decision comments on open and merged review PRs
+count too. A held item it let through counts from this run, and a doubt it
+upheld about a signed-in contributor's edit withdraws their trust.
 --publish-first-photo publishes a contributor's first photo without a person
 when the intake's SafeSearch rating passed it. A photo with no rating still waits.
 --places makes it a photo repository run for an app's own photo service:
@@ -106,6 +111,7 @@ async function main(): Promise<number> {
       "review-prs": { type: "string" },
       "auto-prs": { type: "string" },
       "bot-login": { type: "string", multiple: true },
+      "reviewer-login": { type: "string", multiple: true },
       summary: { type: "string" },
       now: { type: "string" },
       places: { type: "string" },
@@ -163,6 +169,7 @@ async function main(): Promise<number> {
     // Owner approvals read the 30 most recent review PRs; progress reads them all.
     ...(reviewPrs ? { reviewPrs: reviewPrs.slice(0, OWNER_REVIEW_PRS) } : {}),
     ...(values["bot-login"] ? { botLogins: values["bot-login"] } : {}),
+    ...(values["reviewer-login"] ? { reviewerLogins: values["reviewer-login"] } : {}),
     ...(values["review-data"] ? { reviewData: values["review-data"] } : {}),
     ...(now ? { now } : {}),
     ...(values.places ? { places: values.places } : {}),

@@ -177,6 +177,54 @@ describe("trust from a track record", () => {
     expect(trustedContributors(out.trust)).toEqual(new Set([ctr("dev-x")]));
   });
 
+  it("counts no confirmation through a human check, such as the contributor confirming their own edits from a browser", () => {
+    const { history, place } = edits(5);
+    const browser: Who = { device: "dev-browser", humanChecked: true, attested: false, signedIn: false };
+    const fromWeb = FACTS.map((name) => ({ ...fact(6, browser, name, true), origin: "org_home" }) as StoredFeedback);
+    expect(trustedContributors(run(fromWeb, { history, place }).trust)).toEqual(new Set());
+  });
+
+  it("counts no confirmation from an install that is neither attested nor signed in", () => {
+    const { history, place } = edits(5);
+    const signedOut = FACTS.map((name, i) => fact(6, { device: `dev-anon-${i}`, attested: false, signedIn: false }, name, true));
+    expect(trustedContributors(run(signedOut, { history, place }).trust)).toEqual(new Set());
+  });
+
+  it("is withdrawn when the AI reviewer dismisses one of their contacts, or takes down their new place", () => {
+    const phone = applied(fact(9, { device: "dev-x", attested: false }, "phone", "+61 3 5555 0100"));
+    const shown = { case: "contact_check", place: PLACE, location: { lat: -36.85, lon: 144.55 }, kind: "campground", fact: "phone", checks: ["website"], feedback: [phone.id] } as const;
+    const dismissed = run([], { history: [phone], trust: earned(), now: 12, extra: { reviewerDecisions: [{ case: { ...shown, checks: [...shown.checks], feedback: [...shown.feedback] }, decision: "dismiss" }] } });
+    expect(trustedContributors(dismissed.trust)).toEqual(new Set());
+    const confirmed = run([], { history: [phone], trust: earned(), now: 12, extra: { reviewerDecisions: [{ case: { ...shown, checks: [...shown.checks], feedback: [...shown.feedback] }, decision: "confirm" }] } });
+    expect(trustedContributors(confirmed.trust)).toEqual(new Set([ctr("dev-x")]));
+
+    const newPlace = report(9, X, { kind: "new_place", place_kind: "campground", name: "Bush Camp" }, null);
+    (newPlace as { location?: unknown }).location = { lat: -30.1, lon: 140.2 };
+    const id = `ocdb_${newPlace.id.replace(/^fb_/, "")}`;
+    const reporter = report(10, { device: "dev-r" }, { kind: "remove", reason: "not_a_place" }, id);
+    const hidden = { case: "hidden", place: id, location: { lat: -30.1, lon: 140.2 }, kind: "campground", reports: 1, reasons: ["not_a_place"], feedback: [reporter.id] } as const;
+    const out = run([], {
+      history: [applied(newPlace), applied(reporter)],
+      trust: earned(),
+      now: 12,
+      extra: { reviewerDecisions: [{ case: { ...hidden, reasons: [...hidden.reasons], feedback: [...hidden.feedback] }, decision: "take_down" }] },
+    });
+    expect(trustedContributors(out.trust)).toEqual(new Set());
+    expect(out.trust.contributors[ctr("dev-r")]?.withdrawn).toBeUndefined();
+  });
+
+  it("is withdrawn when a person turns down one of their edits on a merged review PR, and not when the data holds it", () => {
+    const held = (value: string) => ({ ...fact(9, X, "phone", value), outcome: { result: "needs_review", reason: "", run: at(9) } }) as unknown as StoredFeedback;
+    const left = held("+61 3 5555 0100");
+    const out = run([], { history: [left], trust: earned(), now: 12, extra: { turnedDown: new Set([left.id]) } });
+    expect(trustedContributors(out.trust)).toEqual(new Set());
+    // The value is on the place: the PR was merged with it, so nothing was turned down.
+    const kept = held("+61 3 5555 0199");
+    const merged = place({ facts: { website: "https://lake.example.org", phone: "+61 3 5555 0199" }, fact_sources: { website: "osm", phone: "feedback" }, fact_dates: { phone: at(9) } });
+    const same = run([], { history: [kept], trust: earned(), place: merged, now: 12, extra: { turnedDown: new Set([kept.id]) } });
+    expect(trustedContributors(same.trust)).toEqual(new Set([ctr("dev-x")]));
+  });
+
   it("is never held by a blocked contributor", () => {
     expect(trustedContributors(earned(), new Set([ctr("dev-x")]))).toEqual(new Set());
   });
@@ -190,6 +238,9 @@ describe("what trust does in the apply", () => {
     const trusted = run([phone], { trust: earned(), now: 12 });
     expect(trusted.outcome(phone)).toBe("applied");
     expect(trusted.places.get(PLACE)?.facts.phone).toBe("+61 3 5555 0100");
+    // The decision and the PR note say trust settled it.
+    expect(trusted.decisions[0]?.reason).toContain("trusted contributor");
+    expect(trusted.changes.find((c) => c.feedback.includes(phone.id))?.summary).toContain("trusted contributor");
     const untrusted = run([phone], { now: 12 });
     expect(untrusted.outcome(phone)).toBe("waiting");
   });
@@ -210,6 +261,8 @@ describe("what trust does in the apply", () => {
     (newPlace as { location?: unknown }).location = { lat: -30.1, lon: 140.2 };
     const trusted = run([newPlace], { trust: earned(), now: 12 });
     expect(trusted.outcome(newPlace)).toBe("applied");
+    expect(trusted.decisions[0]?.reason).toContain("trusted contributor");
+    expect(trusted.changes.find((c) => c.feedback.includes(newPlace.id))?.summary).toContain("trusted contributor");
     const untrusted = run([newPlace], { now: 12 });
     expect(untrusted.outcome(newPlace)).toBe("needs_review");
   });

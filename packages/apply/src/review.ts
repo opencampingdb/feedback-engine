@@ -4,7 +4,7 @@ import { byCodePoint } from "./data-check.js";
 import { factsClearedBy, type Settles } from "./decide.js";
 import type { ImplausibleHit } from "./plausible.js";
 import { distanceM, majorRoads, type MajorRoads } from "./roads.js";
-import { dumpPlace, placePath } from "./serialise.js";
+import { dumpPlace, placePath, reviewPath } from "./serialise.js";
 import { dropSource, setSource } from "./sources.js";
 import type { Place, Source } from "./types.js";
 
@@ -26,7 +26,7 @@ import type { Place, Source } from "./types.js";
  * always go to a person.
  */
 
-export { dumpPlace, majorRoads, placePath };
+export { dumpPlace, majorRoads, placePath, reviewPath };
 export type { MajorRoads };
 export type { Place };
 
@@ -79,8 +79,17 @@ export type { Place };
  * A reviewer approves it (standing `shown`), merges it into one of them or
  * takes it down.
  * `disputed`: a place frozen because `sources` independent sources sent
- * conflicting values for `fact` within 24 hours. No fact on it changes until
- * a reviewer sets the fact to one value, which lifts the freeze.
+ * conflicting values for `fact` within 24 hours, from `frozen_at`. No fact
+ * on it changes until a reviewer sets the fact to one value, which lifts the
+ * freeze, or until FREEZE_EXPIRY_DAYS pass with the value kept.
+ * `intake_check`: an item the intake held for one of its checks that the AI
+ * reviewer decides (`held_for`: `network_reputation` or `repeated_text`).
+ * `about` says what it is: a `fact` report whose value the review PR set
+ * (`fact`, with `value` what the place had before, if anything), a `review`
+ * the review PR added (`review`, its id), or a `status` report or check
+ * (closed, reopened, or found there or gone), which changes nothing until a
+ * reviewer approves it, after which the apply counts it (`says`: closed,
+ * reopened, found there or found gone).
  * Contact values a traveller sent, notes and device ids are never in it.
  */
 export interface HeldCase {
@@ -99,7 +108,8 @@ export interface HeldCase {
     | "note"
     | "place_change"
     | "disputed"
-    | "unattested_place";
+    | "unattested_place"
+    | "intake_check";
   place: string;
   /** The place's standing. Left out for a place travellers did not add. */
   standing?: "shown" | "confirmed" | "held" | "hidden";
@@ -144,6 +154,16 @@ export interface HeldCase {
   contributor?: string;
   /** On `unattested_place`: places in its group nearby, nearest first, with how far each is. */
   candidates?: { place: string; distance_m: number }[];
+  /** On `disputed`: when the freeze started. Left out on cases listed before it was given. */
+  frozen_at?: string;
+  /** On `intake_check`: the check the intake held the item for. On `place_change`: the check, when the intake held the report for one. */
+  held_for?: IntakeCheckHold;
+  /** On `intake_check`: what the item is. */
+  about?: IntakeCheckItem;
+  /** On `intake_check` of a review: the review's id, `rev_` and the item's ulid. */
+  review?: string;
+  /** On `intake_check` of a status report or check: what it says of the place. */
+  says?: "closed" | "reopened" | "there" | "gone";
   /** On `place_change`: what the report changes. */
   change?: PlaceChange;
   /** On `place_change`: the value the change replaces, `null` for a place without a name. */
@@ -178,6 +198,16 @@ export interface ClosedCase {
 /** What a `place_change` case changes. */
 export type PlaceChange = "name" | "kind" | "location";
 
+/** The checks whose holds go to the AI reviewer as `intake_check` cases. Holds for the intake's other checks go to a person. */
+export const REVIEWER_CHECKS = ["network_reputation", "repeated_text"] as const;
+export type IntakeCheckHold = (typeof REVIEWER_CHECKS)[number];
+
+/** What an `intake_check` case's item is. */
+export type IntakeCheckItem = "fact" | "review" | "status";
+
+/** How long a freeze waits for a reviewer before it lifts with the place's value kept. */
+export const FREEZE_EXPIRY_DAYS = 14;
+
 /** Every `case` a held-case line can have. */
 export const HELD_CASES: readonly HeldCase["case"][] = [
   "duplicate",
@@ -195,6 +225,7 @@ export const HELD_CASES: readonly HeldCase["case"][] = [
   "place_change",
   "disputed",
   "unattested_place",
+  "intake_check",
 ];
 
 /** How far from an `unattested_place` its merge candidates may be. */
@@ -248,6 +279,8 @@ export function isHeldCase(v: unknown): v is HeldCase {
   } else if (v.case === "fact_doubted") {
     if (!isDoubtFact(v.fact) || v.value === undefined || typeof v.taken_down !== "boolean") return false;
     if (typeof v.sources !== "number" || !isStrings(v.doubts) || !isStrings(v.confirmations)) return false;
+  } else if (v.case === "intake_check") {
+    if (v.fact !== undefined && (!isFactName(v.fact) || (v.value !== undefined && !isValidFactValue(v.fact, v.value)))) return false;
   } else if (v.fact !== undefined && (typeof v.fact !== "string" || !isContactFact(v.fact))) return false;
   if (v.case === "contact_withdrawn" && (v.fact === undefined || v.value === undefined)) return false;
   if (v.case === "contact_check") {
@@ -258,6 +291,14 @@ export function isHeldCase(v: unknown): v is HeldCase {
     const ok = (c: unknown) => isObject(c) && typeof c.place === "string" && PLACE_ID.test(c.place) && c.place !== v.place && typeof c.distance_m === "number";
     if (!Array.isArray(v.candidates) || v.candidates.length > MAX_CANDIDATES || !v.candidates.every(ok)) return false;
   } else if (v.candidates !== undefined) return false;
+  if (v.held_for !== undefined && !(REVIEWER_CHECKS as readonly unknown[]).includes(v.held_for)) return false;
+  if (v.case === "intake_check") {
+    if (v.held_for === undefined || !["fact", "review", "status"].includes(v.about as string)) return false;
+    if (v.about === "fact" && (typeof v.fact !== "string" || !isFactName(v.fact))) return false;
+    if (v.about === "review" && (typeof v.review !== "string" || !/^rev_[0-9A-HJKMNP-TV-Z]{26}$/.test(v.review))) return false;
+    if (v.about === "status" && !["closed", "reopened", "there", "gone"].includes(v.says as string)) return false;
+  } else if (v.about !== undefined || v.review !== undefined || v.says !== undefined) return false;
+  if (v.frozen_at !== undefined && (v.case !== "disputed" || typeof v.frozen_at !== "string")) return false;
   if (v.case === "implausible_location") {
     const hits: readonly unknown[] = ["water", "road", "building", "intake"];
     if (!hits.includes(v.hit) || typeof v.problem !== "string") return false;
@@ -347,6 +388,8 @@ export function allowedDecisions(c: HeldCase): ReviewDecision[] {
       return ["approve", "revert", "leave"];
     case "disputed":
       return ["confirm", "leave"];
+    case "intake_check":
+      return c.about === "fact" ? ["confirm", "dismiss", "leave"] : c.about === "review" ? ["approve", "leave"] : ["approve", "dismiss", "leave"];
     default:
       return ["leave"];
   }
@@ -454,6 +497,13 @@ export function settleByRules(
     if (place.fact_sources[c.fact!] === "owner") return leave("the owner set this contact");
     return null;
   }
+  if (c.case === "intake_check") {
+    // Owners keep control of their listings: a person decides.
+    if (place.owner_verified === true) return leave("the place has a verified owner");
+    const key = c.about === "fact" ? c.fact! : c.about === "status" ? "status" : undefined;
+    if (key !== undefined && place.fact_sources[key] === "owner") return leave("the owner set this value");
+    return null;
+  }
   if (place.owner_verified === true) return leave("the place has a verified owner");
   if (place.standing === undefined) return leave("travellers did not add this place");
   if (place.moderator !== undefined) return leave("a person has already decided on this place");
@@ -493,17 +543,22 @@ export function disputeChoices(c: HeldCase, place: Place): FactValue[] {
  * change nothing, and neither does `merge` here: it writes two records, with
  * `mergePlaces`. On a `contact_check` case, `confirm` keeps the reported
  * contact the review PR set, and `dismiss` puts back the value the place had
- * before, or takes the contact off when it had none.
+ * before, or takes the contact off when it had none. An `intake_check` case
+ * of a fact is decided the same way; one of a review or a status report
+ * changes no record here.
  */
 export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecision, at: string, value?: FactValue): Place | null {
   if (!allowedDecisions(c).includes(decision) || decision === "leave" || decision === "keep_down" || decision === "merge") return null;
-  if (decision === "dismiss" && c.case !== "contact_check") return null;
+  if (decision === "dismiss" && c.case !== "contact_check" && c.case !== "intake_check") return null;
   // A Commons photo goes on the do-not-match list (`withDoNotMatch`), not into the place record.
   if (c.case === "commons_mismatch") return null;
   // An approved name, kind or location change is on the place already.
   if (c.case === "place_change" && decision === "approve") return null;
-  // A confirmed contact stays as the review PR has it.
-  if (c.case === "contact_check" && decision === "confirm") return null;
+  // A confirmed contact stays as the review PR has it, and so does a value the intake held for a check.
+  if ((c.case === "contact_check" || c.case === "intake_check") && decision === "confirm") return null;
+  // A review the review PR added stays as it is. A status report or check the reviewer approves or
+  // dismisses changes no record here: the apply counts an approved one from its next run.
+  if (c.case === "intake_check" && c.about !== "fact") return null;
   const next = structuredClone(place);
   if (c.case === "disputed") {
     const fact = c.fact!;
@@ -516,7 +571,7 @@ export function applyDecision(place: Place, c: HeldCase, decision: ReviewDecisio
     setSource(next, fact, "feedback", at);
   } else if (decision === "revert") {
     revertChange(next, c);
-  } else if (c.case === "contact_check") {
+  } else if (c.case === "contact_check" || c.case === "intake_check") {
     // Dismissed: the place's earlier value, or none.
     if (c.value !== undefined) {
       (next.facts as Record<string, FactValue>)[c.fact!] = c.value;

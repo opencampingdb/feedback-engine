@@ -2167,13 +2167,16 @@ export function createHandler(deps: Deps) {
 
     // Decided before the item is stored, and recorded in the same D1 batch that queues it. An
     // attested item from a network on the blocklist is held as network_reputation, and any item
-    // whose network the intake could not look up is held as check_unavailable: the apply sends
-    // both to the review PR, never into the data on their own.
+    // whose network the intake could not look up (or before its first list) as check_unavailable.
+    // Every item that can change the data carries the hold, whether the intake decides it or not,
+    // so the apply sends it to the AI reviewer or a person, never into the data on its own.
     let decision: SendTimeDecision | undefined;
     const reputationHold = standing === "listed" ? "network_reputation" : standing === "unknown" ? "check_unavailable" : undefined;
     if (reputationHold && decidedHere(stored)) {
       decision = { answer: { state: "held", held_reason: reputationHold }, writes: () => [] };
       stored.intake = decision.answer;
+    } else if (reputationHold && (stored.type === "report" || stored.type === "review" || stored.type === "check")) {
+      stored.intake = { state: "held", held_reason: reputationHold };
     } else if (env.RECENT_LIST && decidedHere(stored)) {
       const db = env.RECENT_LIST;
       // Without a contributor, the hashed install stands in for one, as it does for a signed-out install's new places.

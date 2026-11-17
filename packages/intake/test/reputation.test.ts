@@ -212,6 +212,31 @@ describe("network reputation", () => {
     expect((store.db.prepare("SELECT COUNT(*) AS n FROM recent_changes").get() as { n: number }).n).toBe(0);
   });
 
+  it("marks every attested item from a listed network held as network_reputation in the inbox, not only the ones it decides", async () => {
+    const e = env(ATTESTED);
+    await scheduled(e);
+    const bodies = [
+      reportBody({ kind: "closed" }),
+      reportBody({ kind: "name", value: "Riverside Camp" }),
+      JSON.stringify({ type: "check", place: PLACE, device: "3b241101-e2bb-4255-8caf-4136c566a962", app_version: "1.0.0", consent: true, check: { still_there: false, visited: "2026-11-16" } }),
+      JSON.stringify({
+        type: "review",
+        place: PLACE,
+        device: "3b241101-e2bb-4255-8caf-4136c566a962",
+        contributor: "acct_3f9a8b7c6d5e4f30",
+        app_version: "1.0.0",
+        consent: true,
+        review: { stars: 4, text: "Quiet spot by the river with clean toilets.", visited: "2026-11" },
+      }),
+    ];
+    for (const body of bodies) {
+      const res = await handle(post(body, LISTED, attested(body)), e);
+      expect(res.status, await res.clone().text()).toBe(202);
+    }
+    expect(services.writes).toHaveLength(bodies.length);
+    for (const written of services.writes) expect(written).toMatchObject({ intake: { state: "held", held_reason: "network_reputation" } });
+  });
+
   it("drops a human-checked report from a listed network silently, without asking Turnstile", async () => {
     const e = env(WEB);
     await scheduled(e);
@@ -333,6 +358,30 @@ describe("network reputation", () => {
     const body = reportBody();
     const res = await handle(post(body, CLEAR, attested(body)), e);
     expect(await res.json()).toMatchObject({ state: "held", held_reason: "check_unavailable" });
+  });
+
+  it("holds an attested report as check_unavailable until the first list is fetched, and drops no unattested one for it", async () => {
+    const attestedEnv = env(ATTESTED);
+    const body = reportBody();
+    expect(await (await handle(post(body, CLEAR, attested(body)), attestedEnv)).json()).toMatchObject({ state: "held", held_reason: "check_unavailable" });
+    const e = env();
+    expect((await handle(post(reportBody(), LISTED), e)).status).toBe(202);
+    expect(await e.RATE_LIMIT.get("silent:2026-11-17:network_reputation")).toBeNull();
+    expect(services.writes).toHaveLength(2);
+    await scheduled(attestedEnv);
+    const after = await (await handle(post(body, CLEAR, attested(body)), attestedEnv)).json();
+    expect(after).not.toHaveProperty("held_reason");
+  });
+
+  it("tries a first fetch that failed again within minutes, as there is no list to fall back on", async () => {
+    const e = env();
+    list.status = 503;
+    await scheduled(e);
+    clock += 5 * 60 * 1000;
+    list.status = 200;
+    await scheduled(e);
+    expect(list.asked).toHaveLength(2);
+    await looksAccepted(await handle(post(reportBody(), LISTED), e));
   });
 
   it("is off without the integration's credentials or URL: nothing is fetched or dropped", async () => {
