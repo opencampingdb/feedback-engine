@@ -781,9 +781,10 @@ interface StoredFields {
   /**
    * What the intake decided at send time, on the fact reports, contact
    * reports and new places it decides. An item it held for a check
-   * (`text_check`, `link_check`, `ai_check`, `daily_cap`,
+   * (`text_check`, `link_check`, `ai_check`, `daily_cap`, `repeated_text`,
    * `check_unavailable` or `network_reputation`) goes to a person, never
-   * into the data on its own.
+   * into the data on its own. A review carries it only when the intake held
+   * it, for `repeated_text` or `check_unavailable`, and goes to a person.
    * Absent on other items and on items stored before the intake decided any.
    */
   intake?: StoredIntakeDecision;

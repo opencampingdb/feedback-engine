@@ -1107,6 +1107,16 @@ describe("reviews", () => {
     expect(out.reviews.size).toBe(0);
   });
 
+  for (const reason of ["repeated_text", "check_unavailable"]) {
+    it(`sends a trusted contributor's review the intake held for ${reason} to a person`, () => {
+      const r = { ...review(0, "sam", 5, "Lovely"), intake: { state: "held", held_reason: reason } } as StoredFeedback;
+      const out = run([r], { reviewers: [ctr("sam")] });
+      expect(out.outcome(r)).toBe("needs_review");
+      expect(out.decisions.find((d) => d.id === r.id)?.reason).toContain(reason);
+      expect(out.reviews.size).toBe(0);
+    });
+  }
+
   it("keeps visited_nearby on the published line", () => {
     const r = { ...review(0, "sam", 5, "Lovely"), review: { stars: 5, text: "Lovely", visited: "2026-06", visited_nearby: true } } as StoredFeedback;
     const out = run([r], { reviewers: [ctr("sam")] });
@@ -2102,7 +2112,7 @@ describe("items the intake held for a check", () => {
     }) as StoredFeedback;
   const idOf = (item: StoredFeedback) => `ocdb_${item.id.slice(3)}`;
 
-  for (const reason of ["text_check", "link_check", "ai_check", "daily_cap", "check_unavailable", "network_reputation"]) {
+  for (const reason of ["text_check", "link_check", "ai_check", "daily_cap", "repeated_text", "check_unavailable", "network_reputation"]) {
     it(`sends an attested fact held for ${reason} to a person instead of applying it`, () => {
       const r = heldFor(attested(fact(0, "dev-a", "power", true)), reason);
       const out = run([r]);

@@ -19,7 +19,9 @@
  * travellers restored or replaced) is left without asking. Owner-set
  * values, blocked contributors and values that wait in the inbox go to a
  * person, and an answer the model isn't sure of, or one that can't be read,
- * is `leave`.
+ * is `leave`. With the second stage (src/second-review.ts), such a case is
+ * asked of a second model while the month's spending is under its cap, and
+ * is `leave` only when both models are unsure, or over the cap as `ai_cap`.
  *
  * Only held-case lines in the PR body and in comments from the bot logins the
  * deployment lists (REVIEW_BOT_LOGINS: the apply's GitHub App and the
@@ -51,7 +53,9 @@ import {
 import type { AiLike } from "./checks.js";
 import type { GitHubApp, GitHubAppConfig, IssueComment } from "./github.js";
 import type { D1Like } from "./recent.js";
+import { recordReviewerHold } from "./progress.js";
 import { claimReviewRun } from "./runs.js";
+import { addSpend, askSecondModel, monthOf, monthSpend, SECOND_REVIEW_MODEL, SecondModelUnavailable, type SecondStage } from "./second-review.js";
 
 /**
  * A current Workers AI instruct model that supports JSON Mode, so its answer
@@ -102,6 +106,13 @@ export interface ReviewerDeps {
    * is merged.
    */
   roads?: MajorRoads;
+  /**
+   * The second stage (src/second-review.ts), when the deployment has an
+   * Anthropic API key: a case the first model is unsure of is asked of the
+   * second model while the month's spending is under the cap. Without it,
+   * such a case is left for a person.
+   */
+  second?: SecondStage;
 }
 
 /** One decision, as the reviewer records it on the PR. */
@@ -110,13 +121,15 @@ export interface ReviewRecord {
   case: HeldCase["case"];
   place: string;
   decision: ReviewDecision;
-  /** `ai:<model>`. */
+  /** `ai:<model>`: the first model, or the second when it was asked. */
   reviewer: string;
   reason: string;
   /** Settled by the rules, without asking the model. */
   by_rules: boolean;
   /** The decision changed the place, in the run's commit to the review branch. */
   committed: boolean;
+  /** `ai_cap`: the first model was unsure and the second model's monthly spending cap was reached, so a person decides. */
+  held?: "ai_cap";
 }
 
 export type ReviewResult =
@@ -290,20 +303,16 @@ export function answerOf(out: unknown): Record<string, unknown> | null {
   }
 }
 
-/**
- * The model's decision on one case. A run that fails or takes too long throws
- * ModelUnavailable. An answer that can't be read, gives a decision this case
- * doesn't allow, or isn't sure, is `leave`.
- */
-export async function askModel(
-  ai: AiLike,
-  model: string,
-  c: HeldCase,
-  place: Place,
-  duplicateOf: Place | undefined,
-  allowed: readonly ReviewDecision[] = allowedDecisions(c),
-): Promise<{ decision: ReviewDecision; reason: string }> {
-  const evidence = {
+/** A model's decision on one case. `unsure` is true when the model did not settle it: it answered `leave`, wasn't sure, gave a decision the case doesn't allow, or gave an answer that can't be read. */
+export interface ModelDecision {
+  decision: ReviewDecision;
+  reason: string;
+  unsure: boolean;
+}
+
+/** What a model reads about a case, as JSON. */
+function caseEvidence(c: HeldCase, place: Place, duplicateOf: Place | undefined): string {
+  return JSON.stringify({
     case: c.case,
     place: placeView(place),
     ...(c.case === "duplicate" ? { possible_duplicate_of: duplicateOf ? placeView(duplicateOf) : c.duplicate_of, distance_m: c.distance_m } : {}),
@@ -314,7 +323,31 @@ export async function askModel(
       : {}),
     ...(c.case === "vehicle_access_candidate" ? { fact: c.fact, value: c.value } : {}),
     ...(c.case === "commons_mismatch" ? { file: c.file, reporting_sources: c.sources } : {}),
-  };
+  });
+}
+
+/** A model's answer object as a decision: `leave`, and unsure, unless it is a sure decision the case allows. */
+function decisionOf(answer: Record<string, unknown> | null, allowed: readonly ReviewDecision[]): ModelDecision {
+  if (!answer || typeof answer.decision !== "string") return { decision: "leave", reason: "the model's answer could not be read", unsure: true };
+  const reason = typeof answer.reason === "string" ? answer.reason : "";
+  if (!allowed.includes(answer.decision as ReviewDecision)) return { decision: "leave", reason: `the model answered ${safeReason(answer.decision)}, which this case does not allow`, unsure: true };
+  if (answer.decision !== "leave" && answer.sure !== true) return { decision: "leave", reason: `the model was not sure: ${reason}`, unsure: true };
+  return { decision: answer.decision as ReviewDecision, reason, unsure: answer.decision === "leave" };
+}
+
+/**
+ * The model's decision on one case. A run that fails or takes too long throws
+ * ModelUnavailable. An answer that can't be read, gives a decision this case
+ * doesn't allow, or isn't sure, is `leave`, and `unsure`.
+ */
+export async function askModel(
+  ai: AiLike,
+  model: string,
+  c: HeldCase,
+  place: Place,
+  duplicateOf: Place | undefined,
+  allowed: readonly ReviewDecision[] = allowedDecisions(c),
+): Promise<ModelDecision> {
   let out: unknown;
   try {
     out = await withTimeout(
@@ -322,7 +355,7 @@ export async function askModel(
       ai.run(model, {
         messages: [
           { role: "system", content: systemPrompt(c, allowed) },
-          { role: "user", content: JSON.stringify(evidence) },
+          { role: "user", content: caseEvidence(c, place, duplicateOf) },
         ],
         temperature: 0,
         max_tokens: 256,
@@ -332,12 +365,64 @@ export async function askModel(
   } catch (error) {
     throw error instanceof ModelUnavailable ? error : new ModelUnavailable(String(error));
   }
-  const answer = answerOf(out);
-  if (!answer || typeof answer.decision !== "string") return { decision: "leave", reason: "the model's answer could not be read" };
-  const reason = typeof answer.reason === "string" ? answer.reason : "";
-  if (!allowed.includes(answer.decision as ReviewDecision)) return { decision: "leave", reason: `the model answered ${safeReason(answer.decision)}, which this case does not allow` };
-  if (answer.decision !== "leave" && answer.sure !== true) return { decision: "leave", reason: `the model was not sure: ${reason}` };
-  return { decision: answer.decision as ReviewDecision, reason };
+  return decisionOf(answerOf(out), allowed);
+}
+
+/** The second stage's decision on a case the first model was unsure of, with who made it. */
+interface SecondDecision {
+  decision: ReviewDecision;
+  reason: string;
+  reviewer: string;
+  held?: "ai_cap";
+}
+
+/** The second model's name on a decision. */
+export const SECOND_REVIEWER = `ai:${SECOND_REVIEW_MODEL}`;
+
+/**
+ * Asks the second model about a case the first was unsure of (`first`), when
+ * the month's spending is under the cap, and adds what the answer cost. Over
+ * the cap the case is `leave` with `held: "ai_cap"`. A failed or timed out
+ * call, spending that can't be read or written, and an answer the second
+ * model isn't sure of, are `leave`, for a person.
+ */
+async function askSecondStage(
+  deps: ReviewerDeps & { second: SecondStage },
+  firstReviewer: string,
+  first: ModelDecision,
+  c: HeldCase,
+  place: Place,
+  duplicateOf: Place | undefined,
+  allowed: readonly ReviewDecision[],
+): Promise<SecondDecision> {
+  const month = monthOf(deps.now());
+  let spent: number;
+  try {
+    spent = await monthSpend(deps.db, month);
+  } catch (error) {
+    onError(deps, error);
+    return { decision: "leave", reason: "the second model's spending could not be read, so a person decides", reviewer: firstReviewer };
+  }
+  if (spent >= deps.second.capUsd * 1e9) {
+    return { decision: "leave", reason: "ai_cap: the first model was unsure and the second model's monthly spending cap is reached, so a person decides", reviewer: firstReviewer, held: "ai_cap" };
+  }
+  let answer: Awaited<ReturnType<typeof askSecondModel>>;
+  try {
+    answer = await askSecondModel(deps.second, systemPrompt(c, allowed), caseEvidence(c, place, duplicateOf), decisionSchema(allowed));
+  } catch (error) {
+    if (!(error instanceof SecondModelUnavailable)) throw error;
+    onError(deps, error);
+    return { decision: "leave", reason: "the second model's call failed, so a person decides", reviewer: SECOND_REVIEWER };
+  }
+  try {
+    await addSpend(deps.db, month, answer.nanoUsd);
+  } catch (error) {
+    onError(deps, error);
+    return { decision: "leave", reason: "the second model's spending could not be recorded, so a person decides", reviewer: SECOND_REVIEWER };
+  }
+  const second = decisionOf(answer.answer, allowed);
+  if (second.unsure) return { decision: "leave", reason: `both models were unsure: ${first.reason}; ${second.reason}`, reviewer: SECOND_REVIEWER };
+  return { decision: second.decision, reason: second.reason, reviewer: SECOND_REVIEWER };
 }
 
 /** A place record from its file, or undefined when the file is not one. */
@@ -373,6 +458,8 @@ interface Pending {
   /** What it decided, for the commit message: `<reviewer>: <decision> held case <case> on <place>`. */
   title: string;
   reason: string;
+  /** The case's feedback ids, for their progress records. */
+  feedback: readonly string[];
 }
 
 /**
@@ -459,6 +546,8 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [] });
       let decision: ReviewDecision;
       let reason: string;
+      let by = reviewer;
+      let held: "ai_cap" | undefined;
       let otherFile: { text: string } | null = null;
       let other: Place | undefined;
       const failed = failures.get(key)?.failures ?? 0;
@@ -476,13 +565,18 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         // A merge only where the rules allow one: never into an owner's place or a pair a person found separate.
         const pairs = c.case === "duplicate" ? await distinctPairs() : undefined;
         const allowed = allowedDecisions(c).filter((d) => d !== "merge" || reviewerMergeProblem(place!, other, pairs, deps.roads) === null);
+        let first: ModelDecision;
         try {
-          ({ decision, reason } = await askModel(deps.ai, deps.model, c, place!, other, allowed));
+          first = await askModel(deps.ai, deps.model, c, place!, other, allowed);
           answered++;
         } catch (error) {
           if (!(error instanceof ModelUnavailable)) throw error;
           failedNow.push({ key, c, error });
           continue;
+        }
+        ({ decision, reason } = first);
+        if (first.unsure && deps.second) {
+          ({ decision, reason, reviewer: by, held } = await askSecondStage({ ...deps, second: deps.second }, reviewer, first, c, place!, other, allowed));
         }
       }
       reason = safeReason(reason);
@@ -504,10 +598,11 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         staged.set(write.path, { text: write.text, sha: shas.get(write.path) });
       }
       decisions.push({
-        record: { key, case: c.case, place: c.place, decision, reviewer, reason, by_rules: settled !== null, committed: writes.length > 0 },
+        record: { key, case: c.case, place: c.place, decision, reviewer: by, reason, by_rules: settled !== null, committed: writes.length > 0, ...(held ? { held } : {}) },
         paths: writes.map((w) => w.path),
-        title: `${reviewer}: ${decision} held case ${c.case} on ${c.place}`,
+        title: `${by}: ${decision} held case ${c.case} on ${c.place}`,
         reason,
+        feedback: c.feedback,
       });
     }
   } catch (error) {
@@ -526,6 +621,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       paths: [],
       title: `${reviewer}: leave held case ${c.case} on ${c.place}`,
       reason,
+      feedback: c.feedback,
     });
   }
   let kept: Pending[];
@@ -539,7 +635,20 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
   const records = kept.map((d) => d.record);
   if (records.length > 0) await github.commentOnPullRequest(data, pr.number, decisionComment(reviewer, records));
   await forgetModelFailures(deps.db, records.map((r) => r.key), deps.now());
+  await recordHolds(deps, kept);
   return { outcome: "reviewed", pr: pr.number, decisions: records };
+}
+
+/** Marks the items of each recorded case the cap stopped `held` with `ai_cap`. A failure is logged and changes no decision. */
+async function recordHolds(deps: ReviewerDeps, kept: readonly Pending[]): Promise<void> {
+  for (const { record, feedback } of kept) {
+    if (!record.held || feedback.length === 0) continue;
+    try {
+      await recordReviewerHold(deps.db, feedback, record.place, record.held, deps.now());
+    } catch (error) {
+      onError(deps, error);
+    }
+  }
 }
 
 /** Each case's counted failed runs and the time of the last one, by key. None when the table can't be read. */

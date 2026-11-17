@@ -10,6 +10,8 @@
 #   PLACES_TOKEN        lets the apply run remove places from RECENT_LIST and send the block list, and the data
 #                       release load the place index. Only with RECENT_LIST
 #   URLHAUS_KEY         abuse.ch auth key, for the URLhaus check on links (src/checks.ts)
+#   ANTHROPIC_API_KEY   Anthropic API key, for the AI reviewer's second stage (src/second-review.ts). Optional:
+#                       without it, held cases the first model is unsure of go to a person
 #   CROWDSEC_BLOCKLIST_CREDENTIALS  username:password of a CrowdSec blocklist integration, for network
 #                       reputation (src/reputation.ts). Only with CROWDSEC_BLOCKLIST_URL
 
@@ -51,6 +53,11 @@ SAFESEARCH = "off"
 # decisions to overture/decisions.ndjson on that branch. It fetches each
 # candidate's own website. Off when left out.
 # OVERTURE_REVIEWER = "on"
+# The AI reviewer's second stage (src/second-review.ts), with the
+# ANTHROPIC_API_KEY secret: a held case the first model is unsure of is asked
+# of Claude Haiku 5.5 while this month's spending (UTC) is under this cap, in
+# US dollars. Defaults to 20.
+# SECOND_REVIEW_CAP_USD = "20"
 # Network reputation (src/reputation.ts): the content URL of a CrowdSec blocklist
 # integration in plain_text format. The job below fetches it once a day into
 # RATE_LIMIT. A feedback item without attestation from a listed address is
@@ -122,9 +129,21 @@ migrations_dir = "migrations"
 # namespace_id = "1002"
 # simple = { limit = 120, period = 60 }
 
+# Optional: the repeated text check (src/repeated.ts). Free text nearly the
+# same as text from three other sources in the last 30 days is held as
+# repeated_text. Needs the AI binding below and RECENT_LIST. Create the index,
+# and its two metadata indexes before anything is stored in it:
+#   npx wrangler vectorize create ocdb-repeated-text --dimensions=768 --metric=cosine
+#   npx wrangler vectorize create-metadata-index ocdb-repeated-text --property-name=at --type=number
+#   npx wrangler vectorize create-metadata-index ocdb-repeated-text --property-name=source --type=string
+# Off without it.
+# [[vectorize]]
+# binding = "VECTORIZE"
+# index_name = "ocdb-repeated-text"
+
 # Workers AI, for the Llama Guard check on free text (src/checks.ts), which
 # the send-time decision runs with RECENT_LIST (src/decide.ts), and for the AI
-# reviewer (src/reviewer.ts) when AI_REVIEWER is on. The account needs Workers
-# AI. Without it, free text from a contributor without a track record is held.
+# reviewer (src/reviewer.ts) when AI_REVIEWER is on, and for the embeddings of
+# the repeated text check with VECTORIZE. The account needs Workers AI. Without it, free text from a contributor without a track record is held.
 [ai]
 binding = "AI"

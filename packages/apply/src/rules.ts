@@ -804,8 +804,17 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         text.length >= REPEATED_TEXT_LENGTH &&
         reviewsSent.some((other) => other.place !== item.place && other.id !== item.id && sameText(other.review.text) === text);
       const unproved = item.proved !== true && lines.some((r) => r.contributor === item.contributor && !sameSender(item, r));
-      if (repeated || !trusted.has(item.contributor) || unproved) {
-        const why = repeated ? "the same text was sent for another place" : !trusted.has(item.contributor) ? "first review from this contributor" : "it replaces the contributor's earlier review from another device";
+      // The intake marks a review whose text other sources sent too, or whose text it could not check.
+      const check = heldForCheck(item);
+      if (check !== null || repeated || !trusted.has(item.contributor) || unproved) {
+        const why =
+          check !== null
+            ? `the intake held it for ${check}`
+            : repeated
+              ? "the same text was sent for another place"
+              : !trusted.has(item.contributor)
+                ? "first review from this contributor"
+                : "it replaces the contributor's earlier review from another device";
         edits.push({ kind: "review", place: item.place, review, feedback: item.id });
         // The public PR names the inbox item and never quotes the text, so an erasure or removal leaves no copy there.
         note(item.place, `${item.review.stars} star review, ${why} (read its text in the inbox item before merging)`, false, [item]);

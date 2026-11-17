@@ -39,7 +39,8 @@ import type { MajorRoads } from "@opencampingdb/apply/review";
 import { recordInboxWrite, startApplyIfDue, type RunOutcome } from "./runs.js";
 import { parseTimetable, startTimedIfDue, type TimedStart } from "./timed.js";
 import { reviewOvertureCandidates, type OvertureReviewResult } from "./overture-reviewer.js";
-import { DEFAULT_REVIEW_MODEL, MAX_MODEL_FAILURES, parseBotLogins, REVIEW_BRANCH, reviewHeldCases, type ReviewResult } from "./reviewer.js";
+import { DEFAULT_REVIEW_MODEL, MAX_MODEL_FAILURES, parseBotLogins, REVIEW_BRANCH, REVIEW_TIMEOUT_MS, reviewHeldCases, type ReviewResult } from "./reviewer.js";
+import { capOf } from "./second-review.js";
 import { IntegrityError, IntegrityUnavailable, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
 import { SafeSearch, verdict, worseRatings } from "./safesearch.js";
 import { jpegSize } from "./jpeg.js";
@@ -81,6 +82,7 @@ import {
 } from "./recent.js";
 import { cellHashes, getIndexedPlace, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
 import { createChecks, pruneLiveCounts, releaseLive, type AiLike, type LiveSlot } from "./checks.js";
+import { checkRepeated, pruneTextVectors, repeatedTextOf, type RepeatedResult, type VectorizeLike } from "./repeated.js";
 import {
   decideAtSendTime,
   decidedHere,
@@ -262,6 +264,12 @@ export interface Env {
   /** Secret. The abuse.ch auth key for the URLhaus check on links. Without it, an item with a link is held. */
   URLHAUS_KEY?: string;
   /**
+   * Vectorize index (768 dimensions, cosine, with number metadata index `at`
+   * and string metadata index `source`) for the repeated text check
+   * (src/repeated.ts), with AI and RECENT_LIST. Off without it.
+   */
+  VECTORIZE?: VectorizeLike;
+  /**
    * Network reputation (reputation.ts): the content URL of a CrowdSec
    * blocklist integration in plain text format,
    * `https://admin.api.crowdsec.net/v1/integrations/<id>/content`. The
@@ -283,6 +291,15 @@ export interface Env {
   AI_REVIEWER?: string;
   /** The Workers AI model the reviewer asks. Defaults to DEFAULT_REVIEW_MODEL. */
   REVIEW_MODEL?: string;
+  /**
+   * Secret. An Anthropic API key for the AI reviewer's second stage
+   * (src/second-review.ts): a held case the first model is unsure of is asked
+   * of SECOND_REVIEW_MODEL while the month's spending is under
+   * SECOND_REVIEW_CAP_USD. Without it, such a case is left for a person.
+   */
+  ANTHROPIC_API_KEY?: string;
+  /** The second stage's monthly spending cap in US dollars. Defaults to DEFAULT_SECOND_REVIEW_CAP_USD (20). */
+  SECOND_REVIEW_CAP_USD?: string;
   /**
    * `on` runs the AI reviewer's check of Overture candidates from the
    * scheduled job, at most once every 10 minutes, on the open PR from
@@ -843,6 +860,7 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now"> & { roads?: Maj
         botLogins,
         now: deps.now,
         onError: warn,
+        ...(env.ANTHROPIC_API_KEY ? { second: { apiKey: env.ANTHROPIC_API_KEY, fetch: deps.fetch, capUsd: capOf(env.SECOND_REVIEW_CAP_USD), timeoutMs: REVIEW_TIMEOUT_MS } } : {}),
         onModelFailure: (key, failures, error) =>
           console.warn(`the AI reviewer's model call failed on held case ${key} (${failures} of ${MAX_MODEL_FAILURES} runs), going on to the next case: ${String(error)}`),
         ...(deps.roads ? { roads: deps.roads } : {}),
@@ -945,6 +963,11 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
       await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs), pruneProgress(db, nowMs), pruneRateCounts(db, nowMs), pruneRequestKeys(db, nowMs), pruneSilentDrops(db, nowMs)]).catch((error: unknown) => {
         console.warn(`pruning the recent list failed: ${String(error)}`);
       });
+      if (env.VECTORIZE) {
+        await pruneTextVectors(db, env.VECTORIZE, nowMs).catch((error: unknown) => {
+          console.warn(`deleting old text vectors failed: ${String(error)}`);
+        });
+      }
     }
     // Before the apply is started, so a run that starts now finds this minute's items.
     await flush(env);
@@ -2018,6 +2041,18 @@ export function createHandler(deps: Deps) {
         stored.type === "photo_erasure");
     if (withhold) stored.withheld = true;
 
+    // The repeated text check, with the AI and VECTORIZE bindings and RECENT_LIST, run once for the item.
+    // One source is one client network, or the device when the network is not known.
+    let repeatedOnce: Promise<RepeatedResult> | undefined;
+    const repeated =
+      env.RECENT_LIST && env.AI && env.VECTORIZE
+        ? () =>
+            (repeatedOnce ??= checkRepeated(
+              { ai: env.AI!, index: env.VECTORIZE!, db: env.RECENT_LIST!, now: deps.now },
+              { id, source: stored.origin ?? stored.device, text: repeatedTextOf(submission as FeedbackSubmission) },
+            ))
+        : undefined;
+
     // Decided before the item is stored, and recorded in the same D1 batch that queues it. An
     // attested item from a network on the blocklist is held as network_reputation, and any item
     // whose network the intake could not look up is held as check_unavailable: the apply sends
@@ -2040,7 +2075,7 @@ export function createHandler(deps: Deps) {
                 (r) => r.allowed,
                 () => false,
               );
-      const checks = createChecks({ db, fetch: deps.fetch, urlhausKey: env.URLHAUS_KEY, ai: env.AI, now: deps.now, linkLookup });
+      const checks = createChecks({ db, fetch: deps.fetch, urlhausKey: env.URLHAUS_KEY, ai: env.AI, now: deps.now, linkLookup, repeated });
       decision = await decideAtSendTime({
         db,
         checks,
@@ -2057,7 +2092,13 @@ export function createHandler(deps: Deps) {
       stored.intake = decision.linksPassed && answer.state === "held" ? { ...answer, links: "passed" } : answer;
       // The items after it in a batch are decided as if it were stored already.
       decision.addToDecided?.(intake.decided);
+    } else if (stored.type === "review" && repeated) {
+      // The apply decides a review. One repeated across sources, or one the check could not read, goes to a person.
+      const found = await repeated();
+      if (found === "repeated_text" || found === "check_unavailable") stored.intake = { state: "held", held_reason: found };
     }
+    // An item decided without the checks still leaves its text for the items after it.
+    if (repeated) await repeated();
 
     const writes = env.RECENT_LIST
       ? [
