@@ -6,6 +6,7 @@ import {
   decideDoubt,
   decideFact,
   findDispute,
+  gapFillFact,
   newPlaceFields,
   newPlaceListing,
   REVIEWED_FACTS,
@@ -21,7 +22,6 @@ import {
 } from "@opencampingdb/apply/decide";
 import { websiteCheck, websiteCheckApplies, type Fetch as CheckFetch } from "@opencampingdb/apply/contact-checks";
 import {
-  FREE_TEXT_FACTS,
   isContactFact,
   newPlaceId,
   tidyName,
@@ -85,9 +85,21 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * attestation that carries a source link, waiting for the apply run to read
  * the page. `implausible_location`: a new place in the sea or a lake, on a
  * major road's carriageway or inside a building footprint, which the AI
- * reviewer checks. The apply decides each of these again when it runs.
+ * reviewer checks. `waiting_value`: a doubt about a fact while another
+ * source's report of a new value for it waits for a second source, which
+ * counts against that report and never takes the place's value down. The
+ * apply decides each of these again when it runs.
  */
-export type HeldReason = RulesHeldReason | ChecksHeldReason | RefusedReason | "unknown_place" | "blocked" | "commons_report" | "source_link" | "implausible_location";
+export type HeldReason =
+  | RulesHeldReason
+  | ChecksHeldReason
+  | RefusedReason
+  | "unknown_place"
+  | "blocked"
+  | "commons_report"
+  | "source_link"
+  | "implausible_location"
+  | "waiting_value";
 // Every reason the intake answers is in the SDK's published list: this fails to compile otherwise.
 const PUBLISHED: readonly PublishedHeldReason[] = [] as HeldReason[];
 void PUBLISHED;
@@ -443,20 +455,17 @@ const live = (writes: SendTimeDecision["writes"], addToDecided: (decided: Decide
 const heldWithEvidence = (reason: HeldReason, item: ReportItem): SendTimeDecision =>
   held(reason, (d) => [evidenceStatement(d, item, "held")], (p) => void p.evidence.push(evidenceRow(item, "held")));
 
-/** Facts an unconfirmed value may name: those with a fixed set of values, so never a contact, the address, a fact a person always reads, or one that can hold free words. */
-export const isConfirmableFact = (fact: string): boolean =>
-  !isContactFact(fact) && !REVIEWED_FACTS.has(fact as FactName) && !(FREE_TEXT_FACTS as readonly string[]).includes(fact);
-
 /**
  * A held item's evidence, and when it is a fact report without attestation
  * waiting for a second source (`not_attested` or `source_link`) that would
- * change a confirmable fact, an unconfirmed value on the recent list too.
+ * change a fixed-value fact (`gapFillFact`), an unconfirmed value on the
+ * recent list too.
  */
 function heldWaiting(reason: HeldReason, item: ReportItem, place: PlaceState & { cell: Cell }, contributor: string): SendTimeDecision {
   const { kind, fact, value } = item.report;
   const waits = reason === "not_attested" || reason === "source_link";
   const changes = value !== undefined && !sameValue((place.facts as Record<string, unknown>)[fact as string], value);
-  if (!waits || kind !== "fact" || item.attested !== undefined || !changes || !isConfirmableFact(fact as string)) return heldWithEvidence(reason, item);
+  if (!waits || kind !== "fact" || item.attested !== undefined || !changes || !gapFillFact(fact as FactName)) return heldWithEvidence(reason, item);
   const [cellLon, cellLat] = place.cell;
   return held(
     reason,
@@ -470,6 +479,25 @@ function heldWaiting(reason: HeldReason, item: ReportItem, place: PlaceState & {
     ],
     (p) => void p.evidence.push(evidenceRow(item, "held")),
   );
+}
+
+/**
+ * Whether a doubt answers No to an unconfirmed value: a report of the fact
+ * from another source, received before the doubt and within the rules' 90
+ * days, that waits for a second source and is on the recent list.
+ */
+async function waitingValueFor(db: D1Like, item: ReportItem): Promise<boolean> {
+  const at = Date.parse(item.received);
+  const row = await db
+    .prepare(
+      `SELECT 1 AS found FROM unconfirmed_values u
+       WHERE u.place = ? AND u.fact = ? AND u.source != ? AND u.received <= ? AND u.received >= ?
+         AND NOT EXISTS (SELECT 1 FROM blocked_contributors b WHERE b.contributor = u.contributor)
+       LIMIT 1`,
+    )
+    .bind(item.place, item.report.fact, sourceOf(item), item.received, isoSeconds(at - WINDOW_DAYS * DAY_MS))
+    .first<{ found: number }>();
+  return row !== null && row !== undefined;
 }
 
 /** Takes the unconfirmed values a live change has settled off the list: those of the value the fact now has. */
@@ -528,6 +556,8 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
     const counted = settledAt === null ? earlier : earlier.filter((r) => r.received > settledAt);
     if (findDispute([...counted, item], placeId) !== null) return frozeHere(item);
   }
+  // A No to a value waiting for a second source counts against that report, which the apply weighs, never against the place's value.
+  if (kind === "doubt" && (await waitingValueFor(db, item))) return held("waiting_value");
   const openCase = kind === "fact" ? await openDoubt(db, placeId, item.report.fact as string, decided) : undefined;
   const decision =
     kind === "fact"

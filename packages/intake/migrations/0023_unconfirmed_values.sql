@@ -1,5 +1,5 @@
 -- Unconfirmed values (src/decide.ts): fact reports without attestation that the intake held waiting for a
--- second source, and that would change the place's value. GET /v1/places/recent serves them as `unconfirmed`,
+-- second source, and that would change the place's value. GET /v1/places/recent serves them as `unconfirmed_values`,
 -- by place, fact and value, so apps can ask travellers to confirm them.
 --
 -- One row a held report. value is the reported value as JSON. source is the report's hashed client network,

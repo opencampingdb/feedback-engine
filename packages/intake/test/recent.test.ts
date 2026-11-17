@@ -1570,7 +1570,7 @@ describe("send-time decisions", () => {
   describe("unconfirmed values", () => {
     const unattested = () => env(store, { requires_attestation: false });
     const second = { device: otherDevice(1), contributor: "acct_second_person_01" };
-    const unconfirmed = async (query = "") => ((await listing(query)) as unknown as { unconfirmed: Record<string, unknown>[] }).unconfirmed;
+    const unconfirmed = async (query = "") => ((await listing(query)) as unknown as { unconfirmed_values: Record<string, unknown>[] }).unconfirmed_values;
 
     it("lists a held report without attestation that would change a fact, with its value, time and count of sources and nothing else", async () => {
       expect(await send(fact(PLACE, "toilets", true, { note: "Saw them myself" }), unattested())).toMatchObject(held("not_attested"));
@@ -1630,6 +1630,37 @@ describe("send-time decisions", () => {
       expect((await call("in-data", { ids: [applied], at: "2026-11-03T09:30:00Z" })).status).toBe(200);
       expect((await call("overruled", { ids: [refused, forPerson], refused: [refused] })).status).toBe(200);
       expect((await unconfirmed()).map((u) => [u.place, u.fact])).toEqual([[ELSEWHERE, "toilets"]]);
+    });
+
+    it("holds a No to a waiting value from another source against that report, so two never take the place's value down", async () => {
+      const doubt = (who: Parameters<typeof report>[2]) => report(PLACE, { kind: "doubt", fact: "toilets" }, who);
+      const third = { device: otherDevice(2), contributor: "acct_third_person_01" };
+      await send(fact(PLACE, "toilets", true), unattested());
+      clock += HOUR;
+      expect(await send(doubt(second))).toMatchObject(held("waiting_value"));
+      clock += HOUR;
+      expect(await send(doubt(third))).toMatchObject(held("waiting_value"));
+      expect((await listing()).changes).toEqual([]);
+      expect(await unconfirmed()).toEqual([{ place: PLACE, fact: "toilets", value: true, received: "2026-11-03T09:00:00Z", sources: 1 }]);
+      // Once the report is refused, a No is about the place's value again, and the earlier ones do not count towards it.
+      const [waiting] = written().map((item) => item.id as string);
+      const refused = await handle(
+        new Request("https://intake.example/v1/places/recent/overruled", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+          body: JSON.stringify({ ids: [waiting], refused: [waiting] }),
+        }),
+        e,
+      );
+      expect(refused.status).toBe(200);
+      clock += HOUR;
+      expect(await send(doubt({ device: otherDevice(3), contributor: "acct_fourth_person_01" }))).toMatchObject(held("single_doubt"));
+    });
+
+    it("weighs the reporter's own No as a doubt of the place's value", async () => {
+      await send(fact(PLACE, "toilets", true), unattested());
+      clock += HOUR;
+      expect(await send(report(PLACE, { kind: "doubt", fact: "toilets" }))).toMatchObject(held("single_doubt"));
     });
 
     it("stops counting a report 90 days after it was received, and the scheduled job deletes it", async () => {

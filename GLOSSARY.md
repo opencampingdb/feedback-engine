@@ -73,7 +73,7 @@ A fact report without attestation that goes live without a second source because
 _Avoid_: first value, seed
 
 **Unconfirmed value**:
-A reported value held without attestation, waiting for a second source, that would change a place's fact, published on the recent list so apps can ask travellers to confirm it. Not the held reason `unconfirmed`, which is a contact report from one source.
+A reported value held without attestation, waiting for a second source, that would change a place's fact, published in the recent list's `unconfirmed_values` so apps can ask travellers to confirm it. Not the held reason `unconfirmed`, which is a contact report from one source.
 _Avoid_: pending value, proposed value
 
 **Doubt**:

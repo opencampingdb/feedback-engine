@@ -139,7 +139,7 @@ export type { ValidationResult } from "./validate.js";
 export { PYTHON_SPACE } from "./python-space.js";
 export { isOpeningHours, openingHoursProblem, openMonths, withOpenMonths, withoutOpenMonths } from "./hours.js";
 export { CHARGE_TIME_UNITS, MAX_CHARGE_LENGTH, chargeConditions, isCharge, isChargeConditional, parseCharge, type Charge, type ChargeCondition, type ChargeTimeUnit } from "./charge.js";
-export { dataVersionProblem, dataVersionTime, unconfirmedFor, withRecentChanges } from "./recent.js";
+export { dataVersionProblem, dataVersionTime, unconfirmedValuesFor, withRecentChanges } from "./recent.js";
 export type { RecentChange, RecentList, RecentPlace, RecentRelease, ReleasePlace, UnconfirmedValue } from "./recent.js";
 export { PHOTO_HELD_REASONS, PROGRESS_STATES, isFeedbackId, progressInRelease } from "./progress.js";
 export type { PhotoHeldReason, Progress, ProgressState, RefusedBy } from "./progress.js";

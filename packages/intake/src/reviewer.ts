@@ -770,18 +770,20 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       const siteNames = c.case === "place_change" && c.change === "name" && place && deps.fetchSite ? await readSiteNames(deps.fetchSite, place.facts.website) : undefined;
       // A held review, as the review branch has it.
       const review = c.case === "intake_check" && c.about === "review" && place ? await readReview(read, c.place, c.review!) : undefined;
-      const ruled = settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [], now: deps.now() });
+      const ruled = closed ? null : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [], ...(siteNames ? { siteNames } : {}), now: deps.now() });
       // An unconfirmed value the rules leave to the model: what the place's own website says, when it has one.
       const website =
-        c.case === "unconfirmed_fact" && place && ruled === null && deps.fetchSite && typeof place.facts.website === "string" ? await readWebsite(deps.fetchSite, place.facts.website) : undefined;
+        c.case === "unconfirmed_fact" && !closed && ruled === null && place && deps.fetchSite && typeof place.facts.website === "string"
+          ? await readWebsite(deps.fetchSite, place.facts.website)
+          : undefined;
       const speaks = website !== undefined && "text" in website && SITE_INSTRUCTIONS.test(`${website.title} ${website.description} ${website.text}`);
       const settled = closed
         ? { decision: "leave" as const, reason: `the rules closed this case: travellers ${closed.settles} the fact` }
-        : speaks
-          ? { decision: "leave" as const, reason: "the place's website reads like instructions to a reviewer, so a person decides" }
         : c.case === "intake_check" && c.about === "review" && place && review === undefined
           ? { decision: "leave" as const, reason: "the review is not on the review branch, so a person decides" }
-          : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [], ...(siteNames ? { siteNames } : {}), now: deps.now() });
+          : speaks
+            ? { decision: "leave" as const, reason: "the place's website reads like instructions to a reviewer, so a person decides" }
+            : ruled;
       const extra: CaseExtra = { ...(review ? { review } : {}), ...(website ? { website } : {}) };
       let decision: ReviewDecision;
       let reason: string;

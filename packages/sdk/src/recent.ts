@@ -92,7 +92,7 @@ export interface RecentList {
   /** Absent before the intake has been told of a release, and from intakes older than SDK 0.17.0. */
   release?: RecentRelease;
   /** Values waiting for a second source, in place and fact order. Absent from intakes older than SDK 0.40.0. */
-  unconfirmed?: UnconfirmedValue[];
+  unconfirmed_values?: UnconfirmedValue[];
 }
 
 /** The part of a release place record (`places.ndjson.gz`) that `withRecentChanges` reads and writes. */
@@ -188,8 +188,8 @@ export function withRecentChanges<P extends ReleasePlace>(place: P, changes: rea
  * shows it, with `withRecentChanges` laid over, so a value that has since
  * gone live is not asked about.
  */
-export function unconfirmedFor(place: ReleasePlace, unconfirmed: readonly UnconfirmedValue[]): UnconfirmedValue[] {
+export function unconfirmedValuesFor(place: ReleasePlace, unconfirmedValues: readonly UnconfirmedValue[]): UnconfirmedValue[] {
   const facts = place.facts as Record<string, unknown>;
   const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
-  return unconfirmed.filter((entry) => entry.place === place.id && !same(facts[entry.fact], entry.value));
+  return unconfirmedValues.filter((entry) => entry.place === place.id && !same(facts[entry.fact], entry.value));
 }

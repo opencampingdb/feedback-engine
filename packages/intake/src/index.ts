@@ -1517,7 +1517,7 @@ export function createHandler(deps: Deps) {
   /**
    * `GET /v1/places/recent`: new places that are `shown` or `confirmed`, and
    * the recent changes to released places (`changes`, see decide.ts), and
-   * the values waiting for a second source (`unconfirmed`, see
+   * the values waiting for a second source (`unconfirmed_values`, see
    * `listUnconfirmed`), optionally within `bbox=west,south,east,north` grown out to whole
    * degrees. Public, like the data, and cached at the edge by that box, so the
    * recent list is read at most once per cache period for each box in each location.
@@ -1539,13 +1539,13 @@ export function createHandler(deps: Deps) {
     const hit = await deps.cache?.match(cacheKey);
     if (hit) return withCors(hit);
     const nowMs = deps.now();
-    const [places, changes, unconfirmed, release] = await Promise.all([
+    const [places, changes, unconfirmedValues, release] = await Promise.all([
       listPlaces(env.RECENT_LIST, new Date(nowMs).toISOString(), bbox),
       listChanges(env.RECENT_LIST, nowMs, bbox),
       listUnconfirmed(env.RECENT_LIST, nowMs, bbox),
       latestRelease(env.RECENT_LIST),
     ]);
-    const response = json(200, { places, changes, unconfirmed, ...(release ? { release } : {}) }, { "cache-control": `public, max-age=${RECENT_CACHE_SECONDS}` });
+    const response = json(200, { places, changes, unconfirmed_values: unconfirmedValues, ...(release ? { release } : {}) }, { "cache-control": `public, max-age=${RECENT_CACHE_SECONDS}` });
     await deps.cache?.put(cacheKey, response.clone());
     return withCors(response);
   }

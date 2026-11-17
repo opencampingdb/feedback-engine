@@ -302,7 +302,9 @@ export const GAP_FILL = "filled a gap: the place had no value";
  * Facts a report without attestation may fill a gap in: fixed-value facts,
  * not a contact, the address or another fact a person reads
  * (REVIEWED_FACTS), and none whose value can hold free words
- * (FREE_TEXT_FACTS).
+ * (FREE_TEXT_FACTS). The same facts are the ones the recent list carries
+ * as unconfirmed values, and the ones a doubt counts against a waiting
+ * report of.
  */
 export function gapFillFact(fact: FactName): boolean {
   return !REVIEWED_FACTS.has(fact) && !isContactFact(fact) && !(FREE_TEXT_FACTS as readonly string[]).includes(fact);

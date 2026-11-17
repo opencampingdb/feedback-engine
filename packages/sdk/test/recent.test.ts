@@ -1,5 +1,5 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { dataVersionProblem, dataVersionTime, unconfirmedFor, withRecentChanges, type RecentChange, type RecentPlace, type UnconfirmedValue } from "../src/index.js";
+import { dataVersionProblem, dataVersionTime, unconfirmedValuesFor, withRecentChanges, type RecentChange, type RecentPlace, type UnconfirmedValue } from "../src/index.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
 const OTHER = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZB";
@@ -147,16 +147,16 @@ describe("RecentPlace", () => {
   });
 });
 
-describe("unconfirmedFor", () => {
+describe("unconfirmedValuesFor", () => {
   const waiting = (fact: string, value: UnconfirmedValue["value"], place = PLACE): UnconfirmedValue => ({ place, fact, value, received: "2026-11-03T09:00:00Z", sources: 1 });
 
   it("gives the place's unconfirmed values that would change it, in the list's order", () => {
     const list = [waiting("toilets", true), waiting("water", true), waiting("toilets", true, OTHER), waiting("pets", "leashed")];
-    expect(unconfirmedFor(released, list)).toEqual([waiting("toilets", true), waiting("pets", "leashed")]);
+    expect(unconfirmedValuesFor(released, list)).toEqual([waiting("toilets", true), waiting("pets", "leashed")]);
   });
 
   it("reads the place as the app shows it, with the recent changes laid over", () => {
     const shown = withRecentChanges(released, [change("toilets", true, "2026-11-03T10:00:00Z")], RELEASE);
-    expect(unconfirmedFor(shown, [waiting("toilets", true)])).toEqual([]);
+    expect(unconfirmedValuesFor(shown, [waiting("toilets", true)])).toEqual([]);
   });
 });

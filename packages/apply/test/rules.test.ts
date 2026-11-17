@@ -2540,6 +2540,62 @@ describe("unconfirmed facts", () => {
     expect(run([d], { now: 2 }).outcome(d)).toBe("refused");
   });
 
+  it("sends a confirmed value to a person when another source has reported a different value since the case was listed", () => {
+    const r = web(fact(0, "dev-a", "power", true));
+    const listed = run([r], { now: 7 }).held[0]!;
+    const since = { ...fact(7, "dev-b", "power", false), attested: "app_attest" } as StoredFeedback;
+    const out = run([r, since], { now: 8, extra: { reviewerDecisions: [{ case: listed, decision: "confirm" }] } });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(reasonOf(out, r)).toBe("the AI reviewer confirmed it, but another source has reported a different value since, so a person decides");
+    expect(out.after()?.facts.power).not.toBe(true);
+  });
+
+  it("sends a confirmed value to a person when a traveller doubted it since, and refuses it when two sources did", () => {
+    const r = web(fact(0, "dev-a", "power", true));
+    const listed = run([r], { now: 7 }).held[0]!;
+    const confirmed = { reviewerDecisions: [{ case: listed, decision: "confirm" as const }] };
+    const one = no(7, "dev-b", "power", "net-2");
+    const out = run([r, one], { now: 8, extra: confirmed });
+    expect(out.outcome(one)).toBe("applied");
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(reasonOf(out, r)).toBe("the AI reviewer confirmed it, but a traveller has doubted it since, so a person decides");
+    const two = no(7, "dev-c", "power", "net-3");
+    const refused = run([r, one, two], { now: 8, extra: confirmed });
+    expect(refused.outcome(r)).toBe("refused");
+    expect(refused.after()).toBeUndefined();
+  });
+
+  it("never weighs a No counted against a waiting report against the place's value", () => {
+    const owned = place({ facts: { power: false, fee: true, toilets: false }, fact_sources: { power: "osm", fee: "osm", toilets: "feedback" } });
+    const r = web(fact(0, "dev-a", "toilets", true));
+    const first = { ...no(1, "dev-b", "toilets", "net-2"), attested: "app_attest" } as StoredFeedback;
+    const earlier = run([r, first], { now: 2, places: [owned] });
+    expect(earlier.outcome(first)).toBe("applied");
+    const kept = applied(first);
+    (kept as unknown as { outcome: { reason: string } }).outcome.reason = reasonOf(earlier, first)!;
+    // The report is refused, and a second traveller doubts the place's own value: one doubt, so the fact stays.
+    const refusedReport = { ...applied(r, "refused") } as StoredFeedback;
+    const later = { ...no(3, "dev-c", "toilets", "net-3"), attested: "app_attest" } as StoredFeedback;
+    const out = run([later], { now: 4, places: [owned], history: [kept, refusedReport] });
+    expect(out.outcome(later)).toBe("needs_review");
+    expect(out.after()?.facts.toilets ?? false).toBe(false);
+  });
+
+  it("weighs a No about a fact with free words as a doubt of the place's value, even while a report of it waits", () => {
+    const owned = place({ facts: { power: false, fee: true, operator: "Example Shire" }, fact_sources: { power: "osm", fee: "osm", operator: "feedback" } });
+    const r = web(fact(0, "dev-a", "operator", "Example Parks"));
+    const d = no(1, "dev-b", "operator", "net-2");
+    const out = run([r, d], { now: 2, places: [owned] });
+    expect(reasonOf(out, d)).not.toMatch(/counted against/);
+  });
+
+  it("lists a report for the AI reviewer though a refused report from another source sent a different value", () => {
+    const r = web(fact(0, "dev-a", "power", true));
+    const refusedOther = applied(web(fact(1, "dev-b", "power", "4wd"), "net-2"), "refused");
+    const out = run([r], { now: 7, history: [refusedOther] });
+    expect(out.held).toEqual([expect.objectContaining({ case: "unconfirmed_fact", fact: "power", feedback: [r.id] })]);
+  });
+
   it("sends a confirmed value to a person when the owner has set the fact since", () => {
     const r = web(fact(0, "dev-a", "power", true));
     const listed = run([r], { now: 7 }).held[0]!;

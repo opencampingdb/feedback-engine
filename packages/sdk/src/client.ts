@@ -929,9 +929,10 @@ export type AnswerOutcome =
  * is additive; renaming or removing one is a breaking change.
  *
  * - `not_attested`: the report was not from an attested install, so a person
- *   reads it (a contact) or a second device has to agree (any other fact). On a
- *   doubt or a confirmation of a value doubts took down, none of the reports
- *   counted was attested.
+ *   reads it (a contact), the next apply run puts it in the data as a gap fill
+ *   (a fixed-value fact the place has no value for), or a second device has to
+ *   agree (any other fact). On a doubt or a confirmation of a value doubts took
+ *   down, none of the reports counted was attested.
  * - `owner_value`: the place's owner set the value.
  * - `disagreement`: another source sent a different value within 90 days, or as
  *   many sources confirm a doubted fact as doubt it.
@@ -973,6 +974,9 @@ export type AnswerOutcome =
  * - `implausible_location`: a new place the map data puts in the sea or a lake, on a major road's
  *   carriageway or inside a building footprint, so the AI reviewer checks it before it is listed.
  *   Remoteness is never a reason.
+ * - `waiting_value`: a doubt about a fact while another source's report of a new value for it waits
+ *   for a second source (an unconfirmed value on the recent list). It counts against that report,
+ *   and the place's fact stays.
  */
 export const HELD_REASONS = [
   "not_attested",
@@ -1003,6 +1007,7 @@ export const HELD_REASONS = [
   "source_link",
   "disputed",
   "implausible_location",
+  "waiting_value",
 ] as const;
 
 /** Why an item is held: at send time by the intake, or later on its progress (`ai_cap`). */

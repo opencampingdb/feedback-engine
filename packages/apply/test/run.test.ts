@@ -4,7 +4,8 @@ import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReviewPr } from "../src/owners.js";
-import { heldCaseKey, type HeldCase } from "../src/review.js";
+import { tellIntake } from "../src/recent.js";
+import { heldCaseKey, parseHeldCases, type HeldCase } from "../src/review.js";
 import { run } from "../src/run.js";
 import { dumpPlace } from "../src/serialise.js";
 import type { Place } from "../src/types.js";
@@ -147,6 +148,54 @@ describe("run", () => {
     expect((await record()).status).toBe("open");
     await run({ inbox, data, now: NOW, reviewPrs: [pr("example-reviewer")], botLogins: ["example-bot"], reviewerLogins: ["example-reviewer"] });
     expect((await record()).status).toBe("reported_closed");
+  });
+
+  it("applies a waiting value the AI reviewer confirmed and refuses one it dismissed, so the intake takes both off its list", async () => {
+    // Two website reports that would change the place's values, waiting 8 days for a second source.
+    await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace({ ...place, facts: { power: false, toilets: false }, fact_sources: { power: "osm", toilets: "osm" } }));
+    const web = { type: "report", origin: "net-1", human_checked: true };
+    await pending(1, "2026-10-22T01:00:00Z", "aaaa", { ...web, report: { kind: "fact", fact: "power", value: true } });
+    await pending(2, "2026-10-22T01:00:00Z", "aaaa", { ...web, report: { kind: "fact", fact: "toilets", value: true } });
+    const listed = parseHeldCases((await run({ inbox, data, now: NOW })).review_pr_body);
+    expect(listed.map((c) => [c.case, c.fact, c.feedback])).toEqual([
+      ["unconfirmed_fact", "power", [id(1)]],
+      ["unconfirmed_fact", "toilets", [id(2)]],
+    ]);
+    const decision = (c: HeldCase, d: string) => `- review-decision ${JSON.stringify({ key: heldCaseKey(c), decision: d })}`;
+    const pr: ReviewPr = {
+      number: 4,
+      state: "OPEN",
+      body: listed.map((c) => `- held-case ${JSON.stringify(c)}`).join("\n"),
+      isCrossRepository: false,
+      author: { login: "example-bot", type: "Bot" },
+      comments: [{ author: { login: "example-reviewer", type: "Bot" }, body: [decision(listed[0]!, "confirm"), decision(listed[1]!, "dismiss")].join("\n") }],
+    };
+
+    const summary = await run({ inbox, data, now: new Date("2026-10-30T01:00:00Z"), reviewPrs: [pr], botLogins: ["example-bot"], reviewerLogins: ["example-reviewer"] });
+    expect(summary.decisions.map((d) => [d.id, d.outcome])).toEqual([
+      [id(1), "applied"],
+      [id(2), "refused"],
+    ]);
+    expect(summary.refused).toEqual([id(2)]);
+    expect(summary.auto_files).toEqual([`places/za/${PLACE}.json`]);
+    const record = JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
+    expect(record.facts).toMatchObject({ power: true, toilets: false });
+
+    // The intake hears of both: the refusal at once, and the confirmed value once main holds it (here, the data checkout).
+    const told: { inData: string[]; overruled: string[]; refused: string[] } = { inData: [], overruled: [], refused: [] };
+    const store = {
+      remove: async () => {},
+      block: async () => {},
+      trust: async () => {},
+      inData: async (ids: readonly string[]) => void told.inData.push(...ids),
+      overruled: async (ids: readonly string[], refused: readonly string[]) => {
+        told.overruled.push(...ids);
+        told.refused.push(...refused);
+      },
+      doubtCases: async () => {},
+    };
+    await tellIntake({ inbox, main: data, store, notApplied: summary.not_applied, refused: summary.refused, now: new Date("2026-10-30T02:00:00Z") });
+    expect(told).toEqual({ inData: [id(1)], overruled: [id(2)], refused: [id(2)] });
   });
 
   it("stops on a trust file that is not JSON", async () => {
