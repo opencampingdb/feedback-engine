@@ -648,7 +648,7 @@ export const feedback = createFeedbackClient({
 });
 ```
 
-If `humanCheck` throws, the item stays queued and is tried on a later send or flush, which may be on a later visit. Call `flush()` once the widget is ready on each page, so waiting items go. The intake answers `401 human_check_required` without a token and `401 human_check_failed` (with `details`) when Turnstile refuses it, and the item stays queued for a fresh token. `503` means Turnstile could not be reached.
+If `humanCheck` throws, the item stays queued and is tried on a later send or flush, which may be on a later visit. Call `flush()` once the widget is ready on each page, so waiting items go. A request without a token, or with a token Turnstile refuses or that was made for another site, body or form, is dropped silently: the intake answers it exactly as it answers an accepted item (`202` with an id, or each item of a batch so), stores nothing, and its progress reads `received` and never moves on. So a bot learns nothing from the answer, and neither does your page: a misconfigured widget looks like it works. Test your set-up once by sending a report and checking that it reaches the review PR, or ask the intake's maintainer to check its silent drop counts ([self-hosting.md](self-hosting.md#silent-drops)). Make a fresh token for every call, since a token sent twice fails and its item is lost. `503` means Turnstile could not be reached, and the item stays queued.
 
 A human check shows that a person filled in the form, not that the device or app is genuine. So a website key may send only fact reports of fixed-value facts, doubts, contact reports (a phone, website or address is wrong) and closed, name, kind and wrong_location reports, and the intake weighs them as unattested: a fact waits for a second source on another network, and a closed report leaves the place open until a second source agrees. Reviews, photos, new places, contacts and addresses, and facts that hold free words (opening hours, the operator and charges) answer `403 type_not_allowed_for_app_key`.
 
@@ -712,7 +712,6 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `daily_cap` | The contributor, their network or their install's App Attest key has had 50 live changes today (UTC). |
 | `ai_check` | The AI check flagged its free text. |
 | `check_unavailable` | A check could not run, so it waits rather than going live unchecked. |
-| `repeated_text` | Its free text is nearly the same as text three other sources sent in the last 30 days, so a person reads it. |
 | `unknown_place` | The intake does not have the place yet, such as a place newer than the last release. |
 | `blocked` | The contributor is blocked. |
 | `no_value` | A contact report or doubt about a fact the place does not have. |
@@ -724,6 +723,8 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `unlikely_charge` | A `charge` or `charge_powered` over 250 AUD a night, or more than 50% above or below the place's current charge, so a person checks it. |
 | `commons_report` | A report that a Commons photo is not of the place. Hide it for the traveller who sent it: a reviewer decides, and two sources hide it for everyone. |
 | `not_own_value` | A `clear` of a value another traveller set, or one the intake cannot tie to this install, so a person decides. |
+| `ai_cap` | Not given at send time. The AI reviewer was unsure, and its second model's monthly spending cap was reached, so a person decides. It shows on the item's progress. |
+| `repeated_text` | Its free text is nearly the same as text three other sources sent in the last 30 days, so a person reads it. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.
 

@@ -55,7 +55,7 @@ Then edit `wrangler.deploy.toml` by hand:
 
 - `INBOX_REPO`: `<your organisation>/inbox`. `INBOX_BRANCH` defaults to `main`.
 - `ALLOWED_ORIGINS`: the web origins allowed to call the intake from a browser, comma separated, or `*`. Native apps send no origin and are not affected.
-- Optional, under `[vars]`: `APPLY_WORKFLOW` (step 10), and `AI_REVIEWER`, `DATA_REPO`, `REVIEW_BOT_LOGINS` and `REVIEW_MODEL` ([The AI reviewer](#the-ai-reviewer)). An app's photo service adds its own bindings and variables ([photos.md](photos.md)).
+- Optional, under `[vars]`: `APPLY_WORKFLOW` (step 10), and `AI_REVIEWER`, `DATA_REPO`, `REVIEW_BOT_LOGINS`, `REVIEW_MODEL` and `SECOND_REVIEW_CAP_USD` ([The AI reviewer](#the-ai-reviewer)). An app's photo service adds its own bindings and variables ([photos.md](photos.md)).
 
 From now on, edit this copy. Running the `sed` command again starts from `wrangler.toml` and drops every value you set by hand, such as `APPLY_WORKFLOW`, `AI_REVIEWER`, `DATA_REPO` and `REVIEW_BOT_LOGINS`, or a `GH_APP_ID` and `GH_INSTALLATION_ID` kept as plain variables.
 
@@ -209,7 +209,7 @@ The OSM notes workflow (`osm-notes.yml`) is retired, so don't add it. [osm.md](o
    ```
 
 2. If the diff adds a binding or variable to `wrangler.toml`, add it to your deploy copy by hand. Don't regenerate the copy.
-3. Apply any new migrations, then deploy. Code newer than its schema answers `500`: without `0010` and `0011` to every submission, without `0012` to a photo service's progress calls, and without `0013` to every request with an idempotency key, which every SDK from 0.21.0 sends. Without `0014` the AI reviewer still goes on past a case whose model call fails, but never counts its failed runs, so it never leaves that case to a person. Without `0015` a new place report the intake would put on the recent list answers `500`, because the intake keeps the adder's client network with the place. Without `0016`, an intake with `VECTORIZE` holds every item with free text to check as `check_unavailable`.
+3. Apply any new migrations, then deploy. Code newer than its schema answers `500`: without `0010` and `0011` to every submission, without `0012` to a photo service's progress calls, and without `0013` to every request with an idempotency key, which every SDK from 0.21.0 sends. Without `0014` the AI reviewer still goes on past a case whose model call fails, but never counts its failed runs, so it never leaves that case to a person. Without `0015` a new place report the intake would put on the recent list answers `500`, because the intake keeps the adder's client network with the place. Without `0016` the intake still answers a silently dropped item as accepted, but logs a warning and records neither its progress nor its count. Without `0017` the AI reviewer's second stage can't read its spending, so every case the first model is unsure of goes to a person. Without `0018`, an intake with `VECTORIZE` holds every item with free text to check as `check_unavailable`.
 
    ```sh
    cd packages/intake
@@ -363,7 +363,7 @@ With `VECTORIZE`, the intake checks free text for repeats across sources, after 
 
 The text is embedded with Workers AI (`@cf/baai/bge-base-en-v1.5`) and looked up in the index. When texts from at least 3 other sources sent in the last 30 days have a cosine similarity of 0.95 or more, the item is held as `repeated_text`, and the apply sends it to a person. A source is the client network the item came from, or its device when the network is not known, as the apply counts sources, so one network repeating itself through many devices counts once. The constants are in `packages/intake/src/repeated.ts`.
 
-The text's vector is then stored with its source and time, whatever the outcome, so the texts of items the rules hold (an unattested report, say) count too. When the rules hold an item, its text is still checked, and a repeat is held as `repeated_text` in place of the rule's reason. A review, which the apply decides, carries `"intake": { "state": "held", "held_reason": "repeated_text" }` in the inbox, and the apply sends it to a person. Only the vector is stored, never the text. The `text_vectors` table (migration `0016`) keeps each vector's id and time, and the scheduled job deletes vectors older than 30 days, up to 1,000 a minute.
+The text's vector is then stored with its source and time, whatever the outcome, so the texts of items the rules hold (an unattested report, say) count too. When the rules hold an item, its text is still checked, and a repeat is held as `repeated_text` in place of the rule's reason. A review, which the apply decides, carries `"intake": { "state": "held", "held_reason": "repeated_text" }` in the inbox, and the apply sends it to a person. Only the vector is stored, never the text. The `text_vectors` table (migration `0018`) keeps each vector's id and time, and the scheduled job deletes vectors older than 30 days, up to 1,000 a minute.
 
 When the embedding or Vectorize fails or takes longer than 2 seconds, an item with free text to check is held as `check_unavailable`, and an item without is not affected.
 
@@ -393,6 +393,16 @@ It asks the model (`REVIEW_MODEL`, by default `@cf/meta/llama-3.3-70b-instruct-f
 | any other | `leave` |
 
 An answer the model isn't sure of, or one that can't be read, is `leave`. A model call that fails or takes longer than 30 seconds is logged, and the run goes on to the next case. The case is asked about again next run. Its failure counts in the `review_failures` table only when another model call in the same run answered, so an outage counts nothing, or when it was the run's only model call and its last counted failure was at least 30 minutes earlier. Once a case has 3 counted failures it is `leave`, for a person, so a lone case is left only after its failures span at least an hour. The decisions that change a place go to `feedback/review` as one commit at the end of the run, through the Git Data API, with the reviewer (`ai:<model>`) and each reason in the message. A file another writer changed on the branch since the run read it is left out with its decisions, which are decided again next run. Each run adds one comment with a `review-decision` line per decision that landed. A case with a decision is not asked about again. A person can reverse any decision on the PR before merging it.
+
+#### The second stage
+
+With the secret `ANTHROPIC_API_KEY` set, a case the first model is unsure of is asked again of Claude Haiku 5.5 (`claude-haiku-5-5`) on Anthropic's API, with the same instructions, case and allowed decisions. The first model is unsure when it answers `leave`, isn't sure, gives a decision the case doesn't allow or gives an answer that can't be read. A case the first model is sure of is never sent, and neither is a case the rules leave to a person, such as an owner's value or a place with a verified owner. The second model's sure decision is recorded and committed under its own name, `ai:claude-haiku-5-5`. A case both models are unsure of is `leave`, for a person.
+
+```sh
+npx wrangler secret put ANTHROPIC_API_KEY -c wrangler.deploy.toml
+```
+
+Each answer's cost is worked out from the token usage it reports and Claude Haiku 5.5's published prices, and added to the month's total in the `ai_spend` table (migration `0017`), by calendar month in UTC, so each month starts from nothing. `SECOND_REVIEW_CAP_USD`, under `[vars]`, is the monthly cap in US dollars, 20 when it is left out. The second model is asked only while the month's total is under the cap, so the last answer of a month can take it a little over. Once the cap is reached, a case the first model is unsure of is `leave` with `held: "ai_cap"` on its `review-decision` line, and its items' progress says `held` with `held_reason: "ai_cap"`. A second model call that fails or takes longer than 30 seconds, and a month's total that can't be read or written, leave the case for a person too. Without the key the stage is off and those cases go to a person, as before.
 
 ## The apply workflow
 
@@ -488,6 +498,19 @@ Check that `diff` shows only that block, and that the binding list Wrangler prin
 rm wrangler.deploy.toml.bak
 npx wrangler kv namespace delete --namespace-id <RECENT_PLACES namespace id>
 ```
+
+### Silent drops
+
+Some abuse is dropped silently instead of refused: a request from a key with `requires_human_check` that has no token, or whose token Turnstile refuses or made for another site, body or form. The intake answers it exactly as it answers an accepted item from that key, `202` with an id (and, for a report it decides at send time, `held` with `not_attested`, or `unknown_place` for a place it does not know), and writes its progress record as `received`, which never moves on. It stores nothing for the inbox or the recent list, counts nothing as a source, and counts nothing against a daily limit. Text and link refusals stay visible, so an honest traveller can fix what they typed. When Turnstile cannot answer, the intake still answers `503`.
+
+The intake counts silent drops per UTC day and reason (`human_check_required`, `human_check_failed`), with no item content, app, device or network. With `RECENT_LIST` they are rows in `silent_drops`, kept 90 days:
+
+```sh
+npx wrangler d1 execute RECENT_LIST --remote -c wrangler.deploy.toml \
+  --command "SELECT day, reason, count FROM silent_drops ORDER BY day DESC, reason"
+```
+
+Without `RECENT_LIST` they are KV keys `silent:<day>:<reason>` in `RATE_LIMIT`, which expire after 90 days. A steady count of `human_check_required` from a website you run usually means its page sends without calling Turnstile.
 
 ## Abuse
 
