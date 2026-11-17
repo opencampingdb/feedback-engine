@@ -34,6 +34,14 @@ export interface HumanCheckConfig {
 export const HUMAN_CHECK_REPORT_KINDS: readonly ReportKind[] = ["fact", "doubt", "contact", "closed", "name", "kind", "wrong_location"];
 
 /**
+ * Facts only travellers in an app set, never a website: a false value is easy
+ * to send for fun from a public page and hard on the place (nudist), or
+ * frightens people off or puts them at risk (the hazard and warning facts).
+ * A human-check key may send no fact report or doubt of them.
+ */
+export const APP_ONLY_FACTS: readonly string[] = ["nudist", "crocodiles", "sharks", "marine_stingers", "dangerous_when_wet", "over_50s"];
+
+/**
  * Whether a key that requires a human check may send this submission: a
  * report of one of HUMAN_CHECK_REPORT_KINDS, whose fact report sets no contact
  * or address, and no fact that holds free words unless the key allows them.
@@ -42,14 +50,6 @@ export const HUMAN_CHECK_REPORT_KINDS: readonly ReportKind[] = ["fact", "doubt",
  * Every other type, reviews, photos, new places and owner submissions among
  * them, is refused whatever the key's other settings.
  */
-/**
- * Facts only travellers in an app set, never a website: a false value is easy
- * to send for fun from a public page and hard on the place (nudist), or
- * frightens people off or puts them at risk (the hazard and warning facts).
- * A human-check key may send no fact report or doubt of them.
- */
-export const APP_ONLY_FACTS: readonly string[] = ["nudist", "crocodiles", "sharks", "marine_stingers", "dangerous_when_wet", "over_50s"];
-
 export function humanCheckAllows(
   submission: { type: string; report?: { kind: string; fact?: string; first_hand?: string } },
   config: HumanCheckConfig,
