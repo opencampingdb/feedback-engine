@@ -92,6 +92,10 @@ _Avoid_: moderator, admin
 An automatic check on a reported contact that stands in for a person: the place's own website shows it, its domain is not newly registered, or an address is in the place's state.
 _Avoid_: verification (owners verify), link check (the link rules and the malware check)
 
+**Trusted contributor**:
+A signed-in contributor five of whose edits other sources have confirmed, with no upheld doubt about any of their edits since. Their new places list at once, and their contacts go live once they pass the contact checks, without a second source.
+_Avoid_: verified contributor, trusted reviewer (a contributor whose reviews publish)
+
 **Merge**:
 Folding a new place added twice into the place it duplicates, leaving the new place as a tombstone that points at it.
 _Avoid_: dedupe, delete (for a merge)

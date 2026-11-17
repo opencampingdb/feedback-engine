@@ -2,7 +2,7 @@ import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { intakeRecentList, intakeRecentStore, sendBlockList, sendDoubtCases, sendOverruled, settleRecentChanges, settleRecentPlaces, tellIntake } from "../src/recent.js";
+import { intakeRecentList, intakeRecentStore, sendBlockList, sendDoubtCases, sendTrustList, sendOverruled, settleRecentChanges, settleRecentPlaces, tellIntake } from "../src/recent.js";
 import { run } from "../src/run.js";
 import { dumpPlace } from "../src/serialise.js";
 import type { Place } from "../src/types.js";
@@ -59,14 +59,14 @@ describe("settleRecentPlaces", () => {
     await put(join(main, "places", placeOf(5).slice(-2).toLowerCase(), `${placeOf(5)}.json`), { id: placeOf(5) });
 
     const remove = vi.fn(async (_ids: readonly string[]) => {});
-    const ids = await settleRecentPlaces({ inbox, main, store: { remove, block: async () => {} }, now: NOW });
+    const ids = await settleRecentPlaces({ inbox, main, store: { remove, block: async () => {}, trust: async () => {} }, now: NOW });
     expect(ids).toEqual([placeOf(1), placeOf(3), placeOf(9)]);
     expect(remove).toHaveBeenCalledWith([placeOf(1), placeOf(3), placeOf(9)]);
   });
 
   it("calls nothing when there is nothing to remove", async () => {
     const remove = vi.fn(async (_ids: readonly string[]) => {});
-    expect(await settleRecentPlaces({ inbox, main, store: { remove, block: async () => {} }, now: NOW })).toEqual([]);
+    expect(await settleRecentPlaces({ inbox, main, store: { remove, block: async () => {}, trust: async () => {} }, now: NOW })).toEqual([]);
     expect(remove).not.toHaveBeenCalled();
   });
 });
@@ -251,14 +251,38 @@ describe("sendBlockList", () => {
       ],
     });
     const block = vi.fn(async (_contributors: readonly string[]) => {});
-    expect(await sendBlockList({ main, store: { remove: async () => {}, block } })).toEqual(["ctr_00000000000000a1", "ctr_00000000000000b2"]);
+    expect(await sendBlockList({ main, store: { remove: async () => {}, block, trust: async () => {} } })).toEqual(["ctr_00000000000000a1", "ctr_00000000000000b2"]);
     expect(block).toHaveBeenCalledWith(["ctr_00000000000000a1", "ctr_00000000000000b2"]);
   });
 
   it("sends an empty list when nobody is blocked, so anyone unblocked is listed again", async () => {
     const block = vi.fn(async (_contributors: readonly string[]) => {});
-    expect(await sendBlockList({ main, store: { remove: async () => {}, block } })).toEqual([]);
+    expect(await sendBlockList({ main, store: { remove: async () => {}, block, trust: async () => {} } })).toEqual([]);
     expect(block).toHaveBeenCalledWith([]);
+  });
+});
+
+describe("sendTrustList", () => {
+  const edit = (n: number) => ({ feedback: id(n), received: "2026-10-01T00:00:00Z", place: placeOf(1), fact: "toilets", value: true });
+  const record = (contributors: Record<string, unknown>) => put(join(inbox, "trust", "contributors.json"), { contributors });
+
+  it("sends every trusted contributor in the inbox's track records, leaving out blocked ones", async () => {
+    await record({
+      ctr_00000000000000c3: { confirmed: [1, 2, 3, 4, 5].map(edit) },
+      ctr_00000000000000a1: { confirmed: [6, 7, 8, 9, 10].map(edit) },
+      ctr_00000000000000d4: { confirmed: [11, 12, 13, 14].map(edit) },
+      ctr_00000000000000b2: { confirmed: [15, 16, 17, 18, 19].map(edit) },
+    });
+    await put(join(main, "moderation", "blocked_contributors.json"), { contributors: [{ contributor: "ctr_00000000000000b2", added: "2026-10-01", reason: "spam" }] });
+    const trust = vi.fn(async (_contributors: readonly string[]) => {});
+    expect(await sendTrustList({ inbox, main, store: { trust } })).toEqual(["ctr_00000000000000a1", "ctr_00000000000000c3"]);
+    expect(trust).toHaveBeenCalledWith(["ctr_00000000000000a1", "ctr_00000000000000c3"]);
+  });
+
+  it("sends an empty list when no one is trusted, so withdrawn trust reaches the intake", async () => {
+    const trust = vi.fn(async (_contributors: readonly string[]) => {});
+    expect(await sendTrustList({ inbox, main, store: { trust } })).toEqual([]);
+    expect(trust).toHaveBeenCalledWith([]);
   });
 });
 
@@ -269,6 +293,15 @@ describe("intakeRecentStore", () => {
     const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("https://intake.example.org/v1/places/recent/block");
     expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("authorization")).toBe("Bearer secret");
+    expect(JSON.parse(init.body as string)).toEqual({ contributors: ["ctr_00000000000000a1"] });
+  });
+
+  it("posts the whole trusted list to the intake with the token", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ trusted: 1 }), { status: 200 }));
+    await intakeRecentStore("https://intake.example.org/", "secret", fetch).trust(["ctr_00000000000000a1"]);
+    const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://intake.example.org/v1/places/recent/trust");
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer secret");
     expect(JSON.parse(init.body as string)).toEqual({ contributors: ["ctr_00000000000000a1"] });
   });
@@ -398,9 +431,11 @@ describe("tellIntake", () => {
     };
     const block = vi.fn(async (_contributors: readonly string[]) => {});
     const overruled = vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {});
-    const store = { remove: refuse, block, inData: async () => {}, overruled, doubtCases: refuse };
+    const trust = vi.fn(async (_contributors: readonly string[]) => {});
+    const store = { remove: refuse, block, trust, inData: async () => {}, overruled, doubtCases: refuse };
     const told = await tellIntake({ inbox, main, store, notApplied: [id(2)], refused: [id(2)], now: NOW });
     expect(block).toHaveBeenCalled();
+    expect(trust).toHaveBeenCalledWith([]);
     expect(overruled).toHaveBeenCalledWith([id(2)], [id(2)]);
     expect(told.failed).toEqual(["sending the doubt cases"]);
   });
@@ -411,16 +446,16 @@ describe("tellIntake", () => {
       throw new Error("the intake refused: 503");
     };
     const ok = async () => {};
-    const first = await tellIntake({ inbox, main, store: { remove: ok, block: ok, inData: ok, overruled: refuse, doubtCases: ok }, notApplied: [id(2), id(3)], refused: [id(3)], now: NOW });
+    const first = await tellIntake({ inbox, main, store: { remove: ok, block: ok, trust: ok, inData: ok, overruled: refuse, doubtCases: ok }, notApplied: [id(2), id(3)], refused: [id(3)], now: NOW });
     expect(first.failed).toEqual(["sending the items decided other than applied"]);
     expect(first.recorded).toBe(true);
     const overruled = vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {});
-    const second = await tellIntake({ inbox, main, store: { remove: ok, block: ok, inData: ok, overruled, doubtCases: ok }, notApplied: [id(4)], refused: [], now: NOW });
+    const second = await tellIntake({ inbox, main, store: { remove: ok, block: ok, trust: ok, inData: ok, overruled, doubtCases: ok }, notApplied: [id(4)], refused: [], now: NOW });
     expect(overruled).toHaveBeenCalledWith([id(2), id(3), id(4)], [id(3)]);
     expect(second).toEqual({ failed: [], recorded: true });
     // Sent, so a third run sends only its own.
     const third = vi.fn(async (_ids: readonly string[], _refused: readonly string[]) => {});
-    const again = await tellIntake({ inbox, main, store: { remove: ok, block: ok, inData: ok, overruled: third, doubtCases: ok }, notApplied: [id(5)], refused: [], now: NOW });
+    const again = await tellIntake({ inbox, main, store: { remove: ok, block: ok, trust: ok, inData: ok, overruled: third, doubtCases: ok }, notApplied: [id(5)], refused: [], now: NOW });
     expect(third).toHaveBeenCalledWith([id(5)], []);
     expect(again.recorded).toBe(false);
   });

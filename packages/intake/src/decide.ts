@@ -132,22 +132,23 @@ export function decidedHere(item: StoredFeedback): item is ReportItem {
 }
 
 
-/** A contributor's track record, and whether they are on the block list. */
+/** A contributor's track record, whether they are on the block list, and whether the apply trusts them (trust from a track record). */
 export async function contributorRecord(
   db: D1Like,
   contributor: string,
   decided: DecidedInRequest = noneDecided(),
-): Promise<CheckContributor & { blocked: boolean }> {
+): Promise<CheckContributor & { blocked: boolean; trusted: boolean }> {
   const row = await db
     .prepare(
       `SELECT COALESCE((SELECT accepted FROM contributor_records WHERE contributor = ?1), 0) AS accepted,
          COALESCE((SELECT taken_down FROM contributor_records WHERE contributor = ?1), 0) AS taken_down,
-         EXISTS (SELECT 1 FROM blocked_contributors WHERE contributor = ?1) AS blocked`,
+         EXISTS (SELECT 1 FROM blocked_contributors WHERE contributor = ?1) AS blocked,
+         EXISTS (SELECT 1 FROM trusted_contributors WHERE contributor = ?1) AS trusted`,
     )
     .bind(contributor)
-    .first<{ accepted: number; taken_down: number; blocked: number }>();
+    .first<{ accepted: number; taken_down: number; blocked: number; trusted: number }>();
   const accepted = (row?.accepted ?? 0) + (decided.accepted.get(contributor) ?? 0);
-  return { id: contributor, accepted, taken_down: row?.taken_down ?? 0, blocked: row?.blocked === 1 };
+  return { id: contributor, accepted, taken_down: row?.taken_down ?? 0, blocked: row?.blocked === 1, trusted: row?.trusted === 1 };
 }
 
 /** Counts one more accepted item for a contributor. */
@@ -540,8 +541,10 @@ async function decideClearHere({ db, checks, item, submission, contributor, deci
  * description that fails the text checks are left for a person, as the apply
  * leaves them, and the place is listed without them.
  */
-async function decideNewPlace({ checks, item, submission }: DecideInput, record: CheckContributor): Promise<SendTimeDecision> {
-  const listing = newPlaceListing(item);
+async function decideNewPlace({ checks, item, submission }: DecideInput, record: CheckContributor & { trusted: boolean }): Promise<SendTimeDecision> {
+  // A trusted contributor's place is listed without attestation, but only when it was sent signed in and not through a human check.
+  const trusted = record.trusted && item.signed_in === true && item.human_checked === undefined;
+  const listing = newPlaceListing(item, trusted);
   if (listing !== null) return held(listing.reason);
   if (item.location === undefined || item.contributor === undefined || submission.type !== "report") return held("invalid_value");
   const fields = newPlaceFields(item);

@@ -9,6 +9,7 @@ import type { AwaitingClaim, OwnerRecord } from "./owners.js";
 import { pairKey, withDoNotMatch, type DoNotMatchEntry } from "./review.js";
 import { majorRoads, type MajorRoads } from "./roads.js";
 import type { Decision } from "./rules.js";
+import type { TrustRecord } from "./trust.js";
 import { dumpPhotoLine, dumpPlace, dumpReviewLine, photoPath, placePath, reviewPath } from "./serialise.js";
 import type { BlockedList, Photo, PhotoVotes, Place, RemovedPhotos, Review, Source } from "./types.js";
 
@@ -274,6 +275,64 @@ export async function writePhotoVotes(inbox: string, votes: PhotoVotes): Promise
   const path = join(inbox, PHOTO_VOTES_FILE);
   const before = await readFile(path, "utf8").catch(() => undefined);
   if (before === text || (before === undefined && Object.keys(ordered.photos).length === 0)) return false;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, text, "utf8");
+  return true;
+}
+
+/** Where the apply run keeps each signed-in contributor's track record, in the inbox. Private: it ties feedback to contributors. */
+export const TRUST_FILE = "trust/contributors.json";
+
+/** The track records, from the inbox. Empty when there are none yet. */
+export async function readTrust(inbox: string): Promise<TrustRecord> {
+  let text: string;
+  try {
+    text = await readFile(join(inbox, TRUST_FILE), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { contributors: {} };
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // A withdrawal is never lost by guessing: the run stops until a person fixes the file.
+    throw new Error(`${TRUST_FILE} in the inbox is not valid JSON: fix it by hand, from its git history`);
+  }
+  const contributors = (parsed as { contributors?: unknown } | null)?.contributors;
+  if (typeof contributors !== "object" || contributors === null) {
+    throw new Error(`${TRUST_FILE} in the inbox has no "contributors" object: fix it by hand, from its git history`);
+  }
+  const out: TrustRecord = { contributors: {} };
+  for (const [contributor, value] of Object.entries(contributors)) {
+    const entry = value as { confirmed?: unknown; withdrawn?: unknown } | null;
+    const withdrawn = typeof entry?.withdrawn === "string" ? entry.withdrawn : undefined;
+    const confirmed = Array.isArray(entry?.confirmed) ? entry.confirmed.filter(isConfirmedEdit) : [];
+    if (!Array.isArray(entry?.confirmed) || confirmed.length < entry.confirmed.length) console.warn(`skipping malformed confirmed edits for ${contributor} in ${TRUST_FILE}`);
+    out.contributors[contributor] = { confirmed, ...(withdrawn !== undefined ? { withdrawn } : {}) };
+  }
+  return out;
+}
+
+function isConfirmedEdit(value: unknown): value is TrustRecord["contributors"][string]["confirmed"][number] {
+  const v = value as Record<string, unknown> | null;
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    typeof v.feedback === "string" &&
+    typeof v.received === "string" &&
+    typeof v.place === "string" &&
+    (v.fact === undefined || typeof v.fact === "string")
+  );
+}
+
+/** Writes the track records back, contributors in id order. True when the file changed. */
+export async function writeTrust(inbox: string, trust: TrustRecord): Promise<boolean> {
+  const ordered: TrustRecord = { contributors: Object.fromEntries(Object.entries(trust.contributors).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) };
+  const text = `${JSON.stringify(ordered, null, 2)}\n`;
+  const path = join(inbox, TRUST_FILE);
+  const before = await readFile(path, "utf8").catch(() => undefined);
+  if (before === text || (before === undefined && Object.keys(ordered.contributors).length === 0)) return false;
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, text, "utf8");
   return true;

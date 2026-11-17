@@ -185,6 +185,12 @@ export interface ItemInput {
    * attestation goes to a person.
    */
   contactChecks?: readonly CheckOutcome[];
+  /**
+   * The item comes from a trusted contributor (trust.ts): a contact that
+   * passes every contact check goes live without attestation or a second
+   * source.
+   */
+  trusted?: boolean;
 }
 
 /** An open `fact_doubted` case as `decideFact` reads it: the value the fact had, and when doubts took it down. */
@@ -267,7 +273,7 @@ export function unlikelyCharge(value: unknown, current: unknown): string | null 
  * fact waits for a second device to agree (which `applyRules` settles across
  * runs).
  */
-export function decideFact({ item, place, earlier, openCase, contactChecks }: ItemInput): ItemDecision {
+export function decideFact({ item, place, earlier, openCase, contactChecks, trusted = false }: ItemInput): ItemDecision {
   const refusal = factRefusal(item);
   if (refusal !== null) return refusal;
   const fact = item.report.fact as FactName;
@@ -309,7 +315,7 @@ export function decideFact({ item, place, earlier, openCase, contactChecks }: It
     if (failed.length > 0) {
       return { verdict: "held", reason: "contact_check", failed, why: `${fact} failed the contact checks (${failed.map((c) => c.detail).join("; ")}), so the AI reviewer decides` };
     }
-    if (item.attested === undefined) return { verdict: "held", reason: "not_attested", why: `${fact} passed the contact checks, and waits for a second device to agree` };
+    if (item.attested === undefined && !trusted) return { verdict: "held", reason: "not_attested", why: `${fact} passed the contact checks, and waits for a second device to agree` };
   }
   const at = time(item);
   const source = sourceOf(item);
@@ -402,9 +408,12 @@ export function decideContactReport({ item, place, earlier }: ItemInput): ItemDe
   return { verdict: "held", reason: "unconfirmed", why: `a report that the ${fact} is ${reason} is read by a person` };
 }
 
-/** Why a new place is not listed for apps until a reviewer decides, or null when it is. */
-export function newPlaceListing(item: ReportItem): { reason: "not_attested" | "no_contributor" | "text_check"; why: string } | null {
-  if (item.attested === undefined) return { reason: "not_attested", why: "not proven by attestation" };
+/**
+ * Why a new place is not listed for apps until a reviewer decides, or null
+ * when it is. A trusted contributor's place (trust.ts) needs no attestation.
+ */
+export function newPlaceListing(item: ReportItem, trusted = false): { reason: "not_attested" | "no_contributor" | "text_check"; why: string } | null {
+  if (item.attested === undefined && !trusted) return { reason: "not_attested", why: "not proven by attestation" };
   if (item.contributor === undefined) return { reason: "no_contributor", why: "no contributor" };
   const problem = item.report.note === undefined ? null : firstProblem(tidyText(item.report.note));
   return problem === null ? null : { reason: "text_check", why: `note fails the text checks (${problem})` };

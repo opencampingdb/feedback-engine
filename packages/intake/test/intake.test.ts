@@ -128,6 +128,7 @@ describe("intake", () => {
       place: PLACE,
       device: await hashDevice("pepper", DEVICE),
       contributor: await hashContributor("pepper", "example-app", "acct_3f9a8b7c6d5e4f30"),
+      signed_in: true,
       app_version: "1.0.0",
       consent: true,
       review: { stars: 4, text: "Lovely spot. Call [removed] or email [removed]", visited: "2026-10" },

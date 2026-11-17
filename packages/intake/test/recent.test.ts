@@ -714,6 +714,46 @@ describe("recent places", () => {
     });
   });
 
+  describe("trusted list from the apply run", () => {
+    const trust = (contributors: unknown, token = TOKEN) =>
+      new Request("https://intake.example/v1/places/recent/trust", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ contributors }),
+      });
+
+    it("marks an item whose contributor the app sent as signed in, and no other", async () => {
+      await add();
+      await add({ device: otherDevice(1), contributor: null });
+      expect(written()[0]).toMatchObject({ signed_in: true });
+      expect(written()[1]!.contributor).toMatch(/^ctr_/);
+      expect(written()[1]).not.toHaveProperty("signed_in");
+    });
+
+    it("lists a trusted contributor's new place straight away, without attestation", async () => {
+      const unattested = env(store, { requires_attestation: false });
+      const first = await handle(feedback(newPlace({ contributor: "acct_trusted_000000001" })), unattested);
+      expect(await first.json()).toMatchObject({ state: "held", held_reason: "not_attested" });
+      const contributor = written()[0]!.contributor as string;
+      const res = await handle(trust([contributor]), e);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ trusted: 1 });
+      const second = await handle(feedback(newPlace({ device: otherDevice(1), contributor: "acct_trusted_000000001" })), unattested);
+      expect(await second.json()).toMatchObject({ state: "live" });
+      expect((await list()).map((p) => p.contributor)).toEqual([contributor]);
+      // The whole list goes each time: an empty one withdraws the trust.
+      expect((await handle(trust([]), e)).status).toBe(200);
+      const third = await handle(feedback(newPlace({ device: otherDevice(2), contributor: "acct_trusted_000000001" })), unattested);
+      expect(await third.json()).toMatchObject({ state: "held", held_reason: "not_attested" });
+    });
+
+    it("refuses a wrong token and a bad body", async () => {
+      expect((await handle(trust(["ctr_00000000000000a1"], "not-the-token"), e)).status).toBe(401);
+      expect((await handle(trust(["acct_raw_id"]), e)).status).toBe(400);
+      expect((await handle(trust("ctr_00000000000000a1"), e)).status).toBe(400);
+    });
+  });
+
   describe("block list from the apply run", () => {
     const block = (contributors: unknown, token = TOKEN) =>
       new Request("https://intake.example/v1/places/recent/block", {

@@ -98,6 +98,31 @@ describe("run", () => {
     expect(record.facts.phone).toBe("03 5555 0100");
   });
 
+  it("reads each contributor's track record from the inbox, uses it, and writes it back", async () => {
+    const edits = ["tents", "toilets", "showers", "drinking_water", "dump_station"].map((fact, n) => ({
+      feedback: id(90 + n), received: "2026-10-01T00:00:00Z", place: PLACE, fact, value: true,
+    }));
+    await put(join(inbox, "trust", "contributors.json"), { contributors: { [TRUSTED]: { confirmed: edits } } });
+    // An unattested contact from the trusted contributor, which the contact checks pass.
+    const withSite = dumpPlace({ ...place, facts: { ...place.facts, website: "https://lake.example.org" }, fact_sources: { ...place.fact_sources, website: "osm" } });
+    await put(join(data, "places", "za", `${PLACE}.json`), withSite);
+    await pending(1, "2026-10-29T01:00:00Z", "aaaa", { type: "report", contributor: TRUSTED, signed_in: true, report: { kind: "fact", fact: "phone", value: "03 5555 0100" } });
+    await pending(2, "2026-10-29T02:00:00Z", "bbbb", { type: "report", attested: "app_attest", contributor: NEWCOMER, report: { kind: "fact", fact: "power", value: false } });
+    const fetch = async (url: string) => (url === "https://lake.example.org/" ? new Response("<p>03 5555 0100</p>", { status: 200 }) : new Response("", { status: 404 }));
+
+    const summary = await run({ inbox, data, now: NOW, contactChecks: { fetch } });
+
+    expect(summary.counts).toMatchObject({ applied: 2 });
+    expect(summary.inbox_changed).toBe(true);
+    const kept = JSON.parse(await readFile(join(inbox, "trust", "contributors.json"), "utf8")) as { contributors: Record<string, { confirmed: unknown[] }> };
+    expect(kept.contributors[TRUSTED]?.confirmed).toHaveLength(5);
+  });
+
+  it("stops on a trust file that is not JSON", async () => {
+    await put(join(inbox, "trust", "contributors.json"), "{ not json");
+    await expect(run({ inbox, data, now: NOW })).rejects.toThrow(/trust\/contributors.json in the inbox is not valid JSON/);
+  });
+
   it("decides contacts as before when the contact checks are off", async () => {
     await pending(1, "2026-10-29T01:00:00Z", "aaaa", { type: "report", attested: "app_attest", contributor: NEWCOMER, report: { kind: "fact", fact: "phone", value: "03 5555 0100" } });
     const summary = await run({ inbox, data, now: NOW });

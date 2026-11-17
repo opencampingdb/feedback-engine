@@ -10,10 +10,12 @@ import {
   readPending,
   readPhotoVotes,
   readRoads,
+  readTrust,
   refuseMalformed,
   settleAwaiting,
   writeOwners,
   writePhotoVotes,
+  writeTrust,
 } from "./io.js";
 import { checkContacts, type Fetch } from "./contact-checks.js";
 import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
@@ -215,6 +217,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
 
   // Every photo line, when anything in this run is about photos, or any helpful vote counts (its photo's counts age).
   const photoVotes = await readPhotoVotes(options.inbox);
+  const trust = await readTrust(options.inbox);
   const photos = crowd.some((p) => photoTypes.has(p.type)) || Object.keys(photoVotes.photos).length > 0 ? await auto.allPhotos() : [];
   // The place a photo named by a removal is filed under, which may have been merged since.
   const removing = new Set(crowd.map((p) => (p.type === "photo_removal" ? p.photo_removal.photo : undefined)));
@@ -318,6 +321,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     allReviews,
     photos,
     photoVotes,
+    trust,
     ...(options.photoLicence ? { photoLicence: options.photoLicence } : {}),
     ...(options.holdFirstPhoto === false ? { holdFirstPhoto: false } : {}),
     ...(everyPlace ? { everyPlace } : {}),
@@ -475,6 +479,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const ownersWritten = await writeOwners(options.inbox, ownerResult.owners.values());
   const settled = await settleAwaiting(options.inbox, ownerResult.approvals, runAt);
   const votesWritten = await writePhotoVotes(options.inbox, crowdResult.photoVotes);
+  const trustWritten = await writeTrust(options.inbox, crowdResult.trust);
 
   const counts = { applied: 0, refused: 0, needs_review: 0, waiting: 0, awaiting_approval: 0 };
   for (const d of decisions) counts[d.outcome] += 1;
@@ -522,7 +527,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     auto_changed: autoChanged,
     review_changed: reviewChanged,
     owner_claims: ownerClaims,
-    inbox_changed: refusedMalformed + moved + ownersWritten + settled > 0 || votesWritten,
+    inbox_changed: refusedMalformed + moved + ownersWritten + settled > 0 || votesWritten || trustWritten,
     counts,
     auto_files: autoFiles,
     review_files: reviewFiles,

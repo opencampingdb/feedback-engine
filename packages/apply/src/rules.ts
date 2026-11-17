@@ -50,6 +50,7 @@ import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
 import { doNotMatchProblems, newProblems, placeProblems, reviewProblems, textProblems } from "./data-check.js";
 import { dropSource, setSource } from "./sources.js";
+import { emptyTrust, isTrusted, nextTrust, trustedContributors, type Confirmation, type TrustRecord, type UpheldDoubt } from "./trust.js";
 import type { Photo, PhotoVote, PhotoVotes, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
 
 export type { ClosedCase, HeldCase };
@@ -207,6 +208,12 @@ export interface RulesInput {
    * person.
    */
   contactChecks?: ReadonlyMap<string, readonly CheckOutcome[]>;
+  /**
+   * Each signed-in contributor's track record (`trust/contributors.json` in
+   * the inbox, trust.ts). Trust as it stands before the run decides this
+   * run's items. Left out, no one is trusted yet.
+   */
+  trust?: TrustRecord;
 }
 
 /**
@@ -258,6 +265,8 @@ export interface RulesOutput {
   removedPhotos: RemovedPhotos["photos"];
   /** The helpful votes after this run, to write back to the inbox. */
   photoVotes: PhotoVotes;
+  /** The track records after this run, to write back to the inbox. */
+  trust: TrustRecord;
   /** Changes for a person, in the order they arrived. */
   edits: ReviewEdit[];
   changes: Change[];
@@ -527,6 +536,9 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
 
   const pending = [...input.pending].sort(byReceived);
   const blocked = input.blocked ?? new Set<string>();
+  const trusted = trustedContributors(input.trust ?? emptyTrust(), blocked);
+  // Doubts this run upheld, which withdraw trust from whoever sent the value.
+  const upheld: UpheldDoubt[] = [];
   const newPhotos = new Map<string, Photo[]>();
   const photoById = new Map((input.photos ?? []).map((p) => [p.id, p]));
   const removedPhotos: RemovedPhotos["photos"] = [];
@@ -725,6 +737,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
 
   const ordered = pending.map((p) => decisions.get(p.id)!);
   return {
+    trust: trustAfter(),
     decisions: ordered,
     places: changed,
     reviews: newReviews,
@@ -740,6 +753,46 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     removed,
     needsReview: ordered.some((d) => d.outcome === "needs_review"),
   };
+
+  /**
+   * The track records after this run (trust.ts). An edit is a fact report or
+   * a new place, with each contact it carries, applied in an earlier run or
+   * not refused in this one. A fact report this run did not refuse confirms
+   * earlier edits of the same value from other sources, and a check that
+   * found a new place there, sent nearby, confirms the place. Items the
+   * intake held for a check confirm nothing.
+   */
+  function trustAfter(): TrustRecord {
+    const counts = (i: StoredFeedback) => (decisions.has(i.id) ? decisions.get(i.id)!.outcome !== "refused" : wasApplied(i));
+    const items = [...input.history.filter(wasApplied), ...known.filter(counts)];
+    const edits: Parameters<typeof nextTrust>[3][number][] = [];
+    for (const item of items) {
+      if (item.type !== "report") continue;
+      if (item.report.kind === "fact" && typeof item.place === "string") {
+        edits.push({ item, place: item.place, fact: item.report.fact as string, value: item.report.value as FactValue });
+      } else if (isNewPlaceReport(item) && item.location) {
+        const id = newPlaceIdOf(item);
+        edits.push({ item, place: id });
+        for (const [fact, value] of Object.entries(newPlaceFields(item).contacts)) edits.push({ item, place: id, fact, value: value as FactValue });
+      }
+    }
+    const confirmations: Confirmation[] = [];
+    for (const by of [...known, ...newPlaceEvidence]) {
+      if (!decisions.has(by.id) || !counts(by) || heldForCheck(by) !== null) continue;
+      if (by.type === "report" && by.report.kind === "fact") {
+        const fact = by.report.fact as string;
+        for (const e of edits) {
+          if (e.item.id !== by.id && e.place === by.place && e.fact === fact && sameValue(e.value, by.report.value) && inWindow(e.item, time(by))) {
+            confirmations.push({ edit: e.item, place: e.place, fact, value: e.value!, by });
+          }
+        }
+      } else if (by.type === "check" && by.check.still_there && by.check.nearby === true && typeof by.place === "string") {
+        const origin = origins.get(by.place);
+        if (origin !== undefined && inWindow(origin, time(by))) confirmations.push({ edit: origin, place: by.place, by });
+      }
+    }
+    return nextTrust(input.trust ?? emptyTrust(), confirmations, upheld, edits);
+  }
 
   /**
    * Removes every review line from each erasing contributor, on every place,
@@ -1456,7 +1509,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             decide(item, "waiting", `the contact checks have not run on ${fact} yet`);
             continue;
           }
-          const decision = decideFact({ item, place, earlier: evidence, ...(found !== undefined ? { contactChecks: found } : {}) });
+          const decision = decideFact({ item, place, earlier: evidence, trusted: isTrusted(item, trusted), ...(found !== undefined ? { contactChecks: found } : {}) });
           if (found !== undefined && decision.verdict === "held" && decision.reason === "not_attested") agreeable.push(item);
           else settle(item, decision);
         }
@@ -1725,7 +1778,11 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       }
 
       if (standing === "held" && (isPending || before !== "held")) held.push(caseFor("duplicate", isPending ? [origin] : mine));
-      if (standing === "hidden" && (isPending || before !== "hidden")) held.push(caseFor("hidden", isPending ? [origin, ...mine] : mine));
+      if (standing === "hidden" && (isPending || before !== "hidden")) {
+        held.push(caseFor("hidden", isPending ? [origin, ...mine] : mine));
+        const at = [...mine].map((e) => e.received).sort().pop() ?? nowIso;
+        upheld.push({ place: id, at });
+      }
       if (isPending && published && failing.length > 0) held.push(caseFor("contacts", [origin]));
       if (isPending && published && descriptionProblem !== null) held.push(caseFor("description", [origin]));
       if (isPending && firstPlace) held.push(caseFor("first_place", [origin]));
@@ -1744,7 +1801,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   /** Why the intake would not list a new place or did not, or undefined when it would. */
   function whyNotListed(item: ReportItem): string | undefined {
     const check = heldForCheck(item);
-    return newPlaceListing(item)?.why ?? (check === null ? undefined : `held by the intake for ${check}`);
+    return newPlaceListing(item, isTrusted(item, trusted))?.why ?? (check === null ? undefined : `held by the intake for ${check}`);
   }
 
   /** A new place's record as its report describes it, with no standing yet. */
@@ -1883,6 +1940,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       if (decision.verdict === "live" && decision.takedown && check === null) {
         const { value, sources, reasons, feedback } = decision.takedown;
         const reports = earlier.filter((r) => feedback.includes(r.id));
+        upheld.push({ place: placeId, fact, value, at: item.received });
         takeDown(place, fact);
         note(placeId, `${fact} taken down after reports from ${sources} sources within ${WINDOW_DAYS} days (${reasons.join(", ")})`, true, reports);
         for (const r of reports) {
@@ -1982,6 +2040,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       const check = heldForCheck(item);
       if (decision.verdict === "live" && decision.doubtTakedown && check === null) {
         const { value, sources, doubts, confirmations } = decision.doubtTakedown;
+        upheld.push({ place: placeId, fact, value, at: item.received });
         takeDown(place, fact);
         const counted = earlier.filter((r) => doubts.includes(r.id));
         note(placeId, `${fact} taken down after doubts from ${sources} sources within ${WINDOW_DAYS} days`, true, counted);

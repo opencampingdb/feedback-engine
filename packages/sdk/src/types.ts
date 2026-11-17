@@ -734,7 +734,7 @@ export type StoredOwnerSubmission =
   | (Omit<OwnerListingSubmission, "device"> & OwnerStoredFields & { code: string; token_sha256: string })
   | (Omit<OwnerUpdateSubmission, "device" | "token"> & OwnerStoredFields & { token_sha256: string });
 
-type OwnerStoredFields = Omit<StoredFields, "contributor" | "attested" | "human_checked" | "attest_key" | "intake">;
+type OwnerStoredFields = Omit<StoredFields, "contributor" | "signed_in" | "attested" | "human_checked" | "attest_key" | "intake">;
 
 /** Everything that can be in `inbox/pending/`. */
 export type StoredSubmission = StoredFeedback | StoredOwnerSubmission;
@@ -770,6 +770,12 @@ interface StoredFields {
    * Absent when the app key does not require a human check.
    */
   human_checked?: true;
+  /**
+   * The app sent `contributor`: the traveller is signed in to an account, and
+   * the stored id is not a stand-in made from the install or its attested
+   * key. Only such items earn and use trust from a track record. Absent otherwise.
+   */
+  signed_in?: true;
   /** `ak_` and 16 hex characters of the salted App Attest key id: a second signal beside the contributor. */
   attest_key?: string;
   /**

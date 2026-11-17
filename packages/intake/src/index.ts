@@ -68,6 +68,7 @@ import {
   insertEvidence,
   listPlaces,
   MAX_BLOCKED_CONTRIBUTORS,
+  MAX_TRUSTED_CONTRIBUTORS,
   MAX_REMOVE_IDS,
   NEW_PLACE_DAILY_LIMIT,
   parseBbox,
@@ -75,6 +76,7 @@ import {
   markPlacesInData,
   isBlocked,
   setBlockList,
+  setTrustList,
   snapBbox,
   WITHDRAW_WINDOW_MS,
   type D1Like,
@@ -1590,6 +1592,24 @@ export function createHandler(deps: Deps) {
     return json(200, { blocked: new Set(contributors).size }, cors);
   }
 
+  /**
+   * `POST /v1/places/recent/trust`, for the apply run: `{ "contributors": [...] }`,
+   * every contributor trusted from their track record, as hashed contributor
+   * ids, with `authorization: Bearer <PLACES_TOKEN>`. It replaces the list the
+   * intake keeps, so a contributor left off it is no longer trusted.
+   */
+  async function trustRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_TRUSTED_CONTRIBUTORS * 24 + 1024);
+    if (call instanceof Response) return call;
+    const contributors = call.body.contributors;
+    const isHashed = (c: unknown) => typeof c === "string" && /^ctr_[0-9a-f]{16}$/.test(c);
+    if (!Array.isArray(contributors) || contributors.length > MAX_TRUSTED_CONTRIBUTORS || !contributors.every(isHashed)) {
+      return json(400, { error: "invalid", details: [`contributors must be up to ${MAX_TRUSTED_CONTRIBUTORS} hashed contributor ids`] }, cors);
+    }
+    await setTrustList(call.db, contributors as string[]);
+    return json(200, { trusted: new Set(contributors).size }, cors);
+  }
+
   /** The `ids` of a call from the apply run: 1 to 500 feedback ids. A Response when they are not. */
   function feedbackIds(body: Record<string, unknown>, cors: Record<string, string>): string[] | Response {
     const ids = body.ids;
@@ -1848,6 +1868,8 @@ export function createHandler(deps: Deps) {
 
     let proof: Proof | undefined;
     let contributor: string | undefined;
+    // The app sent the contributor, so the traveller is signed in: only such items earn and use trust.
+    let signedIn = false;
     let attestKey: string | undefined;
     let target: StoredPlace | undefined;
     let owner: "mine" | "theirs" | "unknown" | "unreadable" | undefined;
@@ -1868,8 +1890,11 @@ export function createHandler(deps: Deps) {
         }
         proof = result;
       }
-      if (feedback.contributor !== undefined) contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
-      else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
+      if (feedback.contributor !== undefined) {
+        contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
+        // A website's id is the browser's, which anyone can reset, so a human-checked item never counts as signed in.
+        signedIn = !humanChecked;
+      } else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
       if (proof?.keyId) attestKey = `ak_${await saltedHash(env.DEVICE_SALT, `key:${proof.keyId}`)}`;
       // A signed-out install attested by Play Integrity has neither. Its new places still need a
       // contributor to list and block them by, so the hashed install stands in.
@@ -1987,6 +2012,7 @@ export function createHandler(deps: Deps) {
       device,
       ...(origin ? { origin } : {}),
       ...(contributor ? { contributor } : {}),
+      ...(signedIn ? { signed_in: true } : {}),
       ...(proof ? { attested: proof.attested } : {}),
       ...(humanChecked ? { human_checked: true } : {}),
       ...(attestKey ? { attest_key: attestKey } : {}),
@@ -2386,6 +2412,10 @@ export function createHandler(deps: Deps) {
     if (route === "/v1/places/recent/block") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return blockRecent(request, env, cors);
+    }
+    if (route === "/v1/places/recent/trust") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return trustRecent(request, env, cors);
     }
     if (route === "/v1/feedback/progress") {
       if (request.method === "GET") return getProgress(env, url, cors);

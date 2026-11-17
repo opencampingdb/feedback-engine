@@ -37,7 +37,7 @@ when the intake's SafeSearch rating passed it. A photo with no rating still wait
 Open Camping DB data checkout in <dir>, and anything but photos is refused.
 --main and --intake take new places that are now in the data on main, and
 withdrawn ones, out of the intake's recent places store, and send it the
-contributors blocked on main, with the token in PLACES_TOKEN. <dir> is a checkout of the data repository's main branch, so a
+contributors blocked on main and those trusted from their track records, with the token in PLACES_TOKEN. <dir> is a checkout of the data repository's main branch, so a
 place leaves the store only once the PR that writes it is merged. They also
 tell the intake which applied fact and contact reports now have their change
 on main, so it keeps those recent changes for 7 days from this run, and which
