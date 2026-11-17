@@ -115,6 +115,7 @@ import {
 import { verifyPreview } from "@opencampingdb/apply/preview";
 import { IDEMPOTENCY_HEADER, isIdempotencyKey, keepAnswer, keptAnswers, pruneRequestKeys, requestKey } from "./idempotency.js";
 import { countSilentDrops, pruneSilentDrops, type SilentReason } from "./silent.js";
+import { createReputation, refreshBlocklist, reputationConfig, type Standing } from "./reputation.js";
 import {
   appVersionAtLeast,
   minimumAppVersion,
@@ -160,7 +161,8 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   /**
    * The daily counters of an intake without RECENT_LIST. With RECENT_LIST they
-   * are kept in D1 (`rate_counts`) and this namespace is not used.
+   * are kept in D1 (`rate_counts`). The network blocklist (reputation.ts) is
+   * kept here either way.
    */
   RATE_LIMIT: KVLike;
   /** Registered App Attest keys and open challenges. Needed when an app key has `ios`. */
@@ -268,6 +270,16 @@ export interface Env {
    * (src/repeated.ts), with AI and RECENT_LIST. Off without it.
    */
   VECTORIZE?: VectorizeLike;
+  /**
+   * Network reputation (reputation.ts): the content URL of a CrowdSec
+   * blocklist integration in plain text format,
+   * `https://admin.api.crowdsec.net/v1/integrations/<id>/content`. The
+   * scheduled job fetches it once a day into RATE_LIMIT. Off without
+   * CROWDSEC_BLOCKLIST_CREDENTIALS.
+   */
+  CROWDSEC_BLOCKLIST_URL?: string;
+  /** Secret. The integration's Basic auth credentials, as `username:password`. Off without CROWDSEC_BLOCKLIST_URL. */
+  CROWDSEC_BLOCKLIST_CREDENTIALS?: string;
   /** Workers AI, for the Llama Guard check on free text and the AI reviewer. Without it, free text from a contributor without a track record is held. */
   AI?: AiLike;
   /**
@@ -936,8 +948,9 @@ export function createFlush(deps: Pick<Deps, "fetch" | "now">) {
 /**
  * The scheduled job, run every minute: writes the queued items to the inbox,
  * starts the inbox's apply workflow when it is due (see runs.ts), then runs
- * the AI reviewer and its Overture candidate check when they are on and due
- * (see reviewer.ts and overture-reviewer.ts). A failed start,
+ * fetches the network blocklist when it is a day old (reputation.ts), then
+ * runs the AI reviewer and its Overture candidate check when they are on and
+ * due (see reviewer.ts and overture-reviewer.ts). A failed start,
  * such as the GitHub App missing `actions: write`, is logged and tried again
  * on the next tick. Returns what became of the apply.
  */
@@ -973,6 +986,7 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
           )
         : "off";
     await timed(env);
+    await refreshBlocklist(deps, env);
     await review(env);
     await reviewOverture(env);
     return outcome;
@@ -1017,6 +1031,13 @@ export function createHandler(deps: Deps) {
   const integrity = new PlayIntegrity(deps.fetch, deps.now);
   const safeSearch = new SafeSearch(deps.fetch, deps.now);
   const random = deps.randomBytes ?? ((n: number) => crypto.getRandomValues(new Uint8Array(n)));
+  const reputation = createReputation(deps.now);
+
+  /** Whether the client's address is on the network blocklist, or `off` when the intake has none. Never asks an outside service. */
+  async function standingOf(request: Request, env: Env): Promise<Standing | "off"> {
+    if (!reputationConfig(env)) return "off";
+    return reputation(env.RATE_LIMIT, request.headers.get("cf-connecting-ip") ?? "");
+  }
 
   /** Checks the human check header against the exact body text. */
   async function humanCheck(request: Request, app: AppEntry, body: string): Promise<HumanCheckResult> {
@@ -1785,7 +1806,9 @@ export function createHandler(deps: Deps) {
    * attestation is checked once the item is read. A batch has `batch.proof`,
    * its attestation already checked over the whole body.
    */
-  type IntakeHow = { text: string } | { batch: { proof: Proof | undefined; humanChecked: boolean; dropped: SilentReason | undefined } };
+  type IntakeHow =
+    | { text: string }
+    | { batch: { proof: Proof | undefined; humanChecked: boolean; dropped: SilentReason | undefined; standing: Standing | "off" } };
   type Intake = IntakeShared & IntakeHow;
 
   async function newIntake(request: Request, env: Env, app: AppEntry, nowMs: number, how: IntakeHow & { nextId: () => string }): Promise<Intake> {
@@ -1835,9 +1858,14 @@ export function createHandler(deps: Deps) {
     if (app.requires_human_check && !humanCheckAllows(submission, app.human_check!)) {
       return { status: 403, body: { error: "type_not_allowed_for_app_key" } };
     }
+    // A network on the blocklist: an item from a key without attestation is dropped silently, before
+    // its human check is sent to Turnstile. An attested item is held (below), never dropped, as a
+    // shared carrier address may be listed for someone else's abuse.
+    const standing = "batch" in intake ? intake.batch.standing : isOwner ? "off" : await standingOf(request, env);
     let humanChecked = false;
     let dropped: SilentReason | undefined;
     if ("batch" in intake) ({ humanChecked, dropped } = intake.batch);
+    else if (standing === "listed" && !app.requires_attestation) dropped = "network_reputation";
     else if (app.requires_human_check) {
       const outcome = humanCheckOutcome(await humanCheck(request, app, intake.text));
       if ("status" in outcome) return outcome;
@@ -2029,9 +2057,16 @@ export function createHandler(deps: Deps) {
             ))
         : undefined;
 
-    // Decided before the item is stored, and recorded in the same D1 batch that queues it.
+    // Decided before the item is stored, and recorded in the same D1 batch that queues it. An
+    // attested item from a network on the blocklist is held as network_reputation, and any item
+    // whose network the intake could not look up is held as check_unavailable: the apply sends
+    // both to the review PR, never into the data on their own.
     let decision: SendTimeDecision | undefined;
-    if (env.RECENT_LIST && decidedHere(stored)) {
+    const reputationHold = standing === "listed" ? "network_reputation" : standing === "unknown" ? "check_unavailable" : undefined;
+    if (reputationHold && decidedHere(stored)) {
+      decision = { answer: { state: "held", held_reason: reputationHold }, writes: () => [] };
+      stored.intake = decision.answer;
+    } else if (env.RECENT_LIST && decidedHere(stored)) {
       const db = env.RECENT_LIST;
       // Without a contributor, the hashed install stands in for one, as it does for a signed-out install's new places.
       const who = contributor ?? `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
@@ -2169,7 +2204,8 @@ export function createHandler(deps: Deps) {
     let state: ItemState | undefined;
     if (db && decidedHere({ ...submission, id, received: intake.received } as unknown as StoredFeedback)) {
       const known = place !== null && (await getIndexedPlace(db, place).catch(() => undefined)) !== undefined;
-      state = { state: "held", held_reason: known ? "not_attested" : "unknown_place" };
+      const commons = submission.type === "report" && submission.report.kind === "commons_mismatch";
+      state = { state: "held", held_reason: commons ? "commons_report" : known ? "not_attested" : "unknown_place" };
     }
     return {
       dropped: reason,
@@ -2256,9 +2292,13 @@ export function createHandler(deps: Deps) {
       if ("error" in result) return refusedOrUnavailable(result, cors);
       proof = result;
     }
+    // Looked up once for the whole batch. A listed network's batch from a key without attestation is
+    // dropped silently, before its human check is sent to Turnstile.
+    const standing = await standingOf(request, env);
     let humanChecked = false;
     let dropped: SilentReason | undefined;
-    if (app.requires_human_check) {
+    if (standing === "listed" && !proof) dropped = "network_reputation";
+    else if (app.requires_human_check) {
       const outcome = humanCheckOutcome(await humanCheck(request, app, text));
       if ("status" in outcome) return json(outcome.status, outcome.body, { ...cors, ...outcome.headers });
       if ("dropped" in outcome) dropped = outcome.dropped;
@@ -2267,7 +2307,7 @@ export function createHandler(deps: Deps) {
     const nowMs = deps.now();
     // Items sent before, whose answers were lost, are answered as they were the first time.
     const kept = keys ? await keptAnswers(env.RECENT_LIST, app.app, keys as string[]) : new Map<string, never>();
-    const intake = await newIntake(request, env, app, nowMs, { batch: { proof, humanChecked, dropped }, nextId: orderedUlids(nowMs, deps.randomBytes) });
+    const intake = await newIntake(request, env, app, nowMs, { batch: { proof, humanChecked, dropped, standing }, nextId: orderedUlids(nowMs, deps.randomBytes) });
     // Each item is measured as sent, as POST /v1/feedback measures its body, so an item is too
     // large in a batch exactly when it would be alone.
     const sent = arrayElementTexts(text, "items");

@@ -960,6 +960,8 @@ export type AnswerOutcome =
  * - `contact_check`: a contact the automatic contact checks have not passed yet. At send time an
  *   attested contact goes live only when the place's own website shows it; otherwise the apply run
  *   checks it in full, and one that fails a check goes to the AI reviewer.
+ * - `network_reputation`: an attested report from a network on the intake's blocklist, which a
+ *   reviewer reads before it goes live.
  */
 export const HELD_REASONS = [
   "not_attested",
@@ -986,6 +988,7 @@ export const HELD_REASONS = [
   "ai_cap",
   "repeated_text",
   "contact_check",
+  "network_reputation",
 ] as const;
 
 /** Why the intake held an item at send time. */

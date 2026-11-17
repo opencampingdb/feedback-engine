@@ -23,8 +23,12 @@ A Cloudflare Turnstile token showing that a person filled in the form that sent 
 _Avoid_: attestation, captcha, proof of a genuine app
 
 **Silent drop**:
-An item the intake answers exactly as it answers an accepted one, with an id and progress, but never stores, so whoever sent it cannot tell which check it failed. Used for abuse that cannot be traced to a genuine install, such as a missing or failed human check. Only a count per day and reason is kept.
+An item the intake answers exactly as it answers an accepted one, with an id and progress, but never stores, so whoever sent it cannot tell which check it failed. Used for abuse that cannot be traced to a genuine install, such as a missing or failed human check, or a request without attestation from a network on the blocklist. Only a count per day and reason is kept.
 _Avoid_: refusal (which always gives its reason), shadow ban
+
+**Network reputation**:
+Whether a request's address is on a public IP blocklist the intake fetches once a day and keeps itself. A listed address drops an item without attestation silently, and holds an attested one for a reviewer.
+_Avoid_: IP ban, firewall
 
 ## Between releases
 

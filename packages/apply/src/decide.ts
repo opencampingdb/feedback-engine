@@ -96,7 +96,7 @@ export type HeldReason =
   | "contact_check";
 
 /** The reasons the intake holds an item for one of its checks rather than for these rules. */
-export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "repeated_text", "check_unavailable"];
+export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "repeated_text", "check_unavailable", "network_reputation"];
 
 /** Contact facts that are links, which URLhaus checks at the intake. */
 export const LINK_FACTS: readonly ContactFactName[] = ["website", "facebook", "instagram", "tiktok", "x"];

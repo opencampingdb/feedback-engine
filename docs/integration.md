@@ -736,6 +736,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `ai_cap` | Not given at send time. The AI reviewer was unsure, and its second model's monthly spending cap was reached, so a person decides. It shows on the item's progress. |
 | `repeated_text` | Its free text is nearly the same as text three other sources sent in the last 30 days, so a person reads it. |
 | `contact_check` | A contact the automatic contact checks have not passed yet: the place's website does not show it, or its check could not finish in time at send time, or it is a website or address, which only the apply run checks. The apply run's full check decides it, and one that fails goes to the AI reviewer. |
+| `network_reputation` | The report came from an attested install on a network the intake's blocklist names, so a reviewer reads it. The same report from an install that is not attested, or from a website, is dropped silently. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.
 

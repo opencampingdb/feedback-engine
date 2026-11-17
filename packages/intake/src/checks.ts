@@ -54,7 +54,7 @@ export const URLHAUS_HOST_ENDPOINT = "https://urlhaus-api.abuse.ch/v1/host/";
 export const GUARD_MODEL = "@cf/meta/llama-guard-3-8b";
 
 /** Why the checks held an item. */
-export type HeldReason = "text_check" | "link_check" | "daily_cap" | "repeated_text" | "ai_check" | "check_unavailable";
+export type HeldReason = "text_check" | "link_check" | "daily_cap" | "repeated_text" | "ai_check" | "check_unavailable" | "network_reputation";
 
 /** The live change an item that passed took from each of its daily caps, to give back if it is not recorded after all. */
 export interface LiveSlot {
