@@ -20,10 +20,11 @@ const basePlace: Place = {
   group: "overnight",
   location: { lat: -36.85, lon: 144.55 },
   osm: { type: "node", id: 123456, version: 7 },
-  facts: { power: false, website: "https://www.example.org/" },
+  // The place has values for the facts reported, so each report changes one and needs a second source.
+  facts: { power: false, showers: false, toilets: false, website: "https://www.example.org/" },
   status: "open",
   rating: null,
-  fact_sources: { power: "osm", website: "osm" },
+  fact_sources: { power: "osm", showers: "osm", toilets: "osm", website: "osm" },
   updated: "2026-06-01T00:00:00Z",
 };
 
@@ -122,7 +123,7 @@ describe("source links in the apply run", () => {
     const { transport } = network({ [GOV]: page("There are no toilets at this camp. Bring a portable toilet.") });
     const summary = await run({ inbox, data, now: NOW, sourceTransport: transport });
     expect(outcomeOf(summary, 1)).toMatchObject({ outcome: "waiting" });
-    expect((await placeNow()).facts.toilets).toBeUndefined();
+    expect((await placeNow()).facts.toilets).toBe(false);
   });
 
   it("never confirms when the page cannot be fetched", async () => {
@@ -140,7 +141,7 @@ describe("source links in the apply run", () => {
       const summary = await run({ inbox, data, now: NOW, sourceTransport: transport });
       expect(outcomeOf(summary, 1)?.outcome).toBe("waiting");
     }
-    expect((await placeNow()).facts.toilets).toBeUndefined();
+    expect((await placeNow()).facts.toilets).toBe(false);
   });
 
   it("never confirms from a page on another host, nor one a redirect takes elsewhere", async () => {
@@ -182,10 +183,16 @@ describe("source links in the apply run", () => {
 });
 
 describe("what a page must say for a value to appear on it", () => {
+  /** Another value for each fact reported, so the report changes the place's value rather than filling a gap. */
+  const other = (fact: string, value: unknown): unknown =>
+    typeof value === "boolean" ? !value : ({ pets: value === "no" ? "yes" : "no", fee: true, toilet_type: "flush", access: "2wd", max_stay: "1d" } as Record<string, unknown>)[fact];
+
   /** Whether one report of `fact` = `value`, linked to a page holding `text`, goes in. */
   async function confirms(fact: string, value: unknown, text: string): Promise<boolean> {
     await rm(inbox, { recursive: true, force: true });
-    await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace(basePlace));
+    const before = other(fact, value);
+    const record: Place = before === undefined ? basePlace : { ...basePlace, facts: { ...basePlace.facts, [fact]: before }, fact_sources: { ...basePlace.fact_sources, [fact]: "osm" } };
+    await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace(record));
     await report(1, "aaaa", fact, value, GOV);
     const { transport } = network({ [GOV]: page(text) });
     const summary = await run({ inbox, data, now: NOW, sourceTransport: transport });

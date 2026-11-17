@@ -116,7 +116,7 @@ const NAME_INSTRUCTIONS =
 /** The longest name taken as a place name. */
 const MAX_NAME_CHARS = 120;
 /** Website text that speaks to a reviewer or a model. */
-const SITE_INSTRUCTIONS =
+export const SITE_INSTRUCTIONS =
   /\b(?:ignore|disregard|forget)\b[^.]{0,40}\b(?:previous|prior|above|earlier|all)\b[^.]{0,20}\b(?:instructions?|prompts?|rules)\b|\bsystem prompt\b|\byou are an? (?:ai|assistant|language model|reviewer|model)\b|\b(?:ai|automated) (?:reviewer|assistant|model)\b|\b(?:approve|reject) this (?:place|candidate|listing|site)\b|"decision"\s*:/i;
 
 /** The rule that settles a candidate without asking the model, or null. */

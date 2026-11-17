@@ -168,6 +168,10 @@ await feedback.reportFacts({
 
 A `note` is free text up to 2,000 characters on any report. It is kept for reviewers.
 
+**Gap fills.** A fact report without attestation (from a website after a [human check](#websites-a-human-check), or an app key without attestation) needs no second source when it fills a gap: the place has no value for the fact, the fact has a fixed set of values (not a contact, the address, or a fact that can hold free words, `FREE_TEXT_FACTS`), the report passes every check another report gets, and no other source reported a different value within 90 days, before or after it. The intake still answers `held` (`not_attested`), and the next apply run puts the value in the data, with the reason "filled a gap: the place had no value". Doubts take a gap fill down as they take down any traveller's value, and a doubt from another source that arrives before the apply run puts it in counts against the report instead: it waits, and goes to the AI reviewer. A change to a value the place has still needs a second source. One client network fills at most 20 gaps a UTC day (`GAP_FILL_DAILY_LIMIT` in `packages/apply/src/rules.ts`): past that, its reports wait for a second source.
+
+**Waiting for a second source.** A report without attestation that still waits for a second source after 7 days goes to the AI reviewer, which confirms the value (the next apply run puts it in the data), dismisses it (the report is refused) or leaves it for a person. A report the AI reviewer does not decide is refused 90 days after it arrived, as before.
+
 **Closures.** One closed report marks the place `reported_closed`, and a closure from a second device within 90 days closes it. Evidence of closure counts as that second source: OSM newly tagging the place's object `disused:` or `abandoned:`, or the domain of the place's website not found in DNS (NXDOMAIN) on two checks at least a day apart. A website that answers with an HTTP error, or a DNS lookup that times out or fails, never counts. Evidence never closes a place no traveller reported closed, nor one whose owner manages its status, and the apply's notes name the evidence it used.
 
 ### Facts a report may name
@@ -319,7 +323,7 @@ await feedback.report({ place, report: { kind: "contact", fact: "website", reaso
 
 A traveller who sees a fact is still right confirms it with a `fact` report of the same value, so a "Still right? Yes" button needs no new kind. A `doubt` report says one fact on a place is wrong when the traveller doesn't know the right value: `fact` is any reportable fact except the contacts and the address (`isDoubtFact`), which use the `contact` kind. It needs the place, carries no `value`, and may carry a `note`, which is kept for reviewers and never published.
 
-Each source counts once, however many times it sends. One doubt goes to a reviewer and the fact stays. Doubts from two different sources within 90 days, at least one attested and more than the sources confirming the value, take the fact off the place at once: it comes through the recent list as a change with `value: null`, and a reviewer gets the case. The fact comes back when two new travellers confirm it (one of them attested, and more than any newer doubts), and is replaced when someone reports a new value. A fact from OSM or the owner is never taken down. A doubt about a fact the place doesn't have is answered `held` (`no_value`) and refused at the next apply run. Doubts sent before a fact was last set are about an older value and don't count.
+Each source counts once, however many times it sends. One doubt goes to a reviewer and the fact stays. Doubts from two different sources within 90 days, at least one attested and more than the sources confirming the value, take the fact off the place at once: it comes through the recent list as a change with `value: null`, and a reviewer gets the case. The fact comes back when two new travellers confirm it (one of them attested, and more than any newer doubts), and is replaced when someone reports a new value. A fact from OSM or the owner is never taken down. A doubt about a fact the place doesn't have is answered `held` (`no_value`) and refused at the next apply run, unless another source's report of a value for it waits for a second source: then it is answered `held` (`waiting_value`) and counts against that report ([Values waiting for confirmation](#the-recent-list)). Doubts sent before a fact was last set are about an older value and don't count.
 
 ```ts
 await feedback.report({ place, report: { kind: "fact", fact: "toilets", value: true }, consent: true }); // still right
@@ -480,10 +484,11 @@ It needs no app key. `bbox` is optional: west, south, east and north in degrees.
   "description": "Flat sites beside the creek.", "fee": false, "contacts": {"phone": "+61 3 5555 0100"}}],
  "changes": [{"place": "ocdb_01JB...", "fact": "toilets", "value": true, "accepted": "2026-11-03T09:00:00Z", "in_data_at": null},
   {"place": "ocdb_01JB...", "fact": "website", "value": null, "accepted": "2026-11-03T09:05:00Z", "in_data_at": "2026-11-03T10:00:00Z"}],
+ "unconfirmed_values": [{"place": "ocdb_01JB...", "fact": "drinking_water", "value": true, "received": "2026-11-03T08:40:00Z", "sources": 1}],
  "release": {"data_version": "20261107T110000Z-abc1234", "published": "2026-11-07T11:04:00Z", "layout_version": 2}}
 ```
 
-The SDK types the answer as `RecentList`, with `RecentPlace`, `RecentChange` and `RecentRelease`.
+The SDK types the answer as `RecentList`, with `RecentPlace`, `RecentChange`, `UnconfirmedValue` and `RecentRelease`.
 
 **New places on the list.** A place is listed when its report came from an attested install (an app key with `requires_attestation`) or from a trusted contributor ([Trust from a track record](#trust-from-a-track-record)), and its note, with contact details stripped, passes `textProblem`. Other new places are decided through the apply run. One that only a lack of attestation keeps off the list, with a contributor, whose location is plausible, that is not a possible duplicate and whose name, note, description and contacts pass the checks, goes to the AI reviewer, which may publish it, merge it into a place nearby that it duplicates, or take it down. The rest, and any the reviewer is unsure of, reach a person. `kind` is the code the traveller picked, or `null`. `name` is the report's `name` after `tidyName`, or `null`. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive: only `still_there` checks with `nearby: true` from two sources other than the adder count towards `confirmed` (a check from the adder's device, or from the client network the place was added from, never does), and reports from two other devices on two different client networks take the place off the list. `description`, `fee` and `contacts` (the contact facts and the `address`) are there when the report carried them and they passed the checks. The list never carries the note or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. A blocked contributor's new places leave the list.
 
@@ -514,6 +519,26 @@ import { withRecentChanges, type RecentList } from "@opencampingdb/feedback";
 const recent = (await (await fetch(`${endpoint}/v1/places/recent?bbox=${bbox}`)).json()) as RecentList;
 const shown = places.map((p) => withRecentChanges(p, recent.changes ?? [], dataVersion));
 ```
+
+**Values waiting for confirmation.** `unconfirmed_values` holds the values a traveller reported that wait for a second source before they change the place: a fact report from a website after a [human check](#websites-a-human-check), or from an app key without attestation, that the intake answered `held` with `not_attested` or `source_link`. There is one entry for each place, fact and value: `value` is the reported value, `received` when the intake received the earliest report of it, and `sources` how many independent sources (client networks, or devices without one) reported it. The list never says who sent it, from which device or network, or any note. Only facts with a fixed set of values are listed: never a contact, the address, or a fact that can hold free words (`FREE_TEXT_FACTS`, such as `operator` or `charge`). An entry leaves the list when the value goes live at the intake, when the change the apply run made from the report reaches the data's main branch, when the apply run refuses the report, or 90 days after it was received, when the rules stop counting it. A report the apply sends to a reviewer stays listed while it waits. Reports from a blocked contributor leave the list.
+
+To ask travellers, take the place as you show it (with `withRecentChanges` laid over) and call `unconfirmedValuesFor(place, recent.unconfirmed_values ?? [])`, which gives that place's entries less any value it already has. Show each one beside the fact, for example "A traveller reported drinking water: yes. Not confirmed yet. Is it right?", with two answers:
+
+- **Yes** sends an ordinary `fact` report of the same value. It is the second source: attested, it goes live at once, and without attestation the apply run puts the value live once two sources agree.
+- **No** sends a `doubt` about the fact. While a report of a value waits for a second source, a doubt about that fact from another source counts against the report, not against the place's value: the intake answers it `held` (`waiting_value`), one such doubt sends the report to the AI reviewer at the next apply run, without waiting 7 days, and doubts from two sources on different client networks refuse it there, so the value leaves the list. They never count towards taking the place's own value down. A doubt about a fact with no waiting report works as before.
+
+```ts
+import { unconfirmedValuesFor, withRecentChanges, type RecentList } from "@opencampingdb/feedback";
+
+const shown = withRecentChanges(place, recent.changes ?? [], dataVersion);
+for (const waiting of unconfirmedValuesFor(shown, recent.unconfirmed_values ?? [])) {
+  const answer = await askTraveller(waiting.fact, waiting.value); // your own "Is it right?" prompt
+  if (answer === "yes") await feedback.report({ place: shown.id, report: { kind: "fact", fact: waiting.fact, value: waiting.value }, consent: true });
+  if (answer === "no") await feedback.report({ place: shown.id, report: { kind: "doubt", fact: waiting.fact }, consent: true });
+}
+```
+
+Ask a traveller once for each entry, and not about a value their own install reported: its report already counts as one source, and a second report from the same source counts once.
 
 **The newest release.** `release` names the newest data release once the release workflow has told the intake of it. When its `data_version` differs from the phone's, pass it to the release updater (section 10), at most once an hour. It is absent until the intake has been told of a release.
 
@@ -684,7 +709,7 @@ export const feedback = createFeedbackClient({
 
 If `humanCheck` throws, the item stays queued and is tried on a later send or flush, which may be on a later visit. Call `flush()` once the widget is ready on each page, so waiting items go. A request without a token, or with a token Turnstile refuses or that was made for another site, body or form, is dropped silently: the intake answers it exactly as it answers an accepted item (`202` with an id, or each item of a batch so), stores nothing, and its progress reads `received` and never moves on. So a bot learns nothing from the answer, and neither does your page: a misconfigured widget looks like it works. Test your set-up once by sending a report and checking that it reaches the review PR, or ask the intake's maintainer to check its silent drop counts ([self-hosting.md](self-hosting.md#silent-drops)). Make a fresh token for every call, since a token sent twice fails and its item is lost. `503` means Turnstile could not be reached, and the item stays queued.
 
-A human check shows that a person filled in the form, not that the device or app is genuine. So a website key may send only fact reports of fixed-value facts, doubts, contact reports (a phone, website or address is wrong) and closed, name, kind and wrong_location reports, and the intake weighs them as unattested: a fact waits for a second source on another network, and a closed report leaves the place open until a second source agrees. Reviews, photos, new places, contacts and addresses, and facts that hold free words (opening hours, the operator and charges) answer `403 type_not_allowed_for_app_key`.
+A human check shows that a person filled in the form, not that the device or app is genuine. So a website key may send only fact reports of fixed-value facts, doubts, contact reports (a phone, website or address is wrong) and closed, name, kind and wrong_location reports, and the intake weighs them as unattested: a fact the place has no value for goes in at the next apply run ([gap fills](#reports)), and any other fact waits for a second source on another network, and is listed on the recent list in `unconfirmed_values` meanwhile, so apps can ask their travellers to confirm it ([The recent list](#the-recent-list)), and a closed report leaves the place open until a second source agrees. Reviews, photos, new places, contacts and addresses, and facts that hold free words (opening hours, the operator and charges) answer `403 type_not_allowed_for_app_key`.
 
 A website report may be first-hand with `first_hand: "says_so"`, when the traveller answered yes to the question in "First-hand reports". A website has no device location to go on, so `seen_nearby` from a website key answers `403 type_not_allowed_for_app_key`, before the intake checks the token.
 
@@ -738,7 +763,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 
 | `heldReason` | Why |
 | --- | --- |
-| `not_attested` | The report was not from an attested install: a person reads a contact, and a second device has to agree on any other fact. A new place is not listed, and the AI reviewer decides it once it passes the location, duplicate and text checks: a person sees it only when the reviewer is unsure. On a doubt, or a confirmation of a fact doubts took down, none of the reports counted was attested. |
+| `not_attested` | The report was not from an attested install: a person reads a contact, a fact the place has no value for goes in at the next apply run as a gap fill, and a second device has to agree on any other change. A new place is not listed, and the AI reviewer decides it once it passes the location, duplicate and text checks: a person sees it only when the reviewer is unsure. On a doubt, or a confirmation of a fact doubts took down, none of the reports counted was attested. |
 | `owner_value` | The place's owner set the value. |
 | `disagreement` | Another source reported a different value within 90 days. On a doubt, as many sources confirm the value as doubt it, or more. |
 | `link_check` | A link failed `contactProblem` or the malware check. |
@@ -766,6 +791,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `source_link` | A fact report without attestation that carries a source link. The apply run reads the page: the value goes into the data when the page shows it, or when a second source agrees. |
 | `disputed` | The place is frozen: three or more sources sent conflicting values for one of its facts within 24 hours. No fact report, doubt, clear or contact report changes the place until a reviewer settles the value, or for 14 days when no one does, and then reports are decided as usual. |
 | `implausible_location` | A new place the map data puts in the sea or a lake, on a major road's carriageway or inside a building footprint. It is not listed, and the AI reviewer checks it: a person sees it only when the reviewer is unsure. A remote place is never held for being remote. |
+| `waiting_value` | A doubt about a fact while another source's report of a new value for it waits for a second source (an [unconfirmed value](#the-recent-list)). It counts against that report: one sends it to the AI reviewer, and two from sources on different client networks refuse it. The place's fact stays. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.
 
@@ -1176,8 +1202,12 @@ const feedback = createFeedbackClient({
 
 ## What changed by version
 
-What an app moving to 0.39.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
+What an app moving to 0.40.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
 
+- **0.40.0.** Gap fills and unconfirmed values:
+  - A fact report without attestation (from a website after a human check, or an app key without attestation) of a fixed-value fact the place has no value for now goes into the data at the next apply run, without a second source ([gap fills](#reports)). The intake still answers `held` (`not_attested`). Any other change still waits for a second source, and after 7 days goes to the AI reviewer.
+  - `RecentList` gains `unconfirmed_values`, the values waiting for a second source, typed `UnconfirmedValue`, and `unconfirmedValuesFor(place, unconfirmedValues)` gives one place's entries less any value it already has ([Values waiting for confirmation](#the-recent-list)). Ask travellers to confirm them with an ordinary `fact` report (Yes) or a `doubt` (No). An older intake leaves `unconfirmed_values` out.
+  - `HELD_REASONS` gains `waiting_value`: a doubt about a fact while another source's report of a new value for it waits. It counts against that report, and the place's fact stays.
 - **0.39.0.** Source links, sign-in and new held reasons:
   - A `fact` report may carry `source`, a link to a page that shows the value, on a `.gov.au` host or the host of the place's own website ([Source links](#source-links)), and `reportFacts` takes it for the whole edit. `MAX_SOURCE_LENGTH` (500) and `sourceLinkProblem(source, website)` are exported, so an app can check a link before sending. The intake refuses a link on another host with `400 source_not_allowed`. `websiteHost(url)` gives a website's host as the rule compares it: lower case, without final dots or a leading `www.`.
   - Stored items gain `signed_in: true` when the app sent `contributor`. Only such items earn and use [trust from a track record](#trust-from-a-track-record), so send `contributor` with every report from a signed-in traveller.

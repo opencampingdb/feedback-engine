@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FEE_RETIRED, type StoredFeedback } from "@opencampingdb/feedback";
-import { applyEdit, applyHeldReview, applyRules, ratingOf, REPORTS_TO_HIDE, reviewIdOf, type ClosureEvidence, type HeldCase, type RulesInput } from "../src/rules.js";
+import { applyEdit, applyHeldReview, applyRules, GAP_FILL_DAILY_LIMIT, ratingOf, REPORTS_TO_HIDE, reviewIdOf, type ClosureEvidence, type HeldCase, type RulesInput } from "../src/rules.js";
 import type { Place, Review } from "../src/types.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
@@ -711,7 +711,8 @@ describe("fact reports", () => {
     const b = fact(1, "dev-b", "power", "4wd");
     const c = fact(1, "dev-c", "access", "2wd");
     const d = fact(2, "dev-d", "access", "4wd");
-    const out = run([a, b, c, d], { now: 2, places: [place({ facts: {}, fact_sources: {} })] });
+    // The place has power already, so the one valid power report would change it, and needs a second device.
+    const out = run([a, b, c, d], { now: 2, places: [place({ facts: { power: false }, fact_sources: { power: "osm" } })] });
     expect(out.after()).toBeUndefined();
     expect(out.outcome(a)).toBe("waiting");
     expect(out.outcome(b)).toBe("refused"); // not a valid value for power
@@ -2389,5 +2390,218 @@ describe("results the data validator would refuse", () => {
     const out = run([r], { reviewers: [ctr("sam")] });
     expect(out.outcome(r)).toBe("applied");
     expect(out.reviews.get(PLACE)).toHaveLength(1);
+  });
+});
+
+describe("gap fills", () => {
+  const web = (item: StoredFeedback, origin = "net-1") => ({ ...item, origin, human_checked: true }) as StoredFeedback;
+  const reasonOf = (out: ReturnType<typeof run>, item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.reason;
+
+  it("puts a fixed-value fact the place has no value for live on one report without attestation", () => {
+    const r = web(fact(0, "dev-a", "toilets", true));
+    const out = run([r]);
+    expect(out.outcome(r)).toBe("applied");
+    expect(reasonOf(out, r)).toBe("toilets set to true (filled a gap: the place had no value)");
+    expect(out.after()?.facts).toMatchObject({ toilets: true });
+    expect(out.after()?.fact_sources).toMatchObject({ toilets: "feedback" });
+    expect(out.changes).toEqual([expect.objectContaining({ automatic: true, feedback: [r.id], summary: "toilets set to true (filled a gap: the place had no value)" })]);
+  });
+
+  it("keeps the two-source rule for a fact with free words, a contact and a change to a value the place has", () => {
+    const operator = web(fact(0, "dev-a", "operator", "Example Shire Council"));
+    const hours = web(fact(0, "dev-a", "opening_hours", "Mo-Su 08:00-18:00"));
+    const changed = web(fact(0, "dev-a", "power", true));
+    const out = run([operator, hours, changed]);
+    expect([out.outcome(operator), out.outcome(hours), out.outcome(changed)]).toEqual(["waiting", "waiting", "waiting"]);
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("waits when another source sent a different value within 90 days, before or after it", () => {
+    const a = web(fact(0, "dev-a", "toilets", true), "net-1");
+    const b = web(fact(1, "dev-b", "toilets", false), "net-2");
+    const out = run([a, b], { now: 2 });
+    expect([out.outcome(a), out.outcome(b)]).toEqual(["waiting", "waiting"]);
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("sends a gap fill the intake held for repeated text to the AI reviewer, not into the data", () => {
+    const r = { ...web(fact(0, "dev-a", "toilets", true)), intake: { state: "held", held_reason: "repeated_text" } } as StoredFeedback;
+    const out = run([r]);
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.after()).toBeUndefined();
+    expect(out.held).toEqual([expect.objectContaining({ case: "intake_check", held_for: "repeated_text", fact: "toilets" })]);
+  });
+
+  it("fills at most GAP_FILL_DAILY_LIMIT gaps a day from one client network, and the rest wait for a second source", () => {
+    const others = Array.from({ length: GAP_FILL_DAILY_LIMIT }, (_, n) => `ocdb_01JBXK3M8Q4R5S6T7V8W9X${String(n).padStart(4, "0")}`);
+    const places = [place(), ...others.map((id) => place({ id }))];
+    const earlier = others.map((id) => applied(web(fact(1, "dev-a", "toilets", true, id))));
+    for (const e of earlier) (e as unknown as { outcome: { reason: string } }).outcome.reason = "toilets set to true (filled a gap: the place had no value)";
+    const sameDay = web(fact(1, "dev-b", "toilets", true));
+    const out = run([sameDay], { now: 2, places, history: earlier });
+    expect(out.outcome(sameDay)).toBe("waiting");
+    expect(reasonOf(out, sameDay)).toMatch(/gap fills a day/);
+    // Another network, or the next day, fills it.
+    const otherNetwork = web(fact(1, "dev-c", "toilets", true), "net-2");
+    expect(run([otherNetwork], { now: 2, places, history: earlier }).outcome(otherNetwork)).toBe("applied");
+    const nextDay = web(fact(2, "dev-b", "toilets", true));
+    expect(run([nextDay], { now: 3, places, history: earlier }).outcome(nextDay)).toBe("applied");
+  });
+});
+
+describe("unconfirmed facts", () => {
+  const web = (item: StoredFeedback, origin = "net-1") => ({ ...item, origin, human_checked: true }) as StoredFeedback;
+  const reasonOf = (out: ReturnType<typeof run>, item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.reason;
+
+  it("lists a report still waiting for a second source after 7 days for the AI reviewer", () => {
+    const r = web(fact(0, "dev-a", "power", true));
+    expect(run([r], { now: 6 }).held).toEqual([]);
+    const out = run([r], { now: 7 });
+    expect(out.outcome(r)).toBe("waiting");
+    expect(out.held).toEqual([
+      {
+        case: "unconfirmed_fact",
+        place: PLACE,
+        location: { lat: -36.85, lon: 144.55 },
+        kind: "free_camp",
+        fact: "power",
+        value: true,
+        from_source: "osm",
+        feedback: [r.id],
+      },
+    ]);
+    expect(reasonOf(out, r)).toBe("waiting for a second device to agree on power, and listed for the AI reviewer");
+  });
+
+  it("puts the value in the data when the AI reviewer confirms it, refuses it on dismiss, and sends it to a person on leave", () => {
+    const r = web(fact(0, "dev-a", "power", true));
+    const listed = run([r], { now: 7 }).held[0]!;
+    const decided = (decision: "confirm" | "dismiss" | "leave") => run([r], { now: 8, extra: { reviewerDecisions: [{ case: listed, decision }] } });
+
+    const confirmed = decided("confirm");
+    expect(confirmed.outcome(r)).toBe("applied");
+    expect(reasonOf(confirmed, r)).toBe("power set to true (the AI reviewer confirmed it)");
+    expect(confirmed.after()?.facts.power).toBe(true);
+    expect(confirmed.after()?.fact_sources.power).toBe("feedback");
+    expect(confirmed.held).toEqual([]);
+
+    const dismissed = decided("dismiss");
+    expect(dismissed.outcome(r)).toBe("refused");
+    expect(reasonOf(dismissed, r)).toBe("the AI reviewer dismissed power = true");
+    expect(dismissed.after()).toBeUndefined();
+    expect(dismissed.held).toEqual([]);
+
+    const left = decided("leave");
+    expect(left.outcome(r)).toBe("needs_review");
+    expect(left.after()).toBeUndefined();
+    expect(left.edits).toEqual([{ kind: "fact", place: PLACE, fact: "power", value: true, feedback: r.id }]);
+    expect(left.held).toEqual([]);
+  });
+
+  const no = (day: number, device: string, name: string, origin: string) =>
+    ({ ...base(day, device), origin, type: "report", report: { kind: "doubt", fact: name } }) as StoredFeedback;
+
+  it("sends a report a doubt from another source answers No to straight to the AI reviewer, with the doubt counted", () => {
+    // A change of the place's value, and a gap fill a doubt in the same run stops.
+    const change = web(fact(0, "dev-a", "power", true));
+    const gap = web(fact(0, "dev-a", "toilets", true));
+    const d1 = no(1, "dev-b", "power", "net-2");
+    const d2 = no(1, "dev-b", "toilets", "net-2");
+    const out = run([change, gap, d1, d2], { now: 2 });
+    expect([out.outcome(d1), out.outcome(d2)]).toEqual(["applied", "applied"]);
+    expect([out.outcome(change), out.outcome(gap)]).toEqual(["waiting", "waiting"]);
+    // The doubt counts against the report, not the place's value.
+    expect(out.after()).toBeUndefined();
+    expect(out.held).toEqual([
+      expect.objectContaining({ case: "unconfirmed_fact", fact: "power", value: true, doubts: [d1.id], feedback: [change.id] }),
+      expect.objectContaining({ case: "unconfirmed_fact", fact: "toilets", value: true, doubts: [d2.id], feedback: [gap.id] }),
+    ]);
+  });
+
+  it("refuses a report doubts from two sources on different networks answer No to", () => {
+    const r = web(fact(0, "dev-a", "toilets", true));
+    const first = no(1, "dev-b", "toilets", "net-2");
+    const earlier = run([r, first], { now: 2 });
+    const kept = applied(first, earlier.outcome(first));
+    (kept as unknown as { outcome: { reason: string } }).outcome.reason = earlier.decisions.find((d) => d.id === first.id)!.reason;
+    const second = no(3, "dev-c", "toilets", "net-3");
+    const out = run([r, second], { now: 4, history: [kept] });
+    expect(out.outcome(r)).toBe("refused");
+    expect(reasonOf(out, r)).toBe("doubts from 2 sources say toilets = true is wrong");
+    expect(out.outcome(second)).toBe("applied");
+    expect(out.after()).toBeUndefined();
+    // Two doubts on one network count once.
+    const sameNetwork = no(3, "dev-c", "toilets", "net-2");
+    expect(run([r, sameNetwork], { now: 4, history: [kept] }).outcome(r)).toBe("waiting");
+  });
+
+  it("weighs a doubt as before when no report waits for the fact", () => {
+    const d = no(1, "dev-b", "toilets", "net-2");
+    expect(run([d], { now: 2 }).outcome(d)).toBe("refused");
+  });
+
+  it("sends a confirmed value to a person when another source has reported a different value since the case was listed", () => {
+    const r = web(fact(0, "dev-a", "power", true));
+    const listed = run([r], { now: 7 }).held[0]!;
+    const since = { ...fact(7, "dev-b", "power", false), attested: "app_attest" } as StoredFeedback;
+    const out = run([r, since], { now: 8, extra: { reviewerDecisions: [{ case: listed, decision: "confirm" }] } });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(reasonOf(out, r)).toBe("the AI reviewer confirmed it, but another source has reported a different value since, so a person decides");
+    expect(out.after()?.facts.power).not.toBe(true);
+  });
+
+  it("sends a confirmed value to a person when a traveller doubted it since, and refuses it when two sources did", () => {
+    const r = web(fact(0, "dev-a", "power", true));
+    const listed = run([r], { now: 7 }).held[0]!;
+    const confirmed = { reviewerDecisions: [{ case: listed, decision: "confirm" as const }] };
+    const one = no(7, "dev-b", "power", "net-2");
+    const out = run([r, one], { now: 8, extra: confirmed });
+    expect(out.outcome(one)).toBe("applied");
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(reasonOf(out, r)).toBe("the AI reviewer confirmed it, but a traveller has doubted it since, so a person decides");
+    const two = no(7, "dev-c", "power", "net-3");
+    const refused = run([r, one, two], { now: 8, extra: confirmed });
+    expect(refused.outcome(r)).toBe("refused");
+    expect(refused.after()).toBeUndefined();
+  });
+
+  it("never weighs a No counted against a waiting report against the place's value", () => {
+    const owned = place({ facts: { power: false, fee: true, toilets: false }, fact_sources: { power: "osm", fee: "osm", toilets: "feedback" } });
+    const r = web(fact(0, "dev-a", "toilets", true));
+    const first = { ...no(1, "dev-b", "toilets", "net-2"), attested: "app_attest" } as StoredFeedback;
+    const earlier = run([r, first], { now: 2, places: [owned] });
+    expect(earlier.outcome(first)).toBe("applied");
+    const kept = applied(first);
+    (kept as unknown as { outcome: { reason: string } }).outcome.reason = reasonOf(earlier, first)!;
+    // The report is refused, and a second traveller doubts the place's own value: one doubt, so the fact stays.
+    const refusedReport = { ...applied(r, "refused") } as StoredFeedback;
+    const later = { ...no(3, "dev-c", "toilets", "net-3"), attested: "app_attest" } as StoredFeedback;
+    const out = run([later], { now: 4, places: [owned], history: [kept, refusedReport] });
+    expect(out.outcome(later)).toBe("needs_review");
+    expect(out.after()?.facts.toilets ?? false).toBe(false);
+  });
+
+  it("weighs a No about a fact with free words as a doubt of the place's value, even while a report of it waits", () => {
+    const owned = place({ facts: { power: false, fee: true, operator: "Example Shire" }, fact_sources: { power: "osm", fee: "osm", operator: "feedback" } });
+    const r = web(fact(0, "dev-a", "operator", "Example Parks"));
+    const d = no(1, "dev-b", "operator", "net-2");
+    const out = run([r, d], { now: 2, places: [owned] });
+    expect(reasonOf(out, d)).not.toMatch(/counted against/);
+  });
+
+  it("lists a report for the AI reviewer though a refused report from another source sent a different value", () => {
+    const r = web(fact(0, "dev-a", "power", true));
+    const refusedOther = applied(web(fact(1, "dev-b", "power", "4wd"), "net-2"), "refused");
+    const out = run([r], { now: 7, history: [refusedOther] });
+    expect(out.held).toEqual([expect.objectContaining({ case: "unconfirmed_fact", fact: "power", feedback: [r.id] })]);
+  });
+
+  it("sends a confirmed value to a person when the owner has set the fact since", () => {
+    const r = web(fact(0, "dev-a", "power", true));
+    const listed = run([r], { now: 7 }).held[0]!;
+    const owned = place({ fact_sources: { power: "owner", fee: "osm" } });
+    const out = run([r], { now: 8, places: [owned], extra: { reviewerDecisions: [{ case: listed, decision: "confirm" }] } });
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.after()).toBeUndefined();
   });
 });

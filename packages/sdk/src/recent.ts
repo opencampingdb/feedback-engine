@@ -48,6 +48,29 @@ export interface RecentChange {
 }
 
 /**
+ * An unconfirmed value: a fact report that the intake holds waiting for a
+ * second source, and that would change the place's value (a report from a
+ * website after a human check, or from an app key without attestation). Apps
+ * can show it as "a traveller reported this, not confirmed yet" and ask the
+ * traveller to confirm it. The recent list has one entry for each place, fact
+ * and value, and never says who sent it, from where, or any note. An entry
+ * leaves the list once the value goes live, the apply refuses it, or the
+ * rules stop counting it after 90 days. Only facts with a fixed set of
+ * values are listed: never a contact, the address, or a fact that can hold
+ * free words (`FREE_TEXT_FACTS`).
+ */
+export interface UnconfirmedValue {
+  place: string;
+  fact: string;
+  /** The reported value. */
+  value: FactValue;
+  /** When the intake received the earliest report of this value, ISO 8601 UTC. */
+  received: string;
+  /** Independent sources (client networks, or devices without one) that reported this value. */
+  sources: number;
+}
+
+/**
  * The newest data release the intake knows of, announced by the data
  * repository's release workflow once the release is out. An app whose
  * release has an older `data_version` can fetch the newer one.
@@ -68,6 +91,8 @@ export interface RecentList {
   changes?: RecentChange[];
   /** Absent before the intake has been told of a release, and from intakes older than SDK 0.17.0. */
   release?: RecentRelease;
+  /** Values waiting for a second source, in place and fact order. Absent from intakes older than SDK 0.40.0. */
+  unconfirmed_values?: UnconfirmedValue[];
 }
 
 /** The part of a release place record (`places.ndjson.gz`) that `withRecentChanges` reads and writes. */
@@ -155,4 +180,16 @@ export function withRecentChanges<P extends ReleasePlace>(place: P, changes: rea
     }
   }
   return { ...place, facts, fact_sources: sources, fact_dates: dates };
+}
+
+/**
+ * The unconfirmed values on the recent list for `place`, leaving out any
+ * value the place already has, in the list's order. Pass the place as the app
+ * shows it, with `withRecentChanges` laid over, so a value that has since
+ * gone live is not asked about.
+ */
+export function unconfirmedValuesFor(place: ReleasePlace, unconfirmedValues: readonly UnconfirmedValue[]): UnconfirmedValue[] {
+  const facts = place.facts as Record<string, unknown>;
+  const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
+  return unconfirmedValues.filter((entry) => entry.place === place.id && !same(facts[entry.fact], entry.value));
 }

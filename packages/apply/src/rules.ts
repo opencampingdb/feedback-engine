@@ -1,5 +1,6 @@
 import {
   FEE_RETIRED,
+  factFreeText,
   firstProblem,
   isCommonsFileName,
   isContactFact,
@@ -29,6 +30,8 @@ import {
   distinctSources as distinctDevices,
   factRefusal,
   factsClearedBy,
+  GAP_FILL,
+  gapFillFact,
   heldForCheck,
   inWindow,
   newPlaceFields,
@@ -56,6 +59,7 @@ import {
   mergePlaces,
   mergeProblem,
   REVIEWER_CHECKS,
+  UNCONFIRMED_AFTER_DAYS,
   type ClosedCase,
   type DoNotMatchEntry,
   type HeldCase,
@@ -114,6 +118,12 @@ export function liftOf(place: Place, freeze: FreezeRecord, now: string): string 
   const expiry = expiryOf(freeze);
   return now >= expiry ? expiry : undefined;
 }
+
+/** The reason a doubt kept against an unconfirmed fact report starts with. */
+export const AGAINST_UNCONFIRMED = "counted against the unconfirmed report of";
+
+/** Gap fills (decide.ts `gapFillFact`) one client network may make in a UTC day. Past it, a report that would fill a gap waits for a second source. */
+export const GAP_FILL_DAILY_LIMIT = 20;
 
 export const DRAFT_KIND = "campground";
 const DRAFT_GROUP = "overnight";
@@ -668,6 +678,81 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       feedback: [item.id],
     };
   };
+  /**
+   * Fact reports without attestation in `pending/` that a doubt from another
+   * source, sent after one of them and within 90 days, answers No to: each
+   * would change the place's value or fill a gap, and waits for a second
+   * source or a gap fill. Only a fixed-value fact (`gapFillFact`), as the
+   * recent list carries them, is one.
+   */
+  const pendingIds = new Set(pending.map((i) => i.id));
+  const waitingReportsDoubtedBy = (doubt: ReportItem): ReportItem[] =>
+    pending.filter(
+      (r): r is ReportItem =>
+        r.type === "report" &&
+        r.report.kind === "fact" &&
+        r.place === doubt.place &&
+        r.report.fact === doubt.report.fact &&
+        r.attested === undefined &&
+        gapFillFact(r.report.fact as FactName) &&
+        factRefusal(r) === null &&
+        heldNow(r) === null &&
+        sourceOf(r) !== sourceOf(doubt) &&
+        time(r) <= time(doubt) &&
+        time(doubt) - time(r) <= WINDOW_MS &&
+        !sameValue((input.places.get(r.place as string)?.facts as Record<string, unknown> | undefined)?.[r.report.fact as string], r.report.value),
+    );
+  /**
+   * Whether a doubt counts against a waiting report rather than the place's
+   * value: one decided so in this run or an earlier one, or one in
+   * `pending/` that `applyDoubts` decides so.
+   */
+  const againstUnconfirmed = (d: StoredFeedback): boolean => {
+    if (((decisions.get(d.id)?.reason ?? (d as { outcome?: { reason?: string } }).outcome?.reason) ?? "").startsWith(AGAINST_UNCONFIRMED)) return true;
+    return d.type === "report" && d.report.kind === "doubt" && pendingIds.has(d.id) && !decisions.has(d.id) && heldNow(d) === null && waitingReportsDoubtedBy(d as ReportItem).length > 0;
+  };
+  /** The doubts kept against `report` as an unconfirmed value, from earlier runs and this one. */
+  const doubtsAgainst = (report: ReportItem): StoredFeedback[] =>
+    [...input.history.filter(wasApplied), ...pending.filter((i) => decisions.get(i.id)?.outcome === "applied")].filter(
+      (d) =>
+        d.type === "report" &&
+        d.report.kind === "doubt" &&
+        d.place === report.place &&
+        d.report.fact === report.report.fact &&
+        sourceOf(d) !== sourceOf(report) &&
+        time(d) >= time(report) &&
+        time(d) - time(report) <= WINDOW_MS &&
+        againstUnconfirmed(d),
+    );
+  /**
+   * Whether another source reported a different value for the item's fact
+   * within 90 days of it, before or after: a report applied in an earlier
+   * run, or one in `pending/` this run has not refused.
+   */
+  const conflicting = (item: ReportItem): boolean =>
+    [...factHistory(item.place as string, item.report.fact as string), ...pending].some(
+      (r) =>
+        r.id !== item.id &&
+        r.type === "report" &&
+        r.report.kind === "fact" &&
+        r.place === item.place &&
+        r.report.fact === item.report.fact &&
+        sourceOf(r) !== sourceOf(item) &&
+        !sameValue(r.report.value, item.report.value) &&
+        Math.abs(time(r) - time(item)) <= WINDOW_MS &&
+        decisions.get(r.id)?.outcome !== "refused",
+    );
+  /** Fact reports without attestation left waiting for a second source in this run (not a confirmation of a fact doubts took down). */
+  const unmatched: ReportItem[] = [];
+  /** Gap fills applied by client network (or device, without one) and UTC day, from earlier runs and this one. */
+  const gapFillKey = (item: StoredFeedback) => `${sourceOf(item)} ${item.received.slice(0, 10)}`;
+  const gapFills = new Map<string, number>();
+  for (const h of input.history) {
+    if (wasApplied(h) && ((h as { outcome?: { reason?: string } }).outcome?.reason ?? "").endsWith(`(${GAP_FILL})`)) gapFills.set(gapFillKey(h), (gapFills.get(gapFillKey(h)) ?? 0) + 1);
+  }
+  /** Reports that would fill a gap, kept waiting because their network filled GAP_FILL_DAILY_LIMIT gaps that day. */
+  const capped = new Set<string>();
+
   const blocked = input.blocked ?? new Set<string>();
   const trusted = trustedContributors(input.trust ?? emptyTrust(), blocked);
   // Doubts this run upheld, which withdraw trust from whoever sent the value.
@@ -833,6 +918,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   const unfrozen = known.filter((i) => !frozenOut.has(i.id));
   applyDoubts(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "doubt"));
   applyFacts(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
+  applyUnconfirmed();
   applyNewPlaces(known.filter((i): i is ReportItem => isNewPlaceReport(i)), newPlaceEvidence);
   // After facts and new places, so a value set in this run can be cleared by its sender in it too.
   applyClears(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "clear"));
@@ -1738,6 +1824,122 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     return found;
   }
 
+  /**
+   * A gap fill `decideFact` let through, or the wait for a second source
+   * when another source sent a different value within 90 days of it, before
+   * or after.
+   */
+  function gapFillOrWait(item: ReportItem, decision: ItemDecision): ItemDecision {
+    const waits: ItemDecision = { verdict: "held", reason: "not_attested", why: `waiting for a second device to agree on ${item.report.fact as string}` };
+    if (doubtsAgainst(item).length > 0) return waits;
+    if ((gapFills.get(gapFillKey(item)) ?? 0) >= GAP_FILL_DAILY_LIMIT) {
+      capped.add(item.id);
+      return waits;
+    }
+    return conflicting(item) ? waits : decision;
+  }
+
+  /**
+   * Fact reports without attestation that still wait for a second source.
+   * One that has waited UNCONFIRMED_AFTER_DAYS or more, with no other source
+   * sending a different value within 90 days, is listed for the AI reviewer
+   * as an `unconfirmed_fact` case, one case per place, fact and value.
+   */
+  function applyUnconfirmed(): void {
+    const reviewed = new Map<string, ReviewerDecision>();
+    for (const decided of input.reviewerDecisions ?? []) {
+      if (decided.case.case === "unconfirmed_fact") for (const id of decided.case.feedback) if (!reviewed.has(id)) reviewed.set(id, decided);
+    }
+    const groups = new Map<string, ReportItem[]>();
+    for (const item of unmatched) {
+      if (decisions.get(item.id)?.outcome !== "waiting") continue;
+      const placeId = item.place as string;
+      const fact = item.report.fact as FactName;
+      // Doubts from two sources refuse it, even after the AI reviewer confirmed it.
+      const doubts = doubtsAgainst(item);
+      if (distinctDevices(doubts) >= 2) {
+        decide(item, "refused", `doubts from ${distinctDevices(doubts)} sources say ${fact} = ${JSON.stringify(item.report.value)} is wrong`);
+        continue;
+      }
+      const decided = reviewed.get(item.id);
+      if (decided !== undefined) {
+        settleUnconfirmed(item, decided);
+        continue;
+      }
+      if (doubts.length === 0 && now - time(item) < UNCONFIRMED_AFTER_DAYS * DAY_MS) continue;
+      if (conflicting(item)) continue;
+      const key = `${placeId} ${fact} ${JSON.stringify(item.report.value)}`;
+      groups.set(key, [...(groups.get(key) ?? []), item]);
+    }
+    for (const items of groups.values()) {
+      const first = items[0]!;
+      const doubts = [...new Map(items.flatMap(doubtsAgainst).map((d) => [d.id, d])).values()];
+      const placeId = first.place as string;
+      const fact = first.report.fact as FactName;
+      const value = first.report.value as FactValue;
+      const place = working.get(placeId) ?? input.places.get(placeId)!;
+      const source = place.fact_sources[fact];
+      // A value with free words is read by a person in the inbox, never shown in the PR.
+      const shown = factFreeText(fact, value).length === 0;
+      // A note edit, so the run lists the case on the review PR although no file changes.
+      edits.push({ kind: "note", place: placeId, feedback: first.id });
+      note(placeId, `${fact}: ${shown ? `${JSON.stringify(value)} ` : ""}waits for a second source, so the AI reviewer decides it`, false, items);
+      held.push({
+        case: "unconfirmed_fact",
+        place: placeId,
+        ...(place.standing !== undefined ? { standing: place.standing } : {}),
+        location: { lat: roundCoord(place.location.lat), lon: roundCoord(place.location.lon) },
+        kind: place.kind,
+        fact,
+        ...(shown ? { value } : {}),
+        ...(source !== undefined && (place.facts as Record<string, unknown>)[fact] !== undefined ? { from_source: source } : {}),
+        ...(doubts.length > 0 ? { doubts: doubts.map((d) => d.id) } : {}),
+        feedback: items.map((i) => i.id),
+      });
+      for (const item of items) decide(item, "waiting", `${decisions.get(item.id)!.reason}, and listed for the AI reviewer`);
+    }
+  }
+
+  /**
+   * The AI reviewer's decision on an `unconfirmed_fact` case, for one of its
+   * reports. `confirm` puts the value in the data, unless the owner set the
+   * fact or the place has a verified owner, or something the reviewer did not
+   * see has arrived since the case was listed (a different value from
+   * another source, or a doubt), when a person decides. `dismiss` refuses the
+   * report. `leave` sends it to a person on the review PR.
+   */
+  function settleUnconfirmed(item: ReportItem, { case: c, decision }: ReviewerDecision): void {
+    const placeId = item.place as string;
+    const fact = item.report.fact as FactName;
+    const value = item.report.value as FactValue;
+    const place = record(placeId);
+    const forPerson = (why: string) => {
+      edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
+      note(placeId, `${fact} set to ${JSON.stringify(value)}: ${why} (check before merging)`, false, [item]);
+      decide(item, "needs_review", why);
+    };
+    if (decision === "dismiss") {
+      decide(item, "refused", `the AI reviewer dismissed ${fact} = ${JSON.stringify(value)}`);
+      return;
+    }
+    if (decision !== "confirm") return forPerson("the AI reviewer left it for a person");
+    if (place.owner_verified === true || place.fact_sources[fact] === "owner") return forPerson("the AI reviewer confirmed it, but the owner manages this fact, so a person decides");
+    if (conflicting(item)) return forPerson("the AI reviewer confirmed it, but another source has reported a different value since, so a person decides");
+    const seen = new Set(c.doubts ?? []);
+    if (doubtsAgainst(item).some((d) => !seen.has(d.id))) return forPerson("the AI reviewer confirmed it, but a traveller has doubted it since, so a person decides");
+    const why = `${fact} set to ${JSON.stringify(value)} (the AI reviewer confirmed it)`;
+    if (!sameValue((place.facts as Record<string, unknown>)[fact], value)) {
+      for (const cleared of factsClearedBy(place.facts, fact, value)) {
+        delete (place.facts as Record<string, FactValue | undefined>)[cleared];
+        dropSource(place, cleared);
+      }
+      (place.facts as Record<string, FactValue>)[fact] = value;
+      setSource(place, fact, "feedback", nowIso);
+      note(placeId, why, true, [item]);
+    }
+    decide(item, "applied", why);
+  }
+
   function applyFacts(items: ReportItem[]): void {
     const groups = new Map<string, ReportItem[]>();
     for (const item of items) {
@@ -1788,7 +1990,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         if (decision.verdict === "live") {
           if (decision.changes.length > 0) {
             setFact(value);
-            note(placeId, `${fact} set to ${JSON.stringify(value)} (${decision.byTrust ? "a trusted contributor, past the contact checks" : "one attested report"})`, true, [item]);
+            note(placeId, `${fact} set to ${JSON.stringify(value)} (${decision.byTrust ? "a trusted contributor, past the contact checks" : decision.gapFill ? GAP_FILL : "one attested report"})`, true, [item]);
           }
           decide(item, "applied", decision.why);
           return;
@@ -1874,7 +2076,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           (r.report.kind === "doubt" || r.report.kind === "fact") &&
           r.place === placeId &&
           r.report.fact === fact &&
-          decisions.get(r.id)?.outcome !== "refused",
+          decisions.get(r.id)?.outcome !== "refused" &&
+          !againstUnconfirmed(r),
       );
       const closeCase = (settles: ClosedCase["settles"], by: readonly StoredFeedback[]) => {
         closed.push({ case: "fact_doubted", place: placeId, fact, settles, feedback: by.map((r) => r.id) });
@@ -1914,10 +2117,12 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           settle(item, decision);
           continue;
         }
-        const decision = decideFact({ item, place, earlier: evidence, ...(openCase !== undefined ? { openCase } : {}) });
+        const ruled = decideFact({ item, place, earlier: evidence, ...(openCase !== undefined ? { openCase } : {}) });
+        const decision = ruled.verdict === "live" && ruled.gapFill ? gapFillOrWait(item, ruled) : ruled;
         if (decision.verdict !== "held" || decision.reason !== "not_attested") {
           open.delete(item);
           settle(item, decision);
+          if (decision.verdict === "live" && decision.gapFill && decisions.get(item.id)?.outcome === "applied") gapFills.set(gapFillKey(item), (gapFills.get(gapFillKey(item)) ?? 0) + 1);
           if (decision.verdict === "live" && decision.settles === "replaced" && decisions.get(item.id)?.outcome === "applied") {
             changes[changes.length - 1]!.summary += CLOSES_CASE;
             closeCase("replaced", [item]);
@@ -1963,7 +2168,16 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         }
       }
       for (const item of open) {
-        decide(item, "waiting", openCase !== undefined && sameValue(item.report.value, openCase.value) ? takenDownWhy(fact) : `waiting for a second device to agree on ${fact}`);
+        decide(
+          item,
+          "waiting",
+          openCase !== undefined && sameValue(item.report.value, openCase.value)
+            ? takenDownWhy(fact)
+            : capped.has(item.id)
+              ? `waiting for a second device to agree on ${fact}: its network reached ${GAP_FILL_DAILY_LIMIT} gap fills a day`
+              : `waiting for a second device to agree on ${fact}`,
+        );
+        if (openCase === undefined || !sameValue(item.report.value, openCase.value)) unmatched.push(item);
       }
     }
   }
@@ -2375,7 +2589,9 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     };
     const evidence = (item: ReportItem) =>
       [...input.history, ...known].filter(
-        (r) => r === item || (r.type === "report" && (r.report.kind === "doubt" || r.report.kind === "fact") && decisions.get(r.id)?.outcome !== "refused"),
+        (r) =>
+          r === item ||
+          (r.type === "report" && (r.report.kind === "doubt" || r.report.kind === "fact") && decisions.get(r.id)?.outcome !== "refused" && !againstUnconfirmed(r)),
       );
     const takesDown = (item: ReportItem, place: Place) => {
       const decision = decideDoubt({ item, place, earlier: evidence(item) });
@@ -2391,6 +2607,11 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       const placeId = item.place as string;
       const fact = item.report.fact as FactName;
       const key = factKey(placeId, fact);
+      // A No to an unconfirmed value counts against that report, not the place's value.
+      if (heldNow(item) === null && waitingReportsDoubtedBy(item).length > 0) {
+        decide(item, "applied", `${AGAINST_UNCONFIRMED} ${fact}`);
+        continue;
+      }
       const downCase = takenDown.get(key);
       if (downCase) {
         downCase.doubts!.push(item.id);

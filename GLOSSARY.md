@@ -65,8 +65,16 @@ An accepted change to a place that is not in a release yet, such as a fact set o
 _Avoid_: pending change, live edit
 
 **Recent list**:
-The new places, with their standing, and the recent changes that apps show between releases.
+The new places, with their standing, the recent changes and the unconfirmed values that apps show between releases.
 _Avoid_: recent places store, instant places feed
+
+**Gap fill**:
+A fact report without attestation that goes live without a second source because the place had no value for that fixed-value fact and no other source sent a different one. Not an Overture Maps value, which fills a gap as a fact source.
+_Avoid_: first value, seed
+
+**Unconfirmed value**:
+A reported value held without attestation, waiting for a second source, that would change a place's fact, published in the recent list's `unconfirmed_values` so apps can ask travellers to confirm it. Not the held reason `unconfirmed`, which is a contact report from one source.
+_Avoid_: pending value, proposed value
 
 **Doubt**:
 A traveller saying one fact about a place is wrong, without giving the right value.
