@@ -723,6 +723,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `unlikely_charge` | A `charge` or `charge_powered` over 250 AUD a night, or more than 50% above or below the place's current charge, so a person checks it. |
 | `commons_report` | A report that a Commons photo is not of the place. Hide it for the traveller who sent it: a reviewer decides, and two sources hide it for everyone. |
 | `not_own_value` | A `clear` of a value another traveller set, or one the intake cannot tie to this install, so a person decides. |
+| `ai_cap` | Not given at send time. The AI reviewer was unsure, and its second model's monthly spending cap was reached, so a person decides. It shows on the item's progress. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.
 

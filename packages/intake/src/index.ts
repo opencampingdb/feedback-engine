@@ -39,7 +39,8 @@ import type { MajorRoads } from "@opencampingdb/apply/review";
 import { recordInboxWrite, startApplyIfDue, type RunOutcome } from "./runs.js";
 import { parseTimetable, startTimedIfDue, type TimedStart } from "./timed.js";
 import { reviewOvertureCandidates, type OvertureReviewResult } from "./overture-reviewer.js";
-import { DEFAULT_REVIEW_MODEL, MAX_MODEL_FAILURES, parseBotLogins, REVIEW_BRANCH, reviewHeldCases, type ReviewResult } from "./reviewer.js";
+import { DEFAULT_REVIEW_MODEL, MAX_MODEL_FAILURES, parseBotLogins, REVIEW_BRANCH, REVIEW_TIMEOUT_MS, reviewHeldCases, type ReviewResult } from "./reviewer.js";
+import { capOf } from "./second-review.js";
 import { IntegrityError, IntegrityUnavailable, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
 import { SafeSearch, verdict, worseRatings } from "./safesearch.js";
 import { jpegSize } from "./jpeg.js";
@@ -270,6 +271,15 @@ export interface Env {
   AI_REVIEWER?: string;
   /** The Workers AI model the reviewer asks. Defaults to DEFAULT_REVIEW_MODEL. */
   REVIEW_MODEL?: string;
+  /**
+   * Secret. An Anthropic API key for the AI reviewer's second stage
+   * (src/second-review.ts): a held case the first model is unsure of is asked
+   * of SECOND_REVIEW_MODEL while the month's spending is under
+   * SECOND_REVIEW_CAP_USD. Without it, such a case is left for a person.
+   */
+  ANTHROPIC_API_KEY?: string;
+  /** The second stage's monthly spending cap in US dollars. Defaults to DEFAULT_SECOND_REVIEW_CAP_USD (20). */
+  SECOND_REVIEW_CAP_USD?: string;
   /**
    * `on` runs the AI reviewer's check of Overture candidates from the
    * scheduled job, at most once every 10 minutes, on the open PR from
@@ -814,6 +824,7 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now"> & { roads?: Maj
         botLogins,
         now: deps.now,
         onError: warn,
+        ...(env.ANTHROPIC_API_KEY ? { second: { apiKey: env.ANTHROPIC_API_KEY, fetch: deps.fetch, capUsd: capOf(env.SECOND_REVIEW_CAP_USD), timeoutMs: REVIEW_TIMEOUT_MS } } : {}),
         onModelFailure: (key, failures, error) =>
           console.warn(`the AI reviewer's model call failed on held case ${key} (${failures} of ${MAX_MODEL_FAILURES} runs), going on to the next case: ${String(error)}`),
         ...(deps.roads ? { roads: deps.roads } : {}),

@@ -836,7 +836,8 @@ describe("send-time decisions", () => {
   const held = (reason: string) => ({ state: "held", held_reason: reason });
 
   it("holds only with the codes the SDK lists, so apps can read every one", () => {
-    expectTypeOf<HeldReason>().toEqualTypeOf<SdkHeldReason>();
+    // `ai_cap` is never given at send time: the AI reviewer sets it later, on the item's progress.
+    expectTypeOf<HeldReason>().toEqualTypeOf<Exclude<SdkHeldReason, "ai_cap">>();
   });
 
   it("puts an attested fact live at once, as a recent change, and still writes it to the inbox", async () => {

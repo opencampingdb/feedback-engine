@@ -10,6 +10,8 @@
 #   PLACES_TOKEN        lets the apply run remove places from RECENT_LIST and send the block list, and the data
 #                       release load the place index. Only with RECENT_LIST
 #   URLHAUS_KEY         abuse.ch auth key, for the URLhaus check on links (src/checks.ts)
+#   ANTHROPIC_API_KEY   Anthropic API key, for the AI reviewer's second stage (src/second-review.ts). Optional:
+#                       without it, held cases the first model is unsure of go to a person
 
 name = "ocdb-feedback-intake"
 main = "src/index.ts"
@@ -49,6 +51,11 @@ SAFESEARCH = "off"
 # decisions to overture/decisions.ndjson on that branch. It fetches each
 # candidate's own website. Off when left out.
 # OVERTURE_REVIEWER = "on"
+# The AI reviewer's second stage (src/second-review.ts), with the
+# ANTHROPIC_API_KEY secret: a held case the first model is unsure of is asked
+# of Claude Haiku 5.5 while this month's spending (UTC) is under this cap, in
+# US dollars. Defaults to 20.
+# SECOND_REVIEW_CAP_USD = "20"
 
 # Every minute: writes the queued items to the inbox, starts the apply when it
 # is due, runs the AI reviewer when it is on and due, and checks Overture
