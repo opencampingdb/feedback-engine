@@ -13,6 +13,15 @@
 # closed. NXDOMAIN on two runs a day apart counts as a second source for the
 # closure. Remove the line to turn it off.
 #
+# contact-checks runs the automatic contact checks on each contact report: the
+# place's own website, the domain's age through RDAP and the address's state.
+# Remove the line to turn them off.
+#
+# Add geometry-asset, land-mask-asset and buildings-asset (file names among the
+# data release's assets) under with: to hold new places in the water, on a
+# major road or inside a building for the AI reviewer, and reviewer-login (the
+# AI reviewer's GitHub App slug) when the reviewer is not the bot App.
+#
 # Add claim-reviewers (GitHub logins, separated by commas) under with: to have
 # the run mention those people on the review PR when owner claims arrive.
 #
@@ -42,6 +51,7 @@ jobs:
       intake-url: REPLACE_WITH_INTAKE_URL
       release-workflow: release.yml
       dns-resolver: https://cloudflare-dns.com/dns-query
+      contact-checks: true
     secrets:
       app-client-id: ${{ secrets.OCDB_BOT_CLIENT_ID }}
       app-private-key: ${{ secrets.OCDB_BOT_PRIVATE_KEY }}

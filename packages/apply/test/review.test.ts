@@ -263,3 +263,26 @@ describe("intake_check cases", () => {
     expect(applyDecision(place(), ofStatus, "approve", AT)).toBeNull();
   });
 });
+
+describe("place_change cases of a name", () => {
+  const rename = (from_source?: "osm" | "feedback"): HeldCase => ({
+    ...base,
+    case: "place_change",
+    change: "name",
+    from: "Creek Bend Camp",
+    to: "CREEK BEND CAMP",
+    ...(from_source !== undefined ? { from_source } : {}),
+  });
+  const renamed = (osm: Place["osm"]) => place({ standing: undefined, name: "CREEK BEND CAMP", osm, fact_sources: {} });
+
+  it("checks a new name against the OSM name it replaces, which a name with no source entry on a place in OSM is", () => {
+    const inOsm = renamed({ type: "node", id: 1, version: 2 });
+    expect(settleByRules(rename("osm"), inOsm)).toBeNull();
+    expect(settleByRules(rename(), inOsm)).toBeNull();
+  });
+
+  it("has no OSM name to check against once a traveller set the name, or for a place not in OSM", () => {
+    expect(settleByRules(rename("feedback"), renamed({ type: "node", id: 1, version: 2 }))?.reason).toContain("neither the OSM name it replaces");
+    expect(settleByRules(rename(), renamed(null))?.reason).toContain("neither the OSM name it replaces");
+  });
+});

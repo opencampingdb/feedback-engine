@@ -403,14 +403,22 @@ const nameWords = (name: string) =>
   ` ${tidyName(name).normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/&/g, " and ").replace(/[^\p{L}\p{N}]+/gu, " ").trim()} `;
 
 /**
- * Whether `name` is confirmed: the same as the name from OSM, `osmName`, once
- * case, accents and punctuation are set aside, or found whole among the words
- * of one of `siteNames`, the title and headings of the place's own website.
+ * Whether `name` is confirmed: the same as `replacedOsmName`, the OSM name the
+ * change replaces, once case, accents and punctuation are set aside, or found
+ * whole among the words of one of `siteNames`, the title and headings of the
+ * place's own website.
+ *
+ * The data keeps OSM's name only while a record's name follows OSM: once a
+ * traveller, an owner or a contribution sets the name, the OSM sync stops
+ * refreshing it and nothing else in the data repository holds OSM's name
+ * (`osm/history.ndjson` covers only objects that left the extract). So the
+ * name a change is checked against is OSM's only when the name it replaces
+ * came from OSM; otherwise only the website can confirm it.
  */
-export function nameConfirmed(name: string, osmName: string | null | undefined, siteNames: readonly string[] = []): boolean {
+export function nameConfirmed(name: string, replacedOsmName: string | null | undefined, siteNames: readonly string[] = []): boolean {
   const words = nameWords(name);
   if (words.trim() === "") return false;
-  if (typeof osmName === "string" && nameWords(osmName) === words) return true;
+  if (typeof replacedOsmName === "string" && nameWords(replacedOsmName) === words) return true;
   return siteNames.some((text) => nameWords(text).includes(words));
 }
 
@@ -431,9 +439,11 @@ function settleChange(c: HeldCase, place: Place, siteNames: readonly string[] | 
     if (moved > MAX_REVIEWER_MOVE_M) return leave(`a move of ${moved} m is more than ${MAX_REVIEWER_MOVE_M} m, so a person checks it`);
   }
   if (c.change === "name") {
-    const osmName = c.from_source === "osm" ? (c.from as string | null) : undefined;
-    if (!nameConfirmed(c.to as string, osmName, siteNames)) {
-      return leave("the new name matches neither the name from OSM nor the place's own website, so a person checks it");
+    // A name with no source entry follows OSM, as the OSM sync reads it, on a place that is in OSM.
+    const fromOsm = c.from_source === "osm" || (c.from_source === undefined && place.osm !== null);
+    const replacedOsmName = fromOsm ? (c.from as string | null) : undefined;
+    if (!nameConfirmed(c.to as string, replacedOsmName, siteNames)) {
+      return leave("the new name matches neither the OSM name it replaces nor the place's own website, so a person checks it");
     }
   }
   return null;

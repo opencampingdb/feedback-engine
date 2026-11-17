@@ -650,7 +650,7 @@ describe("the AI reviewer", () => {
       expect(result).toMatchObject({
         decisions: [
           { reason: "a move of 600 m is more than 500 m, so a person checks it" },
-          { reason: "the new name matches neither the name from OSM nor the place's own website, so a person checks it" },
+          { reason: "the new name matches neither the OSM name it replaces nor the place's own website, so a person checks it" },
         ],
       });
     });
