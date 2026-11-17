@@ -42,7 +42,7 @@ import {
   type Setter,
 } from "./decide.js";
 import { moderateReview } from "./moderation.js";
-import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase } from "./review.js";
+import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase, type PlaceChange } from "./review.js";
 import type { EarlierFact } from "./io.js";
 import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
@@ -2115,6 +2115,33 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     }
   }
 
+  /**
+   * The `place_change` case for a name, kind or location report on a place
+   * in the data, with the value it replaces as the data has it, where that
+   * value came from and when, for the AI reviewer to keep or put back.
+   */
+  function placeChange(item: ReportItem, change: PlaceChange, to: string | { lat: number; lon: number }): HeldCase {
+    const current = input.places.get(item.place as string)!;
+    const from = change === "name" ? current.name : change === "kind" ? current.kind : { ...current.location };
+    const source = current.fact_sources[change];
+    const date = current.fact_dates?.[change];
+    return {
+      case: "place_change",
+      place: current.id,
+      ...(current.standing !== undefined ? { standing: current.standing } : {}),
+      location: { lat: roundCoord(current.location.lat), lon: roundCoord(current.location.lon) },
+      kind: current.kind,
+      change,
+      from,
+      ...(change === "kind" ? { from_group: current.group } : {}),
+      to,
+      ...(source !== undefined ? { from_source: source } : {}),
+      ...(date !== undefined ? { from_date: date } : {}),
+      ...(change === "location" ? { distance_m: Math.round(distanceM(current.location, to as { lat: number; lon: number })) } : {}),
+      feedback: [item.id],
+    };
+  }
+
   function routeToPerson(items: ReportItem[]): void {
     for (const item of items) {
       const { kind, note: text, value } = item.report;
@@ -2125,11 +2152,13 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           edits.push({ kind: "location", place: item.place, location, feedback: item.id });
           const where = `${item.location.lat}, ${item.location.lon}`;
           note(item.place, `location moved to ${where}${quote(text)} (check before merging)`, false, [item]);
+          held.push(placeChange(item, "location", location));
+          decide(item, "needs_review", "location changes are checked by the AI reviewer or a person");
         } else {
           edits.push({ kind: "note", place: item.place, feedback: item.id });
           note(item.place, `location reported wrong, no new location given${quote(text)}`, false, [item]);
+          decide(item, "needs_review", "location reports are checked by a person");
         }
-        decide(item, "needs_review", "location reports are checked by a person");
       } else if (problem !== null && item.place) {
         // The value never reaches the review checkout: a person reads it in the inbox.
         edits.push({ kind: "note", place: item.place, feedback: item.id });
@@ -2138,7 +2167,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       } else if (kind === "name" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "name", place: item.place, name: item.report.value, feedback: item.id });
         note(item.place, `name changed to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
-        decide(item, "needs_review", "names are checked by a person");
+        held.push(placeChange(item, "name", item.report.value));
+        decide(item, "needs_review", "names are checked by the AI reviewer or a person");
       } else if (kind === "description" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "description", place: item.place, description: item.report.value, feedback: item.id });
         note(item.place, `description set to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
@@ -2152,7 +2182,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         }
         edits.push({ kind: "kind", place: item.place, placeKind: picked, group, feedback: item.id });
         note(item.place, `kind changed to ${picked}${quote(text)} (check before merging)`, false, [item]);
-        decide(item, "needs_review", "kind changes are checked by a person");
+        held.push(placeChange(item, "kind", picked));
+        decide(item, "needs_review", "kind changes are checked by the AI reviewer or a person");
       } else if (kind === "remove" && item.place) {
         // Only places added in the last 90 days come down on reports. On any other place a person decides.
         edits.push({ kind: "note", place: item.place, feedback: item.id });

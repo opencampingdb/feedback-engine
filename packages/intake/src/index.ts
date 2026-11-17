@@ -834,6 +834,7 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now"> & { roads?: Maj
         onModelFailure: (key, failures, error) =>
           console.warn(`the AI reviewer's model call failed on held case ${key} (${failures} of ${MAX_MODEL_FAILURES} runs), going on to the next case: ${String(error)}`),
         ...(deps.roads ? { roads: deps.roads } : {}),
+        fetchSite: deps.fetch,
       });
     } catch (error) {
       warn(error);
