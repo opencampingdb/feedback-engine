@@ -306,14 +306,6 @@ export const GAP_FILL = "filled a gap: the place had no value";
  * as unconfirmed values, and the ones a doubt counts against a waiting
  * report of.
  */
-/**
- * Facts a single report without attestation never fills a gap in, even
- * where the place has no value: a false value is easy to send for fun and
- * hard on the place. They wait for a second source like a changed value,
- * and the AI reviewer reads one still waiting after a week.
- */
-export const NO_GAP_FILL_FACTS: ReadonlySet<FactName> = new Set<FactName>(["nudist"]);
-
 export function gapFillFact(fact: FactName): boolean {
   return !REVIEWED_FACTS.has(fact) && !isContactFact(fact) && !(FREE_TEXT_FACTS as readonly string[]).includes(fact);
 }
@@ -376,7 +368,7 @@ export function decideFact({ item, place, earlier, openCase, contactChecks, trus
   if (sameValue(current, value)) return { verdict: "live", changes: [], why: `${fact} is already ${show(value)}` };
   if (item.attested === undefined && !checked) {
     // A gap fill: a fixed value for a fact the place has no value for, with no other source sending another.
-    if (current === undefined && down === undefined && gapFillFact(fact) && !NO_GAP_FILL_FACTS.has(fact) && place.fact_sources[fact] !== "owner" && !disagrees(item, earlier, down)) {
+    if (current === undefined && down === undefined && gapFillFact(fact) && place.fact_sources[fact] !== "owner" && !disagrees(item, earlier, down)) {
       return {
         verdict: "live",
         changes: [{ place: item.place as string, fact, value }, ...factsClearedBy(place.facts, fact, value).map((cleared) => ({ place: item.place as string, fact: cleared, value: null }))],
