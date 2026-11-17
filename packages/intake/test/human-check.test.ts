@@ -198,6 +198,19 @@ describe("human check", () => {
     expect((await handle(post(reportBody(), { "x-human-check": "tok-2" }), env(WEB))).status).toBe(503);
   });
 
+  it("refuses fact reports and doubts of the facts only app users set, and takes them from an app key", async () => {
+    for (const fact of ["nudist", "crocodiles", "sharks", "marine_stingers", "dangerous_when_wet", "over_50s"]) {
+      for (const report of [{ kind: "fact", fact, value: true }, { kind: "fact", fact, value: false }, { kind: "doubt", fact }]) {
+        const res = await handle(post(reportBody(report), { "x-human-check": "tok-1" }), env(WEB));
+        expect(res.status, JSON.stringify(report)).toBe(403);
+        expect(await res.json()).toEqual({ error: "type_not_allowed_for_app_key" });
+      }
+    }
+    expect(turnstile.asked).toEqual([]);
+    const app = await handle(post(reportBody({ kind: "fact", fact: "nudist", value: true })), env({}));
+    expect(app.status).toBe(202);
+  });
+
   it("refuses what a human-check key may never send, before the human check", async () => {
     const refused = [
       { kind: "reopened" },
