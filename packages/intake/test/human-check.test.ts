@@ -245,6 +245,19 @@ describe("human check", () => {
     expect((await handle(post(phone, { "x-human-check": "tok-p" }), env({ ...WEB, human_check: { ...CHECK, free_text_facts: true } }))).status).toBe(403);
   });
 
+  it("takes a first-hand report the traveller says so, and refuses one seen nearby, before the human check", async () => {
+    const saysSo = reportBody({ kind: "closed", first_hand: "says_so" });
+    turnstile.answers.set("tok-s", good(saysSo));
+    expect((await handle(post(saysSo, { "x-human-check": "tok-s" }), env(WEB))).status).toBe(202);
+    expect((services.writes[0]!.report as Record<string, unknown>).first_hand).toBe("says_so");
+    const seen = reportBody({ kind: "closed", first_hand: "seen_nearby" });
+    turnstile.answers.set("tok-n", good(seen));
+    const res = await handle(post(seen, { "x-human-check": "tok-n" }), env(WEB));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "type_not_allowed_for_app_key" });
+    expect(turnstile.asked.map((a) => a.response)).toEqual(["tok-s"]);
+  });
+
   it("lets the browser send the human check header", async () => {
     const res = await handle(
       new Request("https://intake.example/v1/feedback", { method: "OPTIONS", headers: { origin: "https://places.example.org" } }),

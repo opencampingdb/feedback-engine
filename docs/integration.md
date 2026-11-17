@@ -652,6 +652,8 @@ If `humanCheck` throws, the item stays queued and is tried on a later send or fl
 
 A human check shows that a person filled in the form, not that the device or app is genuine. So a website key may send only fact reports of fixed-value facts, doubts, contact reports (a phone, website or address is wrong) and closed, name, kind and wrong_location reports, and the intake weighs them as unattested: a fact waits for a second source on another network, and a closed report leaves the place open until a second source agrees. Reviews, photos, new places, contacts and addresses, and facts that hold free words (opening hours, the operator and charges) answer `403 type_not_allowed_for_app_key`.
 
+A website report may be first-hand with `first_hand: "says_so"`, when the traveller answered yes to the question in "First-hand reports". A website has no device location to go on, so `seen_nearby` from a website key answers `403 type_not_allowed_for_app_key`, before the intake checks the token.
+
 ## 8. Flush, answers and the queue
 
 ### Flush when the app comes back
@@ -723,6 +725,8 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `unlikely_charge` | A `charge` or `charge_powered` over 250 AUD a night, or more than 50% above or below the place's current charge, so a person checks it. |
 | `commons_report` | A report that a Commons photo is not of the place. Hide it for the traveller who sent it: a reviewer decides, and two sources hide it for everyone. |
 | `not_own_value` | A `clear` of a value another traveller set, or one the intake cannot tie to this install, so a person decides. |
+| `ai_cap` | Not given at send time. The AI reviewer was unsure, and its second model's monthly spending cap was reached, so a person decides. It shows on the item's progress. |
+| `repeated_text` | Its free text is nearly the same as text three other sources sent in the last 30 days, so a person reads it. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.
 

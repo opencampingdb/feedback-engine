@@ -938,6 +938,8 @@ export type AnswerOutcome =
  * - `no_contributor`: a new place sent without a contributor.
  * - `daily_cap`: the contributor has had 50 live changes this UTC day.
  * - `ai_check`: the AI check flagged free text.
+ * - `repeated_text`: free text nearly the same as text three other sources
+ *   sent in the last 30 days, so a person reads it.
  * - `check_unavailable`: a check could not run, so the item waits.
  * - `unknown_place`: the intake does not have the place yet.
  * - `blocked`: the contributor is blocked.
@@ -953,6 +955,8 @@ export type AnswerOutcome =
  *   traveller at once, a reviewer gets the case, and two sources hide it for everyone.
  * - `not_own_value`: a `clear` of a value another traveller set, or one the intake cannot tie to
  *   this install, so a person decides.
+ * - `ai_cap`: never given at send time. On an item's progress: the AI reviewer was unsure, and its
+ *   second model's monthly spending cap was reached, so a person decides.
  */
 export const HELD_REASONS = [
   "not_attested",
@@ -976,6 +980,8 @@ export const HELD_REASONS = [
   "unlikely_charge",
   "commons_report",
   "not_own_value",
+  "ai_cap",
+  "repeated_text",
 ] as const;
 
 /** Why the intake held an item at send time. */
