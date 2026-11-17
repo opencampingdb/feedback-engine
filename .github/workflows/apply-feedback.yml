@@ -458,7 +458,13 @@ jobs:
             fi
             file="$dir/$name"
             case "$name" in
-              *.gz) gunzip -f "$file" && file="${file%.gz}" ;;
+              *.gz)
+                if ! gunzip -f "$file"; then
+                  echo "::warning::${name} from the ${RELEASE:-latest} release of ${DATA_REPO} could not be unpacked, so that layer is off"
+                  return 0
+                fi
+                file="${file%.gz}"
+                ;;
             esac
             echo "${option#--}=${option} ${file}" >> "$GITHUB_OUTPUT"
           }
