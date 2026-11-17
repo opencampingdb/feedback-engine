@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { checkProof, isPrivateAddress, USER_AGENT, type Transport, type TransportResponse } from "../src/proof.js";
+import { checkProof, isPrivateAddress, transportFetch, USER_AGENT, type Transport, type TransportResponse } from "../src/proof.js";
 
 const NOW = () => new Date("2026-10-31T09:00:00Z");
 
@@ -168,5 +168,25 @@ describe("isPrivateAddress", () => {
 
   it.each(["1.1.1.1", "203.0.113.9", "172.32.0.1", "2606:4700::1111", "::ffff:8.8.8.8"])("treats %s as public", (address) => {
     expect(isPrivateAddress(address)).toBe(false);
+  });
+});
+
+describe("transportFetch", () => {
+  it("gives the contact checks the safe transport's answers as fetch responses, and fetches only public https", async () => {
+    const { t, seen } = transport({
+      "https://camp.example/": page(200, "<p>03 5555 0100</p>", { "content-type": "text/html" }),
+      "https://camp.example/old": page(301, "", { location: "/new" }),
+    });
+    const fetch = transportFetch(t);
+    const init = { signal: new AbortController().signal, headers: { accept: "text/html" } };
+    const res = await fetch("https://camp.example/", init);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/html");
+    expect(await res.text()).toBe("<p>03 5555 0100</p>");
+    expect(seen[0]!.headers).toEqual({ accept: "text/html" });
+    const moved = await fetch("https://camp.example/old", init);
+    expect([moved.status, moved.headers.get("location")]).toEqual([301, "/new"]);
+    await expect(fetch("http://camp.example/", init)).rejects.toThrow();
+    await expect(fetch("https://127.0.0.1/", init)).rejects.toThrow();
   });
 });

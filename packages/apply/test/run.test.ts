@@ -75,6 +75,35 @@ afterEach(async () => {
 });
 
 describe("run", () => {
+  it("runs the contact checks when given a fetch, and holds a contact that fails one for the AI reviewer", async () => {
+    const withSite = dumpPlace({ ...place, facts: { ...place.facts, website: "https://lake.example.org" }, fact_sources: { ...place.fact_sources, website: "osm" } });
+    const reviewData = join(root, "review");
+    await put(join(data, "places", "za", `${PLACE}.json`), withSite);
+    await put(join(reviewData, "places", "za", `${PLACE}.json`), withSite);
+    const phone = (value: string) => ({ type: "report", attested: "app_attest", contributor: NEWCOMER, report: { kind: "fact", fact: "phone", value } });
+    await pending(1, "2026-10-29T01:00:00Z", "aaaa", phone("03 5555 0100"));
+    await pending(2, "2026-10-29T02:00:00Z", "bbbb", phone("03 5555 0999"));
+    const asked: string[] = [];
+    const fetch = async (url: string) => {
+      asked.push(url);
+      return url === "https://lake.example.org/" ? new Response("<p>03 5555 0100</p>", { status: 200 }) : new Response("", { status: 404 });
+    };
+
+    const summary = await run({ inbox, data, reviewData, now: NOW, contactChecks: { fetch } });
+
+    expect(asked).toEqual(["https://lake.example.org/", "https://lake.example.org/"]);
+    expect(summary.counts).toMatchObject({ applied: 1, needs_review: 1 });
+    expect(summary.review_pr_body).toContain('"case":"contact_check"');
+    const record = JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
+    expect(record.facts.phone).toBe("03 5555 0100");
+  });
+
+  it("decides contacts as before when the contact checks are off", async () => {
+    await pending(1, "2026-10-29T01:00:00Z", "aaaa", { type: "report", attested: "app_attest", contributor: NEWCOMER, report: { kind: "fact", fact: "phone", value: "03 5555 0100" } });
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.counts).toMatchObject({ applied: 1 });
+  });
+
   it("refuses fee reports still in the inbox and writes no fees/ file", async () => {
     const day = "2026-10-29";
     await pending(1, `${day}T01:00:00Z`, "aaaa", { type: "fee", contributor: TRUSTED, fee: { amount: 36.5, site: "powered", paid: "2026-10" } });

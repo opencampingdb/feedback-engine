@@ -290,11 +290,13 @@ export function reviewPrBody(
 
 const HELD_INTRO =
   "Cases a person, a bot or an AI reviewer should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
-  "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate`, `commons_mismatch` or `note`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
+  "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate`, `commons_mismatch`, `contact_check`, `note` or `place_change`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
   "set its `standing` to `shown` in this PR. `contacts` and `description` name what was left off a published new place: " +
   "contact details, addresses and descriptions travellers sent are in the inbox items, never here. " +
   "`contact_withdrawn` is a contact taken off a place after reports from two sources: its `value` is the place's own published contact, " +
   "not something a traveller sent, so it is shown here. To restore it, set `facts.<fact>` back to `value` on the place in this PR. " +
+  "`contact_check` is a traveller's contact that failed the automatic contact checks named in `checks`, with what they found in `problem`: it is set on the place in this PR, " +
+  "and to refuse it, set `facts.<fact>` back to `value` (what the place had before), or remove it when there is no `value`. " +
   "`fact_doubted` is a fact travellers say is wrong without giving the right value: with `taken_down` doubts from two sources took it off the place, " +
   "otherwise one traveller doubts it and it stays. `value` is what the place published, and `doubts` and `confirmations` name the reports weighed. " +
   "To restore it, set `facts.<fact>` back to `value`. Doubt notes are in the inbox, never here. " +
@@ -302,7 +304,9 @@ const HELD_INTRO =
   "It comes from the data, so its `feedback` is empty, and each place is listed once. " +
   "`commons_mismatch` is a Commons photo `file` travellers say is not of the place: to confirm it, add the place and file to `moderation/commons-do-not-match.json`. " +
   "`note` is a new place whose traveller wrote a note: read it in the inbox item and add what it says to the place by hand " +
-  "(to the kept record, when the place was merged). Notes are in the inbox, never here.";
+  "(to the kept record, when the place was merged). Notes are in the inbox, never here. " +
+  "`place_change` is a traveller's name, kind or location change, already on the place in this PR: `from` is the value it replaces and `to` the new one. " +
+  "To refuse it, put `from` back on the place.";
 
 const CLOSED_INTRO =
   "Held cases the rules settled, one per line: `closed-case` and a JSON object. Each closes the `fact_doubted` cases for its place and fact listed before it: " +

@@ -194,3 +194,15 @@ describe("what a decision does to the place", () => {
     expect(before.standing).toBe("shown");
   });
 });
+
+describe("contact_check cases", () => {
+  const checked: HeldCase = { ...base, case: "contact_check", fact: "phone", checks: ["website", "domain_age"], problem: "the place's website: timed out" };
+
+  it("reads a contact_check line only with a contact fact and the checks it failed", () => {
+    expect(parseHeldCases(`- held-case ${JSON.stringify(checked)}`)).toEqual([checked]);
+    for (const bad of [{ checks: [] }, { checks: ["vibes"] }, { checks: undefined }, { fact: "toilets" }, { fact: undefined }]) {
+      expect(parseHeldCases(`- held-case ${JSON.stringify({ ...checked, ...bad })}`)).toEqual([]);
+    }
+    expect(allowedDecisions(checked)).toEqual(["confirm", "dismiss", "leave"]);
+  });
+});
