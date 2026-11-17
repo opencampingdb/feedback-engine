@@ -406,6 +406,47 @@ describe("the AI reviewer", () => {
     });
   });
 
+  describe("contact_check cases", () => {
+    const checked = (n: number, extra: Partial<HeldCase> = {}) =>
+      heldCase(n, { case: "contact_check", fact: "phone", checks: ["website"], problem: "the place's website: lake.example.org does not show it", ...extra });
+
+    it("tells the model which checks failed, keeps a contact it confirms, and puts back the earlier value on one it dismisses", async () => {
+      const cases = [checked(0), checked(1, { value: "03 5555 0111" }), checked(2)];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      // The review branch has each reported value on the place.
+      for (const n of [0, 1, 2]) gh.put(place(n, { standing: undefined, facts: { phone: "03 5555 0100" }, fact_sources: { phone: "feedback" } }));
+      const { ai, asked } = fakeAi((input) => (caseOf(input).place as { id: string }).id === id(0) ? reply("confirm", "A local landline for a lake camp.") : reply("dismiss", "Not the camp's number."));
+
+      await run(gh, ai);
+      expect(caseOf(asked[0]!.input)).toMatchObject({
+        case: "contact_check",
+        contact: "phone",
+        failed_checks: ["website"],
+        found: "the place's website: lake.example.org does not show it",
+        place: { facts: { phone: "03 5555 0100" } },
+      });
+      expect(JSON.stringify((asked[0]!.input.messages as { content: string }[])[0]!.content)).toContain("contact_check");
+      expect(gh.read(0).facts).toMatchObject({ phone: "03 5555 0100" });
+      expect(gh.read(1).facts).toMatchObject({ phone: "03 5555 0111" });
+      expect(gh.read(2).facts).not.toHaveProperty("phone");
+      expect(gh.read(2).fact_sources).not.toHaveProperty("phone");
+      const message = gh.commits()[0]!.body!.message as string;
+      expect(message).toContain(`${REVIEWER}: dismiss held case contact_check on ${id(1)}`);
+      expect(message).not.toContain(`on ${id(0)}`);
+    });
+
+    it("leaves a contact on a place with a verified owner, or one the owner set, to a person without asking the model", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [checked(0), checked(1)]));
+      gh.put(place(0, { standing: undefined, owner_verified: true, facts: { phone: "03 5555 0100" } }));
+      gh.put(place(1, { standing: undefined, facts: { phone: "03 5555 0100" }, fact_sources: { phone: "owner" } }));
+      const { ai, asked } = fakeAi(() => reply("confirm", "fine"));
+      const result = await run(gh, ai);
+      expect(asked).toHaveLength(0);
+      if (result === "off" || result === "failed" || result.outcome !== "reviewed") throw new Error("expected a review");
+      expect(result.decisions.map((d) => [d.decision, d.by_rules])).toEqual([["leave", true], ["leave", true]]);
+    });
+  });
+
   describe("fact_doubted cases", () => {
     const doubted = (n: number, takenDown: boolean, extra: Partial<HeldCase> = {}) =>
       heldCase(n, {
@@ -463,6 +504,163 @@ describe("the AI reviewer", () => {
           { place: id(1), decision: "leave", by_rules: true, reason: "the rules closed this case: travellers restored the fact" },
         ],
       });
+    });
+  });
+
+  describe("name, kind and location changes", () => {
+    /** A change a traveller reported, already on the place on the review branch. */
+    const change = (n: number, c: Partial<HeldCase> & Pick<HeldCase, "change" | "to">) => heldCase(n, { case: "place_change", from_source: "osm", ...c });
+    /** A place from OSM, as the review branch has it after the change. */
+    const changed = (n: number, overrides: Partial<Place> = {}) =>
+      place(n, { standing: undefined, osm: { type: "node", id: 1, version: 1 }, fact_sources: { name: "feedback", toilets: "osm" }, fact_dates: { name: AT }, ...overrides });
+    /** The model's answers, by place. */
+    const decides = (answers: Record<string, ReturnType<typeof reply>>) => fakeAi((input) => answers[(caseOf(input).place as { id: string }).id]!);
+    const SITE = "https://creekbend.example.org/";
+    /** GitHub, and the places' own websites from `pages` by URL. */
+    const withSites = (gh: ReturnType<typeof fakeDataRepo>, pages: Record<string, string>) => {
+      const visited: string[] = [];
+      const fetch = async (input: string, init?: RequestInit) => {
+        if (!input.startsWith("https://api.github.com/")) {
+          visited.push(input);
+          const page = pages[input];
+          return page === undefined ? new Response("gone", { status: 404 }) : new Response(page, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+        }
+        return gh.fetch(input, init);
+      };
+      return { fetch, visited };
+    };
+    const decisionsOf = (result: Awaited<ReturnType<ReturnType<typeof createReviewer>>>) => {
+      if (result === "off" || result === "failed" || result.outcome !== "reviewed") throw new Error("expected a review");
+      return result.decisions.map((d) => [d.place, d.decision, d.by_rules]);
+    };
+
+    it("asks the model about a small move and a name OSM confirms, and keeps each change it approves", async () => {
+      const cases = [
+        change(0, { change: "location", from: { lat: -36.85, lon: 144.55 }, to: { lat: -36.851, lon: 144.552 }, distance_m: 210 }),
+        change(1, { change: "name", from: "CREEK BEND 1 CAMP", to: "Creek Bend 1 Camp" }),
+      ];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(changed(0, { location: { lat: -36.851, lon: 144.552 }, fact_sources: { location: "feedback" }, fact_dates: { location: AT } }));
+      gh.put(changed(1, { name: "Creek Bend 1 Camp" }));
+      const { ai, asked } = decides({ [id(0)]: reply("approve", "A small move onto the camp's clearing."), [id(1)]: reply("approve", "The same name, tidied.") });
+
+      const result = await run(gh, ai);
+      expect(decisionsOf(result)).toEqual([
+        [id(0), "approve", false],
+        [id(1), "approve", false],
+      ]);
+      expect(caseOf(asked[0]!.input)).toMatchObject({ case: "place_change", change: "location", from: { lat: -36.85, lon: 144.55 }, to: { lat: -36.851, lon: 144.552 }, distance_m: 210 });
+      expect(caseOf(asked[1]!.input)).toMatchObject({ case: "place_change", change: "name", from: "CREEK BEND 1 CAMP", to: "Creek Bend 1 Camp" });
+      const schema = (asked[0]!.input.response_format as { json_schema: { properties: { decision: { enum: string[] } } } }).json_schema;
+      expect(schema.properties.decision.enum).toEqual(["approve", "revert", "leave"]);
+      // The change is on the review branch already, so keeping it writes nothing.
+      expect(gh.commits()).toHaveLength(0);
+      expect(decidedKeys(gh.posted()[0]!)).toHaveLength(2);
+    });
+
+    it("hands a 600 m move and a name nothing confirms to a person, without asking the model", async () => {
+      const cases = [
+        change(0, { change: "location", from: { lat: -36.85, lon: 144.55 }, to: { lat: -36.8554, lon: 144.55 }, distance_m: 600 }),
+        change(1, { change: "name", from: "Creek Bend 1", to: "Best Camp Ever" }),
+      ];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(changed(0, { location: { lat: -36.8554, lon: 144.55 } }));
+      gh.put(changed(1, { name: "Best Camp Ever" }));
+      const { ai, asked } = fakeAi(() => reply("approve", "should not be asked"));
+
+      const result = await run(gh, ai);
+      expect(asked).toHaveLength(0);
+      expect(decisionsOf(result)).toEqual([
+        [id(0), "leave", true],
+        [id(1), "leave", true],
+      ]);
+      expect(result).toMatchObject({
+        decisions: [
+          { reason: "a move of 600 m is more than 500 m, so a person checks it" },
+          { reason: "the new name matches neither the name from OSM nor the place's own website, so a person checks it" },
+        ],
+      });
+    });
+
+    it("asks the model about a name the place's own website shows in its title or headings, and hands one it does not show to a person", async () => {
+      const cases = [
+        change(0, { change: "name", from: "Creek Bend 0", to: "Creek Bend Riverside Camp" }),
+        change(1, { change: "name", from: "Creek Bend 1", to: "Bend Creek Bush Camp" }),
+        change(2, { change: "name", from: "Creek Bend 2", to: "Gone Camp" }),
+      ];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(changed(0, { name: "Creek Bend Riverside Camp", facts: { toilets: true, website: SITE } }));
+      gh.put(changed(1, { name: "Bend Creek Bush Camp", facts: { toilets: true, website: "https://bend.example.org/" } }));
+      gh.put(changed(2, { name: "Gone Camp", facts: { toilets: true, website: "https://gone.example.org/" } }));
+      const sites = withSites(gh, {
+        [SITE]: "<html><head><title>Home | Creek Bend Riverside Camp</title></head><body><p>Welcome</p></body></html>",
+        // The name is in the text, but not in the title or a heading.
+        "https://bend.example.org/": "<html><head><title>Welcome</title></head><body><h2>Bookings</h2><p>Bend Creek Bush Camp</p></body></html>",
+      });
+      const { ai, asked } = decides({ [id(0)]: reply("approve", "The park's own site uses this name.") });
+
+      const result = await createReviewer({ fetch: sites.fetch, now: () => clock })({ ...env, AI: ai });
+      expect(decisionsOf(result)).toEqual([
+        [id(0), "approve", false],
+        [id(1), "leave", true],
+        [id(2), "leave", true],
+      ]);
+      expect(asked).toHaveLength(1);
+      expect(sites.visited).toEqual([SITE, "https://bend.example.org/", "https://gone.example.org/"]);
+    });
+
+    it("reads a heading on the place's own website as confirming the name", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [change(0, { change: "name", from: "Creek Bend 0", to: "Creek Bend Riverside Camp" })]));
+      gh.put(changed(0, { name: "Creek Bend Riverside Camp", facts: { toilets: true, website: SITE } }));
+      const sites = withSites(gh, { [SITE]: "<title>Welcome</title><h1 class=\"hero\">Creek Bend <em>Riverside</em> Camp</h1>" });
+      const { ai, asked } = decides({ [id(0)]: reply("approve", "The park's own site uses this name.") });
+      expect(decisionsOf(await createReviewer({ fetch: sites.fetch, now: () => clock })({ ...env, AI: ai }))).toEqual([[id(0), "approve", false]]);
+      expect(asked).toHaveLength(1);
+    });
+
+    it("asks the model about a kind change", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [change(0, { change: "kind", from: "free_camp", from_group: "overnight", to: "campground" })]));
+      gh.put(changed(0, { kind: "campground", fact_sources: { kind: "feedback" }, fact_dates: { kind: AT } }));
+      const { ai, asked } = fakeAi(() => reply("approve", "A camp with paid sites."));
+      expect(decisionsOf(await run(gh, ai))).toEqual([[id(0), "approve", false]]);
+      expect(caseOf(asked[0]!.input)).toMatchObject({ case: "place_change", change: "kind", from: "free_camp", to: "campground" });
+    });
+
+    it("puts the replaced value back, with where it came from and when, on a change the model reverts", async () => {
+      const cases = [
+        change(0, { change: "kind", from: "free_camp", from_group: "overnight", to: "picnic_site", from_source: "feedback", from_date: "2026-05-01T00:00:00Z" }),
+        change(1, { change: "name", from: "CREEK BEND 1", to: "Creek Bend 1" }),
+      ];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(changed(0, { kind: "picnic_site", group: "utility", fact_sources: { kind: "feedback" }, fact_dates: { kind: AT } }));
+      gh.put(changed(1, { name: "Creek Bend 1" }));
+      const { ai } = fakeAi(() => reply("revert", "Not what the place is."));
+
+      const result = await run(gh, ai);
+      expect(result).toMatchObject({ decisions: [{ decision: "revert", committed: true }, { decision: "revert", committed: true }] });
+      expect(gh.read(0)).toMatchObject({ kind: "free_camp", group: "overnight", fact_sources: { kind: "feedback" }, fact_dates: { kind: "2026-05-01T00:00:00Z" }, updated: AT });
+      // A name from OSM carries no date.
+      expect(gh.read(1)).toMatchObject({ name: "CREEK BEND 1", fact_sources: { name: "osm", toilets: "osm" }, updated: AT });
+      expect(gh.read(1).fact_dates).toBeUndefined();
+    });
+
+    it("leaves an owner's value, a place with a verified owner and a place that changed since to a person", async () => {
+      const cases = [
+        change(0, { change: "name", from: "CREEK BEND 0", to: "Creek Bend 0", from_source: "owner" }),
+        change(1, { change: "name", from: "CREEK BEND 1", to: "Creek Bend 1" }),
+        change(2, { change: "name", from: "CREEK BEND 2", to: "Creek Bend Two" }),
+      ];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(changed(0));
+      gh.put(changed(1, { owner_verified: true }));
+      gh.put(changed(2));
+      const { ai, asked } = fakeAi(() => reply("approve", "should not be asked"));
+      expect(decisionsOf(await run(gh, ai))).toEqual([
+        [id(0), "leave", true],
+        [id(1), "leave", true],
+        [id(2), "leave", true],
+      ]);
+      expect(asked).toHaveLength(0);
     });
   });
 

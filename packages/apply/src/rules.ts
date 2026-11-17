@@ -2,6 +2,7 @@ import {
   FEE_RETIRED,
   firstProblem,
   isCommonsFileName,
+  isContactFact,
   isValidFactValue,
   newPlaceStanding,
   safeSearchVerdict,
@@ -44,8 +45,10 @@ import {
   type OpenDoubt,
   type Setter,
 } from "./decide.js";
+import { evidenceCounts } from "./closure-evidence.js";
+import type { CheckOutcome } from "./contact-checks.js";
 import { moderateReview } from "./moderation.js";
-import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase } from "./review.js";
+import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase, type PlaceChange } from "./review.js";
 import type { EarlierFact } from "./io.js";
 import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
@@ -225,6 +228,46 @@ export interface RulesInput {
    * moves. They are decided as that run decided them. None when left out.
    */
   earlierFacts?: ReadonlyMap<string, ReadonlyMap<string, EarlierFact>>;
+  /**
+   * What the automatic contact checks found for each pending contact fact
+   * report, by feedback id (`checkContacts`). Given, a contact that fails
+   * any check is held for the AI reviewer as a `contact_check` case, one that
+   * passes them all follows the two-source rule, and one with no entry (the
+   * checks ran out of time) waits for a later run. Left out, the checks are
+   * off: an attested contact goes live and one without attestation goes to a
+   * person.
+   */
+  contactChecks?: ReadonlyMap<string, readonly CheckOutcome[]>;
+  /**
+   * Evidence of closure found outside the inbox, by place id (see
+   * `closure-evidence.ts`). Each kind counts as one more source for a
+   * closure a traveller sent, never as a closure on its own. None when left out.
+   */
+  closureEvidence?: ReadonlyMap<string, readonly ClosureEvidence[]>;
+}
+
+/**
+ * Evidence that a place has closed, from outside the inbox:
+ * - `osm_lifecycle`: OSM tagged the place's object `disused:` or `abandoned:`
+ *   since the version the record follows, in `changeset`.
+ * - `nxdomain`: the domain of the place's website was not found in DNS
+ *   (NXDOMAIN) at `first` and again at `confirmed`, at least a day later.
+ */
+export type ClosureEvidence =
+  | { kind: "osm_lifecycle"; object: string; tags: readonly string[]; changeset: number }
+  | { kind: "nxdomain"; domain: string; first: string; confirmed: string };
+
+/** How a note names one piece of evidence of closure. */
+function describeEvidence(e: ClosureEvidence): string {
+  return e.kind === "osm_lifecycle"
+    ? `OSM tagged ${e.object} ${e.tags.join(", ")} in changeset ${e.changeset}`
+    : `${e.domain} was not found in DNS on ${e.first.slice(0, 10)} or ${e.confirmed.slice(0, 10)}`;
+}
+
+/** Why a closure counted: the travellers, then each piece of evidence. */
+function closureWhy(devices: number, evidence: readonly ClosureEvidence[]): string {
+  const travellers = `${devices} device${devices === 1 ? "" : "s"} within ${WINDOW_DAYS} days`;
+  return evidence.length === 0 ? travellers : `${travellers}, and ${evidence.map(describeEvidence).join(", and ")}`;
 }
 
 /**
@@ -1221,11 +1264,17 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   }
 
   function applyStatus(items: (ReportItem | CheckItem)[]): void {
-    for (const placeId of new Set(items.map((i) => i.place as string))) {
+    // Places with evidence of closure are looked at too, so evidence found after the closure's own run counts.
+    const withEvidence = [...(input.closureEvidence?.keys() ?? [])].filter((id) => {
+      const known = input.places.get(id);
+      return known !== undefined && evidenceCounts(known);
+    });
+    for (const placeId of new Set([...items.map((i) => i.place as string), ...withEvidence])) {
       const mine = items.filter((i) => i.place === placeId);
       const evidence = [...input.history.filter((h) => h.place === placeId), ...mine].sort(byReceived);
       const place = record(placeId);
       const statusBefore = place.status;
+      const found = input.closureEvidence?.get(placeId) ?? [];
 
       // Evidence one way counts only if it came after the latest evidence the other way.
       const latest = (at: number, test: (i: StoredFeedback) => boolean) =>
@@ -1276,10 +1325,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             continue;
           }
           // A closure from a human check (a website) is one source: the place stays open until a
-          // second source, or an attested report, agrees. It still counts towards closing.
+          // second source, an attested report or evidence of closure agrees. It still counts towards closing.
           if (place.status === "open" && isReport && item.human_checked === true) {
             const closing = supporting(at, isClosureEvidence, isReopenEvidence);
-            if (distinctDevices(closing) < 2 && !closing.some((e) => e.attested !== undefined)) {
+            if (distinctDevices(closing) < 2 && !closing.some((e) => e.attested !== undefined) && found.length === 0) {
               decide(item, "applied", "closure from a human check counted as one source: the place stays open until a second source agrees");
               continue;
             }
@@ -1289,14 +1338,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             note(placeId, "status open to reported_closed", true, [item]);
           }
           const devices = supporting(at, isClosureEvidence, isReopenEvidence);
-          if (place.status === "reported_closed" && distinctDevices(devices) >= 2) {
+          // Each kind of evidence of closure counts as one more source.
+          if (place.status === "reported_closed" && distinctDevices(devices) + found.length >= 2) {
             place.status = "closed";
-            note(
-              placeId,
-              `status reported_closed to closed (${distinctDevices(devices)} devices within ${WINDOW_DAYS} days)`,
-              true,
-              devices,
-            );
+            note(placeId, `status reported_closed to closed (${closureWhy(distinctDevices(devices), found)})`, true, devices);
           }
           decide(item, "applied", isReport ? `place is ${place.status}` : "check recorded");
           continue;
@@ -1331,6 +1376,15 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           decide(item, "waiting", "a closed place needs a second device to reopen it");
         } else {
           decide(item, "applied", "check recorded");
+        }
+      }
+      // Evidence of closure counts as one more source for a closure travellers sent, in this run or an
+      // earlier one, that nothing since has undone. It never closes a place on its own, nor one the owner manages.
+      if (found.length > 0 && evidenceCounts(place)) {
+        const devices = supporting(now, isClosureEvidence, isReopenEvidence);
+        if (distinctDevices(devices) >= 1 && distinctDevices(devices) + found.length >= 2) {
+          note(placeId, `status ${place.status} to closed (${closureWhy(distinctDevices(devices), found)})`, true, devices);
+          place.status = "closed";
         }
       }
       // Marks the status as coming from feedback, so the OSM notes can tell it from a contributed closure.
@@ -1514,6 +1568,26 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           decide(item, "applied", decision.why);
           return;
         }
+        if (decision.reason === "contact_check") {
+          const failed = decision.failed ?? [];
+          const before = current();
+          edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
+          note(placeId, `${fact} set to ${JSON.stringify(value)}, which failed the contact checks: ${failed.map((c) => c.detail).join("; ")} (check before merging)`, false, [item]);
+          held.push({
+            case: "contact_check",
+            place: placeId,
+            ...(place.standing !== undefined ? { standing: place.standing } : {}),
+            location: { lat: roundCoord(place.location.lat), lon: roundCoord(place.location.lon) },
+            kind: place.kind,
+            fact,
+            ...(before !== undefined ? { value: before as FactValue } : {}),
+            checks: failed.map((c) => c.check),
+            problem: failed.map((c) => c.detail).join("; "),
+            feedback: [item.id],
+          });
+          decide(item, "needs_review", decision.why);
+          return;
+        }
         const summary =
           decision.reason === "owner_value"
             ? `${fact}: a device reports ${JSON.stringify(value)}, the owner set ${JSON.stringify(current())}`
@@ -1528,7 +1602,34 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       };
 
       if (REVIEWED_FACTS.has(fact)) {
-        for (const item of reports) settle(item, decideFact({ item, place, earlier: evidence }));
+        const checks = isContactFact(fact) ? input.contactChecks : undefined;
+        // Contacts without attestation that passed every contact check, waiting for a second device to agree.
+        const agreeable: ReportItem[] = [];
+        for (const item of reports) {
+          const found = checks?.get(item.id);
+          if (checks !== undefined && found === undefined) {
+            decide(item, "waiting", `the contact checks have not run on ${fact} yet`);
+            continue;
+          }
+          const decision = decideFact({ item, place, earlier: evidence, ...(found !== undefined ? { contactChecks: found } : {}) });
+          if (found !== undefined && decision.verdict === "held" && decision.reason === "not_attested") agreeable.push(item);
+          else settle(item, decision);
+        }
+        // The two-source rule: two devices that agree within 90 days set the contact.
+        const open = new Set(agreeable);
+        for (const item of agreeable) {
+          if (!open.has(item)) continue;
+          const value = item.report.value as FactValue;
+          const agreeing = [...open].filter((r) => sameValue(r.report.value, value) && inWindow(r, time(item)));
+          if (distinctDevices(agreeing) < 2) continue;
+          setFact(value);
+          note(placeId, `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days, contact checks passed)`, true, agreeing);
+          for (const r of agreeing) {
+            open.delete(r);
+            decide(r, "applied", `${fact} set to ${JSON.stringify(value)}`);
+          }
+        }
+        for (const item of open) decide(item, "waiting", `${fact} passed the contact checks, and waits for a second device to agree`);
         continue;
       }
 
@@ -2237,6 +2338,33 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     }
   }
 
+  /**
+   * The `place_change` case for a name, kind or location report on a place
+   * in the data, with the value it replaces as the data has it, where that
+   * value came from and when, for the AI reviewer to keep or put back.
+   */
+  function placeChange(item: ReportItem, change: PlaceChange, to: string | { lat: number; lon: number }): HeldCase {
+    const current = input.places.get(item.place as string)!;
+    const from = change === "name" ? current.name : change === "kind" ? current.kind : { ...current.location };
+    const source = current.fact_sources[change];
+    const date = current.fact_dates?.[change];
+    return {
+      case: "place_change",
+      place: current.id,
+      ...(current.standing !== undefined ? { standing: current.standing } : {}),
+      location: { lat: roundCoord(current.location.lat), lon: roundCoord(current.location.lon) },
+      kind: current.kind,
+      change,
+      from,
+      ...(change === "kind" ? { from_group: current.group } : {}),
+      to,
+      ...(source !== undefined ? { from_source: source } : {}),
+      ...(date !== undefined ? { from_date: date } : {}),
+      ...(change === "location" ? { distance_m: Math.round(distanceM(current.location, to as { lat: number; lon: number })) } : {}),
+      feedback: [item.id],
+    };
+  }
+
   function routeToPerson(items: ReportItem[]): void {
     for (const item of items) {
       const { kind, note: text, value } = item.report;
@@ -2247,11 +2375,13 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           edits.push({ kind: "location", place: item.place, location, feedback: item.id });
           const where = `${item.location.lat}, ${item.location.lon}`;
           note(item.place, `location moved to ${where}${quote(text)} (check before merging)`, false, [item]);
+          held.push(placeChange(item, "location", location));
+          decide(item, "needs_review", "location changes are checked by the AI reviewer or a person");
         } else {
           edits.push({ kind: "note", place: item.place, feedback: item.id });
           note(item.place, `location reported wrong, no new location given${quote(text)}`, false, [item]);
+          decide(item, "needs_review", "location reports are checked by a person");
         }
-        decide(item, "needs_review", "location reports are checked by a person");
       } else if (problem !== null && item.place) {
         // The value never reaches the review checkout: a person reads it in the inbox.
         edits.push({ kind: "note", place: item.place, feedback: item.id });
@@ -2260,7 +2390,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       } else if (kind === "name" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "name", place: item.place, name: item.report.value, feedback: item.id });
         note(item.place, `name changed to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
-        decide(item, "needs_review", "names are checked by a person");
+        held.push(placeChange(item, "name", item.report.value));
+        decide(item, "needs_review", "names are checked by the AI reviewer or a person");
       } else if (kind === "description" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "description", place: item.place, description: item.report.value, feedback: item.id });
         note(item.place, `description set to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
@@ -2274,7 +2405,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         }
         edits.push({ kind: "kind", place: item.place, placeKind: picked, group, feedback: item.id });
         note(item.place, `kind changed to ${picked}${quote(text)} (check before merging)`, false, [item]);
-        decide(item, "needs_review", "kind changes are checked by a person");
+        held.push(placeChange(item, "kind", picked));
+        decide(item, "needs_review", "kind changes are checked by the AI reviewer or a person");
       } else if (kind === "remove" && item.place) {
         // Only places added in the last 90 days come down on reports. On any other place a person decides.
         edits.push({ kind: "note", place: item.place, feedback: item.id });

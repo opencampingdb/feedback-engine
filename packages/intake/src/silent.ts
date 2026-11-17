@@ -8,8 +8,12 @@ import type { D1Like } from "./recent.js";
  * which check it failed. Only a count per UTC day and reason is kept.
  */
 
-/** Why an item was dropped silently: its human check was missing, or did not pass. */
-export type SilentReason = "human_check_required" | "human_check_failed";
+/**
+ * Why an item was dropped silently: its human check was missing, or did not
+ * pass; or it came from a network on the blocklist (reputation.ts) without
+ * attestation.
+ */
+export type SilentReason = "human_check_required" | "human_check_failed" | "network_reputation";
 
 /** Days a day's counts are kept. */
 export const KEEP_SILENT_DROP_DAYS = 90;

@@ -23,8 +23,12 @@ A Cloudflare Turnstile token showing that a person filled in the form that sent 
 _Avoid_: attestation, captcha, proof of a genuine app
 
 **Silent drop**:
-An item the intake answers exactly as it answers an accepted one, with an id and progress, but never stores, so whoever sent it cannot tell which check it failed. Used for abuse that cannot be traced to a genuine install, such as a missing or failed human check. Only a count per day and reason is kept.
+An item the intake answers exactly as it answers an accepted one, with an id and progress, but never stores, so whoever sent it cannot tell which check it failed. Used for abuse that cannot be traced to a genuine install, such as a missing or failed human check, or a request without attestation from a network on the blocklist. Only a count per day and reason is kept.
 _Avoid_: refusal (which always gives its reason), shadow ban
+
+**Network reputation**:
+Whether a request's address is on a public IP blocklist the intake fetches once a day and keeps itself. A listed address drops an item without attestation silently, and holds an attested one for a reviewer.
+_Avoid_: IP ban, firewall
 
 ## Between releases
 
@@ -35,6 +39,10 @@ _Avoid_: instant place, pending place
 **Evidence**:
 What travellers send about a new place: a check, a removal report or a withdraw.
 _Avoid_: votes, feedback (for these three on their own)
+
+**Evidence of closure**:
+A sign from outside the inbox that a place closed: OSM newly tagging its object `disused:` or `abandoned:`, or its website's domain not found in DNS on two checks a day apart. It counts as a second source for a traveller's closure, never as a closure on its own.
+_Avoid_: closure proof, evidence (on its own, which means what travellers send about a new place)
 
 **Check**:
 Evidence that a new place is there as described.
@@ -91,6 +99,10 @@ _Avoid_: locked place, edit war (for the state)
 **Reviewer**:
 A person, bot or AI that the maintainers allow to decide held items, named on every decision it makes.
 _Avoid_: moderator, admin
+
+**Contact check**:
+An automatic check on a reported contact that stands in for a person: the place's own website shows it, its domain is not newly registered, or an address is in the place's state.
+_Avoid_: verification (owners verify), link check (the link rules and the malware check)
 
 **Merge**:
 Folding a new place added twice into the place it duplicates, leaving the new place as a tombstone that points at it.

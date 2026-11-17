@@ -99,6 +99,15 @@ on:
           own photo inbox sets it to Open Camping DB's intake. Off when empty.
         type: string
         default: ""
+      dns-resolver:
+        description: >-
+          DNS over HTTPS JSON endpoint, for example
+          https://cloudflare-dns.com/dns-query. Each run looks up the website
+          domain of every place a traveller reported closed, and NXDOMAIN on
+          two runs at least a day apart counts as a second source for the
+          closure. Off when empty.
+        type: string
+        default: ""
       review-preview-url:
         description: >-
           Base URL of the intake that serves held photos to the person
@@ -116,6 +125,17 @@ on:
           on data-base-branch once the automatic PR has merged. Off when empty.
         type: string
         default: ""
+      contact-checks:
+        description: >-
+          Run the automatic contact checks on each contact fact report: the
+          place's own website shows the phone, email or social link, a
+          website's or email's domain was not registered in the last 90 days
+          (RDAP), and an address belongs in the place's state. A contact that
+          fails one goes to the AI reviewer, and one that passes them all
+          follows the two-source rule. Set it to false to decide contacts as
+          before, with no outside lookups.
+        type: boolean
+        default: true
       claim-reviewers:
         description: >-
           GitHub logins of the people who approve owner claims, separated by
@@ -379,8 +399,10 @@ jobs:
           PLACES_ARGS: ${{ inputs.places-repository != '' && '--places places' || '' }}
           PHOTO_LICENCE: ${{ inputs.photo-licence }}
           FIRST_PHOTO_ARGS: ${{ !inputs.hold-first-photo && '--publish-first-photo' || '' }}
+          CONTACT_CHECK_ARGS: ${{ inputs.contact-checks && '--contact-checks' || '' }}
           INTAKE_URL: ${{ inputs.intake-url }}
           RECENT_PLACES_URL: ${{ inputs.recent-places-url }}
+          DNS_RESOLVER: ${{ inputs.dns-resolver }}
           PLACES_TOKEN: ${{ secrets.places-token }}
           REVIEW_PREVIEW_URL: ${{ inputs.review-preview-url }}
           REVIEW_PREVIEW_SECRET: ${{ secrets.review-preview-secret }}
@@ -388,8 +410,10 @@ jobs:
           node engine/packages/apply/dist/cli.js
           $PLACES_ARGS
           $FIRST_PHOTO_ARGS
+          $CONTACT_CHECK_ARGS
           ${INTAKE_URL:+--main data-main --intake "$INTAKE_URL"}
           ${RECENT_PLACES_URL:+--recent-places "$RECENT_PLACES_URL"}
+          ${DNS_RESOLVER:+--dns-resolver "$DNS_RESOLVER"}
           ${REVIEW_PREVIEW_URL:+--review-preview "$REVIEW_PREVIEW_URL"}
           --photo-licence "$PHOTO_LICENCE"
           --inbox inbox

@@ -959,6 +959,11 @@ export type AnswerOutcome =
  *   its facts within 24 hours. No fact on it changes until a reviewer settles the value.
  * - `ai_cap`: never given at send time. On an item's progress: the AI reviewer was unsure, and its
  *   second model's monthly spending cap was reached, so a person decides.
+ * - `contact_check`: a contact the automatic contact checks have not passed yet. At send time an
+ *   attested contact goes live only when the place's own website shows it; otherwise the apply run
+ *   checks it in full, and one that fails a check goes to the AI reviewer.
+ * - `network_reputation`: an attested report from a network on the intake's blocklist, which a
+ *   reviewer reads before it goes live.
  */
 export const HELD_REASONS = [
   "not_attested",
@@ -984,6 +989,8 @@ export const HELD_REASONS = [
   "not_own_value",
   "ai_cap",
   "repeated_text",
+  "contact_check",
+  "network_reputation",
   "disputed",
 ] as const;
 

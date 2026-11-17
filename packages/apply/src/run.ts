@@ -9,12 +9,26 @@ import {
   readOwners,
   readPending,
   readPhotoVotes,
+  readNxdomain,
   readRoads,
   refuseMalformed,
   settleAwaiting,
+  writeNxdomain,
   writeOwners,
   writePhotoVotes,
 } from "./io.js";
+import { checkContacts, type Fetch } from "./contact-checks.js";
+import {
+  evidenceCounts,
+  isClosureReport,
+  lookUpDomain,
+  osmClosureEvidence,
+  pruneAnswers,
+  recordAnswer,
+  websiteDomain,
+  type DnsOptions,
+  type NxdomainState,
+} from "./closure-evidence.js";
 import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
 import { autoPrBody, jobSummary, reviewPrTexts } from "./prbody.js";
 import { previewUrl, PREVIEW_TTL_SECONDS } from "./preview.js";
@@ -30,6 +44,7 @@ import {
   resolvePlace,
   WINDOW_DAYS,
   type Change,
+  type ClosureEvidence,
   type Decision,
 } from "./rules.js";
 import type { RecentList } from "./recent.js";
@@ -84,12 +99,28 @@ export interface RunOptions {
    */
   recentList?: RecentList;
   /**
+   * Looks up, in DNS over HTTPS, the website domain of each place a traveller
+   * reported closed. NXDOMAIN on two runs at least a day apart counts as a
+   * second source for the closure. The first answer is kept in the inbox
+   * (`evidence/nxdomain.json`). Off when left out.
+   */
+  dns?: DnsOptions;
+  /**
    * Links to held photos in the review PR: the intake that serves them
    * (`GET /v1/photos/review/...`) and the secret it checks them with. Only
    * for a private data repository, since anyone who can read the PR can open
    * the links. Off when left out.
    */
   reviewPreview?: { url: string; secret: string };
+  /**
+   * The automatic contact checks (contact-checks.ts), with the fetch they
+   * read websites and RDAP with. Each contact fact report is checked before
+   * the rules run: one that fails a check is held for the AI reviewer, and
+   * one that passes them all follows the two-source rule. Off when left out:
+   * an attested contact goes live and one without attestation goes to a
+   * person, as before.
+   */
+  contactChecks?: { fetch: Fetch; budget?: { ms: number; concurrency: number }; timeoutMs?: number };
 }
 
 export interface RunSummary {
@@ -223,6 +254,8 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     ...ownerItems.map((p) => p.place),
     ...awaitingClaims.map((a) => a.place),
     ...owners.keys(),
+    // Places travellers reported closed in earlier runs: evidence found since may close them.
+    ...(photosOnly ? [] : history.filter(isClosureReport).map((h) => h.place)),
   ].filter((p): p is string => typeof p === "string"));
   const places = new Map<string, Place>();
   for (let round = 0; round < 10 && wanted.size > 0; round++) {
@@ -285,6 +318,22 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     if (earlier) earlierFacts.set(p.place, (earlierFacts.get(p.place) ?? new Map()).set(fact, earlier));
   }
 
+  // The contact checks, against each place as the data has it before this run.
+  const contactChecks = options.contactChecks && !photosOnly
+    ? await checkContacts(crowd, places, {
+        fetch: options.contactChecks.fetch,
+        now: () => Date.now(),
+        ...(options.contactChecks.budget ? { budget: options.contactChecks.budget } : {}),
+        ...(options.contactChecks.timeoutMs !== undefined ? { timeoutMs: options.contactChecks.timeoutMs } : {}),
+      })
+    : undefined;
+
+  // Evidence of closure for places travellers reported closed in the window, not owner-managed.
+  const nxdomain = options.dns && !photosOnly ? await readNxdomain(options.inbox) : undefined;
+  const closureEvidence = photosOnly
+    ? new Map<string, ClosureEvidence[]>()
+    : await findClosureEvidence(auto, [...crowd, ...history], places, runAt, options.dns && nxdomain ? { ...options.dns, state: nxdomain } : undefined);
+
   const crowdResult = applyRules({
     now: runAt,
     pending: crowd,
@@ -306,6 +355,8 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     ...(doNotMatch ? { doNotMatch } : {}),
     ...(recent !== undefined ? { recent } : {}),
     ...(earlierFacts.size > 0 ? { earlierFacts } : {}),
+    ...(contactChecks ? { contactChecks } : {}),
+    ...(closureEvidence.size > 0 ? { closureEvidence } : {}),
   });
 
   // Proof pages for claims and listings still in pending/, oldest first, within
@@ -454,6 +505,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const ownersWritten = await writeOwners(options.inbox, ownerResult.owners.values());
   const settled = await settleAwaiting(options.inbox, ownerResult.approvals, runAt);
   const votesWritten = await writePhotoVotes(options.inbox, crowdResult.photoVotes);
+  const nxdomainWritten = nxdomain ? await writeNxdomain(options.inbox, nxdomain) : false;
 
   const counts = { applied: 0, refused: 0, needs_review: 0, waiting: 0, awaiting_approval: 0 };
   for (const d of decisions) counts[d.outcome] += 1;
@@ -501,7 +553,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     auto_changed: autoChanged,
     review_changed: reviewChanged,
     owner_claims: ownerClaims,
-    inbox_changed: refusedMalformed + moved + ownersWritten + settled > 0 || votesWritten,
+    inbox_changed: refusedMalformed + moved + ownersWritten + settled > 0 || votesWritten || nxdomainWritten,
     counts,
     auto_files: autoFiles,
     review_files: reviewFiles,
@@ -520,6 +572,41 @@ export async function run(options: RunOptions): Promise<RunSummary> {
       .filter((d) => photoIds.has(d.id))
       .map((d) => ({ id: d.id, place: d.place, outcome: d.outcome, reason: d.reason, ...(d.held_reason ? { held_reason: d.held_reason } : {}) })),
   };
+}
+
+/** Evidence of closure for each place with a traveller's closure in `items` that evidence could still close. */
+async function findClosureEvidence(
+  data: DataRepo,
+  items: readonly StoredFeedback[],
+  places: ReadonlyMap<string, Place>,
+  now: string,
+  dns: (DnsOptions & { state: NxdomainState }) | undefined,
+): Promise<Map<string, ClosureEvidence[]>> {
+  const out = new Map<string, ClosureEvidence[]>();
+  const add = (id: string, evidence: ClosureEvidence) => out.set(id, [...(out.get(id) ?? []), evidence]);
+  const candidates = [...new Set(items.filter(isClosureReport).map((i) => i.place))]
+    .map((id) => (typeof id === "string" ? places.get(id) : undefined))
+    .filter((p): p is Place => p !== undefined && evidenceCounts(p));
+  if (candidates.length > 0) {
+    const osmHistory = await data.osmHistory();
+    for (const place of candidates) {
+      const osm = osmClosureEvidence(place, osmHistory);
+      if (osm) add(place.id, osm);
+    }
+  }
+  if (dns) {
+    // One lookup per domain, one at a time: a run has few places reported closed.
+    const answers = new Map<string, ClosureEvidence | undefined>();
+    for (const place of candidates) {
+      const domain = websiteDomain(place.facts.website);
+      if (domain === undefined) continue;
+      if (!answers.has(domain)) answers.set(domain, recordAnswer(dns.state, domain, await lookUpDomain(domain, dns), now));
+      const evidence = answers.get(domain);
+      if (evidence) add(place.id, evidence);
+    }
+    pruneAnswers(dns.state, now);
+  }
+  return out;
 }
 
 /** A link to each held photo in `changes`, signed to work for 30 days from `now`. Empty when previews are off. */

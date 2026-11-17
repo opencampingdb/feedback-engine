@@ -70,7 +70,14 @@ function fakeServices() {
   /** Hosts URLhaus lists, and every lookup it was asked for. */
   const listed = new Set<string>();
   const lookups: string[] = [];
+  /** Web pages by URL, for the contact checks: text, or "hang" for one that never answers. */
+  const pages = new Map<string, string>();
   const fetch = async (url: string, init?: RequestInit) => {
+    const page = pages.get(url);
+    if (page === "hang") {
+      return new Promise<Response>((_, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+    }
+    if (page !== undefined) return new Response(page, { status: 200, headers: { "content-type": "text/html" } });
     if (url.endsWith("/access_tokens")) {
       return new Response(JSON.stringify({ token: "ghs_x", expires_at: new Date(NOW + 100 * HOUR).toISOString() }), { status: 201 });
     }
@@ -106,7 +113,7 @@ function fakeServices() {
     }
     return new Response("not found", { status: 404 });
   };
-  return { fetch, writes, listed, lookups };
+  return { fetch, writes, listed, lookups, pages };
 }
 
 let clock = NOW;
@@ -796,7 +803,7 @@ describe("send-time decisions", () => {
     services = fakeServices();
     store = fakeD1();
     e = { ...env(store), URLHAUS_KEY: "urlhaus-test-key" };
-    handle = createHandler({ fetch: services.fetch, now: () => clock, randomBytes: () => crypto.getRandomValues(new Uint8Array(16)) });
+    handle = createHandler({ fetch: services.fetch, now: () => clock, randomBytes: () => crypto.getRandomValues(new Uint8Array(16)), contactCheckMs: 200 });
     // A released place near the new places above, and one far away.
     index(PLACE, [146, -37], { toilets: false, phone: "03 5555 0100", website: "https://lake.example.org" }, { phone: "feedback", website: "owner" });
     index(ELSEWHERE, [150, -34], { toilets: false });
@@ -961,6 +968,36 @@ describe("send-time decisions", () => {
     expect((await listing()).changes).toEqual([]);
   });
 
+  describe("the website check at send time", () => {
+    it("puts an attested contact live only when the place's website shows it", async () => {
+      services.pages.set("https://lake.example.org/", '<a href="/contact">Contact</a>');
+      services.pages.set("https://lake.example.org/contact", "<p>Bookings: 03 5555 0200, bookings@lake.example.org</p>");
+      expect(await send(fact(PLACE, "phone", "03 5555 0200"))).toMatchObject({ state: "live" });
+      expect(await send(fact(PLACE, "email", "bookings@lake.example.org"))).toMatchObject({ state: "live" });
+      expect((await listing()).changes.map((c) => c.fact)).toEqual(["email", "phone"]);
+      // Not on the website: it waits for the apply run's full check.
+      expect(await send(fact(PLACE, "phone_2", "0412 345 678"))).toMatchObject(held("contact_check"));
+      expect(written().at(-1)!.intake).toEqual(held("contact_check"));
+    });
+
+    it("waits for the apply run when the website takes longer than the budget, or the check does not apply", async () => {
+      services.pages.set("https://lake.example.org/", "hang");
+      const started = Date.now();
+      expect(await send(fact(PLACE, "phone_2", "03 5555 0200"))).toMatchObject(held("contact_check"));
+      expect(Date.now() - started).toBeLessThan(2_000);
+      // A website or an address is checked by the apply run alone.
+      expect(await send(fact(ELSEWHERE, "website", "https://camp.example.org"))).toMatchObject(held("contact_check"));
+      expect(await send(fact(ELSEWHERE, "address", { street: "Lake Road", state: "NSW", postcode: "2000" }))).toMatchObject(held("contact_check"));
+      expect((await listing()).changes).toEqual([]);
+    });
+
+    it("leaves a contact without attestation held as before", async () => {
+      services.pages.set("https://lake.example.org/", "<p>03 5555 0200</p>");
+      const unattested = env(store, { requires_attestation: false });
+      expect(await send(fact(PLACE, "phone_2", "03 5555 0200"), unattested)).toMatchObject(held("not_attested"));
+    });
+  });
+
   it("holds a fact for each reason the rules and checks give", async () => {
     // The owner set the website.
     expect(await send(fact(PLACE, "website", "https://other.example.org"))).toMatchObject(held("owner_value"));
@@ -973,7 +1010,8 @@ describe("send-time decisions", () => {
     expect(safeAi.runs).toBe(1);
     // A place the index doesn't have, which is held, never refused.
     expect(await send(fact(UNKNOWN, "toilets", true))).toMatchObject(held("unknown_place"));
-    // A check service that isn't set up.
+    // A check service that isn't set up, for a link the place's website shows.
+    services.pages.set("https://lake.example.org/", '<a href="https://instagram.com/lakecamp/">Instagram</a>');
     const { URLHAUS_KEY: _, ...noUrlhaus } = e;
     expect(await send(fact(PLACE, "instagram", "https://www.instagram.com/lakecamp"), noUrlhaus)).toMatchObject(held("check_unavailable"));
     expect((await listing()).changes).toEqual([]);
@@ -1417,6 +1455,8 @@ describe("send-time decisions", () => {
   describe("clears", () => {
     const clear = (place: string, name: string, who: Parameters<typeof report>[2] = {}) => report(place, { kind: "clear", fact: name }, who);
     const second = { device: otherDevice(1), contributor: "acct_second_person_01" };
+    // The place's website links the Facebook page, so the contact check at send time passes.
+    beforeEach(() => void services.pages.set("https://lake.example.org/", '<a href="https://www.facebook.com/wrongpark">Facebook</a>'));
 
     it("takes a value off at once when the device that set it clears it", async () => {
       expect(await send(fact(PLACE, "facebook", "https://www.facebook.com/wrongpark"))).toMatchObject({ state: "live" });
