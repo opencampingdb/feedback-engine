@@ -946,6 +946,9 @@ export type AnswerOutcome =
  *   traveller at once, a reviewer gets the case, and two sources hide it for everyone.
  * - `not_own_value`: a `clear` of a value another traveller set, or one the intake cannot tie to
  *   this install, so a person decides.
+ * - `contact_check`: a contact the automatic contact checks have not passed yet. At send time an
+ *   attested contact goes live only when the place's own website shows it; otherwise the apply run
+ *   checks it in full, and one that fails a check goes to the AI reviewer.
  */
 export const HELD_REASONS = [
   "not_attested",
@@ -969,6 +972,7 @@ export const HELD_REASONS = [
   "unlikely_charge",
   "commons_report",
   "not_own_value",
+  "contact_check",
 ] as const;
 
 /** Why the intake held an item at send time. */

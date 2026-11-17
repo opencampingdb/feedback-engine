@@ -346,6 +346,47 @@ describe("the AI reviewer", () => {
     expect(message).toContain("The email is the park's own.");
   });
 
+  describe("contact_check cases", () => {
+    const checked = (n: number, extra: Partial<HeldCase> = {}) =>
+      heldCase(n, { case: "contact_check", fact: "phone", checks: ["website"], problem: "the place's website: lake.example.org does not show it", ...extra });
+
+    it("tells the model which checks failed, keeps a contact it confirms, and puts back the earlier value on one it dismisses", async () => {
+      const cases = [checked(0), checked(1, { value: "03 5555 0111" }), checked(2)];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      // The review branch has each reported value on the place.
+      for (const n of [0, 1, 2]) gh.put(place(n, { standing: undefined, facts: { phone: "03 5555 0100" }, fact_sources: { phone: "feedback" } }));
+      const { ai, asked } = fakeAi((input) => (caseOf(input).place as { id: string }).id === id(0) ? reply("confirm", "A local landline for a lake camp.") : reply("dismiss", "Not the camp's number."));
+
+      await run(gh, ai);
+      expect(caseOf(asked[0]!.input)).toMatchObject({
+        case: "contact_check",
+        contact: "phone",
+        failed_checks: ["website"],
+        found: "the place's website: lake.example.org does not show it",
+        place: { facts: { phone: "03 5555 0100" } },
+      });
+      expect(JSON.stringify((asked[0]!.input.messages as { content: string }[])[0]!.content)).toContain("contact_check");
+      expect(gh.read(0).facts).toMatchObject({ phone: "03 5555 0100" });
+      expect(gh.read(1).facts).toMatchObject({ phone: "03 5555 0111" });
+      expect(gh.read(2).facts).not.toHaveProperty("phone");
+      expect(gh.read(2).fact_sources).not.toHaveProperty("phone");
+      const message = gh.commits()[0]!.body!.message as string;
+      expect(message).toContain(`${REVIEWER}: dismiss held case contact_check on ${id(1)}`);
+      expect(message).not.toContain(`on ${id(0)}`);
+    });
+
+    it("leaves a contact on a place with a verified owner, or one the owner set, to a person without asking the model", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [checked(0), checked(1)]));
+      gh.put(place(0, { standing: undefined, owner_verified: true, facts: { phone: "03 5555 0100" } }));
+      gh.put(place(1, { standing: undefined, facts: { phone: "03 5555 0100" }, fact_sources: { phone: "owner" } }));
+      const { ai, asked } = fakeAi(() => reply("confirm", "fine"));
+      const result = await run(gh, ai);
+      expect(asked).toHaveLength(0);
+      if (result === "off" || result === "failed" || result.outcome !== "reviewed") throw new Error("expected a review");
+      expect(result.decisions.map((d) => [d.decision, d.by_rules])).toEqual([["leave", true], ["leave", true]]);
+    });
+  });
+
   describe("fact_doubted cases", () => {
     const doubted = (n: number, takenDown: boolean, extra: Partial<HeldCase> = {}) =>
       heldCase(n, {

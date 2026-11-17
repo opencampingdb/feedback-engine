@@ -299,6 +299,14 @@ addressProblems({ suburb: "Lakeside", state: "Victoria" });
 await feedback.report({ place, report: { kind: "fact", fact: "address", value: address }, consent: true });
 ```
 
+**Contact checks.** A reported contact or address (a `fact` report of one of `CONTACT_FACTS`) goes through automatic checks before it goes live:
+
+- the place's own website on record (its home page and up to 3 contact pages it links to) shows the reported phone, email or social link
+- the domain of a reported website or email was not registered in the last 90 days, from its registry's RDAP record
+- an address's `state`, and the state its `postcode` belongs to, are where the place is, allowing about 30 km either side of a state border
+
+A contact that passes every check that applies to it follows the two-source rule: from an attested install it goes live, and without attestation it waits for a second device to agree. One that fails a check, or whose check times out or cannot run, is held for the AI reviewer, and a person sees it only when the reviewer is unsure. A contact the owner set, or one on a place with a verified owner, still goes to a person. At send time the intake runs only the website check, for about 3 seconds: an attested phone, email or social link the website shows goes live at once, and anything else (a website, an address, a contact the website does not show, or a website that is slow to answer) is answered `held` with `contact_check` until the apply run's full check decides it. A contact that went live at send time and then fails the apply run's check leaves the recent list.
+
 **Reporting a contact.** A `contact` report says a contact on a place is wrong or spam: `fact` is one of `CONTACT_FACTS` and `reason` is `wrong` or `spam` (`CONTACT_REPORT_REASONS`). It needs the place and carries no `value`. One report goes to a person. Reports from two different sources within 90 days, at least one of them attested, take the contact off the place at the next apply run, and a reviewer then decides whether it comes back. A contact the owner set is left to a person, and a report about a contact the place does not have is answered `held` (`no_value`) and refused at the next apply run.
 
 ```ts
@@ -723,6 +731,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `unlikely_charge` | A `charge` or `charge_powered` over 250 AUD a night, or more than 50% above or below the place's current charge, so a person checks it. |
 | `commons_report` | A report that a Commons photo is not of the place. Hide it for the traveller who sent it: a reviewer decides, and two sources hide it for everyone. |
 | `not_own_value` | A `clear` of a value another traveller set, or one the intake cannot tie to this install, so a person decides. |
+| `contact_check` | A contact the automatic contact checks have not passed yet: the place's website does not show it, or its check could not finish in time at send time, or it is a website or address, which only the apply run checks. The apply run's full check decides it, and one that fails goes to the AI reviewer. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.
 
