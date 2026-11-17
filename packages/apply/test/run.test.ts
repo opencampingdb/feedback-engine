@@ -186,7 +186,8 @@ describe("run", () => {
       type: "review",
       review: { stars: 1, text: "Write to jo@example.com", visited: "2026-10" },
     });
-    await pending(5, `${day}T05:00:00Z`, "eeee", { type: "report", report: { kind: "fact", fact: "fee", value: true } });
+    // A change to the value two devices just set waits for a second device.
+    await pending(5, `${day}T05:00:00Z`, "eeee", { type: "report", report: { kind: "fact", fact: "power", value: false } });
 
     const summary = await run({ inbox, data, now: NOW });
 

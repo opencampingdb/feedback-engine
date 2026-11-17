@@ -2,6 +2,7 @@ import {
   contactProblem,
   factFreeText,
   firstProblem,
+  FREE_TEXT_FACTS,
   isContactFact,
   isDoubtFact,
   isFactName,
@@ -186,6 +187,8 @@ export type ItemDecision =
       settles?: Settles;
       /** Live only because a trusted contributor sent it (trust.ts), with no second source. */
       byTrust?: true;
+      /** Live without attestation or a second source because it fills a gap (`fillsGap`). */
+      gapFill?: true;
     }
   /** `problem`: on `link_check`, the check the value failed. `failed`: on `contact_check`, the contact checks it failed. */
   | { verdict: "held"; reason: HeldReason; why: string; problem?: string; failed?: CheckOutcome[] }
@@ -292,13 +295,49 @@ export function unlikelyCharge(value: unknown, current: unknown): string | null 
   return null;
 }
 
+/** The words a gap fill's decision reason and PR note carry. */
+export const GAP_FILL = "filled a gap: the place had no value";
+
+/**
+ * Facts a report without attestation may fill a gap in: fixed-value facts,
+ * not a contact, the address or another fact a person reads
+ * (REVIEWED_FACTS), and none whose value can hold free words
+ * (FREE_TEXT_FACTS).
+ */
+export function gapFillFact(fact: FactName): boolean {
+  return !REVIEWED_FACTS.has(fact) && !isContactFact(fact) && !(FREE_TEXT_FACTS as readonly string[]).includes(fact);
+}
+
+/**
+ * Whether another source reported a different value for the item's fact
+ * within 90 days before it. Reports of the value doubts took down (`down`),
+ * sent before the takedown, do not count.
+ */
+function disagrees(item: ReportItem, earlier: readonly StoredFeedback[], down: OpenDoubt | undefined): boolean {
+  const at = time(item);
+  const source = sourceOf(item);
+  return earlier.some(
+    (r) =>
+      r.id !== item.id &&
+      r.type === "report" &&
+      r.report.kind === "fact" &&
+      r.place === item.place &&
+      r.report.fact === item.report.fact &&
+      sourceOf(r) !== source &&
+      !sameValue(r.report.value, item.report.value) &&
+      inWindow(r, at) &&
+      !(down !== undefined && sameValue(r.report.value, down.value) && time(r) < Date.parse(down.at)),
+  );
+}
+
 /**
  * A `fact` report. An attested report changes the fact at once, unless the
  * owner set it, another source disagrees within 90 days, or (for a contact
  * fact or the address) it fails `contactProblem`; then it is held. A report
  * without attestation is held: a person reads a contact fact, and any other
  * fact waits for a second device to agree (which `applyRules` settles across
- * runs).
+ * runs), unless it fills a gap: a `gapFillFact` the place has no value for,
+ * which no other source disagrees with, goes live (`gapFill`).
  */
 export function decideFact({ item, place, earlier, openCase, contactChecks, trusted = false }: ItemInput): ItemDecision {
   const refusal = factRefusal(item);
@@ -326,6 +365,15 @@ export function decideFact({ item, place, earlier, openCase, contactChecks, trus
   const current = (place.facts as Record<string, unknown>)[fact];
   if (sameValue(current, value)) return { verdict: "live", changes: [], why: `${fact} is already ${show(value)}` };
   if (item.attested === undefined && !checked) {
+    // A gap fill: a fixed value for a fact the place has no value for, with no other source sending another.
+    if (current === undefined && down === undefined && gapFillFact(fact) && place.fact_sources[fact] !== "owner" && !disagrees(item, earlier, down)) {
+      return {
+        verdict: "live",
+        changes: [{ place: item.place as string, fact, value }, ...factsClearedBy(place.facts, fact, value).map((cleared) => ({ place: item.place as string, fact: cleared, value: null }))],
+        why: `${fact} set to ${show(value)} (${GAP_FILL})`,
+        gapFill: true,
+      };
+    }
     return { verdict: "held", reason: "not_attested", why: `waiting for a second device to agree on ${fact}` };
   }
   if (place.fact_sources[fact] === "owner") {
@@ -344,21 +392,7 @@ export function decideFact({ item, place, earlier, openCase, contactChecks, trus
     }
     if (item.attested === undefined && !trusted) return { verdict: "held", reason: "not_attested", why: `${fact} passed the contact checks, and waits for a second device to agree` };
   }
-  const at = time(item);
-  const source = sourceOf(item);
-  const disagrees = earlier.some(
-    (r) =>
-      r.id !== item.id &&
-      r.type === "report" &&
-      r.report.kind === "fact" &&
-      r.place === item.place &&
-      r.report.fact === fact &&
-      sourceOf(r) !== source &&
-      !sameValue(r.report.value, value) &&
-      inWindow(r, at) &&
-      !(down !== undefined && sameValue(r.report.value, down.value) && time(r) < Date.parse(down.at)),
-  );
-  if (disagrees) {
+  if (disagrees(item, earlier, down)) {
     return { verdict: "held", reason: "disagreement", why: `another device reported a different ${fact}, so a person decides` };
   }
   // A contact without attestation that passed the contact checks gets here only from a trusted contributor.

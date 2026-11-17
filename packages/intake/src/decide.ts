@@ -496,7 +496,7 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
   const waiting = (reason: HeldReason) =>
     reason === "not_attested" && kind === "fact" && item.report.source !== undefined && !REVIEWED_FACTS.has(item.report.fact as FactName) ? "source_link" : reason;
   if (decision.verdict === "held") return heldWithEvidence(waiting(decision.reason), item);
-  // An item without attestation is never live from the intake. The apply's two-device rule still runs.
+  // An item without attestation is never live from the intake. The apply decides it: a gap fill, or the two-device rule.
   if (item.attested === undefined) return heldWithEvidence(waiting("not_attested"), item);
   // The place already has the value: nothing to show, and nothing for the checks.
   if (decision.changes.length === 0) return live((d) => [evidenceStatement(d, item, "live")], (p) => void p.evidence.push(evidenceRow(item, "live")));

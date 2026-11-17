@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FEE_RETIRED, type StoredFeedback } from "@opencampingdb/feedback";
-import { applyEdit, applyHeldReview, applyRules, ratingOf, REPORTS_TO_HIDE, reviewIdOf, type ClosureEvidence, type HeldCase, type RulesInput } from "../src/rules.js";
+import { applyEdit, applyHeldReview, applyRules, GAP_FILL_DAILY_LIMIT, ratingOf, REPORTS_TO_HIDE, reviewIdOf, type ClosureEvidence, type HeldCase, type RulesInput } from "../src/rules.js";
 import type { Place, Review } from "../src/types.js";
 
 const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
@@ -711,7 +711,8 @@ describe("fact reports", () => {
     const b = fact(1, "dev-b", "power", "4wd");
     const c = fact(1, "dev-c", "access", "2wd");
     const d = fact(2, "dev-d", "access", "4wd");
-    const out = run([a, b, c, d], { now: 2, places: [place({ facts: {}, fact_sources: {} })] });
+    // The place has power already, so the one valid power report would change it, and needs a second device.
+    const out = run([a, b, c, d], { now: 2, places: [place({ facts: { power: false }, fact_sources: { power: "osm" } })] });
     expect(out.after()).toBeUndefined();
     expect(out.outcome(a)).toBe("waiting");
     expect(out.outcome(b)).toBe("refused"); // not a valid value for power
@@ -2389,5 +2390,61 @@ describe("results the data validator would refuse", () => {
     const out = run([r], { reviewers: [ctr("sam")] });
     expect(out.outcome(r)).toBe("applied");
     expect(out.reviews.get(PLACE)).toHaveLength(1);
+  });
+});
+
+describe("gap fills", () => {
+  const web = (item: StoredFeedback, origin = "net-1") => ({ ...item, origin, human_checked: true }) as StoredFeedback;
+  const reasonOf = (out: ReturnType<typeof run>, item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.reason;
+
+  it("puts a fixed-value fact the place has no value for live on one report without attestation", () => {
+    const r = web(fact(0, "dev-a", "toilets", true));
+    const out = run([r]);
+    expect(out.outcome(r)).toBe("applied");
+    expect(reasonOf(out, r)).toBe("toilets set to true (filled a gap: the place had no value)");
+    expect(out.after()?.facts).toMatchObject({ toilets: true });
+    expect(out.after()?.fact_sources).toMatchObject({ toilets: "feedback" });
+    expect(out.changes).toEqual([expect.objectContaining({ automatic: true, feedback: [r.id], summary: "toilets set to true (filled a gap: the place had no value)" })]);
+  });
+
+  it("keeps the two-source rule for a fact with free words, a contact and a change to a value the place has", () => {
+    const operator = web(fact(0, "dev-a", "operator", "Example Shire Council"));
+    const hours = web(fact(0, "dev-a", "opening_hours", "Mo-Su 08:00-18:00"));
+    const changed = web(fact(0, "dev-a", "power", true));
+    const out = run([operator, hours, changed]);
+    expect([out.outcome(operator), out.outcome(hours), out.outcome(changed)]).toEqual(["waiting", "waiting", "waiting"]);
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("waits when another source sent a different value within 90 days, before or after it", () => {
+    const a = web(fact(0, "dev-a", "toilets", true), "net-1");
+    const b = web(fact(1, "dev-b", "toilets", false), "net-2");
+    const out = run([a, b], { now: 2 });
+    expect([out.outcome(a), out.outcome(b)]).toEqual(["waiting", "waiting"]);
+    expect(out.after()).toBeUndefined();
+  });
+
+  it("sends a gap fill the intake held for repeated text to the AI reviewer, not into the data", () => {
+    const r = { ...web(fact(0, "dev-a", "toilets", true)), intake: { state: "held", held_reason: "repeated_text" } } as StoredFeedback;
+    const out = run([r]);
+    expect(out.outcome(r)).toBe("needs_review");
+    expect(out.after()).toBeUndefined();
+    expect(out.held).toEqual([expect.objectContaining({ case: "intake_check", held_for: "repeated_text", fact: "toilets" })]);
+  });
+
+  it("fills at most GAP_FILL_DAILY_LIMIT gaps a day from one client network, and the rest wait for a second source", () => {
+    const others = Array.from({ length: GAP_FILL_DAILY_LIMIT }, (_, n) => `ocdb_01JBXK3M8Q4R5S6T7V8W9X${String(n).padStart(4, "0")}`);
+    const places = [place(), ...others.map((id) => place({ id }))];
+    const earlier = others.map((id) => applied(web(fact(1, "dev-a", "toilets", true, id))));
+    for (const e of earlier) (e as unknown as { outcome: { reason: string } }).outcome.reason = "toilets set to true (filled a gap: the place had no value)";
+    const sameDay = web(fact(1, "dev-b", "toilets", true));
+    const out = run([sameDay], { now: 2, places, history: earlier });
+    expect(out.outcome(sameDay)).toBe("waiting");
+    expect(reasonOf(out, sameDay)).toMatch(/gap fills a day/);
+    // Another network, or the next day, fills it.
+    const otherNetwork = web(fact(1, "dev-c", "toilets", true), "net-2");
+    expect(run([otherNetwork], { now: 2, places, history: earlier }).outcome(otherNetwork)).toBe("applied");
+    const nextDay = web(fact(2, "dev-b", "toilets", true));
+    expect(run([nextDay], { now: 3, places, history: earlier }).outcome(nextDay)).toBe("applied");
   });
 });

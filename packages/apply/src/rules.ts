@@ -29,6 +29,7 @@ import {
   distinctSources as distinctDevices,
   factRefusal,
   factsClearedBy,
+  GAP_FILL,
   heldForCheck,
   inWindow,
   newPlaceFields,
@@ -114,6 +115,9 @@ export function liftOf(place: Place, freeze: FreezeRecord, now: string): string 
   const expiry = expiryOf(freeze);
   return now >= expiry ? expiry : undefined;
 }
+
+/** Gap fills (decide.ts `gapFillFact`) one client network may make in a UTC day. Past it, a report that would fill a gap waits for a second source. */
+export const GAP_FILL_DAILY_LIMIT = 20;
 
 export const DRAFT_KIND = "campground";
 const DRAFT_GROUP = "overnight";
@@ -668,6 +672,15 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       feedback: [item.id],
     };
   };
+  /** Gap fills applied by client network (or device, without one) and UTC day, from earlier runs and this one. */
+  const gapFillKey = (item: StoredFeedback) => `${sourceOf(item)} ${item.received.slice(0, 10)}`;
+  const gapFills = new Map<string, number>();
+  for (const h of input.history) {
+    if (wasApplied(h) && ((h as { outcome?: { reason?: string } }).outcome?.reason ?? "").endsWith(`(${GAP_FILL})`)) gapFills.set(gapFillKey(h), (gapFills.get(gapFillKey(h)) ?? 0) + 1);
+  }
+  /** Reports that would fill a gap, kept waiting because their network filled GAP_FILL_DAILY_LIMIT gaps that day. */
+  const capped = new Set<string>();
+
   const blocked = input.blocked ?? new Set<string>();
   const trusted = trustedContributors(input.trust ?? emptyTrust(), blocked);
   // Doubts this run upheld, which withdraw trust from whoever sent the value.
@@ -1738,6 +1751,30 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     return found;
   }
 
+  /**
+   * A gap fill `decideFact` let through, or the wait for a second source
+   * when another source sent a different value within 90 days of it, before
+   * or after.
+   */
+  function gapFillOrWait(item: ReportItem, decision: ItemDecision, evidence: readonly StoredFeedback[]): ItemDecision {
+    const waits: ItemDecision = { verdict: "held", reason: "not_attested", why: `waiting for a second device to agree on ${item.report.fact as string}` };
+    if ((gapFills.get(gapFillKey(item)) ?? 0) >= GAP_FILL_DAILY_LIMIT) {
+      capped.add(item.id);
+      return waits;
+    }
+    const conflict = evidence.some(
+      (r) =>
+        r.id !== item.id &&
+        r.type === "report" &&
+        r.report.kind === "fact" &&
+        sourceOf(r) !== sourceOf(item) &&
+        !sameValue(r.report.value, item.report.value) &&
+        Math.abs(time(r) - time(item)) <= WINDOW_MS &&
+        decisions.get(r.id)?.outcome !== "refused",
+    );
+    return conflict ? waits : decision;
+  }
+
   function applyFacts(items: ReportItem[]): void {
     const groups = new Map<string, ReportItem[]>();
     for (const item of items) {
@@ -1788,7 +1825,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         if (decision.verdict === "live") {
           if (decision.changes.length > 0) {
             setFact(value);
-            note(placeId, `${fact} set to ${JSON.stringify(value)} (${decision.byTrust ? "a trusted contributor, past the contact checks" : "one attested report"})`, true, [item]);
+            note(placeId, `${fact} set to ${JSON.stringify(value)} (${decision.byTrust ? "a trusted contributor, past the contact checks" : decision.gapFill ? GAP_FILL : "one attested report"})`, true, [item]);
           }
           decide(item, "applied", decision.why);
           return;
@@ -1914,10 +1951,12 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           settle(item, decision);
           continue;
         }
-        const decision = decideFact({ item, place, earlier: evidence, ...(openCase !== undefined ? { openCase } : {}) });
+        const ruled = decideFact({ item, place, earlier: evidence, ...(openCase !== undefined ? { openCase } : {}) });
+        const decision = ruled.verdict === "live" && ruled.gapFill ? gapFillOrWait(item, ruled, evidence) : ruled;
         if (decision.verdict !== "held" || decision.reason !== "not_attested") {
           open.delete(item);
           settle(item, decision);
+          if (decision.verdict === "live" && decision.gapFill && decisions.get(item.id)?.outcome === "applied") gapFills.set(gapFillKey(item), (gapFills.get(gapFillKey(item)) ?? 0) + 1);
           if (decision.verdict === "live" && decision.settles === "replaced" && decisions.get(item.id)?.outcome === "applied") {
             changes[changes.length - 1]!.summary += CLOSES_CASE;
             closeCase("replaced", [item]);
@@ -1963,7 +2002,15 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         }
       }
       for (const item of open) {
-        decide(item, "waiting", openCase !== undefined && sameValue(item.report.value, openCase.value) ? takenDownWhy(fact) : `waiting for a second device to agree on ${fact}`);
+        decide(
+          item,
+          "waiting",
+          openCase !== undefined && sameValue(item.report.value, openCase.value)
+            ? takenDownWhy(fact)
+            : capped.has(item.id)
+              ? `waiting for a second device to agree on ${fact}: its network reached ${GAP_FILL_DAILY_LIMIT} gap fills a day`
+              : `waiting for a second device to agree on ${fact}`,
+        );
       }
     }
   }
