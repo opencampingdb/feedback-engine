@@ -28,6 +28,8 @@
 
 import type { AiLike } from "./checks.js";
 import type { Fetch, GitHubApp, GitHubAppConfig } from "./github.js";
+import { websiteHost } from "@opencampingdb/feedback";
+import { decodeEntities, fetchPage, PageProblem, publicUrl, withDeadline } from "@opencampingdb/apply/pages";
 import type { D1Like } from "./recent.js";
 import { answerOf, ModelUnavailable, onError, REVIEW_TIMEOUT_MS, safeReason, withTimeout } from "./reviewer.js";
 import { claimRun, OVERTURE_REVIEW, REVIEW_EVERY_MS } from "./runs.js";
@@ -47,7 +49,9 @@ export const SITE_TIMEOUT_MS = 8_000;
 /** The most of a website's page that is read. */
 export const SITE_MAX_BYTES = 200_000;
 /** Redirects followed on the website's own host. */
-export const MAX_REDIRECTS = 3;
+export { MAX_REDIRECTS } from "@opencampingdb/apply/pages";
+/** How the reviewer names itself to a website. */
+const USER_AGENT = "OpenCampingDB-reviewer (+https://github.com/opencampingdb)";
 /** Longest page text the model reads. */
 export const MAX_SITE_TEXT = 2_000;
 /** Times a run's commit starts again from a branch that moved on, before it waits for the next run. */
@@ -131,39 +135,8 @@ function settleByRules(c: OvertureCandidate): CandidateCheck | null {
 const NOT_PUBLIC_ADDRESS = "it is not a public web address";
 const TIMED_OUT = "it did not answer in time";
 
-/** Names for hosts on a local or private network, never on the public web. */
-const PRIVATE_NAMES = ["localhost", "local", "internal", "home.arpa"];
-
-/** The URL when it is a public http or https address on the default port, or null. */
-function publicUrl(text: string, base?: URL): URL | null {
-  let url: URL;
-  try {
-    url = new URL(text, base);
-  } catch {
-    return null;
-  }
-  // A trailing dot names the same host ("localhost." is localhost).
-  const host = url.hostname.toLowerCase().replace(/\.+$/, "");
-  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  if (url.username || url.password || url.port) return null;
-  if (!host.includes(".") || host.startsWith("[") || /^[\d.]+$/.test(host)) return null;
-  if (PRIVATE_NAMES.some((name) => host === name || host.endsWith(`.${name}`))) return null;
-  return url;
-}
-
-const bareHost = (url: URL) => url.hostname.toLowerCase().replace(/^www\./, "");
-
-const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
-const decode = (text: string) =>
-  text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (whole, code: string) => {
-    if (code[0] === "#") {
-      const n = code[1] === "x" || code[1] === "X" ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
-      return Number.isFinite(n) && n > 31 && n < 0x110000 ? String.fromCodePoint(n) : " ";
-    }
-    return ENTITIES[code.toLowerCase()] ?? whole;
-  });
 const squash = (text: string, max: number) => {
-  const out = decode(text).replace(/\s+/g, " ").trim();
+  const out = decodeEntities(text).replace(/\s+/g, " ").trim();
   return out.length > max ? `${out.slice(0, max - 3).trimEnd()}...` : out;
 };
 
@@ -183,84 +156,44 @@ function pageText(html: string): { title: string; description: string; text: str
   return { title: squash(title, 200), description: squash(description, 300), text: squash(body, MAX_SITE_TEXT) };
 }
 
-/** Reads at most `max` bytes of a response's body, and stops the rest. */
-async function readLimited(res: Response, max: number): Promise<string> {
-  if (!res.body) return "";
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  while (size < max) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value.subarray(0, max - size));
-    size += Math.min(value.byteLength, max - size);
-  }
-  await reader.cancel().catch(() => undefined);
-  const all = new Uint8Array(size);
-  let at = 0;
-  for (const chunk of chunks) {
-    all.set(chunk, at);
-    at += chunk.byteLength;
-  }
-  return new TextDecoder().decode(all);
-}
-
 /**
  * What a candidate's own website says: its title, description and text, or
- * the problem that stopped it being read. One fetch at a time, within
- * `timeoutMs` in all, at most `maxBytes` read, and a redirect followed only on
- * the same host (with or without `www.`), at most MAX_REDIRECTS times. Never
- * throws.
+ * the problem that stopped it being read (see `fetchWebsitePage`). Never throws.
  */
 export async function readWebsite(
   fetchSite: Fetch,
   website: string,
   options: SiteOptions = {},
 ): Promise<SiteView> {
+  const page = await fetchWebsitePage(fetchSite, website, options);
+  return "html" in page ? { host: page.host, ...pageText(page.html) } : page;
+}
+
+/**
+ * A website's page as HTML, or the problem that stopped it being read. One
+ * fetch at a time, within `timeoutMs` in all, at most `maxBytes` read, and a
+ * redirect followed only on the same host (with or without `www.`), at most
+ * MAX_REDIRECTS times (`fetchPage`). Never throws.
+ */
+export async function fetchWebsitePage(
+  fetchSite: Fetch,
+  website: string,
+  options: SiteOptions = {},
+): Promise<{ host: string; html: string } | { host: string; problem: string }> {
+  type Page = { host: string; html: string } | { host: string; problem: string };
   const first = publicUrl(website);
-  const shownHost = first ? bareHost(first) : "";
-  const problem = (text: string): SiteView => ({ host: shownHost, problem: text });
+  const shownHost = first ? websiteHost(first) : "";
+  const problem = (text: string): Page => ({ host: shownHost, problem: text });
   if (!first) return problem(NOT_PUBLIC_ADDRESS);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? SITE_TIMEOUT_MS);
-  const timedOut = new Promise<SiteView>((resolve) => controller.signal.addEventListener("abort", () => resolve(problem(TIMED_OUT))));
-  const work = async (): Promise<SiteView> => {
-    let url = first;
-    for (let hops = 0; ; hops++) {
-      const res = await fetchSite(url.href, {
-        redirect: "manual",
-        signal: controller.signal,
-        headers: { accept: "text/html,text/plain;q=0.9", "user-agent": "OpenCampingDB-reviewer (+https://github.com/opencampingdb)" },
-      });
-      if (res.status >= 300 && res.status < 400) {
-        await res.body?.cancel().catch(() => undefined);
-        const location = res.headers.get("location");
-        const next = location ? publicUrl(location, url) : null;
-        if (!next || bareHost(next) !== bareHost(first)) return problem("it redirects to another host");
-        if (hops >= MAX_REDIRECTS) return problem("it redirects too many times");
-        url = next;
-        continue;
-      }
-      if (!res.ok) {
-        await res.body?.cancel().catch(() => undefined);
-        return problem(`it answered ${res.status}`);
-      }
-      const type = (res.headers.get("content-type") ?? "").toLowerCase();
-      if (!type.includes("text/html") && !type.includes("text/plain") && !type.includes("application/xhtml")) {
-        await res.body?.cancel().catch(() => undefined);
-        return problem("it is not a web page");
-      }
-      return { host: shownHost, ...pageText(await readLimited(res, options.maxBytes ?? SITE_MAX_BYTES)) };
-    }
-  };
-  try {
-    return await Promise.race([work(), timedOut]);
-  } catch {
-    return problem(controller.signal.aborted ? TIMED_OUT : "it could not be read");
-  } finally {
-    clearTimeout(timer);
-    controller.abort();
-  }
+  return withDeadline<Page>(
+    options.timeoutMs ?? SITE_TIMEOUT_MS,
+    async (signal) => ({
+      host: shownHost,
+      html: await fetchPage(fetchSite, first, { signal, userAgent: USER_AGENT, maxBytes: options.maxBytes ?? SITE_MAX_BYTES, pagesOnly: true }),
+    }),
+    () => problem(TIMED_OUT),
+    (error) => problem(error instanceof PageProblem ? error.message : "it could not be read"),
+  );
 }
 
 // ------------------------------------------------------------------ the model
@@ -446,7 +379,7 @@ export function flagComment(reviewer: string, records: readonly CandidateRecord[
       const c = candidates.get(r.gers);
       const site = c?.website ? publicUrl(c.website) : null;
       const gers = r.gers.replace(/[^0-9A-Za-z_-]/g, "");
-      return `| ${tableCell(r.name)} | \`${gers}\` | ${tableCell(c?.state)} | ${site ? bareHost(site).replace(/[^a-z0-9.-]/g, "") : ""} | ${tableCell(r.reason)} |`;
+      return `| ${tableCell(r.name)} | \`${gers}\` | ${tableCell(c?.state)} | ${site ? websiteHost(site).replace(/[^a-z0-9.-]/g, "") : ""} | ${tableCell(r.reason)} |`;
     }),
     "",
   ];

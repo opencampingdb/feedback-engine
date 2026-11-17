@@ -1,3 +1,4 @@
+import { SEND_TIME_BUDGET_MS } from "@opencampingdb/apply/contact-checks";
 import {
   isJpeg,
   jpegMetadata,
@@ -16,6 +17,7 @@ import {
   type StoredOwnerSubmission,
   isPlaceId,
   isDoubtFact,
+  isFactName,
   isValidFactValue,
   FEE_RETIRED,
   isFeedbackId,
@@ -26,6 +28,7 @@ import {
   isProofPublicKey,
   verifyContributorProof,
   REPORT_KINDS,
+  sourceLinkProblem,
   type ReportKind,
 } from "@opencampingdb/feedback";
 import { placeOf, PROGRESS_UPDATE_STATES, type PhotoProgressUpdate, type ProgressUpdate } from "@opencampingdb/apply/progress-update";
@@ -39,7 +42,8 @@ import type { MajorRoads } from "@opencampingdb/apply/review";
 import { recordInboxWrite, startApplyIfDue, type RunOutcome } from "./runs.js";
 import { parseTimetable, startTimedIfDue, type TimedStart } from "./timed.js";
 import { reviewOvertureCandidates, type OvertureReviewResult } from "./overture-reviewer.js";
-import { DEFAULT_REVIEW_MODEL, MAX_MODEL_FAILURES, parseBotLogins, REVIEW_BRANCH, reviewHeldCases, type ReviewResult } from "./reviewer.js";
+import { DEFAULT_REVIEW_MODEL, MAX_MODEL_FAILURES, parseBotLogins, REVIEW_BRANCH, REVIEW_TIMEOUT_MS, reviewHeldCases, type ReviewResult } from "./reviewer.js";
+import { capOf } from "./second-review.js";
 import { IntegrityError, IntegrityUnavailable, PlayIntegrity, type AndroidConfig, type ServiceAccount } from "./playintegrity.js";
 import { SafeSearch, verdict, worseRatings } from "./safesearch.js";
 import { jpegSize } from "./jpeg.js";
@@ -66,6 +70,7 @@ import {
   insertEvidence,
   listPlaces,
   MAX_BLOCKED_CONTRIBUTORS,
+  MAX_TRUSTED_CONTRIBUTORS,
   MAX_REMOVE_IDS,
   NEW_PLACE_DAILY_LIMIT,
   parseBbox,
@@ -73,6 +78,7 @@ import {
   markPlacesInData,
   isBlocked,
   setBlockList,
+  setTrustList,
   snapBbox,
   WITHDRAW_WINDOW_MS,
   type D1Like,
@@ -80,7 +86,9 @@ import {
   type StoredPlace,
 } from "./recent.js";
 import { cellHashes, getIndexedPlace, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
+import { geometryAt, type GeometryBucket } from "./place-geometry.js";
 import { createChecks, pruneLiveCounts, releaseLive, type AiLike, type LiveSlot } from "./checks.js";
+import { checkRepeated, pruneTextVectors, repeatedTextOf, type RepeatedResult, type VectorizeLike } from "./repeated.js";
 import {
   decideAtSendTime,
   decidedHere,
@@ -88,6 +96,8 @@ import {
   markInData,
   openDoubtCases,
   overrule,
+  recordFreezes,
+  liftUnheld,
   pruneDecisions,
   UNAVAILABLE,
   type DoubtCase,
@@ -111,6 +121,8 @@ import {
 } from "./progress.js";
 import { verifyPreview } from "@opencampingdb/apply/preview";
 import { IDEMPOTENCY_HEADER, isIdempotencyKey, keepAnswer, keptAnswers, pruneRequestKeys, requestKey } from "./idempotency.js";
+import { countSilentDrops, pruneSilentDrops, type SilentReason } from "./silent.js";
+import { createReputation, refreshBlocklist, reputationConfig, type Standing } from "./reputation.js";
 import {
   appVersionAtLeast,
   minimumAppVersion,
@@ -156,13 +168,21 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   /**
    * The daily counters of an intake without RECENT_LIST. With RECENT_LIST they
-   * are kept in D1 (`rate_counts`) and this namespace is not used.
+   * are kept in D1 (`rate_counts`). The network blocklist (reputation.ts) is
+   * kept here either way.
    */
   RATE_LIMIT: KVLike;
   /** Registered App Attest keys and open challenges. Needed when an app key has `ios`. */
   ATTEST?: KVLike;
   /** Secret. Google service account key file (JSON) allowed to decode Play Integrity tokens. Needed when an app key has `android`. */
   GOOGLE_SERVICE_ACCOUNT?: string;
+  /**
+   * R2 bucket with the data repository's place geometry tiles (land mask,
+   * major roads, building footprints) for the plausibility check on new
+   * places (place-geometry.ts). Optional: without it, new places are not
+   * checked at send time and the apply checks them.
+   */
+  PLACE_GEOMETRY?: GeometryBucket;
   /** Private R2 bucket that holds uploaded photos until their record is merged. Needed for `/v1/photos`. */
   PHOTOS_PENDING?: BucketLike;
   /** Secret, shared with the photo server. Signs photo passes. Needed for `/v1/photos/pass`. */
@@ -258,6 +278,22 @@ export interface Env {
   TIMED_INSTALLATION_ID?: string;
   /** Secret. The abuse.ch auth key for the URLhaus check on links. Without it, an item with a link is held. */
   URLHAUS_KEY?: string;
+  /**
+   * Vectorize index (768 dimensions, cosine, with number metadata index `at`
+   * and string metadata index `source`) for the repeated text check
+   * (src/repeated.ts), with AI and RECENT_LIST. Off without it.
+   */
+  VECTORIZE?: VectorizeLike;
+  /**
+   * Network reputation (reputation.ts): the content URL of a CrowdSec
+   * blocklist integration in plain text format,
+   * `https://admin.api.crowdsec.net/v1/integrations/<id>/content`. The
+   * scheduled job fetches it once a day into RATE_LIMIT. Off without
+   * CROWDSEC_BLOCKLIST_CREDENTIALS.
+   */
+  CROWDSEC_BLOCKLIST_URL?: string;
+  /** Secret. The integration's Basic auth credentials, as `username:password`. Off without CROWDSEC_BLOCKLIST_URL. */
+  CROWDSEC_BLOCKLIST_CREDENTIALS?: string;
   /** Workers AI, for the Llama Guard check on free text and the AI reviewer. Without it, free text from a contributor without a track record is held. */
   AI?: AiLike;
   /**
@@ -270,6 +306,15 @@ export interface Env {
   AI_REVIEWER?: string;
   /** The Workers AI model the reviewer asks. Defaults to DEFAULT_REVIEW_MODEL. */
   REVIEW_MODEL?: string;
+  /**
+   * Secret. An Anthropic API key for the AI reviewer's second stage
+   * (src/second-review.ts): a held case the first model is unsure of is asked
+   * of SECOND_REVIEW_MODEL while the month's spending is under
+   * SECOND_REVIEW_CAP_USD. Without it, such a case is left for a person.
+   */
+  ANTHROPIC_API_KEY?: string;
+  /** The second stage's monthly spending cap in US dollars. Defaults to DEFAULT_SECOND_REVIEW_CAP_USD (20). */
+  SECOND_REVIEW_CAP_USD?: string;
   /**
    * `on` runs the AI reviewer's check of Overture candidates from the
    * scheduled job, at most once every 10 minutes, on the open PR from
@@ -313,8 +358,8 @@ const INVALID_KEY = `${IDEMPOTENCY_HEADER} must be 16 to 128 letters, digits, _ 
  * Not for an owner claim or listing, whose answer holds a token that is
  * never stored, and not without the D1 database.
  */
-function withKey<T extends Admitted | ItemAnswer>(db: D1Like | undefined, app: AppEntry, key: string | undefined, at: string, item: T): T {
-  if (!("file" in item) || !db || key === undefined || "token" in item.answer) return item;
+function withKey<T extends Admitted | Dropped | ItemAnswer>(db: D1Like | undefined, app: AppEntry, key: string | undefined, at: string, item: T): T {
+  if (!("file" in item || "dropped" in item) || !db || key === undefined || "token" in item.answer) return item;
   return { ...item, writes: [...item.writes, keepAnswer(db, app.app, key, { status: 202, body: item.answer }, at)] };
 }
 
@@ -415,6 +460,8 @@ export interface Deps {
   appAttestRoot?: string;
   /** Edge cache for the recent places list. Workers' default cache in production; none when left out. */
   cache?: CacheLike;
+  /** How long the website check on an attested contact may take at send time. SEND_TIME_BUDGET_MS by default. */
+  contactCheckMs?: number;
 }
 
 /** The part of the Workers Cache API the recent list uses. */
@@ -690,14 +737,62 @@ interface Admitted {
   after: () => Promise<void>;
 }
 
-/** The answer to a human check that did not pass, or undefined when it passed. */
-function humanCheckRefusal(result: HumanCheckResult): ItemAnswer | undefined {
-  if (result.ok) return undefined;
+/**
+ * An item dropped silently (silent.ts): its answer, the one an accepted item
+ * gets, and its progress row (with its kept idempotency answer, when it has
+ * a key). Nothing else is written for it.
+ */
+interface Dropped {
+  dropped: SilentReason;
+  writes: D1Statement[];
+  answer: Record<string, unknown>;
+}
+
+/** What `screen` found: the network's standing, whether a human check passed, and why the item is dropped silently, if it is. */
+interface Screened {
+  standing: Standing | "off";
+  humanChecked: boolean;
+  dropped: SilentReason | undefined;
+}
+
+/** An owner submission is not screened: it is never from a listed network's silent drops, nor human checked. */
+const NOT_SCREENED: Screened = { standing: "off", humanChecked: false, dropped: undefined };
+
+/**
+ * What a human check settles: the item goes on, human checked; it is
+ * dropped silently, when the token is missing or did not pass, so a sender
+ * cannot tell whether its token was taken; or it is answered `503`, when
+ * Turnstile could not answer, which is not the sender's fault.
+ */
+function humanCheckOutcome(result: HumanCheckResult): { humanChecked: true } | { dropped: SilentReason } | ItemAnswer {
+  if (result.ok) return { humanChecked: true };
   if (result.error === "unavailable") return { status: 503, body: { error: "unavailable" }, headers: { "retry-after": "60" } };
-  return { status: 401, body: result.error === "human_check_failed" ? { error: result.error, details: result.details } : { error: result.error } };
+  return { dropped: result.error };
 }
 
 /** Over a daily limit: 429, with the seconds until the counters reset. */
+/**
+ * The refusal for a fact report's source link on a host other than `.gov.au`
+ * or the place's website in the place index, or undefined when it passes. An
+ * intake without the index, or one that cannot read it, leaves the host to
+ * the apply run, which checks it again and never confirms a value from
+ * another host. A place the index does not hold has no website on record.
+ */
+async function sourceRefusal(db: D1Like | undefined, place: string | null, source: string): Promise<ItemAnswer | undefined> {
+  if (sourceLinkProblem(source, undefined) === null || db === undefined) return undefined;
+  let website: unknown;
+  if (place !== null) {
+    const indexed = await getIndexedPlace(db, place).then(
+      (p) => p ?? null,
+      () => undefined,
+    );
+    if (indexed === undefined) return undefined;
+    website = indexed?.facts.website;
+  }
+  const problem = sourceLinkProblem(source, website);
+  return problem === null ? undefined : { status: 400, body: { error: "source_not_allowed", details: [`report.source ${problem}`] } };
+}
+
 function rateLimited(retryAfter: number): ItemAnswer {
   return { status: 429, body: { error: "rate_limited" }, headers: { "retry-after": String(retryAfter) } };
 }
@@ -814,9 +909,11 @@ export function createReviewer(deps: Pick<Deps, "fetch" | "now"> & { roads?: Maj
         botLogins,
         now: deps.now,
         onError: warn,
+        ...(env.ANTHROPIC_API_KEY ? { second: { apiKey: env.ANTHROPIC_API_KEY, fetch: deps.fetch, capUsd: capOf(env.SECOND_REVIEW_CAP_USD), timeoutMs: REVIEW_TIMEOUT_MS } } : {}),
         onModelFailure: (key, failures, error) =>
           console.warn(`the AI reviewer's model call failed on held case ${key} (${failures} of ${MAX_MODEL_FAILURES} runs), going on to the next case: ${String(error)}`),
         ...(deps.roads ? { roads: deps.roads } : {}),
+        fetchSite: deps.fetch,
       });
     } catch (error) {
       warn(error);
@@ -897,8 +994,9 @@ export function createFlush(deps: Pick<Deps, "fetch" | "now">) {
 /**
  * The scheduled job, run every minute: writes the queued items to the inbox,
  * starts the inbox's apply workflow when it is due (see runs.ts), then runs
- * the AI reviewer and its Overture candidate check when they are on and due
- * (see reviewer.ts and overture-reviewer.ts). A failed start,
+ * fetches the network blocklist when it is a day old (reputation.ts), then
+ * runs the AI reviewer and its Overture candidate check when they are on and
+ * due (see reviewer.ts and overture-reviewer.ts). A failed start,
  * such as the GitHub App missing `actions: write`, is logged and tried again
  * on the next tick. Returns what became of the apply.
  */
@@ -912,9 +1010,14 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
     if (env.RECENT_LIST) {
       const db = env.RECENT_LIST;
       const nowMs = deps.now();
-      await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs), pruneProgress(db, nowMs), pruneRateCounts(db, nowMs), pruneRequestKeys(db, nowMs)]).catch((error: unknown) => {
+      await Promise.all([pruneLiveCounts(db, nowMs), pruneDecisions(db, nowMs), pruneProgress(db, nowMs), pruneRateCounts(db, nowMs), pruneRequestKeys(db, nowMs), pruneSilentDrops(db, nowMs)]).catch((error: unknown) => {
         console.warn(`pruning the recent list failed: ${String(error)}`);
       });
+      if (env.VECTORIZE) {
+        await pruneTextVectors(db, env.VECTORIZE, nowMs).catch((error: unknown) => {
+          console.warn(`deleting old text vectors failed: ${String(error)}`);
+        });
+      }
     }
     // Before the apply is started, so a run that starts now finds this minute's items.
     await flush(env);
@@ -929,6 +1032,7 @@ export function createScheduled(deps: Pick<Deps, "fetch" | "now">) {
           )
         : "off";
     await timed(env);
+    await refreshBlocklist(deps, env);
     await review(env);
     await reviewOverture(env);
     return outcome;
@@ -973,6 +1077,13 @@ export function createHandler(deps: Deps) {
   const integrity = new PlayIntegrity(deps.fetch, deps.now);
   const safeSearch = new SafeSearch(deps.fetch, deps.now);
   const random = deps.randomBytes ?? ((n: number) => crypto.getRandomValues(new Uint8Array(n)));
+  const reputation = createReputation(deps.now);
+
+  /** Whether the client's address is on the network blocklist, or `off` when the intake has none. Never asks an outside service. */
+  async function standingOf(request: Request, env: Env): Promise<Standing | "off"> {
+    if (!reputationConfig(env)) return "off";
+    return reputation(env.RATE_LIMIT, request.headers.get("cf-connecting-ip") ?? "");
+  }
 
   /** Checks the human check header against the exact body text. */
   async function humanCheck(request: Request, app: AppEntry, body: string): Promise<HumanCheckResult> {
@@ -983,6 +1094,24 @@ export function createHandler(deps: Deps) {
       config: app.human_check!,
       remoteip: request.headers.get("cf-connecting-ip") ?? undefined,
     });
+  }
+
+  /**
+   * The network blocklist, then the human check, for one item or a whole
+   * batch, before anything is stored. A sender from a listed network that is
+   * not `attested` is dropped silently, before its human check is sent to
+   * Turnstile. An attested one goes on, to be held (a shared carrier address
+   * may be listed for someone else's abuse). A key with a human check then
+   * has the token checked: a missing or failed token drops the item
+   * silently, and Turnstile not answering is a 503.
+   */
+  async function screen(request: Request, env: Env, app: AppEntry, text: string, attested: boolean): Promise<Screened | ItemAnswer> {
+    const standing = await standingOf(request, env);
+    if (standing === "listed" && !attested) return { standing, humanChecked: false, dropped: "network_reputation" };
+    if (!app.requires_human_check) return { standing, humanChecked: false, dropped: undefined };
+    const outcome = humanCheckOutcome(await humanCheck(request, app, text));
+    if ("status" in outcome) return outcome;
+    return "dropped" in outcome ? { standing, humanChecked: false, dropped: outcome.dropped } : { standing, humanChecked: true, dropped: undefined };
   }
 
   /** Checks the attestation headers against the exact body text. */
@@ -1547,6 +1676,24 @@ export function createHandler(deps: Deps) {
     return json(200, { blocked: new Set(contributors).size }, cors);
   }
 
+  /**
+   * `POST /v1/places/recent/trust`, for the apply run: `{ "contributors": [...] }`,
+   * every contributor trusted from their track record, as hashed contributor
+   * ids, with `authorization: Bearer <PLACES_TOKEN>`. It replaces the list the
+   * intake keeps, so a contributor left off it is no longer trusted.
+   */
+  async function trustRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_TRUSTED_CONTRIBUTORS * 24 + 1024);
+    if (call instanceof Response) return call;
+    const contributors = call.body.contributors;
+    const isHashed = (c: unknown) => typeof c === "string" && /^ctr_[0-9a-f]{16}$/.test(c);
+    if (!Array.isArray(contributors) || contributors.length > MAX_TRUSTED_CONTRIBUTORS || !contributors.every(isHashed)) {
+      return json(400, { error: "invalid", details: [`contributors must be up to ${MAX_TRUSTED_CONTRIBUTORS} hashed contributor ids`] }, cors);
+    }
+    await setTrustList(call.db, contributors as string[]);
+    return json(200, { trusted: new Set(contributors).size }, cors);
+  }
+
   /** The `ids` of a call from the apply run: 1 to 500 feedback ids. A Response when they are not. */
   function feedbackIds(body: Record<string, unknown>, cors: Record<string, string>): string[] | Response {
     const ids = body.ids;
@@ -1620,6 +1767,42 @@ export function createHandler(deps: Deps) {
       cases.map(({ place, fact, value, taken_down_at, feedback_id }) => ({ place, fact, value, taken_down_at, feedback_id })),
     );
     return json(200, { opened }, cors);
+  }
+
+  /**
+   * `POST /v1/places/recent/freezes`, for the apply run: `{ "freezes": [{
+   * "place", "fact", "frozen_at", "lifted_at"? }], "complete"? }`, the places
+   * it froze over conflicting values in the last 90 days, with `lifted_at`
+   * once the reviewer's value is in the data or the freeze expired, and
+   * `authorization: Bearer <PLACES_TOKEN>`. A frozen place's fact changes
+   * are held as `disputed` (see `recordFreezes`), and sending them again
+   * changes nothing. With `complete: true` the list is all the apply holds
+   * (it may be empty), and a freeze the intake found at send time that is
+   * not on it is lifted once it is a day old (`liftUnheld`).
+   */
+  async function freezesRecent(request: Request, env: Env, cors: Record<string, string>): Promise<Response> {
+    const call = await placesCall(request, env, cors, MAX_BODY_BYTES * 16);
+    if (call instanceof Response) return call;
+    const { freezes, complete } = call.body;
+    const isFreeze = (f: unknown): f is { place: string; fact: string; frozen_at: string; lifted_at?: string } => {
+      if (typeof f !== "object" || f === null) return false;
+      const { place, fact, frozen_at: frozenAt, lifted_at: liftedAt } = f as Record<string, unknown>;
+      return isPlaceId(place) && isFactName(fact) && isIsoSeconds(frozenAt) && (liftedAt === undefined || isIsoSeconds(liftedAt));
+    };
+    const least = complete === true ? 0 : 1;
+    if (
+      (complete !== undefined && typeof complete !== "boolean") ||
+      !Array.isArray(freezes) ||
+      freezes.length < least ||
+      freezes.length > MAX_REMOVE_IDS ||
+      !freezes.every(isFreeze)
+    ) {
+      return json(400, { error: "invalid", details: [`freezes must be ${least} to ${MAX_REMOVE_IDS} frozen places`] }, cors);
+    }
+    const sent = freezes.map(({ place, fact, frozen_at, lifted_at }) => ({ place, fact, frozen_at, ...(lifted_at !== undefined ? { lifted_at } : {}) }));
+    const written = await recordFreezes(call.db, sent);
+    const lifted = complete === true ? await liftUnheld(call.db, sent, deps.now()) : 0;
+    return json(200, { written, lifted }, cors);
   }
 
   /**
@@ -1741,7 +1924,9 @@ export function createHandler(deps: Deps) {
    * attestation is checked once the item is read. A batch has `batch.proof`,
    * its attestation already checked over the whole body.
    */
-  type IntakeHow = { text: string } | { batch: { proof: Proof | undefined; humanChecked: boolean } };
+  type IntakeHow =
+    | { text: string }
+    | { batch: { proof: Proof | undefined } & Screened };
   type Intake = IntakeShared & IntakeHow;
 
   async function newIntake(request: Request, env: Env, app: AppEntry, nowMs: number, how: IntakeHow & { nextId: () => string }): Promise<Intake> {
@@ -1760,7 +1945,7 @@ export function createHandler(deps: Deps) {
    * refusal, or what to store for it, which the caller stores. Nothing is
    * stored here, apart from the live change the checks take (`slot`).
    */
-  async function admit(intake: Intake, body: unknown): Promise<Admitted | ItemAnswer> {
+  async function admit(intake: Intake, body: unknown): Promise<Admitted | Dropped | ItemAnswer> {
     const { request, env, app, nowMs, received, day, origin } = intake;
     // Fee reports are no longer collected. Answered before validation, so a client of any SDK version gets the same refusal.
     if (typeof body === "object" && body !== null && (body as { type?: unknown }).type === "fee") {
@@ -1774,6 +1959,10 @@ export function createHandler(deps: Deps) {
       return { status: 400, body: { error: "type_not_allowed_in_batch" } };
     }
     if (submission.type === "photo") return { status: 400, body: { error: "invalid", details: ["photos are sent to /v1/photos"] } };
+    if (submission.type === "report" && submission.report.source !== undefined) {
+      const refused = await sourceRefusal(env.RECENT_LIST, submission.place, submission.report.source);
+      if (refused) return refused;
+    }
     // Photo reports, removals and erasures belong to a photo service: an intake with a photo bucket.
     if (
       (submission.type === "photo_report" || submission.type === "photo_erasure" || submission.type === "photo_removal" || submission.type === "photo_vote") &&
@@ -1791,16 +1980,17 @@ export function createHandler(deps: Deps) {
     if (app.requires_human_check && !humanCheckAllows(submission, app.human_check!)) {
       return { status: 403, body: { error: "type_not_allowed_for_app_key" } };
     }
-    let humanChecked = false;
-    if ("batch" in intake) humanChecked = intake.batch.humanChecked;
-    else if (app.requires_human_check) {
-      const refused = humanCheckRefusal(await humanCheck(request, app, intake.text));
-      if (refused) return refused;
-      humanChecked = true;
-    }
+    // The blocklist and the human check (`screen`). A batch was screened once for all its items.
+    const screened = "batch" in intake ? intake.batch : isOwner ? NOT_SCREENED : await screen(request, env, app, intake.text, app.requires_attestation === true);
+    if ("status" in screened) return screened;
+    const { standing, humanChecked, dropped } = screened;
+    // A human-check key sends only reports (humanCheckAllows), so the submission is feedback.
+    if (dropped) return dropSilently(intake, submission as FeedbackSubmission, dropped);
 
     let proof: Proof | undefined;
     let contributor: string | undefined;
+    // The app sent the contributor, so the traveller is signed in: only such items earn and use trust.
+    let signedIn = false;
     let attestKey: string | undefined;
     let target: StoredPlace | undefined;
     let owner: "mine" | "theirs" | "unknown" | "unreadable" | undefined;
@@ -1821,8 +2011,11 @@ export function createHandler(deps: Deps) {
         }
         proof = result;
       }
-      if (feedback.contributor !== undefined) contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
-      else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
+      if (feedback.contributor !== undefined) {
+        contributor = await hashContributor(env.DEVICE_SALT, app.app, feedback.contributor);
+        // A website's id is the browser's, which anyone can reset, so a human-checked item never counts as signed in.
+        signedIn = !humanChecked;
+      } else if (proof?.keyId) contributor = `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-key:${proof.keyId}`)}`;
       if (proof?.keyId) attestKey = `ak_${await saltedHash(env.DEVICE_SALT, `key:${proof.keyId}`)}`;
       // A signed-out install attested by Play Integrity has neither. Its new places still need a
       // contributor to list and block them by, so the hashed install stands in.
@@ -1940,6 +2133,7 @@ export function createHandler(deps: Deps) {
       device,
       ...(origin ? { origin } : {}),
       ...(contributor ? { contributor } : {}),
+      ...(signedIn ? { signed_in: true } : {}),
       ...(proof ? { attested: proof.attested } : {}),
       ...(humanChecked ? { human_checked: true } : {}),
       ...(attestKey ? { attest_key: attestKey } : {}),
@@ -1969,9 +2163,31 @@ export function createHandler(deps: Deps) {
         stored.type === "photo_erasure");
     if (withhold) stored.withheld = true;
 
-    // Decided before the item is stored, and recorded in the same D1 batch that queues it.
+    // The repeated text check, with the AI and VECTORIZE bindings and RECENT_LIST, run once for the item.
+    // One source is one client network, or the device when the network is not known.
+    let repeatedOnce: Promise<RepeatedResult> | undefined;
+    const repeated =
+      env.RECENT_LIST && env.AI && env.VECTORIZE
+        ? () =>
+            (repeatedOnce ??= checkRepeated(
+              { ai: env.AI!, index: env.VECTORIZE!, db: env.RECENT_LIST!, now: deps.now },
+              { id, source: stored.origin ?? stored.device, text: repeatedTextOf(submission as FeedbackSubmission) },
+            ))
+        : undefined;
+
+    // Decided before the item is stored, and recorded in the same D1 batch that queues it. An
+    // attested item from a network on the blocklist is held as network_reputation, and any item
+    // whose network the intake could not look up (or before its first list) as check_unavailable.
+    // Every item that can change the data carries the hold, whether the intake decides it or not,
+    // so the apply sends it to the AI reviewer or a person, never into the data on its own.
     let decision: SendTimeDecision | undefined;
-    if (env.RECENT_LIST && decidedHere(stored)) {
+    const reputationHold = standing === "listed" ? "network_reputation" : standing === "unknown" ? "check_unavailable" : undefined;
+    if (reputationHold && decidedHere(stored)) {
+      decision = { answer: { state: "held", held_reason: reputationHold }, writes: () => [] };
+      stored.intake = decision.answer;
+    } else if (reputationHold && (stored.type === "report" || stored.type === "review" || stored.type === "check")) {
+      stored.intake = { state: "held", held_reason: reputationHold };
+    } else if (env.RECENT_LIST && decidedHere(stored)) {
       const db = env.RECENT_LIST;
       // Without a contributor, the hashed install stands in for one, as it does for a signed-out install's new places.
       const who = contributor ?? `ctr_${await saltedHash(env.DEVICE_SALT, `contributor-device:${device}`)}`;
@@ -1984,7 +2200,7 @@ export function createHandler(deps: Deps) {
                 (r) => r.allowed,
                 () => false,
               );
-      const checks = createChecks({ db, fetch: deps.fetch, urlhausKey: env.URLHAUS_KEY, ai: env.AI, now: deps.now, linkLookup });
+      const checks = createChecks({ db, fetch: deps.fetch, urlhausKey: env.URLHAUS_KEY, ai: env.AI, now: deps.now, linkLookup, repeated });
       decision = await decideAtSendTime({
         db,
         checks,
@@ -1992,6 +2208,8 @@ export function createHandler(deps: Deps) {
         submission: submission as FeedbackSubmission,
         contributor: who,
         decided: intake.decided,
+        website: { fetch: (url, init) => deps.fetch(url, init), timeoutMs: deps.contactCheckMs ?? SEND_TIME_BUDGET_MS },
+        placeGeometry: (p) => geometryAt(env.PLACE_GEOMETRY, p),
       }).catch((error: unknown) => {
         console.warn(`deciding ${id} failed: ${String(error)}`);
         return { answer: UNAVAILABLE, writes: () => [] };
@@ -2001,7 +2219,13 @@ export function createHandler(deps: Deps) {
       stored.intake = decision.linksPassed && answer.state === "held" ? { ...answer, links: "passed" } : answer;
       // The items after it in a batch are decided as if it were stored already.
       decision.addToDecided?.(intake.decided);
+    } else if (stored.type === "review" && repeated) {
+      // The apply decides a review. One repeated across sources, or one the check could not read, goes to a person.
+      const found = await repeated();
+      if (found === "repeated_text" || found === "check_unavailable") stored.intake = { state: "held", held_reason: found };
     }
+    // An item decided without the checks still leaves its text for the items after it.
+    if (repeated) await repeated();
 
     const writes = env.RECENT_LIST
       ? [
@@ -2088,6 +2312,47 @@ export function createHandler(deps: Deps) {
   }
 
   /**
+   * Answers an item as `admit` answers an accepted one from the same key, but
+   * stores nothing (silent.ts). It gets an id and, with RECENT_LIST, a
+   * progress row, so its progress reads `received` and never moves on. An
+   * item the intake decides at send time is answered as a human-checked one
+   * is: held as `not_attested`, or `unknown_place` for a place the intake
+   * does not know. Nothing is counted against a limit or as a source.
+   */
+  async function dropSilently(intake: Intake, submission: FeedbackSubmission, reason: SilentReason): Promise<Dropped> {
+    const db = intake.env.RECENT_LIST;
+    const id = `fb_${intake.nextId()}`;
+    const place = typeof submission.place === "string" ? submission.place : null;
+    let state: ItemState | undefined;
+    if (db && decidedHere({ ...submission, id, received: intake.received } as unknown as StoredFeedback)) {
+      const known = place !== null && (await getIndexedPlace(db, place).catch(() => undefined)) !== undefined;
+      const commons = submission.type === "report" && submission.report.kind === "commons_mismatch";
+      state = { state: "held", held_reason: commons ? "commons_report" : known ? "not_attested" : "unknown_place" };
+    }
+    return {
+      dropped: reason,
+      writes: db ? [receivedStatement(db, { id, received: intake.received, place }, state)] : [],
+      answer: state ? { id, ...state } : { id },
+    };
+  }
+
+  /**
+   * Writes the progress rows of silently dropped items and counts them by
+   * reason for `day`. A failure is logged and the items are answered as
+   * accepted all the same.
+   */
+  async function storeDropped(env: Env, day: string, items: readonly Dropped[]): Promise<void> {
+    if (items.length === 0) return;
+    try {
+      const db = env.RECENT_LIST;
+      if (db) await db.batch(items.flatMap((item) => item.writes));
+      await countSilentDrops(countStore(env), day, items.map((item) => item.dropped));
+    } catch (error) {
+      console.warn(`recording silent drops failed: ${String(error)}`);
+    }
+  }
+
+  /**
    * Stores admitted items for the inbox. With RECENT_LIST they are queued, in
    * one D1 batch with their daily counts, decisions and progress rows, so
    * every item is stored or none is, and the scheduled job writes them to the
@@ -2149,20 +2414,18 @@ export function createHandler(deps: Deps) {
       if ("error" in result) return refusedOrUnavailable(result, cors);
       proof = result;
     }
-    let humanChecked = false;
-    if (app.requires_human_check) {
-      const answer = humanCheckRefusal(await humanCheck(request, app, text));
-      if (answer) return json(answer.status, answer.body, { ...cors, ...answer.headers });
-      humanChecked = true;
-    }
+    // Screened once for the whole batch (`screen`).
+    const screened = await screen(request, env, app, text, proof !== undefined);
+    if ("status" in screened) return json(screened.status, screened.body, { ...cors, ...screened.headers });
+    const { humanChecked, dropped } = screened;
     const nowMs = deps.now();
     // Items sent before, whose answers were lost, are answered as they were the first time.
     const kept = keys ? await keptAnswers(env.RECENT_LIST, app.app, keys as string[]) : new Map<string, never>();
-    const intake = await newIntake(request, env, app, nowMs, { batch: { proof, humanChecked }, nextId: orderedUlids(nowMs, deps.randomBytes) });
+    const intake = await newIntake(request, env, app, nowMs, { batch: { proof, ...screened }, nextId: orderedUlids(nowMs, deps.randomBytes) });
     // Each item is measured as sent, as POST /v1/feedback measures its body, so an item is too
     // large in a batch exactly when it would be alone.
     const sent = arrayElementTexts(text, "items");
-    const answers: (Admitted | ItemAnswer | undefined)[] = items.map((item, i) => {
+    const answers: (Admitted | Dropped | ItemAnswer | undefined)[] = items.map((item, i) => {
       const key = (keys as string[] | undefined)?.[i];
       const before = key === undefined ? undefined : kept.get(key);
       if (before) return { status: before.status, body: before.body };
@@ -2172,6 +2435,7 @@ export function createHandler(deps: Deps) {
     const waiting = answers.filter((a) => a === undefined).length;
     const at = new Date(nowMs).toISOString();
     const admitted: Admitted[] = [];
+    const droppedItems: Dropped[] = [];
     /** Nothing is stored: every count and live change this request took is given back. */
     const notStored = async () => {
       await intake.counts.giveBack().catch(() => undefined);
@@ -2184,7 +2448,8 @@ export function createHandler(deps: Deps) {
       // network's comes first: a network at its limit holds nothing of the app's count, which every
       // other sender of the app shares, and its items are each refused as they would be alone.
       // An app over its daily limit is refused as a whole, as one item would be.
-      let room = waiting;
+      // A batch dropped silently is counted against no limit, so it holds up no one else's count.
+      let room = dropped ? 0 : waiting;
       if (room > 0 && intake.origin !== undefined) room = await intake.counts.reserve([{ key: `n:${intake.day}:${intake.origin}`, limit: ORIGIN_DAILY_LIMIT }], room);
       const appCounter = { key: `a:${intake.day}:${app.app}`, limit: app.daily_limit };
       if (room > 0 && (await intake.counts.reserve([appCounter], room)) === 0) {
@@ -2197,6 +2462,7 @@ export function createHandler(deps: Deps) {
         const answer = withKey(env.RECENT_LIST, app, (keys as string[] | undefined)?.[i], at, await admit(intake, item));
         answers[i] = answer;
         if ("file" in answer) admitted.push(answer);
+        else if ("dropped" in answer) droppedItems.push(answer);
       }
     } catch (error) {
       if (error instanceof CountUnavailable) return notStored();
@@ -2216,9 +2482,10 @@ export function createHandler(deps: Deps) {
       .catch(() => intake.counts.settle())
       .catch((error: unknown) => console.warn(`giving back reserved counts failed: ${String(error)}`));
     for (const item of admitted) await item.after();
+    await storeDropped(env, intake.day, droppedItems);
     const out = answers.map((a) => {
       if (a === undefined) throw new Error("every item is answered");
-      if ("file" in a) return { status: 202, ...a.answer };
+      if ("file" in a || "dropped" in a) return { status: 202, ...a.answer };
       const retry = a.headers?.["retry-after"];
       return { status: a.status, ...a.body, ...(a.status === 429 && retry ? { retry_after: Number(retry) } : {}) };
     });
@@ -2271,9 +2538,17 @@ export function createHandler(deps: Deps) {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return doubtCasesRecent(request, env, cors);
     }
+    if (route === "/v1/places/recent/freezes") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return freezesRecent(request, env, cors);
+    }
     if (route === "/v1/places/recent/block") {
       if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
       return blockRecent(request, env, cors);
+    }
+    if (route === "/v1/places/recent/trust") {
+      if (request.method !== "POST") return json(405, { error: "method_not_allowed" }, { ...cors, allow: "POST, OPTIONS" });
+      return trustRecent(request, env, cors);
     }
     if (route === "/v1/feedback/progress") {
       if (request.method === "GET") return getProgress(env, url, cors);
@@ -2351,7 +2626,7 @@ export function createHandler(deps: Deps) {
       if (kept) return json(kept.status, kept.body, cors);
     }
     const intake = await newIntake(request, env, app, nowMs, { text, nextId: () => ulid(nowMs, deps.randomBytes) });
-    let admitted: Admitted | ItemAnswer;
+    let admitted: Admitted | Dropped | ItemAnswer;
     try {
       admitted = await admit(intake, body);
     } catch (error) {
@@ -2360,6 +2635,10 @@ export function createHandler(deps: Deps) {
       throw error;
     }
     const item = withKey(env.RECENT_LIST, app, key, new Date(nowMs).toISOString(), admitted);
+    if ("dropped" in item) {
+      await storeDropped(env, intake.day, [item]);
+      return json(202, item.answer, cors);
+    }
     if (!("file" in item)) return json(item.status, item.body, { ...cors, ...item.headers });
     try {
       await storeAdmitted(env, [item]);

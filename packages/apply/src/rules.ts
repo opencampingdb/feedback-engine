@@ -2,6 +2,7 @@ import {
   FEE_RETIRED,
   firstProblem,
   isCommonsFileName,
+  isContactFact,
   isValidFactValue,
   newPlaceStanding,
   safeSearchVerdict,
@@ -22,6 +23,9 @@ import {
   decideContactReport,
   decideDoubt,
   decideFact,
+  DISPUTE_HOURS,
+  disputeValuesShown,
+  findDispute,
   distinctSources as distinctDevices,
   factRefusal,
   factsClearedBy,
@@ -29,6 +33,7 @@ import {
   inWindow,
   newPlaceFields,
   newPlaceListing,
+  reviewerDecidesNewPlace,
   protectedSource,
   restoreWeight,
   REVIEWED_FACTS,
@@ -41,13 +46,30 @@ import {
   type OpenDoubt,
   type Setter,
 } from "./decide.js";
+import { evidenceCounts } from "./closure-evidence.js";
+import type { CheckOutcome } from "./contact-checks.js";
 import { moderateReview } from "./moderation.js";
-import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase } from "./review.js";
+import {
+  CANDIDATE_DISTANCE_M,
+  FREEZE_EXPIRY_DAYS,
+  MAX_CANDIDATES,
+  mergePlaces,
+  mergeProblem,
+  REVIEWER_CHECKS,
+  type ClosedCase,
+  type DoNotMatchEntry,
+  type HeldCase,
+  type IntakeCheckHold,
+  type PlaceChange,
+} from "./review.js";
+import { releasedByReviewer, upheldByReviewer, type ReviewerDecision } from "./reviewer-decisions.js";
 import type { EarlierFact } from "./io.js";
+import { implausibleLocation, type Implausible, type PlaceGeometry } from "./plausible.js";
 import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
 import { doNotMatchProblems, newProblems, placeProblems, reviewProblems, textProblems } from "./data-check.js";
 import { dropSource, setSource } from "./sources.js";
+import { confirms, earnsTrust, emptyTrust, isTrusted, nextTrust, trustedContributors, type Confirmation, type TrustRecord, type UpheldDoubt, type Withdrawal } from "./trust.js";
 import type { Photo, PhotoVote, PhotoVotes, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
 
 export type { ClosedCase, HeldCase };
@@ -67,11 +89,32 @@ export type { ClosedCase, HeldCase };
  */
 
 /** The rules for one item against one place live in `decide.ts`, shared with the intake. */
-export { inWindow, REVIEWED_FACTS, WINDOW_DAYS };
+export { DISPUTE_HOURS, inWindow, REVIEWED_FACTS, WINDOW_DAYS };
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WINDOW_MS = WINDOW_DAYS * DAY_MS;
 
 /** Kind given to a draft record for a `new_place` report until a person sets it. */
+/** Report kinds that change a fact, which a freeze stops. */
+const FREEZES: ReadonlySet<string> = new Set(["fact", "doubt", "clear", "contact"]);
+
+/** When a freeze expires (FREEZE_EXPIRY_DAYS after it started) if no one has set the disputed fact by then. */
+export const expiryOf = (freeze: FreezeRecord) => new Date(Date.parse(freeze.at) + FREEZE_EXPIRY_DAYS * DAY_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+/**
+ * When a freeze lifted, by `now`: the date the data has on the disputed
+ * fact, when it is at or after the freeze, or else its expiry once that has
+ * passed (a person who keeps the place's value sets no date). A reviewer's
+ * decision on the `disputed` case sets the fact with the time of the
+ * decision, and so does a person who sets it on the review PR. Undefined
+ * while the place is still frozen.
+ */
+export function liftOf(place: Place, freeze: FreezeRecord, now: string): string | undefined {
+  const date = place.fact_dates?.[freeze.fact];
+  if (date !== undefined && date >= freeze.at) return date;
+  const expiry = expiryOf(freeze);
+  return now >= expiry ? expiry : undefined;
+}
+
 export const DRAFT_KIND = "campground";
 const DRAFT_GROUP = "overnight";
 
@@ -114,6 +157,19 @@ export interface Decision {
    * it back as the open `fact_doubted` case (see `openDoubt`).
    */
   doubted?: DoubtedRecord;
+  /**
+   * On the reports that froze a place: the disputed fact and when the freeze
+   * started. The inbox keeps it with the outcome, and later runs read it back
+   * (see `standingFreeze`) until the data has a value for the fact set at or
+   * after that time, which a reviewer's decision on the `disputed` case sets.
+   */
+  frozen?: FreezeRecord;
+}
+
+/** A freeze, as the inbox keeps it on the reports that froze the place. */
+export interface FreezeRecord {
+  fact: FactName;
+  at: string;
 }
 
 /** A fact doubts took down, as the inbox keeps it on the doubt that did it. */
@@ -181,6 +237,16 @@ export interface RulesInput {
    */
   roads?: MajorRoads;
   /**
+   * The land mask, major road carriageways and building footprints for the
+   * plausibility check on new places (plausible.ts). A new place in the sea
+   * or a lake, on a major road's carriageway or inside a building footprint
+   * is drafted as held and listed as an `implausible_location` case for the
+   * AI reviewer. A layer left out is not checked, and the check passes; a
+   * place the intake held as `implausible_location` is held whatever this
+   * run has.
+   */
+  placeGeometry?: PlaceGeometry;
+  /**
    * Ids on the intake's recent list, or "unreadable" when the list was asked
    * for and could not be read. Feedback about a place on the list that is not
    * in the data yet waits for it, and with an unreadable list all feedback
@@ -195,6 +261,72 @@ export interface RulesInput {
    * moves. They are decided as that run decided them. None when left out.
    */
   earlierFacts?: ReadonlyMap<string, ReadonlyMap<string, EarlierFact>>;
+  /**
+   * What the automatic contact checks found for each pending contact fact
+   * report, by feedback id (`checkContacts`). Given, a contact that fails
+   * any check is held for the AI reviewer as a `contact_check` case, one that
+   * passes them all follows the two-source rule, and one with no entry (the
+   * checks ran out of time) waits for a later run. Left out, the checks are
+   * off: an attested contact goes live and one without attestation goes to a
+   * person.
+   */
+  contactChecks?: ReadonlyMap<string, readonly CheckOutcome[]>;
+  /**
+   * Evidence of closure found outside the inbox, by place id (see
+   * `closure-evidence.ts`). Each kind counts as one more source for a
+   * closure a traveller sent, never as a closure on its own. None when left out.
+   */
+  closureEvidence?: ReadonlyMap<string, readonly ClosureEvidence[]>;
+  /**
+   * Fact reports whose source link shows their value (`confirmSourceLinks`).
+   * The page counts as one more source for that value (kind `source_link`):
+   * one report and its page are two sources. None when left out.
+   */
+  sourceConfirmed?: ReadonlySet<string>;
+  /**
+   * Each signed-in contributor's track record (`trust/contributors.json` in
+   * the inbox, trust.ts). Trust as it stands before the run decides this
+   * run's items. Left out, no one is trusted yet.
+   */
+  trust?: TrustRecord;
+  /**
+   * The AI reviewer's decisions on the review PRs (reviewer-decisions.ts).
+   * An item it approved on an `intake_check` case counts from this run as if
+   * the intake had not held it, and a doubt it upheld withdraws trust from
+   * the contributor whose edit it was about. None when left out.
+   */
+  reviewerDecisions?: readonly ReviewerDecision[];
+  /**
+   * Items a person turned down on a merged review PR: named on it, on no
+   * open one, held for review by an earlier run. A signed-in contributor's
+   * fact report or new place among them that the data does not hold loses
+   * its sender's trust (see `trustAfter`). None when left out.
+   */
+  turnedDown?: ReadonlySet<string>;
+}
+
+/**
+ * Evidence that a place has closed, from outside the inbox:
+ * - `osm_lifecycle`: OSM tagged the place's object `disused:` or `abandoned:`
+ *   since the version the record follows, in `changeset`.
+ * - `nxdomain`: the domain of the place's website was not found in DNS
+ *   (NXDOMAIN) at `first` and again at `confirmed`, at least a day later.
+ */
+export type ClosureEvidence =
+  | { kind: "osm_lifecycle"; object: string; tags: readonly string[]; changeset: number }
+  | { kind: "nxdomain"; domain: string; first: string; confirmed: string };
+
+/** How a note names one piece of evidence of closure. */
+function describeEvidence(e: ClosureEvidence): string {
+  return e.kind === "osm_lifecycle"
+    ? `OSM tagged ${e.object} ${e.tags.join(", ")} in changeset ${e.changeset}`
+    : `${e.domain} was not found in DNS on ${e.first.slice(0, 10)} or ${e.confirmed.slice(0, 10)}`;
+}
+
+/** Why a closure counted: the travellers, then each piece of evidence. */
+function closureWhy(devices: number, evidence: readonly ClosureEvidence[]): string {
+  const travellers = `${devices} device${devices === 1 ? "" : "s"} within ${WINDOW_DAYS} days`;
+  return evidence.length === 0 ? travellers : `${travellers}, and ${evidence.map(describeEvidence).join(", and ")}`;
 }
 
 /**
@@ -246,6 +378,8 @@ export interface RulesOutput {
   removedPhotos: RemovedPhotos["photos"];
   /** The helpful votes after this run, to write back to the inbox. */
   photoVotes: PhotoVotes;
+  /** The track records after this run, to write back to the inbox. */
+  trust: TrustRecord;
   /** Changes for a person, in the order they arrived. */
   edits: ReviewEdit[];
   changes: Change[];
@@ -487,6 +621,7 @@ function dataCheckFailures(input: RulesInput, out: RulesOutput): Map<string, str
 function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): RulesOutput {
   const now = Date.parse(input.now);
   const nowIso = new Date(now).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const sourceConfirmed = input.sourceConfirmed ?? new Set<string>();
   const decisions = new Map<string, Decision>();
   const working = new Map<string, Place>();
   const newReviews = new Map<string, Review[]>();
@@ -514,7 +649,29 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   };
 
   const pending = [...input.pending].sort(byReceived);
+  // Items the AI reviewer let through after the intake held them for a check.
+  const released = releasedByReviewer(input.reviewerDecisions ?? []);
+  /** The check the intake held `item` for (`heldForCheck`), unless the AI reviewer has since let it through. */
+  const heldNow = (item: StoredFeedback) => (released.has(item.id) ? null : heldForCheck(item));
+  /** An `intake_check` case for an item the intake held for a check the AI reviewer decides, or null for a check a person decides. */
+  const intakeCheckCase = (item: StoredFeedback, place: Place, fields: Pick<HeldCase, "about"> & Partial<Pick<HeldCase, "fact" | "value" | "review" | "says">>): HeldCase | null => {
+    const check = heldNow(item);
+    if (check === null || !(REVIEWER_CHECKS as readonly string[]).includes(check)) return null;
+    return {
+      case: "intake_check",
+      place: place.id,
+      ...(place.standing !== undefined ? { standing: place.standing } : {}),
+      location: { lat: roundCoord(place.location.lat), lon: roundCoord(place.location.lon) },
+      kind: place.kind,
+      held_for: check as IntakeCheckHold,
+      ...fields,
+      feedback: [item.id],
+    };
+  };
   const blocked = input.blocked ?? new Set<string>();
+  const trusted = trustedContributors(input.trust ?? emptyTrust(), blocked);
+  // Doubts this run upheld, which withdraw trust from whoever sent the value.
+  const upheld: UpheldDoubt[] = [];
   const newPhotos = new Map<string, Photo[]>();
   const photoById = new Map((input.photos ?? []).map((p) => [p.id, p]));
   const removedPhotos: RemovedPhotos["photos"] = [];
@@ -671,12 +828,15 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   );
   // Doubts before facts, so a confirmation sent after a takedown in this run can restore it.
   const downInRun = new Map<string, DoubtedRecord>();
-  applyDoubts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "doubt"));
-  applyFacts(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
+  // A disputed place is frozen first: nothing below changes a fact on it.
+  const frozenOut = applyFreezes(known.filter((i): i is ReportItem => i.type === "report" && FREEZES.has(i.report.kind as string)));
+  const unfrozen = known.filter((i) => !frozenOut.has(i.id));
+  applyDoubts(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "doubt"));
+  applyFacts(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "fact"));
   applyNewPlaces(known.filter((i): i is ReportItem => isNewPlaceReport(i)), newPlaceEvidence);
   // After facts and new places, so a value set in this run can be cleared by its sender in it too.
-  applyClears(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "clear"));
-  applyContactReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "contact"));
+  applyClears(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "clear"));
+  applyContactReports(unfrozen.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "contact"));
   applyCommonsReports(known.filter((i): i is ReportItem => i.type === "report" && i.report.kind === "commons_mismatch"));
   routeToPerson(known.filter((i): i is ReportItem => i.type === "report"));
 
@@ -713,6 +873,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
 
   const ordered = pending.map((p) => decisions.get(p.id)!);
   return {
+    trust: trustAfter(),
     decisions: ordered,
     places: changed,
     reviews: newReviews,
@@ -728,6 +889,95 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     removed,
     needsReview: ordered.some((d) => d.outcome === "needs_review"),
   };
+
+  /**
+   * The track records after this run (trust.ts). An edit is a fact report or
+   * a new place, with each contact it carries, applied in an earlier run or
+   * not refused in this one. A fact report this run did not refuse confirms
+   * earlier edits of the same value from other sources, and a check that
+   * found a new place there, sent nearby, confirms the place. Only an item
+   * this run applied confirms, and only one that is attested or signed in,
+   * never one from a human check, and never one the intake held for a check
+   * (`confirms` in trust.ts). Trust is withdrawn for a doubt this run upheld,
+   * for a doubt the AI reviewer upheld on a review PR (`upheldByReviewer`)
+   * and for an edit a person turned down on a merged review PR that the
+   * data does not hold (`input.turnedDown`).
+   */
+  function trustAfter(): TrustRecord {
+    const counts = (i: StoredFeedback) => (decisions.has(i.id) ? decisions.get(i.id)!.outcome !== "refused" : wasApplied(i));
+    const items = [...input.history.filter(wasApplied), ...known.filter(counts)];
+    const edits: Parameters<typeof nextTrust>[3][number][] = [];
+    for (const item of items) {
+      if (item.type !== "report") continue;
+      if (item.report.kind === "fact" && typeof item.place === "string") {
+        edits.push({ item, place: item.place, fact: item.report.fact as string, value: item.report.value as FactValue });
+      } else if (isNewPlaceReport(item) && item.location) {
+        const id = newPlaceIdOf(item);
+        edits.push({ item, place: id });
+        for (const [fact, value] of Object.entries(newPlaceFields(item).contacts)) edits.push({ item, place: id, fact, value: value as FactValue });
+      }
+    }
+    const confirmations: Confirmation[] = [];
+    for (const by of [...known, ...newPlaceEvidence]) {
+      if (decisions.get(by.id)?.outcome !== "applied" || !confirms(by) || heldNow(by) !== null) continue;
+      if (by.type === "report" && by.report.kind === "fact") {
+        const fact = by.report.fact as string;
+        for (const e of edits) {
+          if (e.item.id !== by.id && e.place === by.place && e.fact === fact && sameValue(e.value, by.report.value) && inWindow(e.item, time(by))) {
+            confirmations.push({ edit: e.item, place: e.place, fact, value: e.value!, by });
+          }
+        }
+      } else if (by.type === "check" && by.check.still_there && by.check.nearby === true && typeof by.place === "string") {
+        const origin = origins.get(by.place);
+        if (origin !== undefined && inWindow(origin, time(by))) confirmations.push({ edit: origin, place: by.place, by });
+      }
+    }
+    // The items the inbox keeps, by id, to find who sent what a reviewer or a person turned down.
+    const byId = new Map([...input.history, ...known].map((i) => [i.id, i]));
+    const doubts = [...upheld];
+    const withdrawn: Withdrawal[] = [];
+    const withdrawFrom = (item: StoredFeedback | undefined) => {
+      if (item !== undefined && earnsTrust(item)) withdrawn.push({ contributor: item.contributor!, at: item.received });
+    };
+    for (const decided of upheldByReviewer(input.reviewerDecisions ?? [])) {
+      if (decided.fact !== undefined && decided.value !== undefined) {
+        // keep_down: the doubts are the case's items, and whoever sent the value loses trust.
+        const latest = decided.feedback.map((id) => byId.get(id)?.received).filter((t): t is string => t !== undefined).sort().at(-1);
+        if (latest !== undefined) doubts.push({ place: decided.place, fact: decided.fact, value: decided.value, at: latest });
+      } else if (decided.newPlace) {
+        // A new place taken down: its sender, never the travellers who reported it.
+        withdrawFrom(origins.get(decided.place));
+      } else {
+        for (const id of decided.feedback) withdrawFrom(byId.get(id));
+      }
+    }
+    for (const id of input.turnedDown ?? []) {
+      const item = byId.get(id);
+      if (item !== undefined && turnedDownEdit(item)) withdrawFrom(item);
+    }
+    return nextTrust(input.trust ?? emptyTrust(), confirmations, doubts, edits, withdrawn);
+  }
+
+  /**
+   * Whether an edit a person turned down on a merged review PR is missing
+   * from the data: a fact report whose value the place lacks with no date
+   * from that run or later (a later change did not replace it), or a new
+   * place that is not in the data or is hidden.
+   */
+  function turnedDownEdit(item: StoredFeedback): boolean {
+    if (item.type !== "report") return false;
+    const run = (item as { outcome?: { run?: string } }).outcome?.run ?? item.received;
+    const report = item.report;
+    if (report.kind === "new_place") {
+      const placed = input.places.get(newPlaceIdOf(item));
+      return placed === undefined || placed.standing === "hidden";
+    }
+    if (report.kind !== "fact" || typeof item.place !== "string") return false;
+    const placed = input.places.get(item.place);
+    if (placed === undefined) return false;
+    const fact = report.fact as FactName;
+    return !sameValue((placed.facts as Record<string, unknown>)[fact], report.value) && (placed.fact_dates?.[fact] ?? "") < run;
+  }
 
   /**
    * Removes every review line from each erasing contributor, on every place,
@@ -804,12 +1054,24 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         text.length >= REPEATED_TEXT_LENGTH &&
         reviewsSent.some((other) => other.place !== item.place && other.id !== item.id && sameText(other.review.text) === text);
       const unproved = item.proved !== true && lines.some((r) => r.contributor === item.contributor && !sameSender(item, r));
-      if (repeated || !trusted.has(item.contributor) || unproved) {
-        const why = repeated ? "the same text was sent for another place" : !trusted.has(item.contributor) ? "first review from this contributor" : "it replaces the contributor's earlier review from another device";
+      // The intake marks a review whose text other sources sent too, or whose text it could not check.
+      const check = heldNow(item);
+      if (check !== null || repeated || !trusted.has(item.contributor) || unproved) {
+        const why =
+          check !== null
+            ? `the intake held it for ${check}`
+            : repeated
+              ? "the same text was sent for another place"
+              : !trusted.has(item.contributor)
+                ? "first review from this contributor"
+                : "it replaces the contributor's earlier review from another device";
         edits.push({ kind: "review", place: item.place, review, feedback: item.id });
         // The public PR names the inbox item and never quotes the text, so an erasure or removal leaves no copy there.
         note(item.place, `${item.review.stars} star review, ${why} (read its text in the inbox item before merging)`, false, [item]);
-        decide(item, "needs_review", `${why}, so a person checks it`);
+        // Held only for a check the AI reviewer decides: it reads the review on the review branch.
+        const forReviewer = !repeated && trusted.has(item.contributor) && !unproved ? intakeCheckCase(item, input.places.get(item.place)!, { about: "review", review: reviewId }) : null;
+        if (forReviewer) held.push(forReviewer);
+        decide(item, "needs_review", `${why}, so ${forReviewer ? "the AI reviewer" : "a person"} checks it`);
         continue;
       }
       // One review per contributor per place: the newer replaces the older.
@@ -1179,11 +1441,34 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   }
 
   function applyStatus(items: (ReportItem | CheckItem)[]): void {
-    for (const placeId of new Set(items.map((i) => i.place as string))) {
-      const mine = items.filter((i) => i.place === placeId);
-      const evidence = [...input.history.filter((h) => h.place === placeId), ...mine].sort(byReceived);
+    // Places with evidence of closure are looked at too, so evidence found after the closure's own run counts.
+    const withEvidence = [...(input.closureEvidence?.keys() ?? [])].filter((id) => {
+      const known = input.places.get(id);
+      return known !== undefined && evidenceCounts(known);
+    });
+    // So are places with a status report or check the AI reviewer let through after the intake held it.
+    const releasedHere = (placeId: string) =>
+      input.history.filter((h) => h.place === placeId && released.has(h.id) && heldForCheck(h) !== null && (isClosureEvidence(h) || isReopenEvidence(h)) && inWindow(h, now));
+    const withReleased = [...new Set(input.history.filter((h) => released.has(h.id) && typeof h.place === "string").map((h) => h.place as string))].filter(
+      (id) => input.places.has(id) && releasedHere(id).length > 0,
+    );
+    for (const placeId of new Set([...items.map((i) => i.place as string), ...withEvidence, ...withReleased])) {
+      const all = items.filter((i) => i.place === placeId);
+      // A report or check the intake held for a check changes nothing and counts for nothing until a reviewer lets it through.
+      const mine = all.filter((i) => heldNow(i) === null);
+      for (const item of all.filter((i) => heldNow(i) !== null)) {
+        const check = heldNow(item)!;
+        const says = item.type === "check" ? (item.check.still_there ? "there" : "gone") : item.report.kind === "closed" ? "closed" : "reopened";
+        const forReviewer = intakeCheckCase(item, input.places.get(placeId)!, { about: "status", says });
+        if (forReviewer) held.push(forReviewer);
+        edits.push({ kind: "note", place: placeId, feedback: item.id });
+        note(placeId, `${item.type === "check" ? "check" : `${item.report.kind} report`} held by the intake for ${check}, so it counts once a reviewer lets it through`, false, [item]);
+        decide(item, "needs_review", `the intake held it for ${check}, so ${forReviewer ? "the AI reviewer" : "a person"} decides whether it counts`);
+      }
+      const evidence = [...input.history.filter((h) => h.place === placeId && heldNow(h) === null), ...mine].sort(byReceived);
       const place = record(placeId);
       const statusBefore = place.status;
+      const found = input.closureEvidence?.get(placeId) ?? [];
 
       // Evidence one way counts only if it came after the latest evidence the other way.
       const latest = (at: number, test: (i: StoredFeedback) => boolean) =>
@@ -1234,10 +1519,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             continue;
           }
           // A closure from a human check (a website) is one source: the place stays open until a
-          // second source, or an attested report, agrees. It still counts towards closing.
+          // second source, an attested report or evidence of closure agrees. It still counts towards closing.
           if (place.status === "open" && isReport && item.human_checked === true) {
             const closing = supporting(at, isClosureEvidence, isReopenEvidence);
-            if (distinctDevices(closing) < 2 && !closing.some((e) => e.attested !== undefined)) {
+            if (distinctDevices(closing) < 2 && !closing.some((e) => e.attested !== undefined) && found.length === 0) {
               decide(item, "applied", "closure from a human check counted as one source: the place stays open until a second source agrees");
               continue;
             }
@@ -1247,14 +1532,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             note(placeId, "status open to reported_closed", true, [item]);
           }
           const devices = supporting(at, isClosureEvidence, isReopenEvidence);
-          if (place.status === "reported_closed" && distinctDevices(devices) >= 2) {
+          // Each kind of evidence of closure counts as one more source.
+          if (place.status === "reported_closed" && distinctDevices(devices) + found.length >= 2) {
             place.status = "closed";
-            note(
-              placeId,
-              `status reported_closed to closed (${distinctDevices(devices)} devices within ${WINDOW_DAYS} days)`,
-              true,
-              devices,
-            );
+            note(placeId, `status reported_closed to closed (${closureWhy(distinctDevices(devices), found)})`, true, devices);
           }
           decide(item, "applied", isReport ? `place is ${place.status}` : "check recorded");
           continue;
@@ -1289,6 +1570,35 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           decide(item, "waiting", "a closed place needs a second device to reopen it");
         } else {
           decide(item, "applied", "check recorded");
+        }
+      }
+      // A held report or check a reviewer let through counts now, as it would have counted when it came,
+      // unless something since has undone it. Never on a place the owner manages.
+      const lettingThrough = releasedHere(placeId);
+      if (lettingThrough.length > 0 && evidenceCounts(place)) {
+        const closing = supporting(now, isClosureEvidence, isReopenEvidence);
+        const freed = lettingThrough.filter((h) => closing.includes(h));
+        if (freed.length > 0 && place.status === "open") {
+          place.status = "reported_closed";
+          note(placeId, "status open to reported_closed (a report the intake held, let through by a reviewer)", true, freed);
+        }
+        if (freed.length > 0 && place.status === "reported_closed" && distinctDevices(closing) + found.length >= 2) {
+          place.status = "closed";
+          note(placeId, `status reported_closed to closed (${closureWhy(distinctDevices(closing), found)})`, true, closing);
+        }
+        const reopening = supporting(now, isReopenEvidence, isClosureEvidence).filter((h) => lettingThrough.includes(h));
+        if (reopening.length > 0 && place.status === "reported_closed") {
+          place.status = "open";
+          note(placeId, "status reported_closed to open (a report the intake held, let through by a reviewer)", true, reopening);
+        }
+      }
+      // Evidence of closure counts as one more source for a closure travellers sent, in this run or an
+      // earlier one, that nothing since has undone. It never closes a place on its own, nor one the owner manages.
+      if (found.length > 0 && evidenceCounts(place)) {
+        const devices = supporting(now, isClosureEvidence, isReopenEvidence);
+        if (distinctDevices(devices) >= 1 && distinctDevices(devices) + found.length >= 2) {
+          note(placeId, `status ${place.status} to closed (${closureWhy(distinctDevices(devices), found)})`, true, devices);
+          place.status = "closed";
         }
       }
       // Marks the status as coming from feedback, so the OSM notes can tell it from a contributed closure.
@@ -1340,6 +1650,94 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     );
   }
 
+  /**
+   * Freezes a disputed place (`findDispute`): conflicting values for one fact
+   * from DISPUTE_SOURCES sources within DISPUTE_HOURS. The reports in the
+   * dispute go to the reviewer as one `disputed` case, and every other
+   * report that would change a fact on the place (a fact report, doubt,
+   * clear or contact report) waits. A later run keeps the place frozen
+   * (`standingFreeze`) until the data holds a value for the disputed fact set
+   * at or after the freeze, which the reviewer's decision writes; then
+   * reports of that fact sent before the decision are refused, and the rest
+   * are decided as usual. Answers the ids of the items decided here.
+   */
+  function applyFreezes(items: ReportItem[]): Set<string> {
+    const out = new Set<string>();
+    const byPlace = new Map<string, ReportItem[]>();
+    for (const item of items) byPlace.set(item.place as string, [...(byPlace.get(item.place as string) ?? []), item]);
+    for (const [placeId, mine] of byPlace) {
+      const place = input.places.get(placeId)!;
+      const standing = standingFreeze(placeId);
+      const liftedAt = standing === undefined ? undefined : liftOf(place, standing, nowIso);
+      const expired = standing !== undefined && liftedAt !== undefined && liftedAt === expiryOf(standing) && (place.fact_dates?.[standing.fact] ?? "") < standing.at;
+      if (standing !== undefined && liftedAt === undefined) {
+        for (const item of mine) {
+          decide(item, "waiting", `the place is frozen while a reviewer settles conflicting values for ${standing.fact}`);
+          out.add(item.id);
+        }
+        continue;
+      }
+      // Reports of a fact a reviewer settled, sent before the decision, are over.
+      const settled = (r: StoredFeedback) =>
+        standing !== undefined && liftedAt !== undefined && r.type === "report" && r.report.fact === standing.fact && r.received <= liftedAt;
+      for (const item of mine) {
+        if (!settled(item)) continue;
+        decide(
+          item,
+          "refused",
+          expired
+            ? `the freeze on ${standing!.fact} expired after ${FREEZE_EXPIRY_DAYS} days with the place's value kept`
+            : `a reviewer settled ${standing!.fact} after conflicting values`,
+        );
+        out.add(item.id);
+      }
+      const open = mine.filter((i) => !out.has(i.id));
+      const earlier = input.history.filter(
+        (h) => h.place === placeId && h.type === "report" && h.report.kind === "fact" && (h as { outcome?: { result?: string } }).outcome?.result !== "refused" && !settled(h),
+      );
+      const dispute = findDispute([...earlier, ...open], placeId);
+      const ids = new Set(dispute?.feedback ?? []);
+      if (dispute === null || !open.some((i) => ids.has(i.id))) continue;
+      const frozen: FreezeRecord = { fact: dispute.fact, at: dispute.at };
+      const counted = open.filter((i) => ids.has(i.id));
+      for (const item of open) {
+        out.add(item.id);
+        if (ids.has(item.id)) {
+          decide(item, "needs_review", `${dispute.sources} sources sent conflicting values for ${dispute.fact} within ${DISPUTE_HOURS} hours, so the place is frozen and a reviewer decides`);
+          decisions.get(item.id)!.frozen = frozen;
+        } else {
+          decide(item, "waiting", `the place is frozen while a reviewer settles conflicting values for ${dispute.fact}`);
+        }
+      }
+      // A note edit, so the run lists the case on the review PR although no file changes.
+      edits.push({ kind: "note", place: placeId, feedback: counted.at(-1)!.id });
+      note(placeId, `frozen: ${dispute.sources} sources sent conflicting values for ${dispute.fact} within ${DISPUTE_HOURS} hours, so no fact changes until a reviewer decides`, false, counted);
+      held.push({
+        case: "disputed",
+        place: placeId,
+        location: place.location,
+        kind: place.kind,
+        fact: dispute.fact,
+        ...(disputeValuesShown(dispute.fact, dispute.values) ? { values: dispute.values } : {}),
+        sources: dispute.sources,
+        frozen_at: dispute.at,
+        feedback: dispute.feedback,
+      });
+    }
+    return out;
+  }
+
+  /** The latest freeze the inbox keeps for a place, on a report in the history. */
+  function standingFreeze(placeId: string): FreezeRecord | undefined {
+    let found: FreezeRecord | undefined;
+    for (const h of input.history) {
+      const kept = (h as { outcome?: { frozen?: FreezeRecord } }).outcome?.frozen;
+      if (h.place !== placeId || kept === undefined) continue;
+      if (found === undefined || kept.at > found.at) found = kept;
+    }
+    return found;
+  }
+
   function applyFacts(items: ReportItem[]): void {
     const groups = new Map<string, ReportItem[]>();
     for (const item of items) {
@@ -1377,19 +1775,42 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           decide(item, "refused", decision.why);
           return;
         }
-        const check = heldForCheck(item);
+        const check = heldNow(item);
         if (decision.verdict === "live" && decision.changes.length > 0 && check !== null) {
+          const before = current();
           edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
           note(placeId, `${fact} set to ${JSON.stringify(value)}, which the intake held for ${check} (check before merging)`, false, [item]);
-          decide(item, "needs_review", `the intake held it for ${check}, so a person checks it`);
+          const forReviewer = intakeCheckCase(item, place, { about: "fact", fact, ...(before !== undefined ? { value: before as FactValue } : {}) });
+          if (forReviewer) held.push(forReviewer);
+          decide(item, "needs_review", `the intake held it for ${check}, so ${forReviewer ? "the AI reviewer" : "a person"} checks it`);
           return;
         }
         if (decision.verdict === "live") {
           if (decision.changes.length > 0) {
             setFact(value);
-            note(placeId, `${fact} set to ${JSON.stringify(value)} (one attested report)`, true, [item]);
+            note(placeId, `${fact} set to ${JSON.stringify(value)} (${decision.byTrust ? "a trusted contributor, past the contact checks" : "one attested report"})`, true, [item]);
           }
           decide(item, "applied", decision.why);
+          return;
+        }
+        if (decision.reason === "contact_check") {
+          const failed = decision.failed ?? [];
+          const before = current();
+          edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
+          note(placeId, `${fact} set to ${JSON.stringify(value)}, which failed the contact checks: ${failed.map((c) => c.detail).join("; ")} (check before merging)`, false, [item]);
+          held.push({
+            case: "contact_check",
+            place: placeId,
+            ...(place.standing !== undefined ? { standing: place.standing } : {}),
+            location: { lat: roundCoord(place.location.lat), lon: roundCoord(place.location.lon) },
+            kind: place.kind,
+            fact,
+            ...(before !== undefined ? { value: before as FactValue } : {}),
+            checks: failed.map((c) => c.check),
+            problem: failed.map((c) => c.detail).join("; "),
+            feedback: [item.id],
+          });
+          decide(item, "needs_review", decision.why);
           return;
         }
         const summary =
@@ -1400,13 +1821,47 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
               : decision.reason === "disagreement"
                 ? `${fact} set to ${JSON.stringify(value)}, which another device disagrees with (check before merging)`
                 : `${fact} set to ${JSON.stringify(value)} (check before merging)`;
+        // A person still decides a contact, but sees that its page shows it.
+        const shown = sourceConfirmed.has(item.id) ? ` A source link on ${new URL(item.report.source as string).hostname} shows it.` : "";
         edits.push({ kind: "fact", place: placeId, fact, value, feedback: item.id });
-        note(placeId, summary, false, [item]);
+        note(placeId, `${summary}${shown}`, false, [item]);
         decide(item, "needs_review", decision.why);
       };
 
       if (REVIEWED_FACTS.has(fact)) {
-        for (const item of reports) settle(item, decideFact({ item, place, earlier: evidence }));
+        const checks = isContactFact(fact) ? input.contactChecks : undefined;
+        // Contacts without attestation that passed every contact check, waiting for a second device to agree.
+        const agreeable: ReportItem[] = [];
+        for (const item of reports) {
+          const found = checks?.get(item.id);
+          if (checks !== undefined && found === undefined) {
+            decide(item, "waiting", `the contact checks have not run on ${fact} yet`);
+            continue;
+          }
+          const decision = decideFact({ item, place, earlier: evidence, trusted: isTrusted(item, trusted), ...(found !== undefined ? { contactChecks: found } : {}) });
+          if (found !== undefined && decision.verdict === "held" && decision.reason === "not_attested") agreeable.push(item);
+          else settle(item, decision);
+        }
+        // The two-source rule: two devices that agree within 90 days set the contact.
+        const open = new Set(agreeable);
+        for (const item of agreeable) {
+          if (!open.has(item)) continue;
+          const value = item.report.value as FactValue;
+          const agreeing = [...open].filter((r) => sameValue(r.report.value, value) && inWindow(r, time(item)));
+          // A source link that shows the contact is one more source, as for any other fact.
+          const linked = agreeing.find((r) => sourceConfirmed.has(r.id));
+          if (distinctDevices(agreeing) + (linked ? 1 : 0) < 2) continue;
+          const counted = linked
+            ? `${distinctDevices(agreeing) === 1 ? "one device" : `${distinctDevices(agreeing)} devices`} and a source link (source_link) on ${new URL(linked.report.source as string).hostname}`
+            : `${distinctDevices(agreeing)} devices`;
+          setFact(value);
+          note(placeId, `${fact} set to ${JSON.stringify(value)} (${counted} within ${WINDOW_DAYS} days, contact checks passed)`, true, agreeing);
+          for (const r of agreeing) {
+            open.delete(r);
+            decide(r, "applied", `${fact} set to ${JSON.stringify(value)}${linked ? ` (${counted})` : ""}`);
+          }
+        }
+        for (const item of open) decide(item, "waiting", `${fact} passed the contact checks, and waits for a second device to agree`);
         continue;
       }
 
@@ -1439,7 +1894,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             continue;
           }
           const decision = decideFact({ item, place, earlier: restoreEvidence, openCase });
-          if (decision.verdict === "live" && decision.settles === "restored" && heldForCheck(item) === null) {
+          if (decision.verdict === "live" && decision.settles === "restored" && heldNow(item) === null) {
             const weight = restoreWeight({ place: placeId, fact, value, at: item.received, reports: restoreEvidence, takenDownAt: openCase.at });
             const counted = new Set(weight.confirmations.feedback);
             const confirming = reports.filter((r) => counted.has(r.id));
@@ -1471,7 +1926,13 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         }
         const at = time(item);
         const agreeing = [...open].filter((r) => r.report.value === value && inWindow(r, at));
-        if (distinctDevices(agreeing) < 2) continue;
+        // A source link that shows the value is one more source, however many of the reports carry one.
+        const linked = agreeing.find((r) => sourceConfirmed.has(r.id));
+        const sources = distinctDevices(agreeing) + (linked ? 1 : 0);
+        if (sources < 2) continue;
+        const counted = linked
+          ? `${distinctDevices(agreeing) === 1 ? "one device" : `${distinctDevices(agreeing)} devices`} and a source link (source_link) on ${new URL(linked.report.source as string).hostname}`
+          : `${distinctDevices(agreeing)} devices`;
         if (place.fact_sources[fact] === "owner") {
           // The verified owner set this value. A person decides between them.
           edits.push({ kind: "fact", place: placeId, fact, value, feedback: agreeing[0]!.id });
@@ -1485,14 +1946,14 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         setFact(value);
         note(
           placeId,
-          `${fact} set to ${JSON.stringify(value)} (${distinctDevices(agreeing)} devices within ${WINDOW_DAYS} days)${openCase !== undefined ? CLOSES_CASE : ""}`,
+          `${fact} set to ${JSON.stringify(value)} (${counted} within ${WINDOW_DAYS} days)${openCase !== undefined ? CLOSES_CASE : ""}`,
           true,
           agreeing,
         );
         if (openCase !== undefined) closeCase("replaced", agreeing);
         for (const r of agreeing) {
           open.delete(r);
-          decide(r, "applied", `${fact} set to ${JSON.stringify(value)}`);
+          decide(r, "applied", `${fact} set to ${JSON.stringify(value)}${linked ? ` (${counted})` : ""}`);
         }
         for (const r of [...open]) {
           if (time(r) <= at) {
@@ -1512,7 +1973,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
    * withdrawals sent about them. Each is written with its standing from
    * `newPlaceStanding`: `shown` and `confirmed` places go straight into the
    * data, much as trusted reviews do. A `held` or `hidden` place that is not
-   * in the data yet is drafted for a person instead, a `withdrawn` one is
+   * in the data yet is drafted for a person instead, or for the AI reviewer
+   * when only a lack of attestation keeps it off the list (`unattested_place`), a `withdrawn` one is
    * not written and is removed if it was. Every case a person should look
    * at is listed in `held`.
    */
@@ -1569,7 +2031,12 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
 
       // The intake lists a new place only when it passes these, so apply publishes no other.
       const unlisted = existing ? undefined : whyNotListed(origin);
-      const published = (standing === "shown" || standing === "confirmed") && unlisted === undefined;
+      // A new place in the water, on a major road or inside a building is held for the AI reviewer.
+      const implausible = existing || !isPending ? null : implausibleOf(origin);
+      const published = (standing === "shown" || standing === "confirmed") && unlisted === undefined && implausible === null;
+      // Kept off the list only for want of attestation, past the plausibility, duplicate and text checks: the AI reviewer decides it.
+      const forReviewer =
+        isPending && !existing && unlisted !== undefined && implausible === null && (standing === "shown" || standing === "confirmed") && reviewerDecidesNewPlace(origin, isTrusted(origin, trusted));
       // Contact facts and the address. A published place carries those that pass
       // the link and spam checks; the rest wait for a person. A draft for a person carries them all.
       const { contacts: heldFacts, failing, descriptionProblem } = newPlaceFields(origin);
@@ -1582,7 +2049,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       const caseFor = (kind: HeldCase["case"], feedback: readonly StoredFeedback[]): HeldCase => ({
         case: kind,
         place: id,
-        standing: standing as NonNullable<HeldCase["standing"]>,
+        // An implausible or unattested place is drafted as held, unless reports hid it.
+        standing: ((kind === "implausible_location" || kind === "unattested_place") && standing !== "hidden" ? "held" : standing) as NonNullable<HeldCase["standing"]>,
         location: { lat: roundCoord(origin.location!.lat), lon: roundCoord(origin.location!.lon) },
         kind: (existing ?? draftOf(origin)).kind,
         ...(kind === "duplicate" && duplicate ? { duplicate_of: duplicate.place, distance_m: duplicate.distance } : {}),
@@ -1590,6 +2058,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         ...(kind === "contacts" ? { contacts: failing } : {}),
         ...(kind === "description" && descriptionProblem !== null ? { problem: descriptionProblem } : {}),
         ...(kind === "first_place" && origin.contributor ? { contributor: origin.contributor } : {}),
+        ...(kind === "implausible_location" && implausible !== null ? { hit: implausible.hit, problem: implausible.problem } : {}),
+        ...(kind === "unattested_place" ? { candidates: mergeCandidates(id, origin) } : {}),
         feedback: feedback.map((f) => f.id),
       });
 
@@ -1626,8 +2096,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
             setSource(draft, fact, "feedback", nowIso);
           }
           working.set(id, draft);
-          note(id, `new place at ${where}, published as ${standing}`, true, [origin]);
-          decide(origin, "applied", `new place published as ${standing}`);
+          // Listed without attestation only because its contributor is trusted.
+          const byTrust = origin.attested === undefined ? ", from a trusted contributor" : "";
+          note(id, `new place at ${where}, published as ${standing}${byTrust}`, true, [origin]);
+          decide(origin, "applied", `new place published as ${standing}${byTrust}`);
         }
       } else if (isPending) {
         // Held or hidden before it was ever published: a person decides, with the contacts in the draft.
@@ -1637,9 +2109,11 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           setSource(draft, fact, "feedback", nowIso);
         }
         edits.push({ kind: "new_place", record: draft, feedback: origin.id });
-        if (unlisted !== undefined && !(standing === "held" || standing === "hidden")) draft.standing = "held";
+        if ((unlisted !== undefined || implausible !== null) && !(standing === "held" || standing === "hidden")) draft.standing = "held";
         const why =
-          unlisted !== undefined && draft.standing === "held" && standing !== "held"
+          implausible !== null && unlisted === undefined && standing !== "held" && standing !== "hidden"
+            ? `implausible location: ${implausible.problem}, so it is not published (keep it: set standing to shown)`
+            : unlisted !== undefined && draft.standing === "held" && standing !== "held"
             ? `${unlisted}, so it is not published (keep it: set standing to shown)`
             : standing === "held"
             ? `possible duplicate of ${duplicate!.place}, ${duplicate!.distance} m away (keep it: set standing to shown; the same place: merge it into ${duplicate!.place})`
@@ -1648,7 +2122,15 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         decide(
           origin,
           "needs_review",
-          standing === "hidden" ? "hidden by reports, so a person checks it" : standing === "held" ? "possible duplicate, so a person checks it" : `${unlisted}, so a person checks it`,
+          standing === "hidden"
+            ? "hidden by reports, so a person checks it"
+            : standing === "held"
+            ? "possible duplicate, so a person checks it"
+            : unlisted === undefined
+            ? `implausible location: ${implausible!.problem}, so the AI reviewer checks it`
+            : forReviewer
+            ? `${unlisted}, so the AI reviewer checks it`
+            : `${unlisted}, so a person checks it`,
         );
       } else if (before !== standing) {
         // Not in the data and already with a person: only the listing changes.
@@ -1657,12 +2139,29 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       }
 
       if (standing === "held" && (isPending || before !== "held")) held.push(caseFor("duplicate", isPending ? [origin] : mine));
-      if (standing === "hidden" && (isPending || before !== "hidden")) held.push(caseFor("hidden", isPending ? [origin, ...mine] : mine));
+      if (standing === "hidden" && (isPending || before !== "hidden")) {
+        held.push(caseFor("hidden", isPending ? [origin, ...mine] : mine));
+        const at = [...mine].map((e) => e.received).sort().pop() ?? nowIso;
+        upheld.push({ place: id, at });
+      }
       if (isPending && published && failing.length > 0) held.push(caseFor("contacts", [origin]));
       if (isPending && published && descriptionProblem !== null) held.push(caseFor("description", [origin]));
       if (isPending && firstPlace) held.push(caseFor("first_place", [origin]));
       if (isPending && hasNote) held.push(caseFor("note", [origin]));
+      if (implausible !== null && !published) held.push(caseFor("implausible_location", [origin]));
+      if (forReviewer) held.push(caseFor("unattested_place", [origin]));
     }
+  }
+
+  /**
+   * Why a new place's location is implausible, from this run's geometry, or
+   * from the intake when it held the place for that and this run cannot tell.
+   */
+  function implausibleOf(item: ReportItem): Implausible | null {
+    const found = implausibleLocation(item.location!, item.report.place_kind, input.placeGeometry);
+    if (found !== null) return found;
+    const intake = (item as { intake?: { state?: unknown; held_reason?: unknown } }).intake;
+    return intake?.state === "held" && intake.held_reason === "implausible_location" ? { hit: "intake", problem: "the intake found the location implausible" } : null;
   }
 
   /** A person's decision on a new place's record, or null when it has none it can read. */
@@ -1675,8 +2174,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
 
   /** Why the intake would not list a new place or did not, or undefined when it would. */
   function whyNotListed(item: ReportItem): string | undefined {
-    const check = heldForCheck(item);
-    return newPlaceListing(item)?.why ?? (check === null ? undefined : `held by the intake for ${check}`);
+    const check = heldNow(item);
+    return newPlaceListing(item, isTrusted(item, trusted))?.why ?? (check === null ? undefined : `held by the intake for ${check}`);
   }
 
   /** A new place's record as its report describes it, with no standing yet. */
@@ -1758,7 +2257,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         decide(item, "refused", decision.why);
         continue;
       }
-      const check = heldForCheck(item);
+      const check = heldNow(item);
       if (decision.verdict === "live" && (decision.changes.length === 0 || check === null)) {
         if (decision.changes.length > 0) {
           takeDown(place, fact);
@@ -1779,7 +2278,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     const again = replayTakedowns(items, (item, place) => {
       const earlier = [...input.history, ...items].filter((r) => r === item || decisions.get(r.id)?.outcome !== "refused");
       const decision = decideContactReport({ item, place, earlier });
-      return decision.verdict === "live" && decision.takedown !== undefined && heldForCheck(item) === null;
+      return decision.verdict === "live" && decision.takedown !== undefined && heldNow(item) === null;
     });
     // What a single report sent to a person, to take back if a later report in this run takes the contact down.
     const sentToPerson = new Map<string, { edit: ReviewEdit; change: Change }>();
@@ -1811,14 +2310,15 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         continue;
       }
       // A report the intake held for a check takes nothing down on its own, though it still counts as a source.
-      const check = heldForCheck(item);
+      const check = heldNow(item);
       if (decision.verdict === "live" && decision.takedown && check === null) {
         const { value, sources, reasons, feedback } = decision.takedown;
         const reports = earlier.filter((r) => feedback.includes(r.id));
+        upheld.push({ place: placeId, fact, value, at: item.received });
         takeDown(place, fact);
         note(placeId, `${fact} taken down after reports from ${sources} sources within ${WINDOW_DAYS} days (${reasons.join(", ")})`, true, reports);
         for (const r of reports) {
-          if (!items.includes(r as ReportItem) || heldForCheck(r) !== null) continue;
+          if (!items.includes(r as ReportItem) || heldNow(r) !== null) continue;
           const sent = sentToPerson.get(r.id);
           if (sent) {
             edits.splice(edits.indexOf(sent.edit), 1);
@@ -1882,7 +2382,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       return (
         decision.verdict === "live" &&
         decision.doubtTakedown !== undefined &&
-        heldForCheck(item) === null &&
+        heldNow(item) === null &&
         isValidFactValue(decision.doubtTakedown.fact as ReportFactName, decision.doubtTakedown.value)
       );
     };
@@ -1911,14 +2411,15 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         continue;
       }
       // A doubt the intake held for a check takes nothing down on its own, though it still counts as a source.
-      const check = heldForCheck(item);
+      const check = heldNow(item);
       if (decision.verdict === "live" && decision.doubtTakedown && check === null) {
         const { value, sources, doubts, confirmations } = decision.doubtTakedown;
+        upheld.push({ place: placeId, fact, value, at: item.received });
         takeDown(place, fact);
         const counted = earlier.filter((r) => doubts.includes(r.id));
         note(placeId, `${fact} taken down after doubts from ${sources} sources within ${WINDOW_DAYS} days`, true, counted);
         for (const r of counted) {
-          if (!items.includes(r as ReportItem) || heldForCheck(r) !== null) continue;
+          if (!items.includes(r as ReportItem) || heldNow(r) !== null) continue;
           const sent = sentToPerson.get(r.id);
           if (sent) {
             edits.splice(edits.indexOf(sent.edit), 1);
@@ -2044,6 +2545,23 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   }
 
   /**
+   * The places a reviewer may merge an unattested new place into: up to
+   * MAX_CANDIDATES in the same group within CANDIDATE_DISTANCE_M, nearest
+   * first, from the same records as `nearestDuplicate`, without those
+   * `mergeProblem` rules out.
+   */
+  function mergeCandidates(id: string, item: ReportItem): { place: string; distance_m: number }[] {
+    const draft = draftOf(item);
+    const out: { place: string; distance_m: number }[] = [];
+    for (const other of [...(input.everyPlace ?? []), ...[...working.values()].filter((p) => p.standing !== undefined)]) {
+      if (other.id === id || other.standing === "hidden" || mergeProblem(draft, other, input.distinct) !== null) continue;
+      const distance = Math.round(distanceM(item.location!, other.location));
+      if (distance <= CANDIDATE_DISTANCE_M && !out.some((c) => c.place === other.id)) out.push({ place: other.id, distance_m: distance });
+    }
+    return out.sort((a, b) => a.distance_m - b.distance_m || (a.place < b.place ? -1 : 1)).slice(0, MAX_CANDIDATES);
+  }
+
+  /**
    * The nearest place in the same group within 150 m of a new place: every
    * record in the data and the new places published earlier in this run.
    * Merged and hidden records do not count.
@@ -2089,7 +2607,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       const earlier = input.history.filter(
         (h): h is ReportItem => h.type === "report" && h.report.kind === "commons_mismatch" && h.place === placeId && h.report.file === file,
       );
-      const counted = [...earlier, ...reports].filter((r) => inWindow(r, latest) && heldForCheck(r) === null);
+      const counted = [...earlier, ...reports].filter((r) => inWindow(r, latest) && heldNow(r) === null);
       const sources = distinctDevices(counted);
       if (sources >= 2 && counted.some((r) => r.attested !== undefined)) {
         doNotMatch.push({ place: placeId, file, added: nowIso.slice(0, 10), source: "reports" });
@@ -2115,6 +2633,45 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     }
   }
 
+  /**
+   * The `place_change` case for a name, kind or location report on a place
+   * in the data, with the value it replaces as the data has it, where that
+   * value came from and when, for the AI reviewer to keep or put back.
+   */
+  function placeChange(item: ReportItem, change: PlaceChange, to: string | { lat: number; lon: number }): HeldCase {
+    const current = input.places.get(item.place as string)!;
+    const check = heldNow(item);
+    const from = change === "name" ? current.name : change === "kind" ? current.kind : { ...current.location };
+    const source = current.fact_sources[change];
+    const date = current.fact_dates?.[change];
+    return {
+      case: "place_change",
+      place: current.id,
+      ...(current.standing !== undefined ? { standing: current.standing } : {}),
+      location: { lat: roundCoord(current.location.lat), lon: roundCoord(current.location.lon) },
+      kind: current.kind,
+      change,
+      from,
+      ...(change === "kind" ? { from_group: current.group } : {}),
+      to,
+      ...(source !== undefined ? { from_source: source } : {}),
+      ...(date !== undefined ? { from_date: date } : {}),
+      ...(change === "location" ? { distance_m: Math.round(distanceM(current.location, to as { lat: number; lon: number })) } : {}),
+      ...(check !== null && (REVIEWER_CHECKS as readonly string[]).includes(check) ? { held_for: check as IntakeCheckHold } : {}),
+      feedback: [item.id],
+    };
+  }
+
+  /**
+   * The `place_change` case for a name, kind or location report, for the AI
+   * reviewer, or null when the intake held the report for a check a person
+   * decides: then only the note on the review PR names it.
+   */
+  function changeCase(item: ReportItem, change: PlaceChange, to: string | { lat: number; lon: number }): HeldCase | null {
+    const check = heldNow(item);
+    return check === null || (REVIEWER_CHECKS as readonly string[]).includes(check) ? placeChange(item, change, to) : null;
+  }
+
   function routeToPerson(items: ReportItem[]): void {
     for (const item of items) {
       const { kind, note: text, value } = item.report;
@@ -2125,11 +2682,14 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           edits.push({ kind: "location", place: item.place, location, feedback: item.id });
           const where = `${item.location.lat}, ${item.location.lon}`;
           note(item.place, `location moved to ${where}${quote(text)} (check before merging)`, false, [item]);
+          const c = changeCase(item, "location", location);
+          if (c) held.push(c);
+          decide(item, "needs_review", "location changes are checked by the AI reviewer or a person");
         } else {
           edits.push({ kind: "note", place: item.place, feedback: item.id });
           note(item.place, `location reported wrong, no new location given${quote(text)}`, false, [item]);
+          decide(item, "needs_review", "location reports are checked by a person");
         }
-        decide(item, "needs_review", "location reports are checked by a person");
       } else if (problem !== null && item.place) {
         // The value never reaches the review checkout: a person reads it in the inbox.
         edits.push({ kind: "note", place: item.place, feedback: item.id });
@@ -2138,7 +2698,9 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       } else if (kind === "name" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "name", place: item.place, name: item.report.value, feedback: item.id });
         note(item.place, `name changed to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
-        decide(item, "needs_review", "names are checked by a person");
+        const c = changeCase(item, "name", item.report.value);
+        if (c) held.push(c);
+        decide(item, "needs_review", "names are checked by the AI reviewer or a person");
       } else if (kind === "description" && item.place && typeof item.report.value === "string") {
         edits.push({ kind: "description", place: item.place, description: item.report.value, feedback: item.id });
         note(item.place, `description set to ${JSON.stringify(item.report.value)}${quote(text)} (check before merging)`, false, [item]);
@@ -2152,7 +2714,9 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         }
         edits.push({ kind: "kind", place: item.place, placeKind: picked, group, feedback: item.id });
         note(item.place, `kind changed to ${picked}${quote(text)} (check before merging)`, false, [item]);
-        decide(item, "needs_review", "kind changes are checked by a person");
+        const c = changeCase(item, "kind", picked);
+        if (c) held.push(c);
+        decide(item, "needs_review", "kind changes are checked by the AI reviewer or a person");
       } else if (kind === "remove" && item.place) {
         // Only places added in the last 90 days come down on reports. On any other place a person decides.
         edits.push({ kind: "note", place: item.place, feedback: item.id });

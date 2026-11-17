@@ -10,9 +10,21 @@
       "types": "./dist/decide.d.ts",
       "default": "./dist/decide.js"
     },
+    "./plausible": {
+      "types": "./dist/plausible.d.ts",
+      "default": "./dist/plausible.js"
+    },
     "./review": {
       "types": "./dist/review.d.ts",
       "default": "./dist/review.js"
+    },
+    "./contact-checks": {
+      "types": "./dist/contact-checks.d.ts",
+      "default": "./dist/contact-checks.js"
+    },
+    "./pages": {
+      "types": "./dist/pages.d.ts",
+      "default": "./dist/pages.js"
     },
     "./preview": {
       "types": "./dist/preview.d.ts",
@@ -35,6 +47,6 @@
     "apply": "node dist/cli.js"
   },
   "dependencies": {
-    "@opencampingdb/feedback": "0.38.0"
+    "@opencampingdb/feedback": "0.39.0"
   }
 }

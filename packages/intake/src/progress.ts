@@ -1,4 +1,4 @@
-import { MAX_PROGRESS_IDS, type Progress, type RefusedBy } from "@opencampingdb/feedback";
+import { MAX_PROGRESS_IDS, type HeldReason, type Progress, type RefusedBy } from "@opencampingdb/feedback";
 import type { PhotoProgressUpdate, ProgressUpdate } from "@opencampingdb/apply/progress-update";
 import type { ItemState } from "./decide.js";
 import { chunks, isoSeconds, type D1Like, type D1Statement } from "./recent.js";
@@ -86,6 +86,27 @@ export async function recordProgress(db: D1Like, items: readonly ProgressUpdate[
   );
   const results = await db.batch(statements);
   return results.reduce<number>((sum, result) => sum + ((result as { meta?: { changes?: number } } | null)?.meta?.changes ?? 0), 0);
+}
+
+/**
+ * Marks the items of a case the AI reviewer left for a person `held` with
+ * `held_reason` (such as `ai_cap`), unless an item is already `in_data` or
+ * `refused`. An item with no row gets one, received at the time in its id.
+ * The apply run's updates keep the held reason.
+ */
+export async function recordReviewerHold(db: D1Like, ids: readonly string[], place: string, heldReason: HeldReason, now: number): Promise<void> {
+  const at = isoSeconds(now);
+  const statements = ids.map((id) =>
+    db
+      .prepare(
+        `INSERT INTO item_progress (feedback_id, state, held_reason, place, received, updated) VALUES (?1, 'held', ?2, ?3, ?4, ?5)
+         ON CONFLICT (feedback_id) DO UPDATE SET state = 'held', held_reason = excluded.held_reason, updated = excluded.updated
+         WHERE item_progress.state NOT IN ('in_data', 'refused')
+           AND (item_progress.state IS NOT 'held' OR item_progress.held_reason IS NOT excluded.held_reason)`,
+      )
+      .bind(id, heldReason, place, isoSeconds(ulidTime(id.slice(id.indexOf("_") + 1))), at),
+  );
+  if (statements.length > 0) await db.batch(statements);
 }
 
 interface ProgressRow {

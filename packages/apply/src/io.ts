@@ -7,9 +7,12 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { FIRST_HAND, FIRST_HAND_KINDS, hasLoneSurrogate, isFeedbackId, isOwnerSubmission, type FactValue, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
 import type { AwaitingClaim, OwnerRecord } from "./owners.js";
 import { pairKey, withDoNotMatch, type DoNotMatchEntry } from "./review.js";
-import { majorRoads, type MajorRoads } from "./roads.js";
+import { boundsNear, buildingFootprints, carriageways, landMask, missingLayers, type PlaceGeometry } from "./plausible.js";
+import { majorRoads, type LatLon, type MajorRoads } from "./roads.js";
 import type { Decision } from "./rules.js";
+import type { TrustRecord } from "./trust.js";
 import { dumpPhotoLine, dumpPlace, dumpReviewLine, photoPath, placePath, reviewPath } from "./serialise.js";
+import { NXDOMAIN_FILE, readOsmHistory, type NxdomainRecord, type NxdomainState, type OsmHistoryEntry } from "./closure-evidence.js";
 import type { BlockedList, Photo, PhotoVotes, Place, RemovedPhotos, Review, Source } from "./types.js";
 
 export interface PendingFile {
@@ -221,6 +224,75 @@ export async function readRoads(path: string): Promise<MajorRoads> {
   return majorRoads(lines);
 }
 
+/** Geometry this far from every place a run checks is not kept in memory. */
+const GEOMETRY_NEAR_M = 200;
+
+/** The bounds of every [lon, lat] pair in `value`, however deeply it is nested, or null when it has none. */
+function boundsOf(value: unknown): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  let b: { minX: number; minY: number; maxX: number; maxY: number } | null = null;
+  const walk = (v: unknown): void => {
+    if (!Array.isArray(v)) return;
+    if (typeof v[0] === "number" && typeof v[1] === "number") {
+      const [x, y] = v as [number, number];
+      b = b === null ? { minX: x, minY: y, maxX: x, maxY: y } : { minX: Math.min(b.minX, x), minY: Math.min(b.minY, y), maxX: Math.max(b.maxX, x), maxY: Math.max(b.maxY, y) };
+      return;
+    }
+    for (const item of v) walk(item);
+  };
+  walk(value);
+  return b;
+}
+
+/**
+ * The lines of a JSON lines geometry file holding `key` whose shapes come
+ * within `GEOMETRY_NEAR_M` of one of `points`, read line by line, so a file
+ * for a whole country never sits in memory.
+ */
+async function geometryLinesNear(path: string, key: string, points: readonly LatLon[]): Promise<string[]> {
+  const lines: string[] = [];
+  for await (const line of createInterface({ input: createReadStream(path, "utf8"), crlfDelay: Infinity })) {
+    if (!line.includes(`"${key}"`)) continue;
+    let value: { polygons?: unknown; coords?: unknown };
+    try {
+      value = JSON.parse(line) as typeof value;
+    } catch {
+      continue;
+    }
+    const bounds = boundsOf(value.polygons ?? value.coords);
+    if (bounds !== null && boundsNear(bounds, points, GEOMETRY_NEAR_M)) lines.push(line);
+  }
+  return lines;
+}
+
+/** The files a plausibility check on new places reads (plausible.ts). Each is optional. */
+export interface PlaceGeometryFiles {
+  /** Water lines: sea and lakes. */
+  landMask?: string;
+  /** Building lines. */
+  buildings?: string;
+  /** The geometry sidecar, for its road lines. */
+  geometry?: string;
+}
+
+/**
+ * The land mask, building footprints and major road carriageways near
+ * `points`, from the files given. A file left out is a layer the check
+ * skips, and the run logs it.
+ */
+export async function readPlaceGeometry(files: PlaceGeometryFiles, points: readonly LatLon[]): Promise<PlaceGeometry> {
+  const geometry: PlaceGeometry = {
+    ...(files.landMask ? { water: landMask(await geometryLinesNear(files.landMask, "water", points)) } : {}),
+    ...(files.buildings ? { buildings: buildingFootprints(await geometryLinesNear(files.buildings, "building", points)) } : {}),
+    ...(files.geometry ? { roads: carriageways(await geometryLinesNear(files.geometry, "road", points)) } : {}),
+  };
+  const missing = missingLayers(geometry);
+  if (missing.length > 0) {
+    const listed = missing.length === 1 ? missing[0] : `${missing.slice(0, -1).join(", ")} or ${missing.at(-1)}`;
+    console.warn(`no ${listed}, so new places are not checked against ${missing.length === 1 ? "it" : "them"}`);
+  }
+  return geometry;
+}
+
 /** Where the apply run keeps the helpful votes that count, in the inbox. Private: it names installs. */
 export const PHOTO_VOTES_FILE = "votes/photos.json";
 
@@ -274,6 +346,92 @@ export async function writePhotoVotes(inbox: string, votes: PhotoVotes): Promise
   const path = join(inbox, PHOTO_VOTES_FILE);
   const before = await readFile(path, "utf8").catch(() => undefined);
   if (before === text || (before === undefined && Object.keys(ordered.photos).length === 0)) return false;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, text, "utf8");
+  return true;
+}
+
+/** Where the apply run keeps each signed-in contributor's track record, in the inbox. Private: it ties feedback to contributors. */
+export const TRUST_FILE = "trust/contributors.json";
+
+/** The track records, from the inbox. Empty when there are none yet. */
+export async function readTrust(inbox: string): Promise<TrustRecord> {
+  let text: string;
+  try {
+    text = await readFile(join(inbox, TRUST_FILE), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { contributors: {} };
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // A withdrawal is never lost by guessing: the run stops until a person fixes the file.
+    throw new Error(`${TRUST_FILE} in the inbox is not valid JSON: fix it by hand, from its git history`);
+  }
+  const contributors = (parsed as { contributors?: unknown } | null)?.contributors;
+  if (typeof contributors !== "object" || contributors === null) {
+    throw new Error(`${TRUST_FILE} in the inbox has no "contributors" object: fix it by hand, from its git history`);
+  }
+  const out: TrustRecord = { contributors: {} };
+  for (const [contributor, value] of Object.entries(contributors)) {
+    const entry = value as { confirmed?: unknown; withdrawn?: unknown } | null;
+    const withdrawn = typeof entry?.withdrawn === "string" ? entry.withdrawn : undefined;
+    const confirmed = Array.isArray(entry?.confirmed) ? entry.confirmed.filter(isConfirmedEdit) : [];
+    if (!Array.isArray(entry?.confirmed) || confirmed.length < entry.confirmed.length) console.warn(`skipping malformed confirmed edits for ${contributor} in ${TRUST_FILE}`);
+    out.contributors[contributor] = { confirmed, ...(withdrawn !== undefined ? { withdrawn } : {}) };
+  }
+  return out;
+}
+
+function isConfirmedEdit(value: unknown): value is TrustRecord["contributors"][string]["confirmed"][number] {
+  const v = value as Record<string, unknown> | null;
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    typeof v.feedback === "string" &&
+    typeof v.received === "string" &&
+    typeof v.place === "string" &&
+    (v.fact === undefined || typeof v.fact === "string")
+  );
+}
+
+/** Writes the track records back, contributors in id order. True when the file changed. */
+export async function writeTrust(inbox: string, trust: TrustRecord): Promise<boolean> {
+  const ordered: TrustRecord = { contributors: Object.fromEntries(Object.entries(trust.contributors).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) };
+  const text = `${JSON.stringify(ordered, null, 2)}\n`;
+  const path = join(inbox, TRUST_FILE);
+  const before = await readFile(path, "utf8").catch(() => undefined);
+  if (before === text || (before === undefined && Object.keys(ordered.contributors).length === 0)) return false;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, text, "utf8");
+  return true;
+}
+
+/** Each domain's first NXDOMAIN answer, from the inbox. Empty when there are none yet, or when the file can't be read (the checks start again). */
+export async function readNxdomain(inbox: string): Promise<NxdomainState> {
+  const text = await readFile(join(inbox, NXDOMAIN_FILE), "utf8").catch(() => undefined);
+  if (text === undefined) return { domains: {} };
+  const out: NxdomainState = { domains: {} };
+  try {
+    const domains = (JSON.parse(text) as { domains?: Record<string, Partial<NxdomainRecord>> }).domains ?? {};
+    for (const [domain, record] of Object.entries(domains)) {
+      if (typeof record?.first === "string" && !Number.isNaN(Date.parse(record.first))) out.domains[domain] = { first: record.first };
+    }
+  } catch {
+    console.warn(`${NXDOMAIN_FILE} in the inbox is not valid JSON, so the DNS checks start again`);
+  }
+  return out;
+}
+
+/** Writes the NXDOMAIN records back, domains in order. True when the file changed. */
+export async function writeNxdomain(inbox: string, state: NxdomainState): Promise<boolean> {
+  const ordered: NxdomainState = { domains: Object.fromEntries(Object.entries(state.domains).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) };
+  const text = `${JSON.stringify(ordered, null, 2)}\n`;
+  const path = join(inbox, NXDOMAIN_FILE);
+  const before = await readFile(path, "utf8").catch(() => undefined);
+  if (before === text || (before === undefined && Object.keys(ordered.domains).length === 0)) return false;
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, text, "utf8");
   return true;
@@ -343,7 +501,7 @@ export async function settleAwaiting(
   return moved;
 }
 
-/** Moves each decided pending file to `applied/` or `refused/`, adding the outcome (with `doubted` on a doubt that took a fact down). Waiting files stay. */
+/** Moves each decided pending file to `applied/` or `refused/`, adding the outcome (with `doubted` on a doubt that took a fact down, and `frozen` on the reports that froze a place). Waiting files stay. */
 export async function moveDecided(
   inbox: string,
   files: readonly PendingFile[],
@@ -377,6 +535,7 @@ export async function moveDecided(
       run: runAt,
       ...(decision.held_reason ? { held_reason: decision.held_reason } : {}),
       ...(decision.doubted ? { doubted: decision.doubted } : {}),
+      ...(decision.frozen ? { frozen: decision.frozen } : {}),
     };
     const withOutcome = { ...file.item, outcome };
     await writeFile(target, `${JSON.stringify(withOutcome, null, 2)}\n`, "utf8");
@@ -650,6 +809,13 @@ export class DataRepo {
     if (!(await exists(path))) return new Set();
     const list = JSON.parse(await readFile(path, "utf8")) as { pairs?: { a: string; b: string }[] };
     return new Set((list.pairs ?? []).map((pair) => pairKey(pair.a, pair.b)));
+  }
+
+  /** What OSM's history says about objects that left the extract (`osm/history.ndjson`), by object. Empty when the file is missing. */
+  async osmHistory(): Promise<Map<string, OsmHistoryEntry>> {
+    const path = join(this.root, "osm", "history.ndjson");
+    if (!(await exists(path))) return new Map();
+    return readOsmHistory(await readFile(path, "utf8"));
   }
 
   /** Contributors in `moderation/blocked_contributors.json`. Empty when the file is missing. */

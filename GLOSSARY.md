@@ -22,6 +22,14 @@ _Avoid_: rejection, failure (for a check that ran and said no)
 A Cloudflare Turnstile token showing that a person filled in the form that sent a request. It says nothing about the device or app, so the items it carries are weighed as unattested ones.
 _Avoid_: attestation, captcha, proof of a genuine app
 
+**Silent drop**:
+An item the intake answers exactly as it answers an accepted one, with an id and progress, but never stores, so whoever sent it cannot tell which check it failed. Used for abuse that cannot be traced to a genuine install, such as a missing or failed human check, or a request without attestation from a network with a poor network reputation. Only a count per day and reason is kept.
+_Avoid_: refusal (which always gives its reason), shadow ban
+
+**Network reputation**:
+Whether a request's address is on a public list of abusive addresses, which the intake fetches once a day and keeps itself. A listed address drops an item without attestation silently, and holds an attested one for the AI reviewer.
+_Avoid_: IP ban, firewall
+
 ## Between releases
 
 **New place**:
@@ -31,6 +39,10 @@ _Avoid_: instant place, pending place
 **Evidence**:
 What travellers send about a new place: a check, a removal report or a withdraw.
 _Avoid_: votes, feedback (for these three on their own)
+
+**Evidence of closure**:
+A sign from outside the inbox that a place closed: OSM newly tagging its object `disused:` or `abandoned:`, or its website's domain not found in DNS on two checks a day apart. It counts as a second source for a traveller's closure, never as a closure on its own.
+_Avoid_: closure proof, evidence (on its own, which means what travellers send about a new place)
 
 **Check**:
 Evidence that a new place is there as described.
@@ -72,6 +84,10 @@ _Avoid_: update (an owner's change), batch (how items travel)
 A report from a traveller who was at the place in the last month: the app saw them nearby, or they said so.
 _Avoid_: verified report
 
+**Source link**:
+A page on a government host or the place's own website that a fact report names to show its value. When the page shows the value, it counts as a second source.
+_Avoid_: citation, evidence (a check or report about a new place)
+
 **Progress**:
 Where a contribution is: received, live, waiting, accepted, held, refused or in the data.
 _Avoid_: status, outcome, decision
@@ -80,9 +96,29 @@ _Avoid_: status, outcome, decision
 Accepted, but kept from apps until a reviewer decides.
 _Avoid_: pending, queued, quarantined
 
+**Frozen place**:
+A place where three or more sources sent conflicting values for one fact within 24 hours, so no fact on it changes until a reviewer settles the value, or for 14 days when no one does.
+_Avoid_: locked place, edit war (for the state)
+
 **Reviewer**:
 A person, bot or AI that the maintainers allow to decide held items, named on every decision it makes.
 _Avoid_: moderator, admin
+
+**Contact check**:
+An automatic check on a reported contact that stands in for a person: the place's own website shows it, its domain is not newly registered, or an address is in the place's state.
+_Avoid_: verification (owners verify), link check (the link rules and the malware check)
+
+**Implausible location**:
+A new place the map data puts in the sea or a lake, on a major road's carriageway or inside a building footprint, held for the AI reviewer. Remoteness never makes a location implausible.
+_Avoid_: suspicious location, invalid location (it is held, not refused)
+
+**Unattested new place**:
+A new place from an install without attestation, held for the AI reviewer once it passes the plausibility, duplicate and text checks. The reviewer publishes it, merges it into a nearby place it duplicates, or takes it down.
+_Avoid_: unverified place, anonymous place (it has a contributor)
+
+**Trusted contributor**:
+A signed-in contributor five of whose edits other sources have confirmed, with no upheld doubt about any of their edits since. Only an attested or signed-in item this run applied, from another device, network and contributor, confirms an edit. A doubt is upheld when doubts take the value down, the AI reviewer keeps it down, dismisses or reverts the edit or takes the place down, or a person leaves the edit out of a merged review PR. Their new places list at once, and their contacts go live once they pass the contact checks, without a second source.
+_Avoid_: verified contributor, trusted reviewer (a contributor whose reviews publish)
 
 **Merge**:
 Folding a new place added twice into the place it duplicates, leaving the new place as a tombstone that points at it.

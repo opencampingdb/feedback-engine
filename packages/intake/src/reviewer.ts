@@ -1,36 +1,51 @@
 /**
  * The AI reviewer: from the intake's scheduled job, it reads the held cases on
- * the data repository's `feedback/review` PR, decides the ones the rules can't
- * settle with a Workers AI model, commits the run's decisions that change a
- * place to the review branch as one commit, and comments on the PR once.
- * Every decision names the reviewer, `ai:<model>`, and gives the reason, and
- * a person can reverse any of them on the PR.
+ * the data repository's `feedback/review` PR, decides the ones the rules
+ * can't settle with a Workers AI model, commits the run's decisions that
+ * change a place to the review branch as one commit, and comments on the PR
+ * once. Every decision names the reviewer, `ai:<model>`, and gives the
+ * reason, and a person can reverse any of them on the PR.
  *
  * Cheapest first: `settleByRules` decides first, with no model call, and the
- * model is asked only about what is left, at most MAX_MODEL_CASES a run. On
- * its own the model may approve a held or hidden new place, merge a held
- * duplicate into the place it duplicates (never into a place with a verified
- * owner, a pair on `moderation/distinct_places.json` or a pair across a major
- * road; without road data, only the same name less than 25 m apart), restore a
- * withdrawn contact, take down a new place that is clear spam, restore or
- * keep down a fact doubts took down, dismiss doubts about a fact that
- * stays, and confirm `vehicle_access` on a place whose name says only heavy
- * vehicles may use it. A case the apply's rules closed (a doubted fact that
- * travellers restored or replaced) is left without asking. Owner-set
- * values, blocked contributors and values that wait in the inbox go to a
- * person, and an answer the model isn't sure of, or one that can't be read,
- * is `leave`.
+ * model is asked only about what is left, at most MAX_MODEL_CASES a run.
  *
- * Only held-case lines in the PR body and in comments from the bot logins the
- * deployment lists (REVIEW_BOT_LOGINS: the apply's GitHub App and the
+ * On its own the model may:
+ *
+ * - approve a held or hidden new place, or take down one that is clear spam;
+ * - merge a held duplicate into the place it duplicates, never into a place
+ *   with a verified owner, a pair on `moderation/distinct_places.json` or a
+ *   pair across a major road (without road data, only the same name less
+ *   than 25 m apart);
+ * - approve, take down or merge an unattested new place, merging only into
+ *   one of the candidates its case lists, by the same rules, named as
+ *   `target`;
+ * - restore a withdrawn contact, restore or keep down a fact doubts took
+ *   down, and dismiss doubts about a fact that stays;
+ * - confirm `vehicle_access` on a place whose name says only heavy vehicles
+ *   may use it;
+ * - set a disputed fact to one of the values its sources sent or the place
+ *   has, which lifts the place's freeze once the decision is in the data.
+ *
+ * A case the apply's rules closed (a doubted fact that travellers restored or
+ * replaced) is left without asking. Owner-set values, blocked contributors
+ * and values that wait in the inbox go to a person, and an answer the model
+ * isn't sure of, or one that can't be read, is `leave`. With the second
+ * stage (src/second-review.ts), such a case is asked of a second model while
+ * the month's spending is under its cap, and is `leave` only when both
+ * models are unsure, or over the cap as `ai_cap`.
+ *
+ * Only held-case lines in the PR body and in comments from the bot logins
+ * the deployment lists (REVIEW_BOT_LOGINS: the apply's GitHub App and the
  * reviewer's own) or the repository's owners, members and collaborators
- * count, so a stranger's comment, or another GitHub App's, can't add a case. Decisions are recorded as `review-decision` lines
- * in the reviewer's comment, and a case with one is not asked about again.
+ * count, so a stranger's comment, or another GitHub App's, can't add a case.
+ * Decisions are recorded as `review-decision` lines in the reviewer's
+ * comment, and a case with one is not asked about again.
  */
 
 import {
   allowedDecisions,
   applyDecision,
+  disputeChoices,
   dumpPlace,
   heldCaseKey,
   mergePlaces,
@@ -39,6 +54,7 @@ import {
   parseClosedCases,
   parseHeldCases,
   placePath,
+  reviewPath,
   settleByRules,
   type ClosedCase,
   type HeldCase,
@@ -48,10 +64,15 @@ import {
   type DoNotMatchEntry,
   type MajorRoads,
 } from "@opencampingdb/apply/review";
+import type { FactValue } from "@opencampingdb/feedback";
+import { timeLimit, TimedOut } from "@opencampingdb/apply/pages";
 import type { AiLike } from "./checks.js";
-import type { GitHubApp, GitHubAppConfig, IssueComment } from "./github.js";
+import type { Fetch, GitHubApp, GitHubAppConfig, IssueComment } from "./github.js";
 import type { D1Like } from "./recent.js";
+import { recordReviewerHold } from "./progress.js";
 import { claimReviewRun } from "./runs.js";
+import { addSpend, askSecondModel, monthOf, monthSpend, SECOND_REVIEW_MODEL, SecondModelUnavailable, type SecondStage } from "./second-review.js";
+import { readSiteNames } from "./site-names.js";
 
 /**
  * A current Workers AI instruct model that supports JSON Mode, so its answer
@@ -102,6 +123,19 @@ export interface ReviewerDeps {
    * is merged.
    */
   roads?: MajorRoads;
+  /**
+   * Fetches a place's own website, to read its title and headings for a name
+   * change. Without it, or when the site can't be read, a new name the name
+   * from OSM does not confirm goes to a person.
+   */
+  fetchSite?: Fetch;
+  /**
+   * The second stage (src/second-review.ts), when the deployment has an
+   * Anthropic API key: a case the first model is unsure of is asked of the
+   * second model while the month's spending is under the cap. Without it,
+   * such a case is left for a person.
+   */
+  second?: SecondStage;
 }
 
 /** One decision, as the reviewer records it on the PR. */
@@ -110,13 +144,19 @@ export interface ReviewRecord {
   case: HeldCase["case"];
   place: string;
   decision: ReviewDecision;
-  /** `ai:<model>`. */
+  /** `ai:<model>`: the first model, or the second when it was asked. */
   reviewer: string;
   reason: string;
   /** Settled by the rules, without asking the model. */
   by_rules: boolean;
   /** The decision changed the place, in the run's commit to the review branch. */
   committed: boolean;
+  /** `ai_cap`: the first model was unsure and the second model's monthly spending cap was reached, so a person decides. */
+  held?: "ai_cap";
+  /** On `confirm` of a `disputed` case: the value set. */
+  value?: FactValue;
+  /** On `merge` of an `unattested_place` case: the candidate it was merged into. */
+  target?: string;
 }
 
 export type ReviewResult =
@@ -196,17 +236,87 @@ const MEANINGS: Record<ReviewDecision, string> = {
   leave: "a person decides",
   confirm: "set the fact: the place's name clearly says only heavy vehicles (trucks) may use it",
   merge: "merge the new place into the place it may duplicate: the two are clearly one place added twice, with the same or nearly the same name and nothing to tell them apart",
+  revert: "put back the place's earlier value: the change is wrong, unlikely or vandalism",
+};
+
+/**
+ * What the model is told about each kind of case: lines that explain it, and
+ * what a decision means for it where that differs from MEANINGS.
+ */
+const CASE_GUIDE: Partial<Record<HeldCase["case"], { about?: readonly string[]; means?: Partial<Record<ReviewDecision, string>> }>> = {
+  fact_doubted: {
+    about: ["In a fact_doubted case, travellers say a fact about the place is wrong without giving the right value. Doubts and confirmations count independent travellers."],
+    means: { restore: "put the last value back on the place: the doubts are outweighed or unlikely" },
+  },
+  commons_mismatch: {
+    about: [
+      "In a commons_mismatch case, a traveller says a Wikimedia Commons photo shown for the place is not of it. You see only the photo's file name, matched to the place by its words and distance.",
+    ],
+    means: {
+      confirm: "never show this photo for the place again: its file name clearly names another place or something else",
+      dismiss: "keep showing the photo: its file name clearly names this place",
+    },
+  },
+  disputed: {
+    about: [
+      "In a disputed case, independent travellers sent conflicting values for one fact within a day, so no fact on the place changes until a reviewer settles the value.",
+      "With confirm, give value: the JSON of one of the values listed, the one the place most likely has now.",
+    ],
+    means: { confirm: "set the fact to the value you give, one of the choices, which settles the dispute" },
+  },
+  place_change: {
+    about: [
+      "In a place_change case, a traveller changed the place's name, kind or location (change) from one value (from) to another (to), and the place already shows the new value.",
+    ],
+    means: { approve: "keep the change: it is believable for this place" },
+  },
+  contact_check: {
+    about: [
+      "In a contact_check case, a traveller reported a contact for the place (the place's facts show it) and it failed automatic checks: the place's own website does not show it, its domain was registered recently or its age is unknown, or the address is in another state.",
+      "A newly registered domain or a contact unrelated to the place points to spam. A check that could not run (a website that timed out, a registry with no date) says little either way.",
+    ],
+    means: {
+      confirm: "keep the reported contact on the place: it is clearly the place's own, despite the failed checks",
+      dismiss: "take the reported contact off the place and put back what it had before: it is not the place's own, or it is spam",
+    },
+  },
+  implausible_location: {
+    about: [
+      "In an implausible_location case, a traveller added a new place whose location the map data puts in the sea or a lake, on a major road's carriageway or inside a building footprint (hit and found say which). Map data can be out of date or coarse near a shore. Remoteness is never a reason to doubt a place.",
+    ],
+    means: {
+      approve: "publish the place where it is: the location is believable for its kind, such as a camp on a sand spit or an island the map has as water",
+      take_down: "hide the place: only when it is clearly spam or not a place at all. A real place pinned in the wrong spot is leave, so a person can move it",
+    },
+  },
+  intake_check: {
+    about: [
+      "In an intake_check case, an app that proved it runs on a genuine device sent the item, but the intake held it for held_for: network_reputation means it came from a network on a public list of abusive addresses (a shared mobile carrier address can be listed for someone else's abuse), and repeated_text means its text is nearly the same as text other sources sent in the last 30 days, as in a spam campaign.",
+      "about says what the item is: a fact the place now shows (value_before is what it had), a review (stars and text), or a status report or check (closed, reopened, or found there or gone).",
+      "Judge the item itself: keep or approve it when it is believable for this place, and give leave when it reads like spam or you cannot tell.",
+    ],
+    means: {
+      confirm: "keep the reported value on the place: it is believable for this place",
+      dismiss: "take the reported value off and put back what the place had: it is spam or not believable; for a status report, it never counts",
+      approve: "let the item count as an ordinary report: it is believable for this place",
+    },
+  },
+  unattested_place: {
+    about: [
+      "In an unattested_place case, a traveller added a new place from an app that could not prove it runs on a genuine device. It passed the automatic location, duplicate and text checks. candidates are places of the same group nearby, with how far each is.",
+      "A sparse or remote place is normal for camping. Take it down only when it is clearly spam or not a place at all.",
+      "With merge, give target: the id of the candidate it duplicates, one of those listed as mergeable.",
+    ],
+    means: {
+      approve: "publish the place: it is believable as a real place of its kind, here",
+      merge:
+        "merge the new place into the candidate you give as target: the two are clearly one place added twice, with the same or nearly the same name and nothing to tell them apart",
+    },
+  },
 };
 
 /** What a decision means for this case. */
-const meaning = (c: HeldCase, d: ReviewDecision) =>
-  c.case === "fact_doubted" && d === "restore"
-    ? "put the last value back on the place: the doubts are outweighed or unlikely"
-    : c.case === "commons_mismatch" && d === "confirm"
-      ? "never show this photo for the place again: its file name clearly names another place or something else"
-      : c.case === "commons_mismatch" && d === "dismiss"
-        ? "keep showing the photo: its file name clearly names this place"
-        : MEANINGS[d];
+const meaning = (c: HeldCase, d: ReviewDecision) => CASE_GUIDE[c.case]?.means?.[d] ?? MEANINGS[d];
 
 /** What the model reads of a place. Values travellers or the owner sent are data, not instructions. */
 function placeView(place: Place) {
@@ -227,12 +337,7 @@ function placeView(place: Place) {
 function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
   return [
     "You review held cases for an open database of camping places. A case is a new place or a change that the automatic checks held for a reviewer.",
-    ...(c.case === "fact_doubted"
-      ? ["In a fact_doubted case, travellers say a fact about the place is wrong without giving the right value. Doubts and confirmations count independent travellers."]
-      : []),
-    ...(c.case === "commons_mismatch"
-      ? ["In a commons_mismatch case, a traveller says a Wikimedia Commons photo shown for the place is not of it. You see only the photo's file name, matched to the place by its words and distance."]
-      : []),
+    ...(CASE_GUIDE[c.case]?.about ?? []),
     "Answer with JSON only: {\"decision\": ..., \"reason\": ..., \"sure\": true or false}.",
     `The decisions you may give for this case are: ${allowed.join(", ")}.`,
     ...allowed.map((d) => `- ${d}: ${meaning(c, d)}.`),
@@ -242,17 +347,36 @@ function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
   ].join("\n");
 }
 
-function decisionSchema(allowed: readonly ReviewDecision[]) {
+/**
+ * The answer's schema. With `choices` (a disputed case), the answer also
+ * gives `value`, the JSON of one of them. With `candidates` it may merge
+ * into, it gives `target`, the id of one of them.
+ */
+function decisionSchema(allowed: readonly ReviewDecision[], choices: readonly FactValue[] = [], candidates: readonly Candidate[] = []) {
+  const targets = mergeTargets(allowed, candidates);
   return {
     type: "object",
     properties: {
       decision: { type: "string", enum: allowed },
+      ...(choices.length > 0 ? { value: { type: "string", enum: choices.map((v) => JSON.stringify(v)) } } : {}),
+      ...(targets.length > 0 ? { target: { type: "string", enum: targets } } : {}),
       reason: { type: "string" },
       sure: { type: "boolean" },
     },
     required: ["decision", "reason", "sure"],
   };
 }
+
+/** A place an `unattested_place` case lists nearby, and whether a reviewer may merge the case's place into it. */
+export interface Candidate {
+  place: Place;
+  distance_m: number;
+  mergeable: boolean;
+}
+
+/** The ids of the candidates a reviewer may merge into, when `merge` is allowed. */
+const mergeTargets = (allowed: readonly ReviewDecision[], candidates: readonly Candidate[]) =>
+  allowed.includes("merge") ? candidates.filter((c) => c.mergeable).map((c) => c.place.id) : [];
 
 /** A model call that failed or took too long. */
 export class ModelUnavailable extends Error {}
@@ -262,15 +386,12 @@ export function onError(deps: { onError?: (error: unknown) => void }, error: unk
   deps.onError?.(error);
 }
 
+/** `work`, or ModelUnavailable when it takes longer than `ms` (`timeLimit`). */
 export async function withTimeout<T>(ms: number, work: Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new ModelUnavailable("timed out")), ms);
-  });
   try {
-    return await Promise.race([work, timeout]);
-  } finally {
-    clearTimeout(timer);
+    return await timeLimit(ms, () => work);
+  } catch (error) {
+    throw error instanceof TimedOut ? new ModelUnavailable("timed out") : error;
   }
 }
 
@@ -290,20 +411,27 @@ export function answerOf(out: unknown): Record<string, unknown> | null {
   }
 }
 
-/**
- * The model's decision on one case. A run that fails or takes too long throws
- * ModelUnavailable. An answer that can't be read, gives a decision this case
- * doesn't allow, or isn't sure, is `leave`.
- */
-export async function askModel(
-  ai: AiLike,
-  model: string,
+/** A model's decision on one case. `unsure` is true when the model did not settle it: it answered `leave`, wasn't sure, gave a decision the case doesn't allow, or gave an answer that can't be read. */
+export interface ModelDecision {
+  decision: ReviewDecision;
+  reason: string;
+  unsure: boolean;
+  /** On `confirm` of a disputed case: the value, one of its choices. */
+  value?: FactValue;
+  /** On `merge` of an `unattested_place` case: the candidate to merge into. */
+  target?: string;
+}
+
+/** What a model reads about a case, as JSON. */
+function caseEvidence(
   c: HeldCase,
   place: Place,
   duplicateOf: Place | undefined,
-  allowed: readonly ReviewDecision[] = allowedDecisions(c),
-): Promise<{ decision: ReviewDecision; reason: string }> {
-  const evidence = {
+  choices: readonly FactValue[] = [],
+  candidates: readonly Candidate[] = [],
+  extra: CaseExtra = {},
+): string {
+  return JSON.stringify({
     case: c.case,
     place: placeView(place),
     ...(c.case === "duplicate" ? { possible_duplicate_of: duplicateOf ? placeView(duplicateOf) : c.duplicate_of, distance_m: c.distance_m } : {}),
@@ -314,7 +442,66 @@ export async function askModel(
       : {}),
     ...(c.case === "vehicle_access_candidate" ? { fact: c.fact, value: c.value } : {}),
     ...(c.case === "commons_mismatch" ? { file: c.file, reporting_sources: c.sources } : {}),
-  };
+    ...(c.case === "place_change" ? { change: c.change, from: c.from, to: c.to, ...(c.change === "location" ? { distance_m: c.distance_m } : {}) } : {}),
+    ...(c.case === "contact_check" ? { contact: c.fact, failed_checks: c.checks, found: c.problem, value_before: c.value } : {}),
+    ...(c.case === "implausible_location" ? { hit: c.hit, found: c.problem } : {}),
+    ...(c.case === "disputed" ? { fact: c.fact, values: choices, sources: c.sources } : {}),
+    ...(c.case === "unattested_place"
+      ? { candidates: candidates.map((n) => ({ ...placeView(n.place), distance_m: n.distance_m, mergeable: n.mergeable })) }
+      : {}),
+    ...(c.case === "place_change" && c.held_for !== undefined ? { held_for: c.held_for } : {}),
+    ...(c.case === "intake_check"
+      ? {
+          held_for: c.held_for,
+          about: c.about,
+          ...(c.about === "fact" ? { fact: c.fact, value_before: c.value ?? null } : {}),
+          ...(c.about === "review" && extra.review ? { review: extra.review } : {}),
+          ...(c.about === "status" ? { says: c.says } : {}),
+        }
+      : {}),
+  });
+}
+
+/** What a case's evidence adds that is read from the branch: on an `intake_check` of a review, the review's stars and text. */
+interface CaseExtra {
+  review?: { stars: number; text: string };
+}
+
+/** A model's answer object as a decision: `leave`, and unsure, unless it is a sure decision the case allows. */
+function decisionOf(answer: Record<string, unknown> | null, allowed: readonly ReviewDecision[], choices: readonly FactValue[] = [], candidates: readonly Candidate[] = []): ModelDecision {
+  if (!answer || typeof answer.decision !== "string") return { decision: "leave", reason: "the model's answer could not be read", unsure: true };
+  const reason = typeof answer.reason === "string" ? answer.reason : "";
+  if (!allowed.includes(answer.decision as ReviewDecision)) return { decision: "leave", reason: `the model answered ${safeReason(answer.decision)}, which this case does not allow`, unsure: true };
+  if (answer.decision !== "leave" && answer.sure !== true) return { decision: "leave", reason: `the model was not sure: ${reason}`, unsure: true };
+  if (choices.length > 0 && answer.decision === "confirm") {
+    const value = choices.find((v) => JSON.stringify(v) === answer.value);
+    if (value === undefined) return { decision: "leave", reason: "the model gave a value that is not among the choices", unsure: true };
+    return { decision: "confirm", reason, unsure: false, value };
+  }
+  if (candidates.length > 0 && answer.decision === "merge") {
+    const target = mergeTargets(allowed, candidates).find((t) => t === answer.target);
+    if (target === undefined) return { decision: "leave", reason: "the model gave a target that is not among the candidates it may merge into", unsure: true };
+    return { decision: "merge", reason, unsure: false, target };
+  }
+  return { decision: answer.decision as ReviewDecision, reason, unsure: answer.decision === "leave" };
+}
+
+/**
+ * The model's decision on one case. A run that fails or takes too long throws
+ * ModelUnavailable. An answer that can't be read, gives a decision this case
+ * doesn't allow, or isn't sure, is `leave`, and `unsure`.
+ */
+export async function askModel(
+  ai: AiLike,
+  model: string,
+  c: HeldCase,
+  place: Place,
+  duplicateOf: Place | undefined,
+  allowed: readonly ReviewDecision[] = allowedDecisions(c),
+  choices: readonly FactValue[] = disputeChoices(c, place),
+  candidates: readonly Candidate[] = [],
+  extra: CaseExtra = {},
+): Promise<ModelDecision> {
   let out: unknown;
   try {
     out = await withTimeout(
@@ -322,22 +509,121 @@ export async function askModel(
       ai.run(model, {
         messages: [
           { role: "system", content: systemPrompt(c, allowed) },
-          { role: "user", content: JSON.stringify(evidence) },
+          { role: "user", content: caseEvidence(c, place, duplicateOf, choices, candidates, extra) },
         ],
         temperature: 0,
         max_tokens: 256,
-        response_format: { type: "json_schema", json_schema: decisionSchema(allowed) },
+        response_format: { type: "json_schema", json_schema: decisionSchema(allowed, choices, candidates) },
       }),
     );
   } catch (error) {
     throw error instanceof ModelUnavailable ? error : new ModelUnavailable(String(error));
   }
-  const answer = answerOf(out);
-  if (!answer || typeof answer.decision !== "string") return { decision: "leave", reason: "the model's answer could not be read" };
-  const reason = typeof answer.reason === "string" ? answer.reason : "";
-  if (!allowed.includes(answer.decision as ReviewDecision)) return { decision: "leave", reason: `the model answered ${safeReason(answer.decision)}, which this case does not allow` };
-  if (answer.decision !== "leave" && answer.sure !== true) return { decision: "leave", reason: `the model was not sure: ${reason}` };
-  return { decision: answer.decision as ReviewDecision, reason };
+  return decisionOf(answerOf(out), allowed, choices, candidates);
+}
+
+/** The second stage's decision on a case the first model was unsure of, with who made it. */
+interface SecondDecision {
+  decision: ReviewDecision;
+  reason: string;
+  reviewer: string;
+  held?: "ai_cap";
+  value?: FactValue;
+  target?: string;
+}
+
+/** The second model's name on a decision. */
+export const SECOND_REVIEWER = `ai:${SECOND_REVIEW_MODEL}`;
+
+/**
+ * Asks the second model about a case the first was unsure of (`first`), when
+ * the month's spending is under the cap, and adds what the answer cost. Over
+ * the cap the case is `leave` with `held: "ai_cap"`. A failed or timed out
+ * call, spending that can't be read or written, and an answer the second
+ * model isn't sure of, are `leave`, for a person.
+ */
+async function askSecondStage(
+  deps: ReviewerDeps & { second: SecondStage },
+  firstReviewer: string,
+  first: ModelDecision,
+  c: HeldCase,
+  place: Place,
+  duplicateOf: Place | undefined,
+  allowed: readonly ReviewDecision[],
+  candidates: readonly Candidate[] = [],
+  extra: CaseExtra = {},
+): Promise<SecondDecision> {
+  const month = monthOf(deps.now());
+  let spent: number;
+  try {
+    spent = await monthSpend(deps.db, month);
+  } catch (error) {
+    onError(deps, error);
+    return { decision: "leave", reason: "the second model's spending could not be read, so a person decides", reviewer: firstReviewer };
+  }
+  if (spent >= deps.second.capUsd * 1e9) {
+    return { decision: "leave", reason: "ai_cap: the first model was unsure and the second model's monthly spending cap is reached, so a person decides", reviewer: firstReviewer, held: "ai_cap" };
+  }
+  let answer: Awaited<ReturnType<typeof askSecondModel>>;
+  try {
+    const choices = disputeChoices(c, place);
+    answer = await askSecondModel(deps.second, systemPrompt(c, allowed), caseEvidence(c, place, duplicateOf, choices, candidates, extra), decisionSchema(allowed, choices, candidates));
+  } catch (error) {
+    if (!(error instanceof SecondModelUnavailable)) throw error;
+    onError(deps, error);
+    return { decision: "leave", reason: "the second model's call failed, so a person decides", reviewer: SECOND_REVIEWER };
+  }
+  try {
+    await addSpend(deps.db, month, answer.nanoUsd);
+  } catch (error) {
+    onError(deps, error);
+    return { decision: "leave", reason: "the second model's spending could not be recorded, so a person decides", reviewer: SECOND_REVIEWER };
+  }
+  const second = decisionOf(answer.answer, allowed, disputeChoices(c, place), candidates);
+  if (second.unsure) return { decision: "leave", reason: `both models were unsure: ${first.reason}; ${second.reason}`, reviewer: SECOND_REVIEWER };
+  return {
+    decision: second.decision,
+    reason: second.reason,
+    reviewer: SECOND_REVIEWER,
+    ...(second.value !== undefined ? { value: second.value } : {}),
+    ...(second.target !== undefined ? { target: second.target } : {}),
+  };
+}
+
+/**
+ * The candidates an `unattested_place` case lists, read from the branch:
+ * those whose file is there and is a place, each marked `mergeable` when
+ * `reviewerMergeProblem` allows a merge into it.
+ */
+async function readCandidates(
+  c: HeldCase,
+  place: Place,
+  read: (path: string) => Promise<{ text: string } | null>,
+  pairs: ReadonlySet<string>,
+  roads: MajorRoads | undefined,
+): Promise<(Candidate & { file: { text: string } })[]> {
+  const out: (Candidate & { file: { text: string } })[] = [];
+  for (const { place: id, distance_m } of c.candidates ?? []) {
+    const file = await read(placePath(id));
+    const other = file ? parsePlace(file.text) : undefined;
+    if (!file || !other) continue;
+    out.push({ place: other, file, distance_m, mergeable: reviewerMergeProblem(place, other, pairs, roads) === null });
+  }
+  return out;
+}
+
+/** A review's stars and text from the place's review file on the branch, or undefined when it is not there. */
+async function readReview(read: (path: string) => Promise<{ text: string } | null>, place: string, id: string): Promise<{ stars: number; text: string } | undefined> {
+  const file = await read(reviewPath(place));
+  for (const line of file?.text.split("\n") ?? []) {
+    try {
+      const value = JSON.parse(line) as { id?: unknown; stars?: unknown; text?: unknown };
+      if (value.id === id && typeof value.stars === "number" && typeof value.text === "string") return { stars: value.stars, text: value.text };
+    } catch {
+      // Not a review line.
+    }
+  }
+  return undefined;
 }
 
 /** A place record from its file, or undefined when the file is not one. */
@@ -373,6 +659,8 @@ interface Pending {
   /** What it decided, for the commit message: `<reviewer>: <decision> held case <case> on <place>`. */
   title: string;
   reason: string;
+  /** The case's feedback ids, for their progress records. */
+  feedback: readonly string[];
 }
 
 /**
@@ -454,13 +742,26 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       const place = file ? parsePlace(file.text) : undefined;
       const closed = closedBy.get(key);
       const list = c.case === "commons_mismatch" ? await read(DO_NOT_MATCH_PATH) : null;
+      // A new name the place's own website may confirm.
+      const siteNames = c.case === "place_change" && c.change === "name" && place && deps.fetchSite ? await readSiteNames(deps.fetchSite, place.facts.website) : undefined;
+      // A held review, as the review branch has it.
+      const review = c.case === "intake_check" && c.about === "review" && place ? await readReview(read, c.place, c.review!) : undefined;
       const settled = closed
         ? { decision: "leave" as const, reason: `the rules closed this case: travellers ${closed.settles} the fact` }
-        : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [] });
+        : c.case === "intake_check" && c.about === "review" && place && review === undefined
+          ? { decision: "leave" as const, reason: "the review is not on the review branch, so a person decides" }
+          : settleByRules(c, place, { doNotMatch: list ? doNotMatchOf(list.text) : [], ...(siteNames ? { siteNames } : {}), now: deps.now() });
+      const extra: CaseExtra = review ? { review } : {};
       let decision: ReviewDecision;
       let reason: string;
+      let by = reviewer;
+      let held: "ai_cap" | undefined;
+      let value: FactValue | undefined;
+      let target: string | undefined;
       let otherFile: { text: string } | null = null;
       let other: Place | undefined;
+      // On an unattested_place case: its candidates as the branch has them, with their files.
+      let candidates: (Candidate & { file: { text: string } })[] = [];
       const failed = failures.get(key)?.failures ?? 0;
       if (settled) {
         ({ decision, reason } = settled);
@@ -474,16 +775,26 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         otherFile = c.case === "duplicate" && c.duplicate_of ? await read(placePath(c.duplicate_of)) : null;
         other = otherFile ? parsePlace(otherFile.text) : undefined;
         // A merge only where the rules allow one: never into an owner's place or a pair a person found separate.
-        const pairs = c.case === "duplicate" ? await distinctPairs() : undefined;
-        const allowed = allowedDecisions(c).filter((d) => d !== "merge" || reviewerMergeProblem(place!, other, pairs, deps.roads) === null);
+        const pairs = c.case === "duplicate" || c.case === "unattested_place" ? await distinctPairs() : undefined;
+        if (c.case === "unattested_place") candidates = await readCandidates(c, place!, read, pairs!, deps.roads);
+        const mergeable = c.case === "unattested_place" ? candidates.some((n) => n.mergeable) : reviewerMergeProblem(place!, other, pairs, deps.roads) === null;
+        const allowed = allowedDecisions(c).filter((d) => d !== "merge" || mergeable);
+        let first: ModelDecision;
         try {
-          ({ decision, reason } = await askModel(deps.ai, deps.model, c, place!, other, allowed));
+          first = await askModel(deps.ai, deps.model, c, place!, other, allowed, disputeChoices(c, place!), candidates, extra);
           answered++;
         } catch (error) {
           if (!(error instanceof ModelUnavailable)) throw error;
           failedNow.push({ key, c, error });
           continue;
         }
+        ({ decision, reason, value, target } = first);
+        if (first.unsure && deps.second) {
+          ({ decision, reason, reviewer: by, held, value, target } = await askSecondStage({ ...deps, second: deps.second }, reviewer, first, c, place!, other, allowed, candidates, extra));
+        }
+        // The candidate merged into is the other place of the merge.
+        const into = candidates.find((n) => n.place.id === target);
+        if (into) ({ place: other, file: otherFile } = into);
       }
       reason = safeReason(reason);
       const at = new Date(deps.now()).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -496,7 +807,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         const entry: DoNotMatchEntry = { place: c.place, file: c.file!, added: at.slice(0, 10), source: "reviewer" };
         writes.push({ path: DO_NOT_MATCH_PATH, text: withDoNotMatch(list?.text, [entry]) });
       } else {
-        const next = place && file ? applyDecision(place, c, decision, at) : null;
+        const next = place && file ? applyDecision(place, c, decision, at, value) : null;
         if (next && file) writes.push({ path, text: dumpPlace(next) });
       }
       for (const write of writes) {
@@ -504,10 +815,23 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         staged.set(write.path, { text: write.text, sha: shas.get(write.path) });
       }
       decisions.push({
-        record: { key, case: c.case, place: c.place, decision, reviewer, reason, by_rules: settled !== null, committed: writes.length > 0 },
+        record: {
+          key,
+          case: c.case,
+          place: c.place,
+          decision,
+          reviewer: by,
+          reason,
+          by_rules: settled !== null,
+          committed: writes.length > 0,
+          ...(held ? { held } : {}),
+          ...(value !== undefined ? { value } : {}),
+          ...(decision === "merge" && target !== undefined ? { target } : {}),
+        },
         paths: writes.map((w) => w.path),
-        title: `${reviewer}: ${decision} held case ${c.case} on ${c.place}`,
+        title: `${by}: ${decision} held case ${c.case} on ${c.place}`,
         reason,
+        feedback: c.feedback,
       });
     }
   } catch (error) {
@@ -526,6 +850,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       paths: [],
       title: `${reviewer}: leave held case ${c.case} on ${c.place}`,
       reason,
+      feedback: c.feedback,
     });
   }
   let kept: Pending[];
@@ -539,7 +864,20 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
   const records = kept.map((d) => d.record);
   if (records.length > 0) await github.commentOnPullRequest(data, pr.number, decisionComment(reviewer, records));
   await forgetModelFailures(deps.db, records.map((r) => r.key), deps.now());
+  await recordHolds(deps, kept);
   return { outcome: "reviewed", pr: pr.number, decisions: records };
+}
+
+/** Marks the items of each recorded case the cap stopped `held` with `ai_cap`. A failure is logged and changes no decision. */
+async function recordHolds(deps: ReviewerDeps, kept: readonly Pending[]): Promise<void> {
+  for (const { record, feedback } of kept) {
+    if (!record.held || feedback.length === 0) continue;
+    try {
+      await recordReviewerHold(deps.db, feedback, record.place, record.held, deps.now());
+    } catch (error) {
+      onError(deps, error);
+    }
+  }
 }
 
 /** Each case's counted failed runs and the time of the last one, by key. None when the table can't be read. */

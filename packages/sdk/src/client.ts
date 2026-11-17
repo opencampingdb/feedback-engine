@@ -135,8 +135,11 @@ export interface FeedbackClientOptions {
    * `cData`, for example from `turnstile.execute` on a widget rendered with
    * `cData: bodySha256`. The token goes in `x-human-check`. Each token works
    * once, so return a new one on every call. If it throws, the item stays
-   * queued and is tried later. A human check is not attestation: the intake
-   * weighs these items as unattested ones.
+   * queued and is tried later. A missing token, or one Turnstile refuses or
+   * that was made for another site, body or form, is dropped silently: the
+   * intake answers as if it took the item, so the SDK settles it as sent and
+   * it is lost. A human check is not attestation: the intake weighs these
+   * items as unattested ones.
    */
   humanCheck?: (request: { body: string; bodySha256: string }) => Promise<string>;
   /**
@@ -213,7 +216,11 @@ function attestationErrorIn(status: number, answer: unknown): AttestationError |
 /** The header that carries a human check token. */
 export const HUMAN_CHECK_HEADER = "x-human-check";
 
-/** What the intake answers when a human check is missing or does not pass. */
+/**
+ * What an intake from before silent drops answers when a human check is
+ * missing or does not pass. A current intake drops such an item silently and
+ * answers as if it took it.
+ */
 export type HumanCheckError = "human_check_required" | "human_check_failed";
 
 /** The human check error in a `401` answer, or undefined when the answer is not one. */
@@ -292,6 +299,8 @@ export interface FactsInput {
   ref?: string;
   /** Marks every fact of the edit first-hand, as `report.first_hand` does on a single report. */
   first_hand?: FirstHand;
+  /** A page that shows the edit's values, sent with every fact as `report.source` is on a single report. */
+  source?: string;
 }
 
 /** How a queued call resolves. */
@@ -915,8 +924,9 @@ export type AnswerOutcome =
     };
 
 /**
- * The intake's codes for why it held an item at send time. Adding a code is
- * additive; renaming or removing one is a breaking change.
+ * The codes for why an item is held: most are given by the intake at send
+ * time, and some (`ai_cap`) only later, on the item's progress. Adding a code
+ * is additive; renaming or removing one is a breaking change.
  *
  * - `not_attested`: the report was not from an attested install, so a person
  *   reads it (a contact) or a second device has to agree (any other fact). On a
@@ -931,6 +941,8 @@ export type AnswerOutcome =
  * - `no_contributor`: a new place sent without a contributor.
  * - `daily_cap`: the contributor has had 50 live changes this UTC day.
  * - `ai_check`: the AI check flagged free text.
+ * - `repeated_text`: free text nearly the same as text three other sources
+ *   sent in the last 30 days, so the AI reviewer reads it.
  * - `check_unavailable`: a check could not run, so the item waits.
  * - `unknown_place`: the intake does not have the place yet.
  * - `blocked`: the contributor is blocked.
@@ -946,6 +958,21 @@ export type AnswerOutcome =
  *   traveller at once, a reviewer gets the case, and two sources hide it for everyone.
  * - `not_own_value`: a `clear` of a value another traveller set, or one the intake cannot tie to
  *   this install, so a person decides.
+ * - `source_link`: a fact report without attestation that carries a source link. The apply run
+ *   reads the page, and the value goes live when the page shows it or a second source agrees.
+ * - `disputed`: the place is frozen because three or more sources sent conflicting values for one of
+ *   its facts within 24 hours. No fact on it changes until a reviewer settles the value, or for
+ *   14 days when no one does.
+ * - `ai_cap`: never given at send time. On an item's progress: the AI reviewer was unsure, and its
+ *   second model's monthly spending cap was reached, so a person decides.
+ * - `contact_check`: a contact the automatic contact checks have not passed yet. At send time an
+ *   attested contact goes live only when the place's own website shows it; otherwise the apply run
+ *   checks it in full, and one that fails a check goes to the AI reviewer.
+ * - `network_reputation`: an attested item from a network on the intake's blocklist, which the AI
+ *   reviewer reads before it counts. The intake gives it at send time only on the items it decides.
+ * - `implausible_location`: a new place the map data puts in the sea or a lake, on a major road's
+ *   carriageway or inside a building footprint, so the AI reviewer checks it before it is listed.
+ *   Remoteness is never a reason.
  */
 export const HELD_REASONS = [
   "not_attested",
@@ -969,9 +996,16 @@ export const HELD_REASONS = [
   "unlikely_charge",
   "commons_report",
   "not_own_value",
+  "ai_cap",
+  "repeated_text",
+  "contact_check",
+  "network_reputation",
+  "source_link",
+  "disputed",
+  "implausible_location",
 ] as const;
 
-/** Why the intake held an item at send time. */
+/** Why an item is held: at send time by the intake, or later on its progress (`ai_cap`). */
 export type HeldReason = (typeof HELD_REASONS)[number];
 
 const KNOWN_HELD_REASONS: ReadonlySet<string> = new Set<string>(HELD_REASONS);
@@ -2086,13 +2120,13 @@ function createClient(
       return { id: String(answer.id ?? "") };
     },
     report: (input, submitOptions) => submit({ ...input }, "report", submitOptions),
-    reportFacts: async ({ place, facts, contributor, consent, ref, first_hand }, submitOptions) => {
+    reportFacts: async ({ place, facts, contributor, consent, ref, first_hand, source }, submitOptions) => {
       if (ref !== undefined && (ref.length < 1 || ref.length > 90)) throw new RangeError("ref must be 1 to 90 characters");
       const set = (Object.entries(facts) as [FactName, FactValue | undefined][]).filter(([, value]) => value !== undefined);
       const calls: Call[] = set.map(([fact, value]) => ({
         input: {
           place,
-          report: { kind: "fact", fact, value, ...(first_hand !== undefined ? { first_hand } : {}) },
+          report: { kind: "fact", fact, value, ...(first_hand !== undefined ? { first_hand } : {}), ...(source !== undefined ? { source } : {}) },
           ...(contributor !== undefined ? { contributor } : {}),
           consent,
         },

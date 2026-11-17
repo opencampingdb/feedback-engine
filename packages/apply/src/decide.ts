@@ -7,15 +7,18 @@ import {
   isFactName,
   isValidFactValue,
   parseCharge,
+  tidyName,
   tidyText,
   type ContactFactName,
   type ContactReportReason,
   type FactName,
   type FactValue,
   type FeeValue,
+  type HeldReason as PublishedHeldReason,
   type StoredFeedback,
   type TextProblem,
 } from "@opencampingdb/feedback";
+import type { CheckOutcome } from "./contact-checks.js";
 import { textProblems } from "./data-check.js";
 import type { Place } from "./types.js";
 
@@ -75,25 +78,43 @@ export type PlaceState = Pick<Place, "facts" | "fact_sources" | "fact_dates">;
  * `not_seasonal`: `pets_months` for a place whose `pets` is not `seasonal`.
  * `unlikely_charge`: a charge a person checks before it is published
  * (`unlikelyCharge`). `not_own_value`: a clear of a value another source set
- * (`decideClear`).
+ * (`decideClear`). `contact_check`: a contact that failed one of the
+ * automatic contact checks (contact-checks.ts), for the AI reviewer.
+ * `disputed`: the place is frozen while a reviewer settles conflicting
+ * values for one of its facts (`findDispute`). Each is in the SDK's
+ * published list of held reasons, which the compiler checks.
  */
-export type HeldReason =
-  | "not_attested"
-  | "owner_value"
-  | "disagreement"
-  | "link_check"
-  | "text_check"
-  | "unconfirmed"
-  | "no_contributor"
-  | "single_doubt"
-  | "protected_source"
-  | "taken_down"
-  | "not_seasonal"
-  | "unlikely_charge"
-  | "not_own_value";
+const RULE_HOLDS = [
+  "not_attested",
+  "owner_value",
+  "disagreement",
+  "link_check",
+  "text_check",
+  "unconfirmed",
+  "no_contributor",
+  "single_doubt",
+  "protected_source",
+  "taken_down",
+  "not_seasonal",
+  "unlikely_charge",
+  "not_own_value",
+  "contact_check",
+  "disputed",
+] as const satisfies readonly PublishedHeldReason[];
+export type HeldReason = (typeof RULE_HOLDS)[number];
 
-/** The reasons the intake holds an item for one of its checks rather than for these rules. */
-export const CHECK_HOLDS: readonly string[] = ["text_check", "link_check", "ai_check", "daily_cap", "check_unavailable"];
+/** The reasons the intake holds an item for one of its checks rather than for these rules. Each is in the SDK's published list. */
+export const CHECK_HOLDS = [
+  "text_check",
+  "link_check",
+  "ai_check",
+  "daily_cap",
+  "repeated_text",
+  "check_unavailable",
+  "network_reputation",
+] as const satisfies readonly PublishedHeldReason[];
+/** One of CHECK_HOLDS. */
+export type CheckHold = (typeof CHECK_HOLDS)[number];
 
 /** Contact facts that are links, which URLhaus checks at the intake. */
 export const LINK_FACTS: readonly ContactFactName[] = ["website", "facebook", "instagram", "tiktok", "x"];
@@ -117,12 +138,12 @@ export function setsLink(item: StoredFeedback): boolean {
  * up, so it is held as `link_check`. Items without the field are decided here
  * as before.
  */
-export function heldForCheck(item: StoredFeedback): string | null {
+export function heldForCheck(item: StoredFeedback): CheckHold | null {
   const intake: unknown = (item as { intake?: unknown }).intake;
   if (typeof intake !== "object" || intake === null) return null;
   const { state, held_reason: reason, links } = intake as { state?: unknown; held_reason?: unknown; links?: unknown };
   if (state !== "held" || typeof reason !== "string") return null;
-  if (CHECK_HOLDS.includes(reason)) return reason;
+  if ((CHECK_HOLDS as readonly string[]).includes(reason)) return reason as CheckHold;
   return links !== "passed" && setsLink(item) ? "link_check" : null;
 }
 
@@ -156,9 +177,18 @@ export type ItemDecision =
    * change closes an open `fact_doubted` case, by restoring the value or
    * replacing it with another.
    */
-  | { verdict: "live"; changes: FactChange[]; why: string; takedown?: Takedown; doubtTakedown?: DoubtTakedown; settles?: Settles }
-  /** `problem`: on `link_check`, the check the value failed. */
-  | { verdict: "held"; reason: HeldReason; why: string; problem?: string }
+  | {
+      verdict: "live";
+      changes: FactChange[];
+      why: string;
+      takedown?: Takedown;
+      doubtTakedown?: DoubtTakedown;
+      settles?: Settles;
+      /** Live only because a trusted contributor sent it (trust.ts), with no second source. */
+      byTrust?: true;
+    }
+  /** `problem`: on `link_check`, the check the value failed. `failed`: on `contact_check`, the contact checks it failed. */
+  | { verdict: "held"; reason: HeldReason; why: string; problem?: string; failed?: CheckOutcome[] }
   | { verdict: "refused"; reason: RefusedReason; why: string };
 
 export interface ItemInput {
@@ -173,6 +203,21 @@ export interface ItemInput {
   earlier: readonly StoredFeedback[];
   /** On `decideFact`: the open `fact_doubted` case for this place and fact, when doubts took the fact down. */
   openCase?: OpenDoubt;
+  /**
+   * On `decideFact` of a contact fact: what the automatic contact checks
+   * found. Given, a contact that fails any of them is held as
+   * `contact_check`, and one that passes them all follows the two-source
+   * rule: attested, it goes live; without attestation, it waits for a second
+   * device to agree. Left out, the checks are off and a contact without
+   * attestation goes to a person.
+   */
+  contactChecks?: readonly CheckOutcome[];
+  /**
+   * The item comes from a trusted contributor (trust.ts): a contact that
+   * passes every contact check goes live without attestation or a second
+   * source.
+   */
+  trusted?: boolean;
 }
 
 /** An open `fact_doubted` case as `decideFact` reads it: the value the fact had, and when doubts took it down. */
@@ -255,7 +300,7 @@ export function unlikelyCharge(value: unknown, current: unknown): string | null 
  * fact waits for a second device to agree (which `applyRules` settles across
  * runs).
  */
-export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemDecision {
+export function decideFact({ item, place, earlier, openCase, contactChecks, trusted = false }: ItemInput): ItemDecision {
   const refusal = factRefusal(item);
   if (refusal !== null) return refusal;
   const fact = item.report.fact as FactName;
@@ -274,12 +319,13 @@ export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemD
   const down = openCase !== undefined && (place.facts as Record<string, unknown>)[fact] === undefined ? openCase : undefined;
   if (down !== undefined && sameValue(value, down.value)) return decideRestore(item, earlier, down);
   const reviewed = REVIEWED_FACTS.has(fact);
-  if (reviewed && (!isContactFact(fact) || item.attested === undefined)) {
+  const checked = isContactFact(fact) && contactChecks !== undefined;
+  if (reviewed && (!isContactFact(fact) || (item.attested === undefined && !checked))) {
     return { verdict: "held", reason: "not_attested", why: `${fact} changes are checked by a person` };
   }
   const current = (place.facts as Record<string, unknown>)[fact];
   if (sameValue(current, value)) return { verdict: "live", changes: [], why: `${fact} is already ${show(value)}` };
-  if (item.attested === undefined) {
+  if (item.attested === undefined && !checked) {
     return { verdict: "held", reason: "not_attested", why: `waiting for a second device to agree on ${fact}` };
   }
   if (place.fact_sources[fact] === "owner") {
@@ -290,6 +336,13 @@ export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemD
     if (problem !== null) {
       return { verdict: "held", reason: "link_check", problem, why: `${fact} fails the link checks (${problem}), so a person checks it` };
     }
+  }
+  if (checked) {
+    const failed = contactChecks.filter((c) => !c.passed);
+    if (failed.length > 0) {
+      return { verdict: "held", reason: "contact_check", failed, why: `${fact} failed the contact checks (${failed.map((c) => c.detail).join("; ")}), so the AI reviewer decides` };
+    }
+    if (item.attested === undefined && !trusted) return { verdict: "held", reason: "not_attested", why: `${fact} passed the contact checks, and waits for a second device to agree` };
   }
   const at = time(item);
   const source = sourceOf(item);
@@ -308,10 +361,13 @@ export function decideFact({ item, place, earlier, openCase }: ItemInput): ItemD
   if (disagrees) {
     return { verdict: "held", reason: "disagreement", why: `another device reported a different ${fact}, so a person decides` };
   }
+  // A contact without attestation that passed the contact checks gets here only from a trusted contributor.
+  const byTrust = checked && item.attested === undefined;
   return {
     verdict: "live",
     changes: [{ place: item.place as string, fact, value }, ...factsClearedBy(place.facts, fact, value).map((cleared) => ({ place: item.place as string, fact: cleared, value: null }))],
-    why: `${fact} set to ${show(value)}`,
+    why: byTrust ? `${fact} set to ${show(value)} by a trusted contributor, past the contact checks` : `${fact} set to ${show(value)}`,
+    ...(byTrust ? { byTrust: true as const } : {}),
     ...(down !== undefined ? { settles: "replaced" as const } : {}),
   };
 }
@@ -382,12 +438,31 @@ export function decideContactReport({ item, place, earlier }: ItemInput): ItemDe
   return { verdict: "held", reason: "unconfirmed", why: `a report that the ${fact} is ${reason} is read by a person` };
 }
 
-/** Why a new place is not listed for apps until a reviewer decides, or null when it is. */
-export function newPlaceListing(item: ReportItem): { reason: "not_attested" | "no_contributor" | "text_check"; why: string } | null {
-  if (item.attested === undefined) return { reason: "not_attested", why: "not proven by attestation" };
+/**
+ * Why a new place is not listed for apps until a reviewer decides, or null
+ * when it is. A trusted contributor's place (trust.ts) needs no attestation.
+ */
+export function newPlaceListing(item: ReportItem, trusted = false): { reason: "not_attested" | "no_contributor" | "text_check"; why: string } | null {
+  if (item.attested === undefined && !trusted) return { reason: "not_attested", why: "not proven by attestation" };
   if (item.contributor === undefined) return { reason: "no_contributor", why: "no contributor" };
   const problem = item.report.note === undefined ? null : firstProblem(tidyText(item.report.note));
   return problem === null ? null : { reason: "text_check", why: `note fails the text checks (${problem})` };
+}
+
+/**
+ * Whether the AI reviewer decides a new place the intake does not list: one
+ * that only a lack of attestation keeps off the list. It has a contributor,
+ * its name and note pass the text checks, its description passes them and
+ * its contacts pass the link rules, and the intake did not hold it for one
+ * of its checks (`heldForCheck`). Anything else waits for a person.
+ */
+export function reviewerDecidesNewPlace(item: ReportItem, trusted = false): boolean {
+  if (newPlaceListing(item, trusted)?.reason !== "not_attested" || item.contributor === undefined) return false;
+  const { name, note } = item.report;
+  if (note !== undefined && firstProblem(tidyText(note)) !== null) return false;
+  if (name !== undefined && firstProblem(tidyName(name)) !== null) return false;
+  const fields = newPlaceFields(item);
+  return fields.failing.length === 0 && fields.descriptionProblem === null && heldForCheck(item) === null;
 }
 
 /** The fields a `new_place` report carries, and which of them a published place holds back. */
@@ -629,3 +704,55 @@ export function decideClear({ item, place, setter }: ClearInput): ItemDecision {
     why: `${fact} cleared by the traveller who set it`,
   };
 }
+
+/** Hours within which conflicting values freeze a place (`findDispute`). */
+export const DISPUTE_HOURS = 24;
+/** Sources, each with its own value, that freeze a place when they conflict within DISPUTE_HOURS. */
+export const DISPUTE_SOURCES = 3;
+const DISPUTE_MS = DISPUTE_HOURS * 60 * 60 * 1000;
+
+/** Conflicting values for one fact on one place, which freeze the place until a reviewer decides. */
+export interface Dispute {
+  place: string;
+  fact: FactName;
+  /** When the report that made the dispute was received: the freeze starts then. */
+  at: string;
+  /** The values the sources sent, each once, sorted by their JSON. */
+  values: FactValue[];
+  /** Independent sources among the reports. */
+  sources: number;
+  /** The reports counted, oldest first. */
+  feedback: string[];
+}
+
+/**
+ * The first dispute among `reports`, or null when there is none: the fact
+ * reports about one place and fact, from DISPUTE_SOURCES or more independent
+ * sources within DISPUTE_HOURS, whose values make DISPUTE_SOURCES or more
+ * different values. Each source counts with its latest value in the window,
+ * so one source changing its mind is not a dispute, and neither is two
+ * sources sending two values. Reports that are not fact reports, or name
+ * another place, are skipped.
+ */
+export function findDispute(reports: readonly StoredFeedback[], place: string): Dispute | null {
+  const facts = reports
+    .filter((r): r is ReportItem => r.type === "report" && r.report.kind === "fact" && r.place === place && isFactName(r.report.fact) && r.report.value !== undefined)
+    .sort((a, b) => time(a) - time(b) || (a.id < b.id ? -1 : 1));
+  for (const end of facts) {
+    const t = time(end);
+    const window = facts.filter((r) => r.report.fact === end.report.fact && time(r) <= t && t - time(r) <= DISPUTE_MS);
+    const latest = new Map<string, unknown>();
+    for (const r of window) latest.set(sourceOf(r), r.report.value);
+    const values = [...new Map([...latest.values()].map((v) => [show(v), v as FactValue])).entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([, v]) => v);
+    if (latest.size < DISPUTE_SOURCES || values.length < DISPUTE_SOURCES) continue;
+    return { place, fact: end.report.fact as FactName, at: end.received, values, sources: latest.size, feedback: window.map((r) => r.id) };
+  }
+  return null;
+}
+
+/**
+ * Whether a reviewer may read the values in a dispute about `fact`: not for
+ * a contact or the address, nor for values with free words, which a person
+ * reads in the inbox.
+ */
+export const disputeValuesShown = (fact: FactName, values: readonly FactValue[]) => !REVIEWED_FACTS.has(fact) && values.every((v) => factFreeText(fact, v).length === 0);

@@ -663,6 +663,12 @@ function checkReport(value: unknown, errors: string[]): ReportBody | undefined {
     else if (!(FIRST_HAND as readonly unknown[]).includes(value.first_hand)) errors.push("report.first_hand must be seen_nearby or says_so, or left out");
     else out.first_hand = value.first_hand as FirstHand;
   }
+  if (value.source !== undefined) {
+    if (kind !== "fact") errors.push("report.source is only allowed when report.kind is fact");
+    else if (!isPublicHttpsUrl(value.source) || value.source.length > MAX_SOURCE_LENGTH) {
+      errors.push(`report.source must be an https address on a public website, up to ${MAX_SOURCE_LENGTH} characters`);
+    } else out.source = value.source;
+  }
   const note = checkText(value.note, "report.note", errors, false);
   if (note !== undefined) out.note = note;
   if (value.name !== undefined) {
@@ -1122,6 +1128,36 @@ export function isPublicHttpsUrl(value: unknown): value is string {
   if (!host.includes(".") || /\.(local|localhost|internal|home|lan)$/.test(host)) return false;
   if (/^[\d.]+$/.test(host) || host.startsWith("[")) return false;
   return true;
+}
+
+/** Longest source link a fact report may carry. */
+export const MAX_SOURCE_LENGTH = 500;
+
+/**
+ * A website's host as Open Camping DB compares hosts: lower case, without
+ * final dots or a leading `www.`. `https://WWW.Example.org./camp` is
+ * `example.org`. Throws for text that is not a URL.
+ */
+export function websiteHost(url: string | URL): string {
+  return (typeof url === "string" ? new URL(url) : url).hostname
+    .toLowerCase()
+    .replace(/\.+$/, "")
+    .replace(/^www\./, "");
+}
+
+/**
+ * What is wrong with a fact report's source link, or null when it passes: an
+ * https address on a public host that is a `.gov.au` host (any name ending in
+ * `.gov.au`) or the host of `website`, the place's website on record, with or
+ * without `www.`. Any other host, a subdomain of the website's host included,
+ * fails. Apps can run it with the place's released `website` before sending.
+ */
+export function sourceLinkProblem(source: unknown, website: unknown): string | null {
+  if (!isPublicHttpsUrl(source)) return "must be an https address on a public website";
+  const host = websiteHost(source);
+  if (host.endsWith(".gov.au")) return null;
+  if (isPublicHttpsUrl(website) && websiteHost(website) === host) return null;
+  return "must be on a .gov.au host or the place's own website";
 }
 
 /** Whether `host` is `domain` or one of its subdomains. */

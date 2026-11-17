@@ -5,8 +5,10 @@ import {
   decideContactReport,
   decideDoubt,
   decideFact,
+  findDispute,
   newPlaceFields,
   newPlaceListing,
+  REVIEWED_FACTS,
   WINDOW_DAYS,
   type HeldReason as RulesHeldReason,
   type ItemDecision,
@@ -16,17 +18,22 @@ import {
   type ReportItem,
   type Setter,
 } from "@opencampingdb/apply/decide";
+import { websiteCheck, websiteCheckApplies, type Fetch as CheckFetch } from "@opencampingdb/apply/contact-checks";
 import {
+  isContactFact,
   newPlaceId,
   tidyName,
   type ContactFactName,
+  type FactName,
   type FactValue,
   type FeedbackSubmission,
   type RecentChange,
   type ReportBody,
   type StoredFeedback,
+  type HeldReason as PublishedHeldReason,
 } from "@opencampingdb/feedback";
 import type { CheckContributor, Checks, HeldReason as ChecksHeldReason, LiveSlot } from "./checks.js";
+import { implausibleLocation, type PlaceGeometry } from "@opencampingdb/apply/plausible";
 import { getIndexedPlace, type Cell } from "./place-index.js";
 import { chunks, isoSeconds, placeStatement, prunePlaceStatements, type Bbox, type D1Like, type D1Statement, type StoredPlace } from "./recent.js";
 
@@ -71,10 +78,16 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * block list; `no_value` and `invalid_value`, the rules would refuse it (a
  * contact report or doubt about a fact the place does not have, as the index
  * has it). `commons_report`: a report that a Commons photo is not of the
- * place, which the apply decides. The apply decides each of these again when
- * it runs.
+ * place, which the apply decides. `source_link`: a fact report without
+ * attestation that carries a source link, waiting for the apply run to read
+ * the page. `implausible_location`: a new place in the sea or a lake, on a
+ * major road's carriageway or inside a building footprint, which the AI
+ * reviewer checks. The apply decides each of these again when it runs.
  */
-export type HeldReason = RulesHeldReason | ChecksHeldReason | RefusedReason | "unknown_place" | "blocked" | "commons_report";
+export type HeldReason = RulesHeldReason | ChecksHeldReason | RefusedReason | "unknown_place" | "blocked" | "commons_report" | "source_link" | "implausible_location";
+// Every reason the intake answers is in the SDK's published list: this fails to compile otherwise.
+const PUBLISHED: readonly PublishedHeldReason[] = [] as HeldReason[];
+void PUBLISHED;
 
 /** What the answer to an accepted item adds. */
 export type ItemState = { state: "live" } | { state: "held"; held_reason: HeldReason };
@@ -93,11 +106,13 @@ export interface DecidedInRequest {
   cases: Map<string, { value: string; taken_down_at: string } | null>;
   /** Accepted items by contributor. */
   accepted: Map<string, number>;
+  /** Places frozen by an item in the batch, with the disputed fact and when. */
+  frozen: Map<string, { fact: string; frozen_at: string }>;
 }
 
 /** Nothing decided yet: for a single item, or the start of a batch. */
 export function noneDecided(): DecidedInRequest {
-  return { changes: [], evidence: [], cases: new Map(), accepted: new Map() };
+  return { changes: [], evidence: [], cases: new Map(), accepted: new Map(), frozen: new Map() };
 }
 
 const caseKey = (place: string, fact: string) => `${place}\u0000${fact}`;
@@ -130,22 +145,23 @@ export function decidedHere(item: StoredFeedback): item is ReportItem {
 }
 
 
-/** A contributor's track record, and whether they are on the block list. */
+/** A contributor's track record, whether they are on the block list, and whether the apply trusts them (trust from a track record). */
 export async function contributorRecord(
   db: D1Like,
   contributor: string,
   decided: DecidedInRequest = noneDecided(),
-): Promise<CheckContributor & { blocked: boolean }> {
+): Promise<CheckContributor & { blocked: boolean; trusted: boolean }> {
   const row = await db
     .prepare(
       `SELECT COALESCE((SELECT accepted FROM contributor_records WHERE contributor = ?1), 0) AS accepted,
          COALESCE((SELECT taken_down FROM contributor_records WHERE contributor = ?1), 0) AS taken_down,
-         EXISTS (SELECT 1 FROM blocked_contributors WHERE contributor = ?1) AS blocked`,
+         EXISTS (SELECT 1 FROM blocked_contributors WHERE contributor = ?1) AS blocked,
+         EXISTS (SELECT 1 FROM trusted_contributors WHERE contributor = ?1) AS trusted`,
     )
     .bind(contributor)
-    .first<{ accepted: number; taken_down: number; blocked: number }>();
+    .first<{ accepted: number; taken_down: number; blocked: number; trusted: number }>();
   const accepted = (row?.accepted ?? 0) + (decided.accepted.get(contributor) ?? 0);
-  return { id: contributor, accepted, taken_down: row?.taken_down ?? 0, blocked: row?.blocked === 1 };
+  return { id: contributor, accepted, taken_down: row?.taken_down ?? 0, blocked: row?.blocked === 1, trusted: row?.trusted === 1 };
 }
 
 /** Counts one more accepted item for a contributor. */
@@ -394,6 +410,19 @@ export interface DecideInput {
   contributor: string;
   /** What items earlier in the same batch decided. None for an item sent alone. */
   decided?: DecidedInRequest;
+  /**
+   * The website check on an attested contact (contact-checks.ts): the fetch
+   * it reads the place's website with and how long it may take. Left out, no
+   * attested contact goes live at send time: each waits for the apply run.
+   */
+  website?: { fetch: CheckFetch; timeoutMs: number };
+  /**
+   * The geometry around a new place's location, for the plausibility check
+   * (place-geometry.ts): undefined when there is none, so the check passes.
+   * Throws when it cannot be read, and the place is held as
+   * `check_unavailable`. Left out, new places are not checked.
+   */
+  placeGeometry?: (p: { lat: number; lon: number }) => Promise<PlaceGeometry | undefined>;
 }
 
 const held = (reason: HeldReason, writes: SendTimeDecision["writes"] = () => [], addToDecided?: SendTimeDecision["addToDecided"]): SendTimeDecision => ({
@@ -418,11 +447,16 @@ const countAccepted = (decided: DecidedInRequest, contributor: string) => decide
  * set a link, the checks never run, so its links still get the link rules and
  * URLhaus: a link that fails is held as `link_check`, and links that pass are
  * marked `linksPassed`, without which the apply sends the item to a person.
+ * Its text still gets the repeated text check, so it counts for later items,
+ * and a repeat, or a check that could not run, is held for that instead.
  */
 export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDecision> {
   const decision = await decideByRulesAndChecks(input);
   const { answer } = decision;
-  if (answer.state !== "held" || CHECK_HOLDS.includes(answer.held_reason) || answer.held_reason === "blocked") return decision;
+  if (answer.state !== "held" || (CHECK_HOLDS as readonly string[]).includes(answer.held_reason) || answer.held_reason === "blocked") return decision;
+  // The rules held it, so the checks never ran: its text still counts, and a repeat goes to a person.
+  const repeated = await input.checks.repeated();
+  if (repeated === "repeated_text" || repeated === "check_unavailable") return { ...decision, answer: { state: "held", held_reason: repeated } };
   const links = await input.checks.links(input.submission);
   if (links === "none" || links === "check_unavailable") return decision;
   if (links === "passed") return { ...decision, linksPassed: true };
@@ -440,20 +474,43 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
   const placeId = item.place as string;
   const place = await placeNow(db, placeId, decided);
   if (place === undefined) return held("unknown_place");
+  // A frozen place takes no fact change until the reviewer's value is in the data.
+  const freeze = await freezeOf(db, placeId, decided);
+  if (freeze !== undefined && freeze.lifted_at === null) return item.report.kind === "clear" ? held("disputed") : heldWithEvidence("disputed", item);
   if (item.report.kind === "clear") return decideClearHere(input, place, record);
   const earlier = await earlierReports(db, placeId, item.report.fact as string, Date.parse(item.received), decided);
   const kind = item.report.kind;
+  if (kind === "fact") {
+    // Reports of a fact a reviewer settled no longer count towards a dispute.
+    const settledAt = freeze !== undefined && freeze.fact === item.report.fact ? freeze.lifted_at : null;
+    const counted = settledAt === null ? earlier : earlier.filter((r) => r.received > settledAt);
+    if (findDispute([...counted, item], placeId) !== null) return frozeHere(item);
+  }
   const openCase = kind === "fact" ? await openDoubt(db, placeId, item.report.fact as string, decided) : undefined;
   const decision =
     kind === "fact"
       ? decideFact({ item, place, earlier, ...(openCase === undefined ? {} : { openCase }) })
       : kind === "doubt" ? decideDoubt({ item, place, earlier }) : decideContactReport({ item, place, earlier });
   if (decision.verdict === "refused") return held(decision.reason);
-  if (decision.verdict === "held") return heldWithEvidence(decision.reason, item);
+  // A report waiting for a second source that carries a source link waits for the apply run to read the page instead.
+  const waiting = (reason: HeldReason) =>
+    reason === "not_attested" && kind === "fact" && item.report.source !== undefined && !REVIEWED_FACTS.has(item.report.fact as FactName) ? "source_link" : reason;
+  if (decision.verdict === "held") return heldWithEvidence(waiting(decision.reason), item);
   // An item without attestation is never live from the intake. The apply's two-device rule still runs.
-  if (item.attested === undefined) return heldWithEvidence("not_attested", item);
+  if (item.attested === undefined) return heldWithEvidence(waiting("not_attested"), item);
   // The place already has the value: nothing to show, and nothing for the checks.
   if (decision.changes.length === 0) return live((d) => [evidenceStatement(d, item, "live")], (p) => void p.evidence.push(evidenceRow(item, "live")));
+  // An attested contact goes live now only when the place's own website shows it, within the time
+  // allowed. Otherwise it waits for the apply run, which runs every contact check.
+  const fact = item.report.fact as string;
+  if (kind === "fact" && isContactFact(fact)) {
+    const website = input.website;
+    const shown =
+      website !== undefined && websiteCheckApplies(fact)
+        ? (await websiteCheck(website.fetch, (place.facts as Record<string, unknown>).website, fact, item.report.value as FactValue, website.timeoutMs)).passed
+        : false;
+    if (!shown) return heldWithEvidence("contact_check", item);
+  }
 
   const checked = await checks.check(submission, { ...record, origin: item.origin, attest_key: item.attest_key });
   if ("held" in checked) return heldWithEvidence(checked.held, item);
@@ -477,6 +534,74 @@ async function decideByRulesAndChecks(input: DecideInput): Promise<SendTimeDecis
     }
     countAccepted(p, contributor);
   }, checked.slot);
+}
+
+/** A place's freeze: the latest one, lifted or not, or undefined when it has none. */
+export async function freezeOf(db: D1Like, place: string, decided: DecidedInRequest = noneDecided()): Promise<{ fact: string; frozen_at: string; lifted_at: string | null } | undefined> {
+  const batched = decided.frozen.get(place);
+  if (batched !== undefined) return { ...batched, lifted_at: null };
+  const row = await db.prepare("SELECT fact, frozen_at, lifted_at FROM frozen_places WHERE place = ?").bind(place).first<{ fact: string; frozen_at: string; lifted_at: string | null }>();
+  return row ?? undefined;
+}
+
+/**
+ * The upsert for a freeze. A freeze replaces the place's row when it started
+ * no earlier, or when it lifted at or after the row's freeze started, so the
+ * apply's freeze, which may start at an earlier report than the intake saw
+ * last, still lifts the row the intake wrote for the same dispute.
+ */
+const FREEZE_UPSERT = `INSERT INTO frozen_places (place, fact, frozen_at, lifted_at) VALUES (?, ?, ?, ?)
+  ON CONFLICT (place) DO UPDATE SET fact = excluded.fact, frozen_at = excluded.frozen_at, lifted_at = excluded.lifted_at
+  WHERE excluded.frozen_at >= frozen_places.frozen_at OR (excluded.lifted_at IS NOT NULL AND excluded.lifted_at >= frozen_places.frozen_at)`;
+
+/** A fact report that completes a dispute (`findDispute`): held as `disputed`, and the place frozen from its time. */
+function frozeHere(item: ReportItem): SendTimeDecision {
+  const fact = item.report.fact as string;
+  return held(
+    "disputed",
+    (d) => [evidenceStatement(d, item, "held"), d.prepare(FREEZE_UPSERT).bind(item.place, fact, item.received, null)],
+    (p) => {
+      p.evidence.push(evidenceRow(item, "held"));
+      p.frozen.set(item.place as string, { fact, frozen_at: item.received });
+    },
+  );
+}
+
+/** A freeze the apply keeps in the inbox, as it sends it to `recordFreezes`. */
+export interface Freeze {
+  place: string;
+  fact: string;
+  frozen_at: string;
+  lifted_at?: string;
+}
+
+/** Records the apply's freezes, and lifts the ones it says have lifted. Sending them again changes nothing. Returns the rows written. */
+export async function recordFreezes(db: D1Like, freezes: readonly Freeze[]): Promise<number> {
+  if (freezes.length === 0) return 0;
+  const results = await db.batch(freezes.map((f) => db.prepare(FREEZE_UPSERT).bind(f.place, f.fact, f.frozen_at, f.lifted_at ?? null)));
+  return results.reduce<number>((sum, result) => sum + changesOf(result), 0);
+}
+
+/** How long a freeze the intake found at send time stands before the apply's full list can lift it. */
+export const FREEZE_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Lifts, at `now`, each freeze the intake holds that is not among `held`
+ * (by place and fact) and started FREEZE_GRACE_MS ago or more. `held` is the
+ * apply's full list: the intake's own freeze outlives the apply's view only
+ * for the day the apply may take to see the same reports. Returns how many
+ * it lifted.
+ */
+export async function liftUnheld(db: D1Like, held: readonly Freeze[], now: number): Promise<number> {
+  const { results } = await db
+    .prepare("SELECT place, fact FROM frozen_places WHERE lifted_at IS NULL AND frozen_at <= ?")
+    .bind(isoSeconds(now - FREEZE_GRACE_MS))
+    .all<{ place: string; fact: string }>();
+  const keep = new Set(held.map((f) => `${f.place} ${f.fact}`));
+  const lift = results.filter((r) => !keep.has(`${r.place} ${r.fact}`));
+  if (lift.length === 0) return 0;
+  await db.batch(lift.map((r) => db.prepare("UPDATE frozen_places SET lifted_at = ? WHERE place = ? AND lifted_at IS NULL").bind(isoSeconds(now), r.place)));
+  return lift.length;
 }
 
 /**
@@ -516,10 +641,23 @@ async function decideClearHere({ db, checks, item, submission, contributor, deci
  * description that fails the text checks are left for a person, as the apply
  * leaves them, and the place is listed without them.
  */
-async function decideNewPlace({ checks, item, submission }: DecideInput, record: CheckContributor): Promise<SendTimeDecision> {
-  const listing = newPlaceListing(item);
+async function decideNewPlace({ checks, item, submission, placeGeometry }: DecideInput, record: CheckContributor & { trusted: boolean }): Promise<SendTimeDecision> {
+  // A trusted contributor's place is listed without attestation, but only when it was sent signed in and not through a human check.
+  const trusted = record.trusted && item.signed_in === true && item.human_checked === undefined;
+  const listing = newPlaceListing(item, trusted);
   if (listing !== null) return held(listing.reason);
   if (item.location === undefined || item.contributor === undefined || submission.type !== "report") return held("invalid_value");
+  // In the water, on a major road or inside a building: the AI reviewer checks it. Remoteness never holds a place.
+  if (placeGeometry) {
+    let geometry: PlaceGeometry | undefined;
+    try {
+      geometry = await placeGeometry(item.location);
+    } catch (error) {
+      console.warn(`the place geometry could not be read, so ${item.id} waits for the apply: ${String(error)}`);
+      return held("check_unavailable");
+    }
+    if (implausibleLocation(item.location, item.report.place_kind, geometry) !== null) return held("implausible_location");
+  }
   const fields = newPlaceFields(item);
   const contacts = Object.fromEntries(
     Object.entries(fields.contacts).filter(([fact]) => !fields.failing.includes(fact as ContactFactName)),
@@ -661,7 +799,7 @@ export async function overrule(db: D1Like, ids: readonly string[], takenDown: re
  * Deletes recent changes the data has held for more than 7 days, those
  * accepted more than 7 days ago that the data still does not hold, new places
  * the apply run was done with more than 7 days ago with their evidence, and
- * report evidence and doubt cases older than the rules' 90 days. For the
+ * report evidence, doubt cases and freezes older than the rules' 90 days. For the
  * scheduled job.
  */
 export async function pruneDecisions(db: D1Like, now: number): Promise<void> {
@@ -670,6 +808,7 @@ export async function pruneDecisions(db: D1Like, now: number): Promise<void> {
     db.prepare("DELETE FROM recent_changes WHERE in_data_at IS NULL AND accepted < ?").bind(isoSeconds(now - KEEP_NOT_IN_DATA_DAYS * DAY_MS)),
     db.prepare("DELETE FROM report_evidence WHERE received < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
     db.prepare("DELETE FROM doubt_cases WHERE taken_down_at < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
+    db.prepare("DELETE FROM frozen_places WHERE frozen_at < ?").bind(isoSeconds(now - WINDOW_DAYS * DAY_MS)),
     ...prunePlaceStatements(db, now),
   ]);
 }

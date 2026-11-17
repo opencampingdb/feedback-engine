@@ -168,6 +168,8 @@ await feedback.reportFacts({
 
 A `note` is free text up to 2,000 characters on any report. It is kept for reviewers.
 
+**Closures.** One closed report marks the place `reported_closed`, and a closure from a second device within 90 days closes it. Evidence of closure counts as that second source: OSM newly tagging the place's object `disused:` or `abandoned:`, or the domain of the place's website not found in DNS (NXDOMAIN) on two checks at least a day apart. A website that answers with an HTTP error, or a DNS lookup that times out or fails, never counts. Evidence never closes a place no traveller reported closed, nor one whose owner manages its status, and the apply's notes name the evidence it used.
+
 ### Facts a report may name
 
 - `fee` (true, false or `donation`), `caravans` (true, false or `offroad`), `pets` (`yes`, `no`, `leashed`, `seasonal`)
@@ -299,6 +301,14 @@ addressProblems({ suburb: "Lakeside", state: "Victoria" });
 await feedback.report({ place, report: { kind: "fact", fact: "address", value: address }, consent: true });
 ```
 
+**Contact checks.** A reported contact or address (a `fact` report of one of `CONTACT_FACTS`) goes through automatic checks before it goes live:
+
+- the place's own website on record (its home page and up to 3 contact pages it links to) shows the reported phone, email or social link
+- the domain of a reported website or email was not registered in the last 90 days, from its registry's RDAP record
+- an address's `state`, and the state its `postcode` belongs to, are where the place is, allowing about 30 km either side of a state border
+
+A contact that passes every check that applies to it follows the two-source rule: from an attested install it goes live, and without attestation it waits for a second device to agree, unless it comes from a trusted contributor ([Trust from a track record](#trust-from-a-track-record)), when it goes live too. One that fails a check, or whose check times out or cannot run, is held for the AI reviewer, and a person sees it only when the reviewer is unsure. A contact the owner set, or one on a place with a verified owner, still goes to a person. At send time the intake runs only the website check, for about 3 seconds: an attested phone, email or social link the website shows goes live at once, and anything else (a website, an address, a contact the website does not show, or a website that is slow to answer) is answered `held` with `contact_check` until the apply run's full check decides it. A contact that went live at send time and then fails the apply run's check leaves the recent list.
+
 **Reporting a contact.** A `contact` report says a contact on a place is wrong or spam: `fact` is one of `CONTACT_FACTS` and `reason` is `wrong` or `spam` (`CONTACT_REPORT_REASONS`). It needs the place and carries no `value`. One report goes to a person. Reports from two different sources within 90 days, at least one of them attested, take the contact off the place at the next apply run, and a reviewer then decides whether it comes back. A contact the owner set is left to a person, and a report about a contact the place does not have is answered `held` (`no_value`) and refused at the next apply run.
 
 ```ts
@@ -338,6 +348,22 @@ Leave it out when neither is true, and never send the location itself. Any other
 ```ts
 await feedback.report({ place, report: { kind: "fact", fact: "toilets", value: true, first_hand: "seen_nearby" }, consent: true });
 await feedback.report({ place, report: { kind: "doubt", fact: "pets", first_hand: "says_so" }, consent: true });
+```
+
+### Source links
+
+A `fact` report may carry `source`, an https link of up to 500 characters (`MAX_SOURCE_LENGTH`) to a page that shows the reported value: a government page on a `.gov.au` host, or a page on the host of the place's own website as your release has it (with or without `www.`). `reportFacts` takes it once for the whole edit. `sourceLinkProblem(source, place.facts.website)` says whether a link passes, so check it before sending. The intake refuses a link on any other host, a subdomain of the website's host included, with `400 source_not_allowed` and the reason in `details`, and a link off `.gov.au` for a place its place index does not hold, whose website it cannot know.
+
+A report with a link is held as before. When it would wait for a second source, the intake answers `held` (`source_link`). The apply run then fetches the page, and when the value appears on it the page counts as a second source for that value, so the report goes into the data without a second traveller. A page that cannot be fetched, answers with an error, is not HTML or plain text, or redirects off the allowed hosts confirms nothing, and the report keeps waiting for a second source or a later run. A contact or address counts its page the same way once it has passed the contact checks, and when it goes to a reviewer, the review PR says the page shows it.
+
+What counts as appearing is kept strict:
+
+- A yes or no fact appears when the page names it in words that say the value (`flush toilets`, `no toilets`, `campfires are not permitted`) and nowhere in words that say otherwise or leave it open (`toilets are closed`). A page that never names the fact confirms neither value.
+- `pets`, `fee`, `toilet_type` and `booking_required` appear when the page has words for the reported choice and none for another (`dogs are allowed on a lead` names two choices, so it confirms neither). Other facts with a list of choices, `pets: seasonal`, opening hours and charges with conditions are never confirmed by a page.
+- A charge appears as its amount in dollars (`$25` or `$25.00`), a stay as its number and unit (`7 nights`), the operator, an email or a link as written, ignoring case and spacing, a phone as its digits (with 0 or +61), and an address as its house number, street or place, and suburb or postcode.
+
+```ts
+await feedback.report({ place, report: { kind: "fact", fact: "toilets", value: true, source: "https://www.parks.vic.gov.au/places/example-camp" }, consent: true });
 ```
 
 ### Names, descriptions, kinds and Commons photos
@@ -459,7 +485,7 @@ It needs no app key. `bbox` is optional: west, south, east and north in degrees.
 
 The SDK types the answer as `RecentList`, with `RecentPlace`, `RecentChange` and `RecentRelease`.
 
-**New places on the list.** A place is listed when its report came from an attested install (an app key with `requires_attestation`) and its note, with contact details stripped, passes `textProblem`. Other new places reach a person through the apply run. `kind` is the code the traveller picked, or `null`. `name` is the report's `name` after `tidyName`, or `null`. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive: only `still_there` checks with `nearby: true` from two sources other than the adder count towards `confirmed` (a check from the adder's device, or from the client network the place was added from, never does), and reports from two other devices on two different client networks take the place off the list. `description`, `fee` and `contacts` (the contact facts and the `address`) are there when the report carried them and they passed the checks. The list never carries the note or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. A blocked contributor's new places leave the list.
+**New places on the list.** A place is listed when its report came from an attested install (an app key with `requires_attestation`) or from a trusted contributor ([Trust from a track record](#trust-from-a-track-record)), and its note, with contact details stripped, passes `textProblem`. Other new places are decided through the apply run. One that only a lack of attestation keeps off the list, with a contributor, whose location is plausible, that is not a possible duplicate and whose name, note, description and contacts pass the checks, goes to the AI reviewer, which may publish it, merge it into a place nearby that it duplicates, or take it down. The rest, and any the reviewer is unsure of, reach a person. `kind` is the code the traveller picked, or `null`. `name` is the report's `name` after `tidyName`, or `null`. `standing` is `shown` or `confirmed`, worked out with `newPlaceStanding` as checks and `remove` reports on the place's id arrive: only `still_there` checks with `nearby: true` from two sources other than the adder count towards `confirmed` (a check from the adder's device, or from the client network the place was added from, never does), and reports from two other devices on two different client networks take the place off the list. `description`, `fee` and `contacts` (the contact facts and the `address`) are there when the report carried them and they passed the checks. The list never carries the note or a device id. `contributor` is the hashed id, so hide what a traveller blocked on the phone. A blocked contributor's new places leave the list.
 
 Once the apply run has written a place into the data, the entry gains `in_data_at` and stays on the list for 7 more days with its current standing, which can then also be `hidden` or `withdrawn`. For those 7 days:
 
@@ -594,6 +620,14 @@ A proof is optional for a review. The intake takes a review without one as befor
 
 **Photos.** Open Camping DB takes no photos. To add photos to your app, run your own photo service with the photo kit: [photos.md](photos.md).
 
+### Trust from a track record
+
+A signed-in traveller earns trust when other sources confirm five of their edits: another traveller, on another device and client network, later reports the same value for a fact they set, or checks a new place they added and finds it there, nearby. Each edit counts once, however many sources confirm it. Once trusted, the contributor's new places are listed on the recent list at once, even from an app key without attestation, and their contacts go live once they pass the [contact checks](#contacts-and-addresses), without a second device. Everything else they send is weighed as before.
+
+Only items that carry the `contributor` your app sent count, so send it with every report from a signed-in traveller. Items from a signed-out install, whose id stands in for a contributor, and items from a website's human check never earn or use trust. A confirmation counts only when it went live, came from an attested install or a signed-in traveller (never through a website's human check, so a traveller cannot confirm their own edits from a browser), and came from another device, client network and contributor. Trust is withdrawn at once when a doubt about one of the contributor's edits is upheld: doubts, contact reports or removal reports take down a value or a new place they sent; the AI reviewer keeps a doubted value down, refuses their contact, puts back what their name, kind or location change replaced, or takes their new place down; or a person leaves their value or new place out when merging the review PR. The count then starts again from their edits sent after that. A blocked contributor is never trusted. A decision settled by trust says "trusted contributor" in its progress reason.
+
+The apply run keeps each track record and sends the intake the trusted contributors after every run, so trust earned or withdrawn reaches the intake within one run.
+
 ## 7. Prove the app with App Attest or Play Integrity
 
 An app key with `requires_attestation` takes feedback (everything but owner requests) only from a genuine copy of the app on a sound device. Without proof the intake answers `401 attestation_required`, and with proof that fails `401 attestation_invalid`. The SDK calls your `attest` function each time it sends, with the exact body and its SHA-256 (lower case hex), and adds the headers it returns. A flush calls it once for each batch, over the batch's body.
@@ -648,9 +682,11 @@ export const feedback = createFeedbackClient({
 });
 ```
 
-If `humanCheck` throws, the item stays queued and is tried on a later send or flush, which may be on a later visit. Call `flush()` once the widget is ready on each page, so waiting items go. The intake answers `401 human_check_required` without a token and `401 human_check_failed` (with `details`) when Turnstile refuses it, and the item stays queued for a fresh token. `503` means Turnstile could not be reached.
+If `humanCheck` throws, the item stays queued and is tried on a later send or flush, which may be on a later visit. Call `flush()` once the widget is ready on each page, so waiting items go. A request without a token, or with a token Turnstile refuses or that was made for another site, body or form, is dropped silently: the intake answers it exactly as it answers an accepted item (`202` with an id, or each item of a batch so), stores nothing, and its progress reads `received` and never moves on. So a bot learns nothing from the answer, and neither does your page: a misconfigured widget looks like it works. Test your set-up once by sending a report and checking that it reaches the review PR, or ask the intake's maintainer to check its silent drop counts ([self-hosting.md](self-hosting.md#silent-drops)). Make a fresh token for every call, since a token sent twice fails and its item is lost. `503` means Turnstile could not be reached, and the item stays queued.
 
 A human check shows that a person filled in the form, not that the device or app is genuine. So a website key may send only fact reports of fixed-value facts, doubts, contact reports (a phone, website or address is wrong) and closed, name, kind and wrong_location reports, and the intake weighs them as unattested: a fact waits for a second source on another network, and a closed report leaves the place open until a second source agrees. Reviews, photos, new places, contacts and addresses, and facts that hold free words (opening hours, the operator and charges) answer `403 type_not_allowed_for_app_key`.
+
+A website report may be first-hand with `first_hand: "says_so"`, when the traveller answered yes to the question in "First-hand reports". A website has no device location to go on, so `seen_nearby` from a website key answers `403 type_not_allowed_for_app_key`, before the intake checks the token.
 
 ## 8. Flush, answers and the queue
 
@@ -702,7 +738,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 
 | `heldReason` | Why |
 | --- | --- |
-| `not_attested` | The report was not from an attested install: a person reads a contact, and a second device has to agree on any other fact. On a doubt, or a confirmation of a fact doubts took down, none of the reports counted was attested. |
+| `not_attested` | The report was not from an attested install: a person reads a contact, and a second device has to agree on any other fact. A new place is not listed, and the AI reviewer decides it once it passes the location, duplicate and text checks: a person sees it only when the reviewer is unsure. On a doubt, or a confirmation of a fact doubts took down, none of the reports counted was attested. |
 | `owner_value` | The place's owner set the value. |
 | `disagreement` | Another source reported a different value within 90 days. On a doubt, as many sources confirm the value as doubt it, or more. |
 | `link_check` | A link failed `contactProblem` or the malware check. |
@@ -723,6 +759,13 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `unlikely_charge` | A `charge` or `charge_powered` over 250 AUD a night, or more than 50% above or below the place's current charge, so a person checks it. |
 | `commons_report` | A report that a Commons photo is not of the place. Hide it for the traveller who sent it: a reviewer decides, and two sources hide it for everyone. |
 | `not_own_value` | A `clear` of a value another traveller set, or one the intake cannot tie to this install, so a person decides. |
+| `ai_cap` | Not given at send time. The AI reviewer was unsure, and its second model's monthly spending cap was reached, so a person decides. It shows on the item's progress. |
+| `repeated_text` | Its free text is nearly the same as text three other sources sent in the last 30 days, so the AI reviewer reads it: a person sees it only when the reviewer is unsure. |
+| `contact_check` | A contact the automatic contact checks have not passed yet: the place's website does not show it, or its check could not finish in time at send time, or it is a website or address, which only the apply run checks. The apply run's full check decides it, and one that fails goes to the AI reviewer. |
+| `network_reputation` | The report came from an attested install on a network on the intake's public list of abusive addresses, so the AI reviewer reads it before it counts, and a person when the reviewer is unsure or the owner set the value. Reviews, checks and other reports from such an install are held the same way, though only the items the intake decides are answered `held`. The same item from an install that is not attested, or from a website, is dropped silently. |
+| `source_link` | A fact report without attestation that carries a source link. The apply run reads the page: the value goes into the data when the page shows it, or when a second source agrees. |
+| `disputed` | The place is frozen: three or more sources sent conflicting values for one of its facts within 24 hours. No fact report, doubt, clear or contact report changes the place until a reviewer settles the value, or for 14 days when no one does, and then reports are decided as usual. |
+| `implausible_location` | A new place the map data puts in the sea or a lake, on a major road's carriageway or inside a building footprint. It is not listed, and the AI reviewer checks it: a person sees it only when the reviewer is unsure. A remote place is never held for being remote. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.
 
@@ -1133,8 +1176,14 @@ const feedback = createFeedbackClient({
 
 ## What changed by version
 
-What an app moving to 0.37.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
+What an app moving to 0.39.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
 
+- **0.39.0.** Source links, sign-in and new held reasons:
+  - A `fact` report may carry `source`, a link to a page that shows the value, on a `.gov.au` host or the host of the place's own website ([Source links](#source-links)), and `reportFacts` takes it for the whole edit. `MAX_SOURCE_LENGTH` (500) and `sourceLinkProblem(source, website)` are exported, so an app can check a link before sending. The intake refuses a link on another host with `400 source_not_allowed`. `websiteHost(url)` gives a website's host as the rule compares it: lower case, without final dots or a leading `www.`.
+  - Stored items gain `signed_in: true` when the app sent `contributor`. Only such items earn and use [trust from a track record](#trust-from-a-track-record), so send `contributor` with every report from a signed-in traveller.
+  - `HELD_REASONS` gains `repeated_text`, `contact_check`, `network_reputation`, `source_link`, `disputed`, `implausible_location` and `ai_cap` ([Live or held](#live-or-held)). `ai_cap` is never given at send time: it shows only on an item's progress. Show your own message for each, and treat a code you do not know as `held`.
+  - A website's human check that is missing or does not pass is now dropped silently: the intake answers as it answers an accepted item, so the SDK settles the item as sent and it is lost. Nothing else an app sends is refused that was taken before. Deploy the intake and move the inbox's apply pin to the same commit before an app sends `source`: an older intake refuses it with `400`.
+- **0.38.0.** Websites: an app key may set `requires_human_check`, and the `humanCheck` option returns a Cloudflare Turnstile token for each send ([Websites: a human check](#websites-a-human-check)). `HUMAN_CHECK_HEADER`, `HumanCheckError` and `humanCheckErrorIn` are exported.
 - **0.37.0.** A new fact source:
   - A place's `fact_sources` may name `overture`, a value from Overture Maps that fills a gap no other source fills: a name for a place with none, a website, a phone or an address. Any other source replaces it, doubts and contact reports take it down as they do a traveller's value, a `clear` of it goes to a person, and it never goes to OpenStreetMap. `FACT_SOURCES`, `isFactSource` and the `FactSource` type are exported, so an app can label where a value came from. Nothing an app sends changes.
 - **0.36.0.** New fields and a new call for photo services ([photos.md](photos.md)):

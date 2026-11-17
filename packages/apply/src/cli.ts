@@ -2,6 +2,7 @@
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { botPrs, type ReviewPr } from "./owners.js";
+import { transportFetch } from "./proof.js";
 import { intakeRecentList, intakeRecentStore, tellIntake } from "./recent.js";
 import { sendPhotoProgress } from "./photo-progress.js";
 import { sendProgress } from "./progress.js";
@@ -10,11 +11,13 @@ import { run } from "./run.js";
 const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>]
                   [--auto-pr-body <file>] [--review-pr-body <file>] [--job-summary <file>]
                   [--review-prs <file>] [--auto-prs <file>] [--bot-login <login>]
+                  [--reviewer-login <login>]
                   [--summary <file>] [--now <ISO time>] [--places <dir>]
                   [--photo-licence <id>] [--publish-first-photo]
                   [--main <dir> --intake <url>]
                   [--recent-places <url>] [--review-preview <url>]
-                  [--geometry <file>]
+                  [--geometry <file>] [--land-mask <file>] [--buildings <file>]
+                  [--contact-checks] [--dns-resolver <url>]
 
 Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
@@ -29,6 +32,10 @@ or <login>[bot], or app/<login> as the GitHub CLI writes it, never the bare
 login alone. Held and closed cases the review PR body has no room for are
 written to <file>.2, <file>.3 and so on beside --review-pr-body, to post as
 comments in that order.
+--reviewer-login names the AI reviewer's GitHub App when it is not the
+--bot-login App: its review-decision comments on open and merged review PRs
+count too. A held item it let through counts from this run, and a doubt it
+upheld about a signed-in contributor's edit withdraws their trust.
 --publish-first-photo publishes a contributor's first photo without a person
 when the intake's SafeSearch rating passed it. A photo with no rating still waits.
 --places makes it a photo repository run for an app's own photo service:
@@ -36,7 +43,7 @@ when the intake's SafeSearch rating passed it. A photo with no rating still wait
 Open Camping DB data checkout in <dir>, and anything but photos is refused.
 --main and --intake take new places that are now in the data on main, and
 withdrawn ones, out of the intake's recent places store, and send it the
-contributors blocked on main, with the token in PLACES_TOKEN. <dir> is a checkout of the data repository's main branch, so a
+contributors blocked on main and those trusted from their track records, with the token in PLACES_TOKEN. <dir> is a checkout of the data repository's main branch, so a
 place leaves the store only once the PR that writes it is merged. They also
 tell the intake which applied fact and contact reports now have their change
 on main, so it keeps those recent changes for 7 days from this run, and which
@@ -66,7 +73,26 @@ with a private data repository: anyone who can read the PR can open the links.
 merged into the place it duplicates only when the two have the same name once
 tidied, are in the same group and less than 50 m apart, and no major road runs
 between them. Without it the run has no road data and merges no duplicate on
-its own: each goes to a reviewer as a duplicate case.
+its own: each goes to a reviewer as a duplicate case. Its road lines are also
+the major road carriageways for the plausibility check below.
+--land-mask and --buildings read the water lines (sea and lakes) and building
+lines described in docs/self-hosting.md. A new place in the water, within 6 m
+of a major road's centre line or inside a building footprint is drafted as
+held and listed as an implausible_location case for the AI reviewer. Each file
+is optional: without one, that part of the check passes and the run logs it.
+--contact-checks runs the automatic contact checks on each contact fact
+report: the place's own website shows the phone, email or social link, the
+domain of a website or email was not registered in the last 90 days (RDAP),
+and an address's state and postcode belong where the place is. A contact that
+fails one is held for the AI reviewer as a contact_check case, and one that
+passes them all follows the two-source rule. Without it, an attested contact
+goes live and one without attestation goes to a person.
+--dns-resolver looks up, through that DNS over HTTPS JSON endpoint (such as
+https://cloudflare-dns.com/dns-query), the website domain of each place a
+traveller reported closed. NXDOMAIN on two runs at least a day apart counts as
+a second source for the closure, and the first is kept in
+<inbox>/evidence/nxdomain.json. HTTP errors, timeouts and other DNS answers
+never count. Off when left out.
 When GITHUB_OUTPUT is set, also writes auto_changed, review_changed,
 owner_claims and inbox_changed as step outputs.`;
 
@@ -85,6 +111,7 @@ async function main(): Promise<number> {
       "review-prs": { type: "string" },
       "auto-prs": { type: "string" },
       "bot-login": { type: "string", multiple: true },
+      "reviewer-login": { type: "string", multiple: true },
       summary: { type: "string" },
       now: { type: "string" },
       places: { type: "string" },
@@ -95,6 +122,10 @@ async function main(): Promise<number> {
       "recent-places": { type: "string" },
       "review-preview": { type: "string" },
       geometry: { type: "string" },
+      "land-mask": { type: "string" },
+      buildings: { type: "string" },
+      "contact-checks": { type: "boolean" },
+      "dns-resolver": { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -110,6 +141,10 @@ async function main(): Promise<number> {
 
   if (values["recent-places"] !== undefined && !URL.canParse(values["recent-places"])) {
     console.error(`--recent-places is not a URL: ${values["recent-places"]}`);
+    return 2;
+  }
+  if (values["dns-resolver"] !== undefined && !values["dns-resolver"].startsWith("https://")) {
+    console.error(`--dns-resolver is not an https URL: ${values["dns-resolver"]}`);
     return 2;
   }
   const previewSecret = process.env.REVIEW_PREVIEW_SECRET;
@@ -134,12 +169,17 @@ async function main(): Promise<number> {
     // Owner approvals read the 30 most recent review PRs; progress reads them all.
     ...(reviewPrs ? { reviewPrs: reviewPrs.slice(0, OWNER_REVIEW_PRS) } : {}),
     ...(values["bot-login"] ? { botLogins: values["bot-login"] } : {}),
+    ...(values["reviewer-login"] ? { reviewerLogins: values["reviewer-login"] } : {}),
     ...(values["review-data"] ? { reviewData: values["review-data"] } : {}),
     ...(now ? { now } : {}),
     ...(values.places ? { places: values.places } : {}),
     ...(values["photo-licence"] ? { photoLicence: values["photo-licence"] } : {}),
     ...(values["publish-first-photo"] ? { holdFirstPhoto: false } : {}),
     ...(values.geometry ? { geometry: values.geometry } : {}),
+    ...(values["land-mask"] ? { landMask: values["land-mask"] } : {}),
+    ...(values.buildings ? { buildings: values.buildings } : {}),
+    ...(values["contact-checks"] ? { contactChecks: { fetch: transportFetch() } } : {}),
+    ...(values["dns-resolver"] ? { dns: { resolver: values["dns-resolver"] } } : {}),
     ...(values["recent-places"] ? { recentList: intakeRecentList(values["recent-places"]) } : {}),
     ...(values["review-preview"] && previewSecret ? { reviewPreview: { url: values["review-preview"], secret: previewSecret } } : {}),
   });

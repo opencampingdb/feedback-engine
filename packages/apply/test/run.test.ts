@@ -1,7 +1,10 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReviewPr } from "../src/owners.js";
+import { heldCaseKey, type HeldCase } from "../src/review.js";
 import { run } from "../src/run.js";
 import { dumpPlace } from "../src/serialise.js";
 import type { Place } from "../src/types.js";
@@ -75,6 +78,88 @@ afterEach(async () => {
 });
 
 describe("run", () => {
+  it("runs the contact checks when given a fetch, and holds a contact that fails one for the AI reviewer", async () => {
+    const withSite = dumpPlace({ ...place, facts: { ...place.facts, website: "https://lake.example.org" }, fact_sources: { ...place.fact_sources, website: "osm" } });
+    const reviewData = join(root, "review");
+    await put(join(data, "places", "za", `${PLACE}.json`), withSite);
+    await put(join(reviewData, "places", "za", `${PLACE}.json`), withSite);
+    const phone = (value: string) => ({ type: "report", attested: "app_attest", contributor: NEWCOMER, report: { kind: "fact", fact: "phone", value } });
+    await pending(1, "2026-10-29T01:00:00Z", "aaaa", phone("03 5555 0100"));
+    await pending(2, "2026-10-29T02:00:00Z", "bbbb", phone("03 5555 0999"));
+    const asked: string[] = [];
+    const fetch = async (url: string) => {
+      asked.push(url);
+      return url === "https://lake.example.org/" ? new Response("<p>03 5555 0100</p>", { status: 200 }) : new Response("", { status: 404 });
+    };
+
+    const summary = await run({ inbox, data, reviewData, now: NOW, contactChecks: { fetch } });
+
+    expect(asked).toEqual(["https://lake.example.org/", "https://lake.example.org/"]);
+    expect(summary.counts).toMatchObject({ applied: 1, needs_review: 1 });
+    expect(summary.review_pr_body).toContain('"case":"contact_check"');
+    const record = JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
+    expect(record.facts.phone).toBe("03 5555 0100");
+  });
+
+  it("reads each contributor's track record from the inbox, uses it, and writes it back", async () => {
+    const edits = ["tents", "toilets", "showers", "drinking_water", "dump_station"].map((fact, n) => ({
+      feedback: id(90 + n), received: "2026-10-01T00:00:00Z", place: PLACE, fact, value: true,
+    }));
+    await put(join(inbox, "trust", "contributors.json"), { contributors: { [TRUSTED]: { confirmed: edits } } });
+    // An unattested contact from the trusted contributor, which the contact checks pass.
+    const withSite = dumpPlace({ ...place, facts: { ...place.facts, website: "https://lake.example.org" }, fact_sources: { ...place.fact_sources, website: "osm" } });
+    await put(join(data, "places", "za", `${PLACE}.json`), withSite);
+    await pending(1, "2026-10-29T01:00:00Z", "aaaa", { type: "report", contributor: TRUSTED, signed_in: true, report: { kind: "fact", fact: "phone", value: "03 5555 0100" } });
+    await pending(2, "2026-10-29T02:00:00Z", "bbbb", { type: "report", attested: "app_attest", contributor: NEWCOMER, report: { kind: "fact", fact: "power", value: false } });
+    const fetch = async (url: string) => (url === "https://lake.example.org/" ? new Response("<p>03 5555 0100</p>", { status: 200 }) : new Response("", { status: 404 }));
+
+    const summary = await run({ inbox, data, now: NOW, contactChecks: { fetch } });
+
+    expect(summary.counts).toMatchObject({ applied: 2 });
+    expect(summary.inbox_changed).toBe(true);
+    const kept = JSON.parse(await readFile(join(inbox, "trust", "contributors.json"), "utf8")) as { contributors: Record<string, { confirmed: unknown[] }> };
+    expect(kept.contributors[TRUSTED]?.confirmed).toHaveLength(5);
+  });
+
+  it("reads the AI reviewer's decisions on the review PRs, and counts a held closure it approved", async () => {
+    const held = item(1, "2026-10-28T01:00:00Z", "aaaa", {
+      type: "report",
+      attested: "app_attest",
+      contributor: NEWCOMER,
+      report: { kind: "closed" },
+      intake: { state: "held", held_reason: "network_reputation" },
+      outcome: { result: "needs_review", reason: "", run: "2026-10-28T02:00:00Z" },
+    });
+    await put(join(inbox, "applied", "2026-10-28", `${id(1)}.json`), held);
+    const c: HeldCase = { case: "intake_check", place: PLACE, location: place.location, kind: "free_camp", held_for: "network_reputation", about: "status", says: "closed", feedback: [id(1)] };
+    const pr = (reviewer: string): ReviewPr => ({
+      number: 3,
+      state: "OPEN",
+      body: `- held-case ${JSON.stringify(c)}`,
+      isCrossRepository: false,
+      author: { login: "example-bot", type: "Bot" },
+      comments: [{ author: { login: reviewer, type: "Bot" }, body: `- review-decision ${JSON.stringify({ key: heldCaseKey(c), decision: "approve" })}` }],
+    });
+    const record = async () => JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
+
+    // A comment from a login the run does not know counts for nothing.
+    await run({ inbox, data, now: NOW, reviewPrs: [pr("someone-else")], botLogins: ["example-bot"], reviewerLogins: ["example-reviewer"] });
+    expect((await record()).status).toBe("open");
+    await run({ inbox, data, now: NOW, reviewPrs: [pr("example-reviewer")], botLogins: ["example-bot"], reviewerLogins: ["example-reviewer"] });
+    expect((await record()).status).toBe("reported_closed");
+  });
+
+  it("stops on a trust file that is not JSON", async () => {
+    await put(join(inbox, "trust", "contributors.json"), "{ not json");
+    await expect(run({ inbox, data, now: NOW })).rejects.toThrow(/trust\/contributors.json in the inbox is not valid JSON/);
+  });
+
+  it("decides contacts as before when the contact checks are off", async () => {
+    await pending(1, "2026-10-29T01:00:00Z", "aaaa", { type: "report", attested: "app_attest", contributor: NEWCOMER, report: { kind: "fact", fact: "phone", value: "03 5555 0100" } });
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.counts).toMatchObject({ applied: 1 });
+  });
+
   it("refuses fee reports still in the inbox and writes no fees/ file", async () => {
     const day = "2026-10-29";
     await pending(1, `${day}T01:00:00Z`, "aaaa", { type: "fee", contributor: TRUSTED, fee: { amount: 36.5, site: "powered", paid: "2026-10" } });
@@ -273,6 +358,35 @@ describe("run", () => {
     expect(second.review_pr_body.split("\n").filter((l) => l.startsWith("- closed-case "))).toEqual([
       `- closed-case ${JSON.stringify({ case: "fact_doubted", place: PLACE, fact: "toilets", settles: "restored", feedback: [id(3), id(4)] })}`,
     ]);
+  });
+
+  describe("plausible locations", () => {
+    const fixture = (name: string) => fileURLToPath(new URL(`./fixtures/place-geometry/${name}`, import.meta.url));
+    const geometryFiles = { landMask: fixture("water.ndjson"), buildings: fixture("buildings.ndjson"), geometry: fixture("roads.ndjson") };
+
+    it("holds a new place in the sea for the AI reviewer when given the land mask, building footprints and roads", async () => {
+      const review = join(root, "data-review");
+      await put(join(review, "places", "za", `${PLACE}.json`), dumpPlace(place));
+      const newId = await newPlace(9, "2026-10-29T00:00:00Z", "aaaa", { lat: -33.05, lon: 151.15 });
+      const summary = await run({ inbox, data, reviewData: review, now: NOW, ...geometryFiles });
+      expect(summary.auto_changed).toBe(false);
+      expect(heldCases(summary.review_pr_body)).toContainEqual(expect.objectContaining({ case: "implausible_location", place: newId, hit: "water", problem: "in the sea" }));
+      const draft = JSON.parse(await readFile(join(review, summary.review_files[0]!), "utf8")) as Place;
+      expect(draft.standing).toBe("held");
+    });
+
+    it("publishes a new place on land, and one inside a building on a run that has only the land mask, logging what it lacks", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await newPlace(8, "2026-10-29T00:00:00Z", "aaaa", { lat: -25.3, lon: 131 });
+        await newPlace(9, "2026-10-29T00:00:00Z", "bbbb", { lat: -33.01985, lon: 151.05015 });
+        const summary = await run({ inbox, data, now: NOW, landMask: geometryFiles.landMask });
+        expect(summary.new_places).toHaveLength(2);
+        expect(warn).toHaveBeenCalledWith("no major roads or building footprints, so new places are not checked against them");
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   it("reports the new places it wrote for the first time", async () => {
@@ -602,6 +716,143 @@ describe("run", () => {
       inbox_changed: false,
       auto_pr_body: "",
       review_pr_body: "",
+    });
+  });
+});
+
+describe("evidence of closure", () => {
+  const record = async () => JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
+  const closedEarlier = () =>
+    put(join(inbox, "applied", "2026-10-28", `${id(1)}.json`), {
+      ...item(1, "2026-10-28T00:00:00Z", "aaaa", { type: "report", report: { kind: "closed" } }),
+      outcome: { result: "applied", reason: "place is reported_closed", run: "2026-10-28T01:00:00Z" },
+    });
+  /** One line of the data repository's `osm/history.ndjson`, as its sync writes it. */
+  const historyLine = (extra: Record<string, unknown>) =>
+    `${JSON.stringify({ changeset: 191000001, checked: "2026-10-29", had: { tourism: "camp_site" }, object: "node/123456", successors: [], tags: {}, version: 8, visible: true, ...extra })}\n`;
+
+  it("closes a place one traveller reported closed once OSM newly tags its object disused:, naming it in the PR body", async () => {
+    await closedEarlier();
+    await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace({ ...place, status: "reported_closed" }));
+    await put(join(data, "osm", "history.ndjson"), historyLine({ tags: { "disused:tourism": "camp_site", name: "Lake Eppalock Camp" } }));
+
+    const summary = await run({ inbox, data, now: NOW });
+    expect((await record()).status).toBe("closed");
+    expect(summary.auto_pr_body).toContain("OSM tagged node/123456 disused:tourism=camp_site in changeset 191000001");
+  });
+
+  it("counts abandoned: too, but not other lifecycle prefixes, a deleted object or a tag the record already followed", async () => {
+    await closedEarlier();
+    await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace({ ...place, status: "reported_closed" }));
+    const cases: [Record<string, unknown>, string][] = [
+      [{ tags: { "abandoned:tourism": "camp_site" } }, "closed"],
+      [{ tags: { "was:tourism": "camp_site" } }, "reported_closed"],
+      [{ tags: { "demolished:tourism": "camp_site" } }, "reported_closed"],
+      [{ tags: {}, visible: false }, "reported_closed"],
+      [{ tags: { "disused:tourism": "camp_site" }, version: 7 }, "reported_closed"],
+      [{ tags: { "disused:tourism": "camp_site" }, object: "node/999" }, "reported_closed"],
+    ];
+    for (const [extra, status] of cases) {
+      await put(join(data, "places", "za", `${PLACE}.json`), dumpPlace({ ...place, status: "reported_closed" }));
+      await put(join(data, "osm", "history.ndjson"), historyLine(extra));
+      await run({ inbox, data, now: NOW });
+      expect([extra, (await record()).status]).toEqual([extra, status]);
+    }
+  });
+
+  describe("the website's domain gone from DNS", () => {
+    const RESOLVER = "https://dns.example.net/dns-query";
+    /** A fake DNS over HTTPS resolver: each call answers with the next of `answers`, and every URL asked is kept. */
+    function resolver(...answers: (number | "http_503" | "timeout")[]) {
+      const asked: string[] = [];
+      const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        asked.push(url);
+        expect(new Headers(init?.headers).get("accept")).toBe("application/dns-json");
+        const answer = answers.shift() ?? 0;
+        if (answer === "timeout") throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+        if (answer === "http_503") return new Response("busy", { status: 503 });
+        return Response.json({ Status: answer, TC: false, RD: true, RA: true, Question: [{ name: "example.org", type: 1 }] });
+      });
+      return { fetch: fetch as unknown as typeof globalThis.fetch, asked };
+    }
+    const at = (hours: number) => new Date(NOW.getTime() + hours * 3_600_000);
+    const withWebsite = (status: Place["status"] = "reported_closed") =>
+      put(
+        join(data, "places", "za", `${PLACE}.json`),
+        dumpPlace({
+          ...place,
+          status,
+          facts: { ...place.facts, website: "https://www.example.org/camping" },
+          fact_sources: { ...place.fact_sources, website: "osm" },
+        }),
+      );
+
+    it("closes the place when the domain is NXDOMAIN on two checks a day apart, keeping the first in the inbox", async () => {
+      await closedEarlier();
+      await withWebsite();
+      const dns = resolver(3, 3);
+
+      const first = await run({ inbox, data, now: at(0), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      expect((await record()).status).toBe("reported_closed");
+      expect(first.inbox_changed).toBe(true);
+      expect(JSON.parse(await readFile(join(inbox, "evidence", "nxdomain.json"), "utf8"))).toEqual({
+        domains: { "example.org": { first: "2026-10-30T00:00:00Z" } },
+      });
+
+      const second = await run({ inbox, data, now: at(24), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      expect((await record()).status).toBe("closed");
+      expect(second.auto_pr_body).toContain("example.org was not found in DNS on 2026-10-30 or 2026-10-31");
+      // Only the resolver is asked, never the website itself.
+      expect(dns.asked).toEqual([`${RESOLVER}?name=example.org&type=A`, `${RESOLVER}?name=example.org&type=A`]);
+    });
+
+    it("does not count two NXDOMAIN answers less than a day apart", async () => {
+      await closedEarlier();
+      await withWebsite();
+      const dns = resolver(3, 3);
+      await run({ inbox, data, now: at(0), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      await run({ inbox, data, now: at(23), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      expect((await record()).status).toBe("reported_closed");
+    });
+
+    it("never counts an HTTP error, a timeout or a failed lookup as a check, and keeps the first NXDOMAIN for a later one", async () => {
+      await closedEarlier();
+      await withWebsite();
+      const dns = resolver(3, "http_503", "timeout", 2, 3);
+      for (const hours of [0, 24, 48, 72]) {
+        await run({ inbox, data, now: at(hours), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+        expect((await record()).status).toBe("reported_closed");
+      }
+      await run({ inbox, data, now: at(96), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      expect((await record()).status).toBe("closed");
+    });
+
+    it("an HTTP error or timeout on the first check is not a first NXDOMAIN", async () => {
+      await closedEarlier();
+      await withWebsite();
+      const dns = resolver("http_503", "timeout", 3);
+      for (const hours of [0, 24, 48]) await run({ inbox, data, now: at(hours), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      expect((await record()).status).toBe("reported_closed");
+    });
+
+    it("starts again when the domain is found between two NXDOMAIN answers", async () => {
+      await closedEarlier();
+      await withWebsite();
+      const dns = resolver(3, 0, 3);
+      for (const hours of [0, 24, 48]) await run({ inbox, data, now: at(hours), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      expect((await record()).status).toBe("reported_closed");
+    });
+
+    it("asks nothing without a resolver, or for a place no traveller reported closed", async () => {
+      await withWebsite("open");
+      const dns = resolver(3, 3);
+      await run({ inbox, data, now: at(0), dns: { resolver: RESOLVER, fetch: dns.fetch } });
+      await closedEarlier();
+      await withWebsite();
+      await run({ inbox, data, now: at(24) });
+      expect(dns.asked).toEqual([]);
+      expect((await record()).status).toBe("reported_closed");
     });
   });
 });

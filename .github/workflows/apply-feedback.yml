@@ -99,6 +99,15 @@ on:
           own photo inbox sets it to Open Camping DB's intake. Off when empty.
         type: string
         default: ""
+      dns-resolver:
+        description: >-
+          DNS over HTTPS JSON endpoint, for example
+          https://cloudflare-dns.com/dns-query. Each run looks up the website
+          domain of every place a traveller reported closed, and NXDOMAIN on
+          two runs at least a day apart counts as a second source for the
+          closure. Off when empty.
+        type: string
+        default: ""
       review-preview-url:
         description: >-
           Base URL of the intake that serves held photos to the person
@@ -114,6 +123,55 @@ on:
           File name or id of the data repository's release workflow, for
           example release.yml. When set, a run that changed the data starts it
           on data-base-branch once the automatic PR has merged. Off when empty.
+        type: string
+        default: ""
+      contact-checks:
+        description: >-
+          Run the automatic contact checks on each contact fact report: the
+          place's own website shows the phone, email or social link, a
+          website's or email's domain was not registered in the last 90 days
+          (RDAP), and an address belongs in the place's state. A contact that
+          fails one goes to the AI reviewer, and one that passes them all
+          follows the two-source rule. Off by default: with false, contacts
+          are decided as before, with no outside lookups.
+        type: boolean
+        default: false
+      geometry-asset:
+        description: >-
+          Name of the geometry sidecar (major roads) among the assets of the
+          data repository's release named by geometry-release, for example
+          geometry.ndjson.gz. The run downloads it and keeps a new place on
+          the other side of a major road from the place it may duplicate from
+          being merged into it, and holds a new place on a major road's
+          carriageway. Off when empty.
+        type: string
+        default: ""
+      land-mask-asset:
+        description: >-
+          Name of the land mask (water lines: sea and lakes) among the same
+          release's assets. A new place in the water is held for the AI
+          reviewer. Off when empty.
+        type: string
+        default: ""
+      buildings-asset:
+        description: >-
+          Name of the building footprints among the same release's assets. A
+          new place of an open-ground kind inside a building is held for the
+          AI reviewer. Off when empty.
+        type: string
+        default: ""
+      geometry-release:
+        description: >-
+          Tag of the data repository's release the geometry assets come from.
+          The latest release when empty.
+        type: string
+        default: ""
+      reviewer-login:
+        description: >-
+          Slug of the AI reviewer's GitHub App, when it is not the bot App
+          that runs this workflow. Its decisions on the review PRs are read
+          too: a held item it let through counts, and a doubt it upheld
+          withdraws a contributor's trust. Off when empty.
         type: string
         default: ""
       claim-reviewers:
@@ -372,6 +430,42 @@ jobs:
             fi
           done
 
+      # Each file is optional, and a download that fails leaves that layer off with a warning: the
+      # check passes for it, as it does without the file, and the run logs it.
+      - name: Download the place geometry from the data release
+        id: geometry
+        if: inputs.geometry-asset != '' || inputs.land-mask-asset != '' || inputs.buildings-asset != ''
+        env:
+          GH_TOKEN: ${{ steps.data-token.outputs.token }}
+          DATA_REPO: ${{ format('{0}/{1}', github.repository_owner, inputs.data-repository-name) }}
+          RELEASE: ${{ inputs.geometry-release }}
+          GEOMETRY_ASSET: ${{ inputs.geometry-asset }}
+          LAND_MASK_ASSET: ${{ inputs.land-mask-asset }}
+          BUILDINGS_ASSET: ${{ inputs.buildings-asset }}
+        run: |
+          dir="$RUNNER_TEMP/geometry"
+          mkdir -p "$dir"
+          fetch() {
+            name="$1"
+            option="$2"
+            [ -n "$name" ] || return 0
+            case "$name" in
+              */* | .* | *..*) echo "::warning::${option#--} asset ${name} is not a plain file name, so that layer is off"; return 0 ;;
+            esac
+            if ! gh release download ${RELEASE:+"$RELEASE"} --repo "$DATA_REPO" --pattern "$name" --dir "$dir" --clobber < /dev/null; then
+              echo "::warning::could not download ${name} from the ${RELEASE:-latest} release of ${DATA_REPO}, so that layer is off"
+              return 0
+            fi
+            file="$dir/$name"
+            case "$name" in
+              *.gz) gunzip -f "$file" && file="${file%.gz}" ;;
+            esac
+            echo "${option#--}=${option} ${file}" >> "$GITHUB_OUTPUT"
+          }
+          fetch "$GEOMETRY_ASSET" --geometry
+          fetch "$LAND_MASK_ASSET" --land-mask
+          fetch "$BUILDINGS_ASSET" --buildings
+
       - name: Apply feedback
         id: apply
         env:
@@ -379,8 +473,12 @@ jobs:
           PLACES_ARGS: ${{ inputs.places-repository != '' && '--places places' || '' }}
           PHOTO_LICENCE: ${{ inputs.photo-licence }}
           FIRST_PHOTO_ARGS: ${{ !inputs.hold-first-photo && '--publish-first-photo' || '' }}
+          CONTACT_CHECK_ARGS: ${{ inputs.contact-checks && '--contact-checks' || '' }}
+          GEOMETRY_ARGS: ${{ steps.geometry.outputs.geometry }} ${{ steps.geometry.outputs.land-mask }} ${{ steps.geometry.outputs.buildings }}
+          REVIEWER_LOGIN: ${{ inputs.reviewer-login }}
           INTAKE_URL: ${{ inputs.intake-url }}
           RECENT_PLACES_URL: ${{ inputs.recent-places-url }}
+          DNS_RESOLVER: ${{ inputs.dns-resolver }}
           PLACES_TOKEN: ${{ secrets.places-token }}
           REVIEW_PREVIEW_URL: ${{ inputs.review-preview-url }}
           REVIEW_PREVIEW_SECRET: ${{ secrets.review-preview-secret }}
@@ -388,8 +486,12 @@ jobs:
           node engine/packages/apply/dist/cli.js
           $PLACES_ARGS
           $FIRST_PHOTO_ARGS
+          $CONTACT_CHECK_ARGS
+          $GEOMETRY_ARGS
+          ${REVIEWER_LOGIN:+--reviewer-login "$REVIEWER_LOGIN"}
           ${INTAKE_URL:+--main data-main --intake "$INTAKE_URL"}
           ${RECENT_PLACES_URL:+--recent-places "$RECENT_PLACES_URL"}
+          ${DNS_RESOLVER:+--dns-resolver "$DNS_RESOLVER"}
           ${REVIEW_PREVIEW_URL:+--review-preview "$REVIEW_PREVIEW_URL"}
           --photo-licence "$PHOTO_LICENCE"
           --inbox inbox

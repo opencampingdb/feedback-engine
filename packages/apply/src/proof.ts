@@ -113,7 +113,7 @@ export function isPrivateAddress(address: string): boolean {
 }
 
 /** A URL the check may fetch: https, a public host name, no IP literal. */
-function allowedUrl(url: URL): boolean {
+export function allowedUrl(url: URL): boolean {
   return isPublicHttpsUrl(url.href) && isIP(url.hostname.replace(/^\[|\]$/g, "")) === 0;
 }
 
@@ -158,7 +158,7 @@ export const httpsTransport: Transport = (url, options) =>
     req.end();
   });
 
-async function readCapped(body: AsyncIterable<Uint8Array>, maxBytes: number): Promise<string> {
+export async function readCapped(body: AsyncIterable<Uint8Array>, maxBytes: number): Promise<string> {
   const chunks: Uint8Array[] = [];
   let total = 0;
   for await (const chunk of body) {
@@ -228,4 +228,34 @@ export async function checkProof(proofUrl: string, code: string, options: ProofO
     const where = codeInHead(text, code) ? "head" : "text";
     return { ...result(true, `code found at ${url.href}`), url: url.href, where };
   }
+}
+
+/**
+ * A fetch over `transport` (the safe https transport by default), for the
+ * contact checks: https only, every resolved address checked, no redirect
+ * followed (the caller follows them), and the body streamed as it arrives.
+ */
+export function transportFetch(transport: Transport = httpsTransport) {
+  return async (url: string, init: { signal: AbortSignal; headers: Record<string, string> }): Promise<Response> => {
+    const target = new URL(url);
+    if (!allowedUrl(target)) throw new Error("not a public https address");
+    const res = await transport(target, { headers: init.headers, timeoutMs: TIMEOUT_MS });
+    const iterator = res.body[Symbol.asyncIterator]();
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const { done, value } = await iterator.next();
+        if (done) controller.close();
+        else controller.enqueue(value);
+      },
+      async cancel() {
+        await iterator.return?.();
+      },
+    });
+    init.signal.addEventListener("abort", () => void iterator.return?.());
+    const headers = new Headers();
+    for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) headers.set(k, v);
+    // Response takes no status outside 200 to 599, nor a body with 204 or 304.
+    const status = res.status >= 200 && res.status <= 599 ? res.status : 502;
+    return new Response(status === 204 || status === 304 ? null : body, { status, headers });
+  };
 }

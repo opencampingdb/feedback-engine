@@ -12,4 +12,4 @@ The checks run cheapest first, and the AI only when nothing cheaper can settle a
 
 ## Consequences
 
-The intake needs a place index in D1, loaded from each release, to know a place's facts and who set them. One set of rules runs in two places, so the apply and the intake have to share that code. The AI reviewer runs on Workers AI from the intake's scheduled job, so no model key lives in the public repositories.
+The intake needs a place index in D1, loaded from each release, to know a place's facts and who set them. One set of rules runs in two places, so the apply and the intake have to share that code. The AI reviewer runs on Workers AI from the intake's scheduled job, so no model key lives in the public repositories. Its optional second stage calls Anthropic's API with a key held as a Worker secret ([ADR 0005](0005-second-review-stage-uses-an-api-key.md)).

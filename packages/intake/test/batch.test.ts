@@ -1,7 +1,7 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createHandler, MAX_BATCH_BODY_BYTES, MAX_BATCH_ITEMS, type Env } from "../src/index.js";
-import { NEW_PLACE_DAILY_LIMIT, type D1Like } from "../src/recent.js";
+import { NEW_PLACE_DAILY_LIMIT, type D1Like, type D1Statement } from "../src/recent.js";
 import { ORIGIN_DAILY_LIMIT } from "../src/ratelimit.js";
 import { fakeD1 } from "./fake-d1.js";
 import { listableKv } from "./fake-kv.js";
@@ -340,6 +340,40 @@ describe("a contributor proof on batch items (audit run-2 OCDB-NV-06)", () => {
   });
 });
 
+/**
+ * `store`, with every count of a single item's own counter (any rate count
+ * but a network's `n:`, an app's `a:` and their `held:` marks) waiting until
+ * `open` is called. `reached` settles when the first one arrives.
+ */
+function gateItemCounters(store: D1Like) {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => (open = resolve));
+  let arrived!: () => void;
+  const reached = new Promise<void>((resolve) => (arrived = resolve));
+  const inner = new WeakMap<D1Statement, D1Statement>();
+  const wrap = (sql: string, statement: D1Statement, values: unknown[]): D1Statement => {
+    const waits = sql.startsWith("INSERT INTO rate_counts") && typeof values[0] === "string" && !/^(n|a|held):/.test(values[0]);
+    const before = async () => {
+      if (!waits) return;
+      arrived();
+      await opened;
+    };
+    const out: D1Statement = {
+      bind: (...given: unknown[]) => wrap(sql, statement.bind(...given), given),
+      all: async <T,>() => (await before(), statement.all<T>()),
+      run: async () => (await before(), statement.run()),
+      first: async <T,>(column?: string) => (await before(), statement.first<T>(column)),
+    };
+    inner.set(out, statement);
+    return out;
+  };
+  const db: D1Like = {
+    prepare: (sql: string) => wrap(sql, store.prepare(sql), []),
+    batch: (list: D1Statement[]) => store.batch(list.map((s) => inner.get(s) ?? s)),
+  };
+  return { db, reached, open };
+}
+
 describe("POST /v1/feedback/batch with requests in flight together", () => {
   const unattested = (store: D1Like, daily_limit: number) => env(store, { requires_attestation: false, daily_limit });
   const sender = (i: number) => ({
@@ -419,16 +453,19 @@ describe("POST /v1/feedback/batch with requests in flight together", () => {
   });
 
   it("asks a sender refused while another batch holds the app's counter to wait a minute, not until midnight", async () => {
-    const { handle, e } = setup(250);
+    const { store, handle, e } = setup(250);
     const full = sender(22);
     // One device uses its whole day: 200 of the app's 250.
     for (let b = 0; b < 4; b++) expect(await accepted(await handle(post("/v1/feedback/batch", { items: itemsOf(full, b * MAX_BATCH_ITEMS) }, full.ip), e))).toBe(MAX_BATCH_ITEMS);
+    // The device's next batch holds the rest of the app's count, then waits at its first item's own
+    // counter until the other sender has had its answer, so the two always overlap the same way.
+    const gate = gateItemCounters(store);
+    const held = handle(post("/v1/feedback/batch", { items: itemsOf(full, 1000) }, full.ip), { ...e, RECENT_LIST: gate.db });
+    await gate.reached;
     const other = sender(23);
-    const [held, refused] = await Promise.all([
-      handle(post("/v1/feedback/batch", { items: itemsOf(full, 1000) }, full.ip), e),
-      handle(post("/v1/feedback/batch", { items: itemsOf(other, 2000) }, other.ip), e),
-    ]);
-    expect(await accepted(held)).toBe(0);
+    const refused = await handle(post("/v1/feedback/batch", { items: itemsOf(other, 2000) }, other.ip), { ...e, RECENT_LIST: gate.db });
+    gate.open();
+    expect(await accepted(await held)).toBe(0);
     expect(refused.status).toBe(429);
     expect(refused.headers.get("retry-after")).toBe("60");
     // Once the other batch has given back what it held, the sender's batch is taken.
@@ -500,17 +537,40 @@ describe("POST /v1/feedback/batch with a human check", () => {
     expect(queued.every((q) => q.human_checked === true && q.attested === undefined)).toBe(true);
   });
 
-  it("refuses the whole batch when its token was made for another body", async () => {
-    const res = await handle(humanBatch([fact(PLACE, "toilets", true)], () => `ok:${sha("something else")}`), e);
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toBe("human_check_failed");
-    expect(store.db.prepare("SELECT COUNT(*) AS n FROM inbox_queue").get()).toEqual({ n: 0 });
+  const count = (table: string) => (store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+
+  it("answers every item of a batch whose token was made for another body as taken, and stores none", async () => {
+    const items = [fact(PLACE, "toilets", true), fact(PLACE, "showers", true), report(PLACE, { kind: "closed" })];
+    const res = await handle(humanBatch(items, () => `ok:${sha("something else")}`), e);
+    expect(res.status).toBe(200);
+    const answers = ((await res.json()) as { items: ItemAnswer[] }).items;
+    expect(answers).toEqual([
+      { status: 202, id: expect.stringMatching(/^fb_/), state: "held", held_reason: "not_attested" },
+      { status: 202, id: expect.stringMatching(/^fb_/), state: "held", held_reason: "not_attested" },
+      { status: 202, id: expect.stringMatching(/^fb_/) },
+    ]);
+    expect(count("inbox_queue")).toBe(0);
+    expect(count("report_evidence")).toBe(0);
+    expect(count("rate_counts")).toBe(0);
+    expect(store.db.prepare("SELECT day, reason, count FROM silent_drops").all()).toEqual([{ day: "2026-11-07", reason: "human_check_failed", count: 3 }]);
+    const progress = await handle(new Request(`https://intake.example/v1/feedback/progress?ids=${answers.map((a) => a.id).join(",")}`), e);
+    const read = ((await progress.json()) as { items: { state: string }[] }).items;
+    expect(read.map((p) => p.state)).toEqual(["received", "received", "received"]);
   });
 
-  it("refuses a batch with no token", async () => {
+  it("answers a batch with no token as taken, never asks Turnstile, and stores none", async () => {
     const res = await handle(humanBatch([fact(PLACE, "toilets", true)]), e);
-    expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: "human_check_required" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { items: ItemAnswer[] }).items).toEqual([{ status: 202, id: expect.stringMatching(/^fb_/), state: "held", held_reason: "not_attested" }]);
     expect(asked).toEqual([]);
+    expect(count("inbox_queue")).toBe(0);
+    expect(store.db.prepare("SELECT reason, count FROM silent_drops").all()).toEqual([{ reason: "human_check_required", count: 1 }]);
+  });
+
+  it("still refuses, item by item, what the key may never send in a dropped batch", async () => {
+    const res = await handle(humanBatch([review(PLACE), fact(PLACE, "toilets", true)]), e);
+    const answers = ((await res.json()) as { items: ItemAnswer[] }).items;
+    expect(answers.map((a) => a.status)).toEqual([403, 202]);
+    expect(answers[0]).toEqual({ status: 403, error: "type_not_allowed_for_app_key" });
   });
 });

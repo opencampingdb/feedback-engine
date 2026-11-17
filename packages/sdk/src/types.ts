@@ -375,6 +375,14 @@ export interface ReportBody {
    * (`FirstHand`). Leave it out otherwise. The location itself is never sent.
    */
   first_hand?: FirstHand;
+  /**
+   * On `fact` only: a page that shows the reported value, an https address of
+   * up to 500 characters (`MAX_SOURCE_LENGTH`). It must be on a `.gov.au` host
+   * or on the host of the place's own website on record (`sourceLinkProblem`);
+   * the intake refuses any other host (`400 source_not_allowed`). The apply run
+   * fetches the page, and a value the page shows counts as a second source.
+   */
+  source?: string;
 }
 
 /** The contact facts a new place may carry. */
@@ -734,7 +742,7 @@ export type StoredOwnerSubmission =
   | (Omit<OwnerListingSubmission, "device"> & OwnerStoredFields & { code: string; token_sha256: string })
   | (Omit<OwnerUpdateSubmission, "device" | "token"> & OwnerStoredFields & { token_sha256: string });
 
-type OwnerStoredFields = Omit<StoredFields, "contributor" | "attested" | "human_checked" | "attest_key" | "intake">;
+type OwnerStoredFields = Omit<StoredFields, "contributor" | "signed_in" | "attested" | "human_checked" | "attest_key" | "intake">;
 
 /** Everything that can be in `inbox/pending/`. */
 export type StoredSubmission = StoredFeedback | StoredOwnerSubmission;
@@ -770,6 +778,12 @@ interface StoredFields {
    * Absent when the app key does not require a human check.
    */
   human_checked?: true;
+  /**
+   * The app sent `contributor`: the traveller is signed in to an account, and
+   * the stored id is not a stand-in made from the install or its attested
+   * key. Only such items earn and use trust from a track record. Absent otherwise.
+   */
+  signed_in?: true;
   /** `ak_` and 16 hex characters of the salted App Attest key id: a second signal beside the contributor. */
   attest_key?: string;
   /**
@@ -781,9 +795,14 @@ interface StoredFields {
   /**
    * What the intake decided at send time, on the fact reports, contact
    * reports and new places it decides. An item it held for a check
-   * (`text_check`, `link_check`, `ai_check`, `daily_cap` or
-   * `check_unavailable`) goes to a person, never into the data on its own.
-   * Absent on other items and on items stored before the intake decided any.
+   * (`text_check`, `link_check`, `ai_check`, `daily_cap`, `repeated_text`,
+   * `check_unavailable` or `network_reputation`) never goes into the data
+   * on its own: the AI reviewer decides one held for `network_reputation`
+   * or `repeated_text`, and a person the rest. Any other report, a review or
+   * a check carries it only when the intake held it for its network
+   * (`network_reputation`, or `check_unavailable` when the blocklist could
+   * not be read) or, on a review, for `repeated_text`. Absent on other items
+   * and on items stored before the intake decided any.
    */
   intake?: StoredIntakeDecision;
   /**

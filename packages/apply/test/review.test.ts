@@ -194,3 +194,95 @@ describe("what a decision does to the place", () => {
     expect(before.standing).toBe("shown");
   });
 });
+
+describe("contact_check cases", () => {
+  const checked: HeldCase = { ...base, case: "contact_check", fact: "phone", checks: ["website", "domain_age"], problem: "the place's website: timed out" };
+
+  it("reads a contact_check line only with a contact fact and the checks it failed", () => {
+    expect(parseHeldCases(`- held-case ${JSON.stringify(checked)}`)).toEqual([checked]);
+    for (const bad of [{ checks: [] }, { checks: ["vibes"] }, { checks: undefined }, { fact: "toilets" }, { fact: undefined }]) {
+      expect(parseHeldCases(`- held-case ${JSON.stringify({ ...checked, ...bad })}`)).toEqual([]);
+    }
+    expect(allowedDecisions(checked)).toEqual(["confirm", "dismiss", "leave"]);
+  });
+});
+
+describe("unattested_place cases", () => {
+  const unattested: HeldCase = { ...base, case: "unattested_place", standing: "held", candidates: [{ place: OTHER, distance_m: 320 }] };
+
+  it("reads them from the review PR body, with their candidates", () => {
+    const body = reviewPrBody(AT, [], new Map(), [], [unattested]);
+    expect(parseHeldCases(body)).toEqual([unattested]);
+    // A candidate that is the place itself, or a case with no candidates field, is not one the apply writes.
+    expect(parseHeldCases(body.replace(OTHER, PLACE))).toEqual([]);
+    const { candidates: _, ...bare } = unattested;
+    expect(parseHeldCases(reviewPrBody(AT, [], new Map(), [], [bare as HeldCase]))).toEqual([]);
+  });
+
+  it("may be approved, merged or taken down, and goes to a person once it is no longer held", () => {
+    expect(allowedDecisions(unattested)).toEqual(["approve", "merge", "take_down", "leave"]);
+    expect(settleByRules(unattested, place())).toBeNull();
+    expect(settleByRules(unattested, place({ standing: "shown" }))).toEqual({ decision: "leave", reason: "the place is no longer held" });
+    expect(settleByRules(unattested, place({ owner_verified: true }))).toEqual({ decision: "leave", reason: "the place has a verified owner" });
+  });
+
+  it("is shown on approve and hidden on take_down", () => {
+    expect(applyDecision(place(), unattested, "approve", AT)).toMatchObject({ standing: "shown", updated: AT });
+    expect(applyDecision(place(), unattested, "approve", AT)?.moderator).toBeUndefined();
+    expect(applyDecision(place(), unattested, "take_down", AT)).toMatchObject({ standing: "hidden", moderator: { action: "hide", at: AT } });
+    expect(applyDecision(place(), unattested, "merge", AT)).toBeNull();
+  });
+});
+
+describe("disputed cases", () => {
+  const disputed: HeldCase = { ...base, case: "disputed", fact: "pets", values: ["yes", "no", "leashed"], sources: 3, frozen_at: "2026-11-01T00:00:00Z" };
+
+  it("reads the time a freeze started, and closes the case once the freeze has expired", () => {
+    expect(parseHeldCases(reviewPrBody(AT, [], new Map(), [], [disputed]))).toEqual([disputed]);
+    const record = place({ standing: undefined });
+    expect(settleByRules(disputed, record, { now: Date.parse("2026-11-14T00:00:00Z") })).toBeNull();
+    expect(settleByRules(disputed, record, { now: Date.parse("2026-11-15T00:00:00Z") })?.reason).toContain("expired after 14 days");
+  });
+});
+
+describe("intake_check cases", () => {
+  const ofFact: HeldCase = { ...base, case: "intake_check", held_for: "network_reputation", about: "fact", fact: "toilets", value: false };
+  const ofStatus: HeldCase = { ...base, case: "intake_check", held_for: "repeated_text", about: "status", says: "closed" };
+
+  it("reads only the checks the AI reviewer decides, and the item each case is about", () => {
+    expect(parseHeldCases(reviewPrBody(AT, [], new Map(), [], [ofFact, ofStatus]))).toEqual([ofFact, ofStatus]);
+    expect(parseHeldCases(`- held-case ${JSON.stringify({ ...ofFact, held_for: "text_check" })}`)).toEqual([]);
+    expect(parseHeldCases(`- held-case ${JSON.stringify({ ...ofStatus, says: undefined })}`)).toEqual([]);
+  });
+
+  it("lets a reviewer keep or take back a fact, approve or dismiss a status report, and puts back the earlier value on a dismissed fact", () => {
+    expect(allowedDecisions(ofFact)).toEqual(["confirm", "dismiss", "leave"]);
+    expect(allowedDecisions(ofStatus)).toEqual(["approve", "dismiss", "leave"]);
+    expect(applyDecision(place(), ofFact, "dismiss", AT)?.facts).toMatchObject({ toilets: false });
+    expect(applyDecision(place(), ofFact, "confirm", AT)).toBeNull();
+    expect(applyDecision(place(), ofStatus, "approve", AT)).toBeNull();
+  });
+});
+
+describe("place_change cases of a name", () => {
+  const rename = (from_source?: "osm" | "feedback"): HeldCase => ({
+    ...base,
+    case: "place_change",
+    change: "name",
+    from: "Creek Bend Camp",
+    to: "CREEK BEND CAMP",
+    ...(from_source !== undefined ? { from_source } : {}),
+  });
+  const renamed = (osm: Place["osm"]) => place({ standing: undefined, name: "CREEK BEND CAMP", osm, fact_sources: {} });
+
+  it("checks a new name against the OSM name it replaces, which a name with no source entry on a place in OSM is", () => {
+    const inOsm = renamed({ type: "node", id: 1, version: 2 });
+    expect(settleByRules(rename("osm"), inOsm)).toBeNull();
+    expect(settleByRules(rename(), inOsm)).toBeNull();
+  });
+
+  it("has no OSM name to check against once a traveller set the name, or for a place not in OSM", () => {
+    expect(settleByRules(rename("feedback"), renamed({ type: "node", id: 1, version: 2 }))?.reason).toContain("neither the OSM name it replaces");
+    expect(settleByRules(rename(), renamed(null))?.reason).toContain("neither the OSM name it replaces");
+  });
+});
