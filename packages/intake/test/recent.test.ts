@@ -1567,6 +1567,83 @@ describe("send-time decisions", () => {
     });
   });
 
+  describe("unconfirmed values", () => {
+    const unattested = () => env(store, { requires_attestation: false });
+    const second = { device: otherDevice(1), contributor: "acct_second_person_01" };
+    const unconfirmed = async (query = "") => ((await listing(query)) as unknown as { unconfirmed: Record<string, unknown>[] }).unconfirmed;
+
+    it("lists a held report without attestation that would change a fact, with its value, time and count of sources and nothing else", async () => {
+      expect(await send(fact(PLACE, "toilets", true, { note: "Saw them myself" }), unattested())).toMatchObject(held("not_attested"));
+      expect(await unconfirmed()).toEqual([{ place: PLACE, fact: "toilets", value: true, received: "2026-11-03T09:00:00Z", sources: 1 }]);
+    });
+
+    it("counts each source once, from the earliest report of the value, and goes once the value is live", async () => {
+      await send(fact(PLACE, "toilets", true), unattested());
+      clock += HOUR;
+      // The same install again, and a second install on its own: two sources.
+      await send(fact(PLACE, "toilets", true), unattested());
+      await send(fact(PLACE, "toilets", true, second), unattested());
+      expect(await unconfirmed()).toEqual([{ place: PLACE, fact: "toilets", value: true, received: "2026-11-03T09:00:00Z", sources: 2 }]);
+      // A confirmation with attestation from a third install puts the value live, and it leaves the list.
+      clock += HOUR;
+      expect(await send(fact(PLACE, "toilets", true, { device: otherDevice(2), contributor: "acct_third_person_01" }))).toMatchObject({ state: "live" });
+      expect(await unconfirmed()).toEqual([]);
+    });
+
+    it("leaves out a value the place has, a contact, a fact with free words, a report with attestation and one held for another reason", async () => {
+      index(UNKNOWN, [146, -37], { toilets: true, pets: "leashed" });
+      await send(fact(UNKNOWN, "toilets", true), unattested());
+      await send(fact(UNKNOWN, "phone", "03 5555 0199"), unattested());
+      await send(fact(UNKNOWN, "operator", "Shire of Example"), unattested());
+      await send(fact(UNKNOWN, "pets_months", "Dec-Feb"), unattested());
+      // Held with attestation, for a disagreement with an earlier report.
+      await send(fact(PLACE, "drinking_water", true, second), unattested());
+      clock += HOUR;
+      expect(await send(fact(PLACE, "drinking_water", false))).toMatchObject(held("disagreement"));
+      expect(await unconfirmed()).toEqual([{ place: PLACE, fact: "drinking_water", value: true, received: "2026-11-03T09:00:00Z", sources: 1 }]);
+    });
+
+    it("leaves out a blocked contributor's reports, a value the release has since, and places outside the box", async () => {
+      await send(fact(PLACE, "toilets", true), unattested());
+      await send(fact(ELSEWHERE, "toilets", true, second), unattested());
+      await send(fact(ELSEWHERE, "drinking_water", true, second), unattested());
+      expect((await unconfirmed("?bbox=145.5,-37.5,146.5,-36.5")).map((u) => u.place)).toEqual([PLACE]);
+      store.db.prepare("INSERT INTO blocked_contributors (contributor) SELECT DISTINCT contributor FROM unconfirmed_values WHERE place = ?").run(PLACE);
+      store.db.prepare("UPDATE place_index SET facts = ? WHERE id = ?").run(JSON.stringify({ toilets: true }), ELSEWHERE);
+      expect(await unconfirmed()).toEqual([{ place: ELSEWHERE, fact: "drinking_water", value: true, received: "2026-11-03T09:00:00Z", sources: 1 }]);
+    });
+
+    it("goes when the apply puts the report into the data or refuses it, and stays while a person reads it", async () => {
+      const call = (route: "in-data" | "overruled", body: unknown) =>
+        handle(
+          new Request(`https://intake.example/v1/places/recent/${route}`, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+            body: JSON.stringify(body),
+          }),
+          e,
+        );
+      await send(fact(PLACE, "toilets", true), unattested());
+      await send(fact(PLACE, "drinking_water", true), unattested());
+      await send(fact(ELSEWHERE, "toilets", true), unattested());
+      const [applied, refused, forPerson] = written().map((item) => item.id as string);
+      expect((await call("in-data", { ids: [applied], at: "2026-11-03T09:30:00Z" })).status).toBe(200);
+      expect((await call("overruled", { ids: [refused, forPerson], refused: [refused] })).status).toBe(200);
+      expect((await unconfirmed()).map((u) => [u.place, u.fact])).toEqual([[ELSEWHERE, "toilets"]]);
+    });
+
+    it("stops counting a report 90 days after it was received, and the scheduled job deletes it", async () => {
+      await send(fact(PLACE, "toilets", true), unattested());
+      // 90 days on, it still counts.
+      clock = Date.parse("2027-02-01T09:00:00Z");
+      expect(await unconfirmed()).toHaveLength(1);
+      clock += 1000;
+      expect(await unconfirmed()).toEqual([]);
+      await createScheduled({ fetch: services.fetch, now: () => clock })(e);
+      expect(store.db.prepare("SELECT count(*) AS n FROM unconfirmed_values").get()).toEqual({ n: 0 });
+    });
+  });
+
   describe("what the apply tells it", () => {
     const call = (route: "in-data" | "overruled", body: unknown, token = TOKEN) =>
       new Request(`https://intake.example/v1/places/recent/${route}`, {
