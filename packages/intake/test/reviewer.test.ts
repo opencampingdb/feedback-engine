@@ -1487,7 +1487,12 @@ describe("the second AI stage", () => {
       const { ai } = fakeAi(() => reply("approve", "Probably separate.", false));
       const claude = fakeClaude(() => "hang");
       const running = run(gh, ai, claude);
-      for (let i = 0; i < 40 && claude.calls.length === 0; i++) await vi.advanceTimersByTimeAsync(0);
+      // Wait on real turns of the event loop (setImmediate is not faked) until the second model is asked,
+      // however long the work before it takes on a slow runner.
+      for (let i = 0; i < 2000 && claude.calls.length === 0; i++) {
+        await vi.advanceTimersByTimeAsync(0);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
       expect(claude.calls).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(31_000);
       const result = await running;
