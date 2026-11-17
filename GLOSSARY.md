@@ -76,6 +76,10 @@ _Avoid_: update (an owner's change), batch (how items travel)
 A report from a traveller who was at the place in the last month: the app saw them nearby, or they said so.
 _Avoid_: verified report
 
+**Source link**:
+A page on a government host or the place's own website that a fact report names to show its value. When the page shows the value, it counts as a second source.
+_Avoid_: citation, evidence (a check or report about a new place)
+
 **Progress**:
 Where a contribution is: received, live, waiting, accepted, held, refused or in the data.
 _Avoid_: status, outcome, decision

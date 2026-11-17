@@ -375,6 +375,14 @@ export interface ReportBody {
    * (`FirstHand`). Leave it out otherwise. The location itself is never sent.
    */
   first_hand?: FirstHand;
+  /**
+   * On `fact` only: a page that shows the reported value, an https address of
+   * up to 500 characters (`MAX_SOURCE_LENGTH`). It must be on a `.gov.au` host
+   * or on the host of the place's own website on record (`sourceLinkProblem`);
+   * the intake refuses any other host (`400 source_not_allowed`). The apply run
+   * fetches the page, and a value the page shows counts as a second source.
+   */
+  source?: string;
 }
 
 /** The contact facts a new place may carry. */

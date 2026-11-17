@@ -18,7 +18,8 @@ import {
 import { applyOwnerRules, PROOF_WAIT_DAYS, type ReviewPr } from "./owners.js";
 import { autoPrBody, jobSummary, reviewPrTexts } from "./prbody.js";
 import { previewUrl, PREVIEW_TTL_SECONDS } from "./preview.js";
-import { checkProof as realCheckProof, type ProofResult } from "./proof.js";
+import { checkProof as realCheckProof, type ProofResult, type Transport } from "./proof.js";
+import { confirmSourceLinks } from "./source-link.js";
 import {
   applyEdit,
   applyHeldReview,
@@ -56,6 +57,10 @@ export interface RunOptions {
   checkProof?: (url: string, code: string) => Promise<ProofResult>;
   /** Time the run may spend on proof checks, and how many run at once. Defaults to 3 minutes and 4. */
   proofBudget?: { ms: number; concurrency: number };
+  /** Fetches source link pages (`source-link.ts`). Defaults to node:https with the proof check's safeguards. */
+  sourceTransport?: Transport;
+  /** Time the run may spend fetching source link pages, and how many at once. Defaults to 2 minutes and 4. */
+  sourceBudget?: { ms: number; concurrency: number };
   /** Time of the run. Defaults to now. */
   now?: Date;
   /**
@@ -159,6 +164,7 @@ export type RunDecision = Pick<Decision, "id" | "place" | "outcome" | "reason" |
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PROOF_BUDGET = { ms: 3 * 60_000, concurrency: 4 };
+const SOURCE_BUDGET = { ms: 2 * 60_000, concurrency: 4 };
 
 /**
  * One apply run. Writes automatic changes to `data`, review edits to
@@ -285,6 +291,22 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     if (earlier) earlierFacts.set(p.place, (earlierFacts.get(p.place) ?? new Map()).set(fact, earlier));
   }
 
+  // Source links on fact reports: a page that shows the reported value counts as a second source.
+  // The host is checked again against the place's website in the data, whatever the intake knew.
+  const linked = photosOnly
+    ? []
+    : crowd.flatMap((p) => {
+        if (p.type !== "report" || p.report.kind !== "fact" || typeof p.report.source !== "string") return [];
+        const placeId = resolvePlace(p.place, places);
+        const record = placeId === undefined ? undefined : places.get(placeId);
+        if (!record) return [];
+        return [{ id: p.id, fact: p.report.fact as string, value: p.report.value, source: p.report.source, website: record.facts.website }];
+      });
+  const sourceConfirmed =
+    linked.length > 0
+      ? await confirmSourceLinks(linked, { ...(options.sourceBudget ?? SOURCE_BUDGET), ...(options.sourceTransport ? { transport: options.sourceTransport } : {}) })
+      : new Set<string>();
+
   const crowdResult = applyRules({
     now: runAt,
     pending: crowd,
@@ -306,6 +328,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     ...(doNotMatch ? { doNotMatch } : {}),
     ...(recent !== undefined ? { recent } : {}),
     ...(earlierFacts.size > 0 ? { earlierFacts } : {}),
+    ...(sourceConfirmed.size > 0 ? { sourceConfirmed } : {}),
   });
 
   // Proof pages for claims and listings still in pending/, oldest first, within

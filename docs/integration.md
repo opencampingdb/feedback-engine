@@ -340,6 +340,22 @@ await feedback.report({ place, report: { kind: "fact", fact: "toilets", value: t
 await feedback.report({ place, report: { kind: "doubt", fact: "pets", first_hand: "says_so" }, consent: true });
 ```
 
+### Source links
+
+A `fact` report may carry `source`, an https link of up to 500 characters (`MAX_SOURCE_LENGTH`) to a page that shows the reported value: a government page on a `.gov.au` host, or a page on the host of the place's own website as your release has it (with or without `www.`). `reportFacts` takes it once for the whole edit. `sourceLinkProblem(source, place.facts.website)` says whether a link passes, so check it before sending. The intake refuses a link on any other host, a subdomain of the website's host included, with `400 source_not_allowed` and the reason in `details`, and a link off `.gov.au` for a place its place index does not hold, whose website it cannot know.
+
+A report with a link is held as before. When it would wait for a second source, the intake answers `held` (`source_link`). The apply run then fetches the page, and when the value appears on it the page counts as a second source for that value, so the report goes into the data without a second traveller. A page that cannot be fetched, answers with an error, is not HTML or plain text, or redirects off the allowed hosts confirms nothing, and the report keeps waiting for a second source or a later run. A contact or address with a link still goes to a person, who sees that the page shows it.
+
+What counts as appearing is kept strict:
+
+- A yes or no fact appears when the page names it in words that say the value (`flush toilets`, `no toilets`, `campfires are not permitted`) and nowhere in words that say otherwise or leave it open (`toilets are closed`). A page that never names the fact confirms neither value.
+- `pets`, `fee`, `toilet_type` and `booking_required` appear when the page has words for the reported choice and none for another (`dogs are allowed on a lead` names two choices, so it confirms neither). Other facts with a list of choices, `pets: seasonal`, opening hours and charges with conditions are never confirmed by a page.
+- A charge appears as its amount in dollars (`$25` or `$25.00`), a stay as its number and unit (`7 nights`), the operator, an email or a link as written, ignoring case and spacing, a phone as its digits (with 0 or +61), and an address as its house number, street or place, and suburb or postcode.
+
+```ts
+await feedback.report({ place, report: { kind: "fact", fact: "toilets", value: true, source: "https://www.parks.vic.gov.au/places/example-camp" }, consent: true });
+```
+
 ### Names, descriptions, kinds and Commons photos
 
 Three report kinds let a traveller fix a place's name, description and kind. Each goes to a person, who accepts or rejects it on the review PR:
@@ -727,6 +743,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `not_own_value` | A `clear` of a value another traveller set, or one the intake cannot tie to this install, so a person decides. |
 | `ai_cap` | Not given at send time. The AI reviewer was unsure, and its second model's monthly spending cap was reached, so a person decides. It shows on the item's progress. |
 | `repeated_text` | Its free text is nearly the same as text three other sources sent in the last 30 days, so a person reads it. |
+| `source_link` | A fact report without attestation that carries a source link. The apply run reads the page: the value goes into the data when the page shows it, or when a second source agrees. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.
 

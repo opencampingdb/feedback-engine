@@ -124,6 +124,8 @@ export {
   isPhotoId,
   isPlaceId,
   isPublicHttpsUrl,
+  MAX_SOURCE_LENGTH,
+  sourceLinkProblem,
   isReviewId,
   isValidFactValue,
   monthsInRange,

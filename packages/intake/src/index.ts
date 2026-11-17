@@ -26,6 +26,7 @@ import {
   isProofPublicKey,
   verifyContributorProof,
   REPORT_KINDS,
+  sourceLinkProblem,
   type ReportKind,
 } from "@opencampingdb/feedback";
 import { placeOf, PROGRESS_UPDATE_STATES, type PhotoProgressUpdate, type ProgressUpdate } from "@opencampingdb/apply/progress-update";
@@ -732,6 +733,28 @@ function humanCheckOutcome(result: HumanCheckResult): { humanChecked: true } | {
 }
 
 /** Over a daily limit: 429, with the seconds until the counters reset. */
+/**
+ * The refusal for a fact report's source link on a host other than `.gov.au`
+ * or the place's website in the place index, or undefined when it passes. An
+ * intake without the index, or one that cannot read it, leaves the host to
+ * the apply run, which checks it again and never confirms a value from
+ * another host. A place the index does not hold has no website on record.
+ */
+async function sourceRefusal(db: D1Like | undefined, place: string | null, source: string): Promise<ItemAnswer | undefined> {
+  if (sourceLinkProblem(source, undefined) === null || db === undefined) return undefined;
+  let website: unknown;
+  if (place !== null) {
+    const indexed = await getIndexedPlace(db, place).then(
+      (p) => p ?? null,
+      () => undefined,
+    );
+    if (indexed === undefined) return undefined;
+    website = indexed?.facts.website;
+  }
+  const problem = sourceLinkProblem(source, website);
+  return problem === null ? undefined : { status: 400, body: { error: "source_not_allowed", details: [`report.source ${problem}`] } };
+}
+
 function rateLimited(retryAfter: number): ItemAnswer {
   return { status: 429, body: { error: "rate_limited" }, headers: { "retry-after": String(retryAfter) } };
 }
@@ -1814,6 +1837,10 @@ export function createHandler(deps: Deps) {
       return { status: 400, body: { error: "type_not_allowed_in_batch" } };
     }
     if (submission.type === "photo") return { status: 400, body: { error: "invalid", details: ["photos are sent to /v1/photos"] } };
+    if (submission.type === "report" && submission.report.source !== undefined) {
+      const refused = await sourceRefusal(env.RECENT_LIST, submission.place, submission.report.source);
+      if (refused) return refused;
+    }
     // Photo reports, removals and erasures belong to a photo service: an intake with a photo bucket.
     if (
       (submission.type === "photo_report" || submission.type === "photo_erasure" || submission.type === "photo_removal" || submission.type === "photo_vote") &&
