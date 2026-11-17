@@ -29,6 +29,7 @@ import {
   type StoredFeedback,
 } from "@opencampingdb/feedback";
 import type { CheckContributor, Checks, HeldReason as ChecksHeldReason, LiveSlot } from "./checks.js";
+import { implausibleLocation, type PlaceGeometry } from "@opencampingdb/apply/plausible";
 import { getIndexedPlace, type Cell } from "./place-index.js";
 import { chunks, isoSeconds, placeStatement, prunePlaceStatements, type Bbox, type D1Like, type D1Statement, type StoredPlace } from "./recent.js";
 
@@ -74,9 +75,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * contact report or doubt about a fact the place does not have, as the index
  * has it). `commons_report`: a report that a Commons photo is not of the
  * place, which the apply decides. The apply decides each of these again when
- * it runs.
+ * it runs. `implausible_location`: a new place in the sea or a lake, on a
+ * major road's carriageway or inside a building footprint, which the AI
+ * reviewer checks.
  */
-export type HeldReason = RulesHeldReason | ChecksHeldReason | RefusedReason | "unknown_place" | "blocked" | "commons_report";
+export type HeldReason = RulesHeldReason | ChecksHeldReason | RefusedReason | "unknown_place" | "blocked" | "commons_report" | "implausible_location";
 
 /** What the answer to an accepted item adds. */
 export type ItemState = { state: "live" } | { state: "held"; held_reason: HeldReason };
@@ -402,6 +405,13 @@ export interface DecideInput {
    * attested contact goes live at send time: each waits for the apply run.
    */
   website?: { fetch: CheckFetch; timeoutMs: number };
+  /**
+   * The geometry around a new place's location, for the plausibility check
+   * (place-geometry.ts): undefined when there is none, so the check passes.
+   * Throws when it cannot be read, and the place is held as
+   * `check_unavailable`. Left out, new places are not checked.
+   */
+  placeGeometry?: (p: { lat: number; lon: number }) => Promise<PlaceGeometry | undefined>;
 }
 
 const held = (reason: HeldReason, writes: SendTimeDecision["writes"] = () => [], addToDecided?: SendTimeDecision["addToDecided"]): SendTimeDecision => ({
@@ -540,10 +550,21 @@ async function decideClearHere({ db, checks, item, submission, contributor, deci
  * description that fails the text checks are left for a person, as the apply
  * leaves them, and the place is listed without them.
  */
-async function decideNewPlace({ checks, item, submission }: DecideInput, record: CheckContributor): Promise<SendTimeDecision> {
+async function decideNewPlace({ checks, item, submission, placeGeometry }: DecideInput, record: CheckContributor): Promise<SendTimeDecision> {
   const listing = newPlaceListing(item);
   if (listing !== null) return held(listing.reason);
   if (item.location === undefined || item.contributor === undefined || submission.type !== "report") return held("invalid_value");
+  // In the water, on a major road or inside a building: the AI reviewer checks it. Remoteness never holds a place.
+  if (placeGeometry) {
+    let geometry: PlaceGeometry | undefined;
+    try {
+      geometry = await placeGeometry(item.location);
+    } catch (error) {
+      console.warn(`the place geometry could not be read, so ${item.id} waits for the apply: ${String(error)}`);
+      return held("check_unavailable");
+    }
+    if (implausibleLocation(item.location, item.report.place_kind, geometry) !== null) return held("implausible_location");
+  }
   const fields = newPlaceFields(item);
   const contacts = Object.fromEntries(
     Object.entries(fields.contacts).filter(([fact]) => !fields.failing.includes(fact as ContactFactName)),

@@ -111,6 +111,12 @@ migrations_dir = "migrations"
 # and fill in. The pending bucket holds uploads until their record is merged. Give
 # it a lifecycle rule that deletes objects 180 days after upload. PHOTO_STATE is
 # the photo server's state namespace, where illegal-content reports withhold a photo.
+# Place geometry tiles for the plausibility check on new places (src/place-geometry.ts), built by
+# the data repository: see "Plausible locations" in docs/self-hosting.md. Optional.
+# [[r2_buckets]]
+# binding = "PLACE_GEOMETRY"
+# bucket_name = "replace-me-place-geometry"
+#
 # [[r2_buckets]]
 # binding = "PHOTOS_PENDING"
 # bucket_name = "replace-me-pending-bucket"

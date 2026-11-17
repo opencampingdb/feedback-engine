@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { run } from "../src/run.js";
 import { dumpPlace } from "../src/serialise.js";
@@ -302,6 +303,35 @@ describe("run", () => {
     expect(second.review_pr_body.split("\n").filter((l) => l.startsWith("- closed-case "))).toEqual([
       `- closed-case ${JSON.stringify({ case: "fact_doubted", place: PLACE, fact: "toilets", settles: "restored", feedback: [id(3), id(4)] })}`,
     ]);
+  });
+
+  describe("plausible locations", () => {
+    const fixture = (name: string) => fileURLToPath(new URL(`./fixtures/place-geometry/${name}`, import.meta.url));
+    const geometryFiles = { landMask: fixture("water.ndjson"), buildings: fixture("buildings.ndjson"), geometry: fixture("roads.ndjson") };
+
+    it("holds a new place in the sea for the AI reviewer when given the land mask, building footprints and roads", async () => {
+      const review = join(root, "data-review");
+      await put(join(review, "places", "za", `${PLACE}.json`), dumpPlace(place));
+      const newId = await newPlace(9, "2026-10-29T00:00:00Z", "aaaa", { lat: -33.05, lon: 151.15 });
+      const summary = await run({ inbox, data, reviewData: review, now: NOW, ...geometryFiles });
+      expect(summary.auto_changed).toBe(false);
+      expect(heldCases(summary.review_pr_body)).toContainEqual(expect.objectContaining({ case: "implausible_location", place: newId, hit: "water", problem: "in the sea" }));
+      const draft = JSON.parse(await readFile(join(review, summary.review_files[0]!), "utf8")) as Place;
+      expect(draft.standing).toBe("held");
+    });
+
+    it("publishes a new place on land, and one inside a building on a run that has only the land mask, logging what it lacks", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await newPlace(8, "2026-10-29T00:00:00Z", "aaaa", { lat: -25.3, lon: 131 });
+        await newPlace(9, "2026-10-29T00:00:00Z", "bbbb", { lat: -33.01985, lon: 151.05015 });
+        const summary = await run({ inbox, data, now: NOW, landMask: geometryFiles.landMask });
+        expect(summary.new_places).toHaveLength(2);
+        expect(warn).toHaveBeenCalledWith("no major roads or building footprints, so new places are not checked against them");
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   it("reports the new places it wrote for the first time", async () => {

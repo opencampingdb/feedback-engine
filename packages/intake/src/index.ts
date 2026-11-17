@@ -82,6 +82,7 @@ import {
   type StoredPlace,
 } from "./recent.js";
 import { cellHashes, getIndexedPlace, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
+import { geometryAt, type GeometryBucket } from "./place-geometry.js";
 import { createChecks, pruneLiveCounts, releaseLive, type AiLike, type LiveSlot } from "./checks.js";
 import { checkRepeated, pruneTextVectors, repeatedTextOf, type RepeatedResult, type VectorizeLike } from "./repeated.js";
 import {
@@ -169,6 +170,13 @@ export interface Env {
   ATTEST?: KVLike;
   /** Secret. Google service account key file (JSON) allowed to decode Play Integrity tokens. Needed when an app key has `android`. */
   GOOGLE_SERVICE_ACCOUNT?: string;
+  /**
+   * R2 bucket with the data repository's place geometry tiles (land mask,
+   * major roads, building footprints) for the plausibility check on new
+   * places (place-geometry.ts). Optional: without it, new places are not
+   * checked at send time and the apply checks them.
+   */
+  PLACE_GEOMETRY?: GeometryBucket;
   /** Private R2 bucket that holds uploaded photos until their record is merged. Needed for `/v1/photos`. */
   PHOTOS_PENDING?: BucketLike;
   /** Secret, shared with the photo server. Signs photo passes. Needed for `/v1/photos/pass`. */
@@ -2087,6 +2095,7 @@ export function createHandler(deps: Deps) {
         contributor: who,
         decided: intake.decided,
         website: { fetch: (url, init) => deps.fetch(url, init), timeoutMs: deps.contactCheckMs ?? SEND_TIME_BUDGET_MS },
+        placeGeometry: (p) => geometryAt(env.PLACE_GEOMETRY, p),
       }).catch((error: unknown) => {
         console.warn(`deciding ${id} failed: ${String(error)}`);
         return { answer: UNAVAILABLE, writes: () => [] };

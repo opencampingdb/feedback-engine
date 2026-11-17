@@ -10,6 +10,10 @@
       "types": "./dist/decide.d.ts",
       "default": "./dist/decide.js"
     },
+    "./plausible": {
+      "types": "./dist/plausible.d.ts",
+      "default": "./dist/plausible.js"
+    },
     "./review": {
       "types": "./dist/review.d.ts",
       "default": "./dist/review.js"

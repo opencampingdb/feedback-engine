@@ -346,6 +346,29 @@ describe("the AI reviewer", () => {
     expect(message).toContain("The email is the park's own.");
   });
 
+  describe("implausible_location cases", () => {
+    it("tells the model where the place is, approves one it is sure of and takes down another", async () => {
+      const cases = [
+        heldCase(0, { case: "implausible_location", standing: "held", hit: "water", problem: "in the sea" }),
+        heldCase(1, { case: "implausible_location", standing: "held", hit: "building", problem: "inside a building (way/42)" }),
+      ];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(place(0, { standing: "held" }));
+      gh.put(place(1, { standing: "held" }));
+      const { ai, asked } = fakeAi((input) =>
+        (caseOf(input).place as { id: string }).id === id(0) ? reply("approve", "A camp on a sand spit the mask has as sea.") : reply("take_down", "A pin on a shed."),
+      );
+
+      await run(gh, ai);
+      expect(caseOf(asked[0]!.input)).toMatchObject({ case: "implausible_location", hit: "water", found: "in the sea" });
+      expect(JSON.stringify((asked[0]!.input.messages as { content: string }[])[0]!.content)).toContain("implausible_location");
+      const schema = (asked[0]!.input.response_format as { json_schema: { properties: { decision: { enum: string[] } } } }).json_schema;
+      expect(schema.properties.decision.enum).toEqual(["approve", "take_down", "leave"]);
+      expect(gh.read(0)).toMatchObject({ standing: "shown", updated: AT });
+      expect(gh.read(1)).toMatchObject({ standing: "hidden", moderator: { action: "hide", at: AT } });
+    });
+  });
+
   describe("contact_check cases", () => {
     const checked = (n: number, extra: Partial<HeldCase> = {}) =>
       heldCase(n, { case: "contact_check", fact: "phone", checks: ["website"], problem: "the place's website: lake.example.org does not show it", ...extra });

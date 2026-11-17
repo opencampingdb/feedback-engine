@@ -7,7 +7,8 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { FIRST_HAND, FIRST_HAND_KINDS, hasLoneSurrogate, isFeedbackId, isOwnerSubmission, type FactValue, type StoredFeedback, type StoredSubmission } from "@opencampingdb/feedback";
 import type { AwaitingClaim, OwnerRecord } from "./owners.js";
 import { pairKey, withDoNotMatch, type DoNotMatchEntry } from "./review.js";
-import { majorRoads, type MajorRoads } from "./roads.js";
+import { boundsNear, buildingFootprints, carriageways, landMask, missingLayers, type PlaceGeometry } from "./plausible.js";
+import { majorRoads, type LatLon, type MajorRoads } from "./roads.js";
 import type { Decision } from "./rules.js";
 import { dumpPhotoLine, dumpPlace, dumpReviewLine, photoPath, placePath, reviewPath } from "./serialise.js";
 import type { BlockedList, Photo, PhotoVotes, Place, RemovedPhotos, Review, Source } from "./types.js";
@@ -219,6 +220,75 @@ export async function readRoads(path: string): Promise<MajorRoads> {
     if (line.includes('"road"')) lines.push(line);
   }
   return majorRoads(lines);
+}
+
+/** Geometry this far from every place a run checks is not kept in memory. */
+const GEOMETRY_NEAR_M = 200;
+
+/** The bounds of every [lon, lat] pair in `value`, however deeply it is nested, or null when it has none. */
+function boundsOf(value: unknown): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  let b: { minX: number; minY: number; maxX: number; maxY: number } | null = null;
+  const walk = (v: unknown): void => {
+    if (!Array.isArray(v)) return;
+    if (typeof v[0] === "number" && typeof v[1] === "number") {
+      const [x, y] = v as [number, number];
+      b = b === null ? { minX: x, minY: y, maxX: x, maxY: y } : { minX: Math.min(b.minX, x), minY: Math.min(b.minY, y), maxX: Math.max(b.maxX, x), maxY: Math.max(b.maxY, y) };
+      return;
+    }
+    for (const item of v) walk(item);
+  };
+  walk(value);
+  return b;
+}
+
+/**
+ * The lines of a JSON lines geometry file holding `key` whose shapes come
+ * within `GEOMETRY_NEAR_M` of one of `points`, read line by line, so a file
+ * for a whole country never sits in memory.
+ */
+async function geometryLinesNear(path: string, key: string, points: readonly LatLon[]): Promise<string[]> {
+  const lines: string[] = [];
+  for await (const line of createInterface({ input: createReadStream(path, "utf8"), crlfDelay: Infinity })) {
+    if (!line.includes(`"${key}"`)) continue;
+    let value: { polygons?: unknown; coords?: unknown };
+    try {
+      value = JSON.parse(line) as typeof value;
+    } catch {
+      continue;
+    }
+    const bounds = boundsOf(value.polygons ?? value.coords);
+    if (bounds !== null && boundsNear(bounds, points, GEOMETRY_NEAR_M)) lines.push(line);
+  }
+  return lines;
+}
+
+/** The files a plausibility check on new places reads (plausible.ts). Each is optional. */
+export interface PlaceGeometryFiles {
+  /** Water lines: sea and lakes. */
+  landMask?: string;
+  /** Building lines. */
+  buildings?: string;
+  /** The geometry sidecar, for its road lines. */
+  geometry?: string;
+}
+
+/**
+ * The land mask, building footprints and major road carriageways near
+ * `points`, from the files given. A file left out is a layer the check
+ * skips, and the run logs it.
+ */
+export async function readPlaceGeometry(files: PlaceGeometryFiles, points: readonly LatLon[]): Promise<PlaceGeometry> {
+  const geometry: PlaceGeometry = {
+    ...(files.landMask ? { water: landMask(await geometryLinesNear(files.landMask, "water", points)) } : {}),
+    ...(files.buildings ? { buildings: buildingFootprints(await geometryLinesNear(files.buildings, "building", points)) } : {}),
+    ...(files.geometry ? { roads: carriageways(await geometryLinesNear(files.geometry, "road", points)) } : {}),
+  };
+  const missing = missingLayers(geometry);
+  if (missing.length > 0) {
+    const listed = missing.length === 1 ? missing[0] : `${missing.slice(0, -1).join(", ")} or ${missing.at(-1)}`;
+    console.warn(`no ${listed}, so new places are not checked against ${missing.length === 1 ? "it" : "them"}`);
+  }
+  return geometry;
 }
 
 /** Where the apply run keeps the helpful votes that count, in the inbox. Private: it names installs. */

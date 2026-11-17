@@ -46,6 +46,7 @@ import type { CheckOutcome } from "./contact-checks.js";
 import { moderateReview } from "./moderation.js";
 import { mergePlaces, mergeProblem, type ClosedCase, type DoNotMatchEntry, type HeldCase } from "./review.js";
 import type { EarlierFact } from "./io.js";
+import { implausibleLocation, type Implausible, type PlaceGeometry } from "./plausible.js";
 import type { MajorRoads } from "./roads.js";
 import { roundCoord } from "./serialise.js";
 import { doNotMatchProblems, newProblems, placeProblems, reviewProblems, textProblems } from "./data-check.js";
@@ -182,6 +183,16 @@ export interface RulesInput {
    * duplicate is merged without a reviewer.
    */
   roads?: MajorRoads;
+  /**
+   * The land mask, major road carriageways and building footprints for the
+   * plausibility check on new places (plausible.ts). A new place in the sea
+   * or a lake, on a major road's carriageway or inside a building footprint
+   * is drafted as held and listed as an `implausible_location` case for the
+   * AI reviewer. A layer left out is not checked, and the check passes; a
+   * place the intake held as `implausible_location` is held whatever this
+   * run has.
+   */
+  placeGeometry?: PlaceGeometry;
   /**
    * Ids on the intake's recent list, or "unreadable" when the list was asked
    * for and could not be read. Feedback about a place on the list that is not
@@ -1637,7 +1648,9 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
 
       // The intake lists a new place only when it passes these, so apply publishes no other.
       const unlisted = existing ? undefined : whyNotListed(origin);
-      const published = (standing === "shown" || standing === "confirmed") && unlisted === undefined;
+      // A new place in the water, on a major road or inside a building is held for the AI reviewer.
+      const implausible = existing || !isPending ? null : implausibleOf(origin);
+      const published = (standing === "shown" || standing === "confirmed") && unlisted === undefined && implausible === null;
       // Contact facts and the address. A published place carries those that pass
       // the link and spam checks; the rest wait for a person. A draft for a person carries them all.
       const { contacts: heldFacts, failing, descriptionProblem } = newPlaceFields(origin);
@@ -1650,7 +1663,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       const caseFor = (kind: HeldCase["case"], feedback: readonly StoredFeedback[]): HeldCase => ({
         case: kind,
         place: id,
-        standing: standing as NonNullable<HeldCase["standing"]>,
+        // An implausible place is drafted as held, unless reports hid it.
+        standing: (kind === "implausible_location" && standing !== "hidden" ? "held" : standing) as NonNullable<HeldCase["standing"]>,
         location: { lat: roundCoord(origin.location!.lat), lon: roundCoord(origin.location!.lon) },
         kind: (existing ?? draftOf(origin)).kind,
         ...(kind === "duplicate" && duplicate ? { duplicate_of: duplicate.place, distance_m: duplicate.distance } : {}),
@@ -1658,6 +1672,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         ...(kind === "contacts" ? { contacts: failing } : {}),
         ...(kind === "description" && descriptionProblem !== null ? { problem: descriptionProblem } : {}),
         ...(kind === "first_place" && origin.contributor ? { contributor: origin.contributor } : {}),
+        ...(kind === "implausible_location" && implausible !== null ? { hit: implausible.hit, problem: implausible.problem } : {}),
         feedback: feedback.map((f) => f.id),
       });
 
@@ -1705,9 +1720,11 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           setSource(draft, fact, "feedback", nowIso);
         }
         edits.push({ kind: "new_place", record: draft, feedback: origin.id });
-        if (unlisted !== undefined && !(standing === "held" || standing === "hidden")) draft.standing = "held";
+        if ((unlisted !== undefined || implausible !== null) && !(standing === "held" || standing === "hidden")) draft.standing = "held";
         const why =
-          unlisted !== undefined && draft.standing === "held" && standing !== "held"
+          implausible !== null && unlisted === undefined && standing !== "held" && standing !== "hidden"
+            ? `implausible location: ${implausible.problem}, so it is not published (keep it: set standing to shown)`
+            : unlisted !== undefined && draft.standing === "held" && standing !== "held"
             ? `${unlisted}, so it is not published (keep it: set standing to shown)`
             : standing === "held"
             ? `possible duplicate of ${duplicate!.place}, ${duplicate!.distance} m away (keep it: set standing to shown; the same place: merge it into ${duplicate!.place})`
@@ -1716,7 +1733,13 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         decide(
           origin,
           "needs_review",
-          standing === "hidden" ? "hidden by reports, so a person checks it" : standing === "held" ? "possible duplicate, so a person checks it" : `${unlisted}, so a person checks it`,
+          standing === "hidden"
+            ? "hidden by reports, so a person checks it"
+            : standing === "held"
+            ? "possible duplicate, so a person checks it"
+            : unlisted === undefined
+            ? `implausible location: ${implausible!.problem}, so the AI reviewer checks it`
+            : `${unlisted}, so a person checks it`,
         );
       } else if (before !== standing) {
         // Not in the data and already with a person: only the listing changes.
@@ -1730,7 +1753,19 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       if (isPending && published && descriptionProblem !== null) held.push(caseFor("description", [origin]));
       if (isPending && firstPlace) held.push(caseFor("first_place", [origin]));
       if (isPending && hasNote) held.push(caseFor("note", [origin]));
+      if (implausible !== null && !published) held.push(caseFor("implausible_location", [origin]));
     }
+  }
+
+  /**
+   * Why a new place's location is implausible, from this run's geometry, or
+   * from the intake when it held the place for that and this run cannot tell.
+   */
+  function implausibleOf(item: ReportItem): Implausible | null {
+    const found = implausibleLocation(item.location!, item.report.place_kind, input.placeGeometry);
+    if (found !== null) return found;
+    const intake = (item as { intake?: { state?: unknown; held_reason?: unknown } }).intake;
+    return intake?.state === "held" && intake.held_reason === "implausible_location" ? { hit: "intake", problem: "the intake found the location implausible" } : null;
   }
 
   /** A person's decision on a new place's record, or null when it has none it can read. */

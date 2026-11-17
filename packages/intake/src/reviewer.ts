@@ -223,7 +223,11 @@ const meaning = (c: HeldCase, d: ReviewDecision) =>
           ? "keep the reported contact on the place: it is clearly the place's own, despite the failed checks"
           : c.case === "contact_check" && d === "dismiss"
             ? "take the reported contact off the place and put back what it had before: it is not the place's own, or it is spam"
-            : MEANINGS[d];
+            : c.case === "implausible_location" && d === "approve"
+              ? "publish the place where it is: the location is believable for its kind, such as a camp on a sand spit or an island the map has as water"
+              : c.case === "implausible_location" && d === "take_down"
+                ? "hide the place: only when it is clearly spam or not a place at all. A real place pinned in the wrong spot is leave, so a person can move it"
+                : MEANINGS[d];
 
 /** What the model reads of a place. Values travellers or the owner sent are data, not instructions. */
 function placeView(place: Place) {
@@ -254,6 +258,11 @@ function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
       ? [
           "In a contact_check case, a traveller reported a contact for the place (the place's facts show it) and it failed automatic checks: the place's own website does not show it, its domain was registered recently or its age is unknown, or the address is in another state.",
           "A newly registered domain or a contact unrelated to the place points to spam. A check that could not run (a website that timed out, a registry with no date) says little either way.",
+        ]
+      : []),
+    ...(c.case === "implausible_location"
+      ? [
+          "In an implausible_location case, a traveller added a new place whose location the map data puts in the sea or a lake, on a major road's carriageway or inside a building footprint (hit and found say which). Map data can be out of date or coarse near a shore. Remoteness is never a reason to doubt a place.",
         ]
       : []),
     "Answer with JSON only: {\"decision\": ..., \"reason\": ..., \"sure\": true or false}.",
@@ -334,6 +343,7 @@ function caseEvidence(c: HeldCase, place: Place, duplicateOf: Place | undefined)
     ...(c.case === "vehicle_access_candidate" ? { fact: c.fact, value: c.value } : {}),
     ...(c.case === "commons_mismatch" ? { file: c.file, reporting_sources: c.sources } : {}),
     ...(c.case === "contact_check" ? { contact: c.fact, failed_checks: c.checks, found: c.problem, value_before: c.value } : {}),
+    ...(c.case === "implausible_location" ? { hit: c.hit, found: c.problem } : {}),
   });
 }
 

@@ -737,6 +737,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `repeated_text` | Its free text is nearly the same as text three other sources sent in the last 30 days, so a person reads it. |
 | `contact_check` | A contact the automatic contact checks have not passed yet: the place's website does not show it, or its check could not finish in time at send time, or it is a website or address, which only the apply run checks. The apply run's full check decides it, and one that fails goes to the AI reviewer. |
 | `network_reputation` | The report came from an attested install on a network the intake's blocklist names, so a reviewer reads it. The same report from an install that is not attested, or from a website, is dropped silently. |
+| `implausible_location` | A new place the map data puts in the sea or a lake, on a major road's carriageway or inside a building footprint. It is not listed, and the AI reviewer checks it: a person sees it only when the reviewer is unsure. A remote place is never held for being remote. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.
 

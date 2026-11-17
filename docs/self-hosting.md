@@ -429,11 +429,12 @@ The review PR body lists every held case under "Held cases", one line each: `- h
 
 - A `contact_withdrawn` case is a contact taken off a place after reports from two sources within 90 days, one of them attested. It carries `fact`, `value` and `reasons`. `value` is the place's own published contact, not something a traveller sent, so it is in the PR body. The contact is already off the place through `feedback/auto`. To restore it, set `facts.<fact>` back to `value` on the place in the review PR. Reports sent before the takedown no longer count against it.
 - A `contact_check` case is a traveller's contact that failed the automatic contact checks (`--contact-checks`). It carries `fact`, `checks` (the checks it failed: `website`, `domain_age` or `address`), `problem` (what they found, never the reported value) and `value`, what the place published before, when it had one. The reported contact is set on the place in the review PR. To refuse it, set `facts.<fact>` back to `value`, or remove it when there is no `value`.
+- An `implausible_location` case is a new place the map data puts in the water, on a major road's carriageway or inside a building ([Plausible locations](#plausible-locations)). It carries `hit` and `problem`, and the place is drafted with standing `held`. To keep it, set `standing` to `shown`, after moving its `location` if the pin is in the wrong spot.
 - A `fact_doubted` case is a fact travellers say is wrong without giving the right value. It carries `fact`, `value` (what the place published), `taken_down`, `sources` (the travellers doubting it) and the `doubts` and `confirmations` weighed, by feedback id. With `taken_down`, the fact is already off the place through `feedback/auto`, and to restore it you set `facts.<fact>` back to `value` in the review PR. Without it the fact stays: only one traveller doubts it, no doubt was attested, as many travellers confirm it, or it came from OSM or the owner. Doubt notes stay in the inbox. Two new travellers confirming the value after a takedown (one attested, neither of them a traveller who reported the value before, and more than any doubts since) restore it, and a new value replaces it. Either way the review PR lists a `- closed-case` line under "Closed cases" with `case`, `place`, `fact`, `settles` (`restored` or `replaced`) and `feedback`, which closes the earlier `fact_doubted` cases for that place and fact.
 
 ### New places
 
-New places are written with their `standing` from the SDK's `newPlaceStanding`. A `shown` or `confirmed` place goes on `feedback/auto` when its report was attested, has a contributor and its note passes the SDK's text checks, as the intake requires to list it. Checks, `remove` reports and the adder's `withdraw` on a place added in the last 90 days work its standing out again: reports from two devices on two client networks (three once confirmed) set it to `hidden`, and a place withdrawn within 24 hours is not written, or its record is deleted. A place within 150 m of another in the same group, a place hidden before it was published, and a place the intake would not list are drafted on `feedback/review` with standing `held` or `hidden`: set `standing` to `shown` to publish it, or close the PR. A published new place carries its description, fee, contacts and address. A contact or address that fails the SDK's `contactProblem` link checks, or a description that fails the text checks, stays in the inbox for a person.
+New places are written with their `standing` from the SDK's `newPlaceStanding`. A `shown` or `confirmed` place goes on `feedback/auto` when its report was attested, has a contributor and its note passes the SDK's text checks, as the intake requires to list it. Checks, `remove` reports and the adder's `withdraw` on a place added in the last 90 days work its standing out again: reports from two devices on two client networks (three once confirmed) set it to `hidden`, and a place withdrawn within 24 hours is not written, or its record is deleted. A place within 150 m of another in the same group, a place hidden before it was published, a place in the water, on a major road or inside a building ([Plausible locations](#plausible-locations)) and a place the intake would not list are drafted on `feedback/review` with standing `held` or `hidden`: set `standing` to `shown` to publish it, or close the PR. A published new place carries its description, fee, contacts and address. A contact or address that fails the SDK's `contactProblem` link checks, or a description that fails the text checks, stays in the inbox for a person.
 
 Reports set a place's `standing` again on later runs unless a person's decision is on its record. To restore a hidden place, set `"standing": "shown"` and `"moderator": {"action": "restore", "at": "<now>"}` on the record, on the review PR or in a PR to `main`. Reports up to `at` no longer count. To hide one, set `"standing": "hidden"` and `"moderator": {"action": "hide", "at": "<now>"}`: it stays hidden whatever travellers send. `at` is a UTC time such as `2026-11-03T09:00:00Z` or a day such as `2026-11-03`. Only the latest decision is kept. The note on a place hidden before it was published gives the line to paste.
 
@@ -470,6 +471,83 @@ node packages/apply/dist/cli.js --inbox ../inbox --data ../data \
 ```
 
 Without `--review-data`, automatic and review changes land in the same checkout. It changes files in both checkouts and commits nothing, so you can read the diff before deciding what to do with it.
+
+### Plausible locations
+
+A new place is held as `implausible_location` when the map data puts it:
+
+- in the sea or a lake, more than 25 m from the shore, unless it is a `boat_ramp`, `swimming_spot` or `ferry_terminal`;
+- within 6 m of a major road's centre line, on its carriageway;
+- inside a building footprint, when its kind is open ground: `free_camp`, `national_park_campsite`, `state_forest_campsite`, `reserve_campsite`, `rest_area`, `dump_point`, `drinking_water_point`, `picnic_site`, `long_vehicle_parking`, `lookout`, `swimming_spot`, `boat_ramp` or `recreation_area`. A caravan park, a toilet block or a fuel station may be a building, or be pinned on its office.
+
+The apply drafts it on `feedback/review` with standing `held` and lists an `implausible_location` case with `hit` (`water`, `road`, `building`, or `intake` when only the intake's answer says so) and `problem` (such as `in the sea`). The AI reviewer may approve it (standing `shown`) or take it down, and leaves a real place pinned in the wrong spot to a person, who can move it. Remoteness is never a reason: a point with no water, road or building near it passes. The rules and constants are in `packages/apply/src/plausible.ts`.
+
+Every part of the check is optional. Missing data makes that part pass, never hold, and is logged: the apply logs the layers it was not given, and the intake logs a new place it decided without `PLACE_GEOMETRY`. A tile the intake cannot read holds the place as `check_unavailable`, for the apply to decide.
+
+#### The geometry files
+
+The data repository builds the geometry from OSM. Each file is JSON lines, one object per line, with coordinates as `[lon, lat]` in WGS 84, to 6 decimal places. Polygons are written as the geometry sidecar writes an area: a list of polygons, each an outer ring followed by its holes, each ring closed. Lines of another kind, and lines that do not parse, are skipped.
+
+Water (`--land-mask`), one line per polygon piece:
+
+```json
+{"polygons":[[[[151.1,-33.1],[151.2,-33.1],[151.2,-33.0],[151.1,-33.0],[151.1,-33.1]]]],"water":"sea"}
+{"name":"Example Lake","polygons":[[[[151.0,-33.05],[151.02,-33.05],[151.02,-33.03],[151.0,-33.03],[151.0,-33.05]]]],"water":"lake"}
+```
+
+- `water` is `sea` or `lake`, and `name`, for a lake, is optional.
+- The sea is the water side of `natural=coastline`, the same polygons as the OSM water polygons built from it, cut along the 0.1 degree grid (every 0.1 degree of latitude and longitude) so no piece is larger than a grid square. Any water counts in the shore test, so the cut edges are never taken for a shore.
+- A lake is `natural=water` (closed ways and multipolygons) of at least 1 hectare, leaving out `water=river`, `canal`, `stream`, `ditch`, `drain` and `wastewater`, cut along the same grid.
+- Simplify to about 5 m, keeping the topology.
+
+Buildings (`--buildings`), one line per footprint:
+
+```json
+{"building":"way/42","polygons":[[[[151.05,-33.02],[151.0503,-33.02],[151.0503,-33.0197],[151.05,-33.0197],[151.05,-33.02]]]]}
+```
+
+- `building` is the OSM object, `way/<id>` or `relation/<id>`.
+- Every `building=*` area, leaving out `building=no`, `roof`, `carport`, `shelter`, `ruins` and `construction`, and anything also tagged `amenity=shelter` or `tourism=*`.
+
+Major roads are the geometry sidecar's own road lines (`{"road": <way id>, "highway": ..., "name": ..., "ref": ..., "coords": [[lon, lat], ...]}`), read from `--geometry`. The sidecar keeps only road pieces within about a kilometre of a place in the data, so a new place far from any other is checked against roads only when the data repository writes every major road, which it should do in a separate file in the same format.
+
+The test fixture in `packages/apply/test/fixtures/place-geometry` has a lake with an island, the sea in two pieces, a building and a trunk road.
+
+#### The apply
+
+```sh
+node packages/apply/dist/cli.js ... --land-mask water.ndjson --buildings buildings.ndjson --geometry geometry.ndjson
+```
+
+The run reads the files only when it has a new place to decide, line by line, and keeps only the shapes within 200 m of one, so the files can be as large as the country needs.
+
+#### The intake
+
+The intake reads tiles from an R2 bucket bound as `PLACE_GEOMETRY`, one tile of each layer per new place:
+
+| Key | Holds | Tile |
+| --- | --- | --- |
+| `water/<row>/<col>.ndjson` | water lines | 0.1 degree |
+| `roads/<row>/<col>.ndjson` | road lines | 0.1 degree |
+| `buildings/<row>/<col>.ndjson` | building lines | 0.01 degree |
+
+`row` is `floor(lat * n)` and `col` is `floor(lon * n)`, with `n` 10 for a 0.1 degree tile and 100 for a 0.01 degree tile, worked in double precision (Python's `math.floor(lat * 10)` gives the same answer as the Worker). A tile holds every line whose shape comes within 100 m of the tile, so a point near a tile's edge finds the shore, road or building just over it. `tileKeys` in `packages/intake/src/place-geometry.ts` gives the tiles a shape belongs in. A tile with nothing in it is not uploaded: a missing tile means nothing of that layer is there. A tile over 4 MiB is not read, and that layer passes there and is logged, so the data repository keeps every tile under that size (for buildings, by leaving out the smallest footprints in that tile first).
+
+```toml
+[[r2_buckets]]
+binding = "PLACE_GEOMETRY"
+bucket_name = "<your place geometry bucket>"
+```
+
+#### Sizes for Australia
+
+These are estimates, to be checked against the first build:
+
+- Water: the coastline and its islands, about 60,000 km, and lakes over 1 hectare, simplified to 5 m, come to roughly 100 to 150 MB of lines (30 to 40 MB compressed). About 140,000 0.1 degree squares cover Australia's waters and the mainland, so roughly 90,000 water tiles, most of them a single square of open sea under 200 bytes, and coastal tiles averaging tens of kilobytes.
+- Buildings: OSM has several million building footprints in Australia, roughly 500 MB to 1 GB of lines. As 0.01 degree tiles, a dense suburb holds a few thousand footprints, a few hundred kilobytes.
+- Major roads: every motorway, trunk, primary and secondary road, about 50 to 100 MB of lines, mostly small 0.1 degree tiles.
+
+None of these fits in a Worker's 128 MB of memory as a whole, so the intake reads only tiles. The apply reads the whole files, keeping only what is near its new places, and so has no limit. Without the bucket, the apply alone checks new places, at its next run.
 
 ## Moving an old intake off RECENT_PLACES
 

@@ -2,6 +2,7 @@ import { contactProblem, isCommonsFileName, isContactFact, isDoubtFact, isFactNa
 import type { ContactCheckName } from "./contact-checks.js";
 import { byCodePoint } from "./data-check.js";
 import type { Settles } from "./decide.js";
+import type { ImplausibleHit } from "./plausible.js";
 import { distanceM, majorRoads, type MajorRoads } from "./roads.js";
 import { dumpPlace, placePath } from "./serialise.js";
 import { dropSource, setSource } from "./sources.js";
@@ -55,6 +56,10 @@ export type { Place };
  * contact checks named in `checks`, with what they found in `problem`; it is
  * set on the place in the review PR, and `value` is what the place published
  * before, if anything.
+ * `implausible_location`: a new place drafted as held because the map data
+ * puts it in the sea or a lake, on a major road's carriageway or inside a
+ * building footprint (`hit`, with `problem` saying where), or because the
+ * intake held it for that (`hit` is `intake`).
  * `note`: a new place whose report carries a note, published, drafted or
  * merged into the place it duplicates. The note may say something the place
  * should carry, such as an address the app could not confirm on the map, so a
@@ -73,6 +78,7 @@ export interface HeldCase {
     | "vehicle_access_candidate"
     | "commons_mismatch"
     | "contact_check"
+    | "implausible_location"
     | "note";
   place: string;
   /** The place's standing. Left out for a place travellers did not add. */
@@ -85,8 +91,14 @@ export interface HeldCase {
   reasons?: string[];
   blocked?: true;
   contacts?: string[];
-  /** On `description`: the text check it failed. On `contact_check`: what the failed contact checks found. */
+  /**
+   * On `description`: the text check it failed. On `contact_check`: what the
+   * failed contact checks found. On `implausible_location`: where the place
+   * is, such as "in the sea".
+   */
   problem?: string;
+  /** On `implausible_location`: what the place hit. */
+  hit?: ImplausibleHit;
   /** On `contact_check`: the contact checks it failed. */
   checks?: ContactCheckName[];
   /** On `contact_withdrawn`: the contact taken off the place. On `fact_doubted`: the fact doubted. On `vehicle_access_candidate`: `vehicle_access`. */
@@ -139,6 +151,7 @@ export const HELD_CASES: readonly HeldCase["case"][] = [
   "vehicle_access_candidate",
   "commons_mismatch",
   "contact_check",
+  "implausible_location",
   "note",
 ];
 
@@ -173,6 +186,10 @@ export function isHeldCase(v: unknown): v is HeldCase {
   if (v.case === "contact_check") {
     const names: readonly unknown[] = ["website", "domain_age", "address"];
     if (v.fact === undefined || !Array.isArray(v.checks) || v.checks.length === 0 || !v.checks.every((c) => names.includes(c))) return false;
+  }
+  if (v.case === "implausible_location") {
+    const hits: readonly unknown[] = ["water", "road", "building", "intake"];
+    if (!hits.includes(v.hit) || typeof v.problem !== "string") return false;
   }
   if (v.reasons !== undefined && !isStrings(v.reasons)) return false;
   if (v.contacts !== undefined && !isStrings(v.contacts)) return false;
@@ -241,6 +258,7 @@ export function allowedDecisions(c: HeldCase): ReviewDecision[] {
       return ["approve", "merge", "take_down", "leave"];
     case "hidden":
     case "first_place":
+    case "implausible_location":
       return ["approve", "take_down", "leave"];
     case "contact_withdrawn":
       return ["restore", "leave"];
@@ -313,6 +331,7 @@ export function settleByRules(
   if (c.case === "duplicate" && place.standing !== "held") return leave("the place is no longer held");
   if (c.case === "hidden" && place.standing !== "hidden") return leave("the place is no longer hidden");
   if (c.case === "first_place" && place.standing === "hidden") return leave("the place is already hidden");
+  if (c.case === "implausible_location" && place.standing !== "held") return leave("the place is no longer held");
   return null;
 }
 

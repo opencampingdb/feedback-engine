@@ -9,6 +9,7 @@ import {
   readOwners,
   readPending,
   readPhotoVotes,
+  readPlaceGeometry,
   readRoads,
   refuseMalformed,
   settleAwaiting,
@@ -73,6 +74,16 @@ export interface RunOptions {
    * no road data and merges no duplicate on its own: a reviewer decides.
    */
   geometry?: string;
+  /**
+   * The land mask (water lines: sea and lakes) and the building footprints
+   * (building lines), in the format docs/self-hosting.md describes. With
+   * them and `geometry`'s road lines, a new place in the water, on a major
+   * road's carriageway or inside a building is held for the AI reviewer as
+   * `implausible_location`. Each is optional: a layer left out is not
+   * checked, the check passes, and the run logs it.
+   */
+  landMask?: string;
+  buildings?: string;
   /** Licence id for new photo lines. Defaults to CC-BY-4.0. */
   photoLicence?: string;
   /** False publishes a contributor's first photo when SafeSearch passed it. Defaults to true. */
@@ -268,6 +279,11 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   // What a merge of a duplicate new place checks: pairs a person found separate, and major roads.
   const distinct = everyPlace ? await auto.distinct() : undefined;
   const roads = everyPlace && options.geometry ? await readRoads(options.geometry) : undefined;
+  // The geometry near each new place in this run, for the plausibility check.
+  const newPlacePoints = photosOnly
+    ? []
+    : crowd.flatMap((p) => (p.type === "report" && p.report.kind === "new_place" && p.location ? [p.location] : []));
+  const placeGeometry = newPlacePoints.length > 0 ? await readPlaceGeometry(options, newPlacePoints) : undefined;
 
   // The recent list, asked for only when something is about a place not in the data.
   const aboutMissingPlace = crowd.some((p) => typeof p.place === "string" && !places.has(p.place));
@@ -323,6 +339,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     ...(everyPlace ? { everyPlace } : {}),
     ...(distinct ? { distinct } : {}),
     ...(roads ? { roads } : {}),
+    ...(placeGeometry ? { placeGeometry } : {}),
     ...(doNotMatch ? { doNotMatch } : {}),
     ...(recent !== undefined ? { recent } : {}),
     ...(earlierFacts.size > 0 ? { earlierFacts } : {}),

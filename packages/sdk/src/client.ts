@@ -962,6 +962,9 @@ export type AnswerOutcome =
  *   checks it in full, and one that fails a check goes to the AI reviewer.
  * - `network_reputation`: an attested report from a network on the intake's blocklist, which a
  *   reviewer reads before it goes live.
+ * - `implausible_location`: a new place the map data puts in the sea or a lake, on a major road's
+ *   carriageway or inside a building footprint, so the AI reviewer checks it before it is listed.
+ *   Remoteness is never a reason.
  */
 export const HELD_REASONS = [
   "not_attested",
@@ -989,6 +992,7 @@ export const HELD_REASONS = [
   "repeated_text",
   "contact_check",
   "network_reputation",
+  "implausible_location",
 ] as const;
 
 /** Why the intake held an item at send time. */

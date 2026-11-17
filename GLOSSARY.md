@@ -96,6 +96,10 @@ _Avoid_: moderator, admin
 An automatic check on a reported contact that stands in for a person: the place's own website shows it, its domain is not newly registered, or an address is in the place's state.
 _Avoid_: verification (owners verify), link check (the link rules and the malware check)
 
+**Implausible location**:
+A new place the map data puts in the sea or a lake, on a major road's carriageway or inside a building footprint, held for the AI reviewer. Remoteness never makes a location implausible.
+_Avoid_: suspicious location, invalid location (it is held, not refused)
+
 **Merge**:
 Folding a new place added twice into the place it duplicates, leaving the new place as a tombstone that points at it.
 _Avoid_: dedupe, delete (for a merge)

@@ -290,13 +290,15 @@ export function reviewPrBody(
 
 const HELD_INTRO =
   "Cases a person, a bot or an AI reviewer should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
-  "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate`, `commons_mismatch`, `contact_check` or `note`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
+  "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate`, `commons_mismatch`, `contact_check`, `implausible_location` or `note`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
   "set its `standing` to `shown` in this PR. `contacts` and `description` name what was left off a published new place: " +
   "contact details, addresses and descriptions travellers sent are in the inbox items, never here. " +
   "`contact_withdrawn` is a contact taken off a place after reports from two sources: its `value` is the place's own published contact, " +
   "not something a traveller sent, so it is shown here. To restore it, set `facts.<fact>` back to `value` on the place in this PR. " +
   "`contact_check` is a traveller's contact that failed the automatic contact checks named in `checks`, with what they found in `problem`: it is set on the place in this PR, " +
   "and to refuse it, set `facts.<fact>` back to `value` (what the place had before), or remove it when there is no `value`. " +
+  "`implausible_location` is a new place drafted as held because the map data puts it where `problem` says: in the sea or a lake, on a major road's carriageway or inside a building (`hit`). " +
+  "To keep it, set its `standing` to `shown`, or move its `location` first. " +
   "`fact_doubted` is a fact travellers say is wrong without giving the right value: with `taken_down` doubts from two sources took it off the place, " +
   "otherwise one traveller doubts it and it stays. `value` is what the place published, and `doubts` and `confirmations` name the reports weighed. " +
   "To restore it, set `facts.<fact>` back to `value`. Doubt notes are in the inbox, never here. " +

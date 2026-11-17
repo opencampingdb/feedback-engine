@@ -15,7 +15,8 @@ const USAGE = `Usage: ocdb-apply --inbox <dir> --data <dir> [--review-data <dir>
                   [--photo-licence <id>] [--publish-first-photo]
                   [--main <dir> --intake <url>]
                   [--recent-places <url>] [--review-preview <url>]
-                  [--geometry <file>] [--contact-checks]
+                  [--geometry <file>] [--land-mask <file>] [--buildings <file>]
+                  [--contact-checks]
 
 Applies feedback in <inbox>/pending. Automatic changes go to the data checkout
 in --data, changes for a person to the checkout in --review-data (the same
@@ -67,7 +68,13 @@ with a private data repository: anyone who can read the PR can open the links.
 merged into the place it duplicates only when the two have the same name once
 tidied, are in the same group and less than 50 m apart, and no major road runs
 between them. Without it the run has no road data and merges no duplicate on
-its own: each goes to a reviewer as a duplicate case.
+its own: each goes to a reviewer as a duplicate case. Its road lines are also
+the major road carriageways for the plausibility check below.
+--land-mask and --buildings read the water lines (sea and lakes) and building
+lines described in docs/self-hosting.md. A new place in the water, within 6 m
+of a major road's centre line or inside a building footprint is drafted as
+held and listed as an implausible_location case for the AI reviewer. Each file
+is optional: without one, that part of the check passes and the run logs it.
 --contact-checks runs the automatic contact checks on each contact fact
 report: the place's own website shows the phone, email or social link, the
 domain of a website or email was not registered in the last 90 days (RDAP),
@@ -103,6 +110,8 @@ async function main(): Promise<number> {
       "recent-places": { type: "string" },
       "review-preview": { type: "string" },
       geometry: { type: "string" },
+      "land-mask": { type: "string" },
+      buildings: { type: "string" },
       "contact-checks": { type: "boolean" },
       help: { type: "boolean" },
     },
@@ -149,6 +158,8 @@ async function main(): Promise<number> {
     ...(values["photo-licence"] ? { photoLicence: values["photo-licence"] } : {}),
     ...(values["publish-first-photo"] ? { holdFirstPhoto: false } : {}),
     ...(values.geometry ? { geometry: values.geometry } : {}),
+    ...(values["land-mask"] ? { landMask: values["land-mask"] } : {}),
+    ...(values.buildings ? { buildings: values.buildings } : {}),
     ...(values["contact-checks"] ? { contactChecks: { fetch: transportFetch() } } : {}),
     ...(values["recent-places"] ? { recentList: intakeRecentList(values["recent-places"]) } : {}),
     ...(values["review-preview"] && previewSecret ? { reviewPreview: { url: values["review-preview"], secret: previewSecret } } : {}),
