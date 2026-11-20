@@ -32,6 +32,7 @@ import {
   factsClearedBy,
   GAP_FILL,
   gapFillFact,
+  gapFillPastDailyCap,
   heldForCheck,
   inWindow,
   newPlaceFields,
@@ -211,8 +212,6 @@ export interface RulesInput {
   blocked?: ReadonlySet<string>;
   /** Review ids in `moderation/removed_reviews.json`: a person removed them, so they are never written again. */
   removedReviews?: ReadonlySet<string>;
-  /** Contributors with a visible review in the data: their reviews are trusted. */
-  reviewers?: ReadonlySet<string>;
   /**
    * Every review line in the data, when the run has a review erasure. The
    * places they are on must be in `places`, and `reviews` must answer for them.
@@ -661,8 +660,14 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   const pending = [...input.pending].sort(byReceived);
   // Items the AI reviewer let through after the intake held them for a check.
   const released = releasedByReviewer(input.reviewerDecisions ?? []);
-  /** The check the intake held `item` for (`heldForCheck`), unless the AI reviewer has since let it through. */
-  const heldNow = (item: StoredFeedback) => (released.has(item.id) ? null : heldForCheck(item));
+  /** The place an item is about as this run has left it so far, or undefined when it is not in the data. */
+  const placeNow = (item: StoredFeedback): Place | undefined => (typeof item.place === "string" ? (working.get(item.place) ?? input.places.get(item.place)) : undefined);
+  /**
+   * The check the intake held `item` for (`heldForCheck`), unless the AI
+   * reviewer has since let it through or it is a gap fill held only for the
+   * daily cap (`gapFillPastDailyCap`), which these rules decide.
+   */
+  const heldNow = (item: StoredFeedback) => (released.has(item.id) || gapFillPastDailyCap(item, placeNow(item)) ? null : heldForCheck(item));
   /** An `intake_check` case for an item the intake held for a check the AI reviewer decides, or null for a check a person decides. */
   const intakeCheckCase = (item: StoredFeedback, place: Place, fields: Pick<HeldCase, "about"> & Partial<Pick<HeldCase, "fact" | "value" | "review" | "says">>): HeldCase | null => {
     const check = heldNow(item);
@@ -1095,9 +1100,6 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   }
 
   function applyReviews(items: ReviewItem[]): void {
-    // Trust comes from a visible review in the data or an applied review, and from no other kind of feedback.
-    const trusted = new Set(input.reviewers ?? []);
-    for (const h of input.history) if (h.type === "review" && h.contributor !== undefined && wasApplied(h)) trusted.add(h.contributor);
     const reviewsSent = [...input.history, ...items].filter((i): i is ReviewItem => i.type === "review");
     // The item each review line came from, while it is in the history or this run.
     const senderOf = new Map(reviewsSent.map((i) => [reviewIdOf(i), i]));
@@ -1140,22 +1142,21 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         text.length >= REPEATED_TEXT_LENGTH &&
         reviewsSent.some((other) => other.place !== item.place && other.id !== item.id && sameText(other.review.text) === text);
       const unproved = item.proved !== true && lines.some((r) => r.contributor === item.contributor && !sameSender(item, r));
-      // The intake marks a review whose text other sources sent too, or whose text it could not check.
+      // A review that passes moderateReview goes live, a contributor's first one too (ADR 0006). The intake
+      // marks a review whose text other sources sent too, or whose text it could not check.
       const check = heldNow(item);
-      if (check !== null || repeated || !trusted.has(item.contributor) || unproved) {
+      if (check !== null || repeated || unproved) {
         const why =
           check !== null
             ? `the intake held it for ${check}`
             : repeated
               ? "the same text was sent for another place"
-              : !trusted.has(item.contributor)
-                ? "first review from this contributor"
-                : "it replaces the contributor's earlier review from another device";
+              : "it replaces the contributor's earlier review from another device";
         edits.push({ kind: "review", place: item.place, review, feedback: item.id });
         // The public PR names the inbox item and never quotes the text, so an erasure or removal leaves no copy there.
         note(item.place, `${item.review.stars} star review, ${why} (read its text in the inbox item before merging)`, false, [item]);
         // Held only for a check the AI reviewer decides: it reads the review on the review branch.
-        const forReviewer = !repeated && trusted.has(item.contributor) && !unproved ? intakeCheckCase(item, input.places.get(item.place)!, { about: "review", review: reviewId }) : null;
+        const forReviewer = !repeated && !unproved ? intakeCheckCase(item, input.places.get(item.place)!, { about: "review", review: reviewId }) : null;
         if (forReviewer) held.push(forReviewer);
         decide(item, "needs_review", `${why}, so ${forReviewer ? "the AI reviewer" : "a person"} checks it`);
         continue;
@@ -2186,7 +2187,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
    * New places from travellers, and the checks, removal reports and
    * withdrawals sent about them. Each is written with its standing from
    * `newPlaceStanding`: `shown` and `confirmed` places go straight into the
-   * data, much as trusted reviews do. A `held` or `hidden` place that is not
+   * data, much as reviews do. A `held` or `hidden` place that is not
    * in the data yet is drafted for a person instead, or for the AI reviewer
    * when only a lack of attestation keeps it off the list (`unattested_place`), a `withdrawn` one is
    * not written and is removed if it was. Every case a person should look
