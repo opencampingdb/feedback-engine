@@ -444,10 +444,30 @@ export function nameConfirmed(name: string, replacedOsmName: string | null | und
 }
 
 /**
+ * Kinds a place has only inside one kind of protected area, with the words
+ * that area's name holds. A change to one of them, on a place whose
+ * `protected_area` fact does not name such an area, goes to a person: a
+ * conservation park or a reserve is not a national park, whoever manages it.
+ */
+export const AREA_KINDS: readonly (readonly [kind: string, words: string])[] = [
+  ["national_park_campsite", "National Park"],
+  ["state_forest_campsite", "State Forest"],
+];
+
+/** The name of the protected area a place lies in, from its `protected_area` fact, or "" when it has none. */
+function protectedAreaName(place: Place): string {
+  const area = (place.facts as Record<string, unknown>).protected_area;
+  const name = typeof area === "object" && area !== null ? (area as { name?: unknown }).name : undefined;
+  return typeof name === "string" ? name : "";
+}
+
+/**
  * `leave`, and why, when the rules settle a `place_change` case; null when a
  * reviewer decides it. A person decides an owner's value, a place with a
  * verified owner, a change no longer on the place, a move of more than
- * MAX_REVIEWER_MOVE_M and a name `nameConfirmed` does not confirm.
+ * MAX_REVIEWER_MOVE_M, a name `nameConfirmed` does not confirm, and a change
+ * to a kind in AREA_KINDS on a place its `protected_area` fact does not put
+ * in that kind of area.
  */
 function settleChange(c: HeldCase, place: Place, siteNames: readonly string[] | undefined): { decision: "leave"; reason: string } | null {
   const leave = (reason: string) => ({ decision: "leave" as const, reason });
@@ -458,6 +478,14 @@ function settleChange(c: HeldCase, place: Place, siteNames: readonly string[] | 
   if (c.change === "location") {
     const moved = Math.round(distanceM(c.from as { lat: number; lon: number }, c.to as { lat: number; lon: number }));
     if (moved > MAX_REVIEWER_MOVE_M) return leave(`a move of ${moved} m is more than ${MAX_REVIEWER_MOVE_M} m, so a person checks it`);
+  }
+  if (c.change === "kind") {
+    const area = protectedAreaName(place);
+    for (const [kind, words] of AREA_KINDS) {
+      if (c.to === kind && !area.toLowerCase().includes(words.toLowerCase())) {
+        return leave(`nothing on the place says it lies in a ${words.toLowerCase()}, so a person checks the kind`);
+      }
+    }
   }
   if (c.change === "name") {
     // A name with no source entry follows OSM, as the OSM sync reads it, on a place that is in OSM.

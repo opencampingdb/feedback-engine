@@ -7,7 +7,7 @@ import { dumpPlace, placePath, reviewPath } from "../../apply/src/serialise.js";
 import type { Place } from "../../apply/src/types.js";
 import type { AiLike } from "../src/checks.js";
 import { createHandler, createReviewer, createScheduled, type Env } from "../src/index.js";
-import { decidedKeys, DEFAULT_REVIEW_MODEL, MAX_MODEL_CASES, MAX_MODEL_FAILURES, REVIEW_BRANCH } from "../src/reviewer.js";
+import { decidedKeys, DEFAULT_REVIEW_MODEL, GAP_FILL_GUIDE, KIND_GUIDE, KINDS_PATH, MAX_MODEL_CASES, MAX_MODEL_FAILURES, REVIEW_BRANCH, REVIEW_GUIDE } from "../src/reviewer.js";
 import { REVIEW_EVERY_MS } from "../src/runs.js";
 import { fakeD1 } from "./fake-d1.js";
 
@@ -204,6 +204,9 @@ function fakeAi(answer: (input: Record<string, unknown>) => unknown) {
 const caseOf = (input: Record<string, unknown>) => JSON.parse((input.messages as { content: string }[])[1]!.content) as Record<string, unknown>;
 
 const reply = (decision: string, reason: string, sure = true) => ({ response: { decision, reason, sure } });
+
+/** What the model was told about how to decide, from its system message. */
+const systemOf = (input: Record<string, unknown>) => (input.messages as { content: string }[])[0]!.content;
 
 describe("the AI reviewer", () => {
   let env: Env;
@@ -509,6 +512,37 @@ describe("the AI reviewer", () => {
       ]);
     });
 
+    it("tells the model to approve a review unless it is spam or holds drugs, violence, bad language or sexual content", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [heldCase(0, { case: "intake_check", held_for: "repeated_text", about: "review", review: REVIEW_ID(0) })]));
+      gh.put(place(0, { standing: undefined }));
+      const line = { id: REVIEW_ID(0), place: id(0), stars: 1, text: "Meh.", visited: "2026-10", created: AT, app: "example-app", contributor: "ctr_0000000000000001" };
+      gh.files.set(reviewPath(id(0)), { text: `${JSON.stringify(line)}\n`, sha: "blob-review" });
+      const { ai, asked } = fakeAi(() => reply("approve", "A short, clean review."));
+      await run(gh, ai);
+      const system = systemOf(asked[0]!.input);
+      for (const guide of REVIEW_GUIDE) expect(system).toContain(guide);
+      expect(system).toContain("drugs, violence, bad language or sexual content");
+      expect(system).toContain("star rating, a short text or its being the contributor's first review are never reasons to leave");
+      expect(system).not.toContain(GAP_FILL_GUIDE[0]);
+    });
+
+    it("tells the model to confirm a fact that fills a blank unless it is spam or impossible, and to judge a changed value as before", async () => {
+      const cases = [
+        heldCase(0, { case: "intake_check", held_for: "network_reputation", about: "fact", fact: "toilets", value: false }),
+        heldCase(1, { case: "intake_check", held_for: "network_reputation", about: "fact", fact: "toilets" }),
+      ];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      for (const n of [0, 1]) gh.put(place(n, { standing: undefined, facts: { toilets: true }, fact_sources: { toilets: "feedback" } }));
+      const { ai, asked } = fakeAi(() => reply("confirm", "Believable."));
+      await run(gh, ai);
+      const [changed, filled] = asked.map((a) => systemOf(a.input));
+      expect(caseOf(asked[1]!.input)).toMatchObject({ about: "fact", value_before: null });
+      for (const guide of GAP_FILL_GUIDE) expect(filled).toContain(guide);
+      expect(filled).not.toContain("Judge the item itself");
+      expect(changed).toContain("Judge the item itself");
+      expect(changed).not.toContain(GAP_FILL_GUIDE[0]);
+    });
+
     it("leaves a held closure on a place with a verified owner, or whose status the owner set, to a person", async () => {
       const cases = [0, 1].map((n) => heldCase(n, { case: "intake_check", held_for: "network_reputation", about: "status", says: "closed" }));
       const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
@@ -560,6 +594,24 @@ describe("the AI reviewer", () => {
         [id(1), "dismiss", false],
       ]);
       expect(gh.read(0).facts.toilets).toBe(true);
+    });
+
+    it("tells the model to confirm a value that fills a blank unless it is spam, impossible or contradicted by the website, and to weigh one that changes a value", async () => {
+      const cases = [unconfirmed(0, { value: false }), unconfirmed(1, { value: true }), unconfirmed(2, { value: true, doubts: ["fb_01JC0000000000000000000099"] })];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.put(place(0, { standing: undefined, facts: { toilets: true }, fact_sources: { toilets: "feedback" } }));
+      for (const n of [1, 2]) gh.put(place(n, { standing: undefined, facts: {}, fact_sources: {} }));
+      const { ai, asked } = fakeAi(() => reply("confirm", "Believable."));
+      await run(gh, ai);
+      const [changes, fills, doubted] = asked.map((a) => systemOf(a.input));
+      for (const guide of GAP_FILL_GUIDE) expect(fills).toContain(guide);
+      expect(fills).toContain("Dismiss it too when the place's own website clearly contradicts it.");
+      expect(fills).not.toContain("Confirm only when");
+      // A value that changes one the place has, or that travellers doubted, is weighed as before.
+      for (const system of [changes, doubted]) {
+        expect(system).toContain("Confirm only when the value is believable for this place and nothing speaks against it.");
+        expect(system).not.toContain(GAP_FILL_GUIDE[0]);
+      }
     });
 
     it("leaves a value to a person when the place's website reads like instructions to a reviewer", async () => {
@@ -764,6 +816,69 @@ describe("the AI reviewer", () => {
       const { ai, asked } = fakeAi(() => reply("approve", "A camp with paid sites."));
       expect(decisionsOf(await run(gh, ai))).toEqual([[id(0), "approve", false]]);
       expect(caseOf(asked[0]!.input)).toMatchObject({ case: "place_change", change: "kind", from: "free_camp", to: "campground" });
+    });
+
+    it("tells the model what kinds mean and shows it their labels, and leaves a change to a national park campsite in a conservation park to a person", async () => {
+      const kinds = {
+        kinds: [
+          { code: "campground", label: "Campground", group: "overnight" },
+          { code: "caravan_park", label: "Caravan park", group: "overnight" },
+          { code: "national_park_campsite", label: "National park campsite", group: "overnight" },
+          { code: "reserve_campsite", label: "Reserve campsite", group: "overnight" },
+        ],
+      };
+      const cases = [
+        // From a real run: a place in a conservation park moved to a national park campsite.
+        change(0, { change: "kind", from: "reserve_campsite", from_group: "overnight", to: "national_park_campsite" }),
+        // A holiday park, rightly moved to a caravan park.
+        change(1, { change: "kind", from: "campground", from_group: "overnight", to: "caravan_park" }),
+        // A place that does lie in a national park.
+        change(2, { change: "kind", from: "reserve_campsite", from_group: "overnight", to: "national_park_campsite" }),
+      ];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], cases));
+      gh.files.set(KINDS_PATH, { text: JSON.stringify(kinds), sha: "blob-kinds" });
+      const kindChanged = { fact_sources: { kind: "feedback" as const }, fact_dates: { kind: AT } };
+      gh.put(
+        changed(0, {
+          name: "Fowlers Bay Bush Camp",
+          kind: "national_park_campsite",
+          facts: { protected_area: { name: "Fowlers Bay Conservation Park", osm_id: 1234, osm_type: "relation" } } as Place["facts"],
+          ...kindChanged,
+        }),
+      );
+      gh.put(changed(1, { name: "Creek Bend Holiday Park", kind: "caravan_park", facts: { power: true } as Place["facts"], ...kindChanged }));
+      gh.put(changed(2, { kind: "national_park_campsite", facts: { protected_area: { name: "Example National Park", osm_id: 5678, osm_type: "relation" } } as Place["facts"], ...kindChanged }));
+      const { ai, asked } = decides({ [id(1)]: reply("approve", "A holiday park with powered sites."), [id(2)]: reply("approve", "The place lies in a national park.") });
+
+      const result = await run(gh, ai);
+      expect(decisionsOf(result)).toEqual([
+        [id(0), "leave", true],
+        [id(1), "approve", false],
+        [id(2), "approve", false],
+      ]);
+      expect(result).toMatchObject({ decisions: [{ reason: "nothing on the place says it lies in a national park, so a person checks the kind" }, {}, {}] });
+      // The conservation park's change never reached the model, and the place keeps the kind for a person to check.
+      expect(asked.map((a) => (caseOf(a.input).place as { id: string }).id)).toEqual([id(1), id(2)]);
+      expect(gh.commits()).toHaveLength(0);
+      expect(caseOf(asked[0]!.input)).toMatchObject({ change: "kind", from: "campground", to: "caravan_park", from_label: "Campground", to_label: "Caravan park" });
+      expect(caseOf(asked[1]!.input)).toMatchObject({
+        from_label: "Reserve campsite",
+        to_label: "National park campsite",
+        place: { facts: { protected_area: { name: "Example National Park" } } },
+      });
+      const system = systemOf(asked[0]!.input);
+      for (const guide of KIND_GUIDE) expect(system).toContain(guide);
+      expect(system).toContain("A Conservation Park, a Reserve, a Regional Park or a State Forest is not a national park");
+      expect(system).toContain("approve, revert, leave");
+    });
+
+    it("leaves the labels out of a kind change when the kinds list can't be read", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [change(0, { change: "kind", from: "free_camp", from_group: "overnight", to: "campground" })]));
+      gh.put(changed(0, { kind: "campground", fact_sources: { kind: "feedback" }, fact_dates: { kind: AT } }));
+      const { ai, asked } = fakeAi(() => reply("approve", "A camp with paid sites."));
+      await run(gh, ai);
+      expect(caseOf(asked[0]!.input)).not.toHaveProperty("from_label");
+      expect(caseOf(asked[0]!.input)).not.toHaveProperty("to_label");
     });
 
     it("puts the replaced value back, with where it came from and when, on a change the model reverts", async () => {

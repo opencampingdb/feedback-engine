@@ -26,6 +26,14 @@
  * - set a disputed fact to one of the values its sources sent or the place
  *   has, which lifts the place's freeze once the decision is in the data.
  *
+ * The model is told to approve a held review unless it reads as spam or
+ * advertising, or holds drugs, violence, bad language or sexual content
+ * (REVIEW_GUIDE), and to confirm a value that fills a blank unless it reads as
+ * spam or is impossible for the place (GAP_FILL_GUIDE), as travellers can
+ * report a wrong one. A change of kind is checked against what the kinds mean
+ * and the place's facts, such as `protected_area` (KIND_GUIDE), and a change
+ * to a national park or state forest campsite outside one goes to a person.
+ *
  * A case the apply's rules closed (a doubted fact that travellers restored or
  * replaced) is left without asking. Owner-set values, blocked contributors
  * and values that wait in the inbox go to a person, and an answer the model
@@ -294,7 +302,6 @@ const CASE_GUIDE: Partial<Record<HeldCase["case"], { about?: readonly string[]; 
     about: [
       "In an intake_check case, an app that proved it runs on a genuine device sent the item, but the intake held it for held_for: network_reputation means it came from a network on a public list of abusive addresses (a shared mobile carrier address can be listed for someone else's abuse), and repeated_text means its text is nearly the same as text other sources sent in the last 30 days, as in a spam campaign.",
       "about says what the item is: a fact the place now shows (value_before is what it had), a review (stars and text), or a status report or check (closed, reopened, or found there or gone).",
-      "Judge the item itself: keep or approve it when it is believable for this place, and give leave when it reads like spam or you cannot tell.",
     ],
     means: {
       confirm: "keep the reported value on the place: it is believable for this place",
@@ -306,7 +313,6 @@ const CASE_GUIDE: Partial<Record<HeldCase["case"], { about?: readonly string[]; 
     about: [
       "In an unconfirmed_fact case, one traveller, from a website form or an app that could not prove it runs on a genuine device, reported a value for a fact (reported_value), and no second traveller has confirmed it. current_value is what the place has now (null for none), current_source where it came from, and osm_value OpenStreetMap's value when the place's value comes from there.",
       "doubts counts travellers who were shown the value and said it is wrong. website is what the place's own website says, when it could be read.",
-      "Confirm only when the value is believable for this place and nothing speaks against it; a website that clearly states the value is good evidence. Dismiss a value the website or the place clearly contradicts, or one that reads like vandalism.",
     ],
     means: {
       confirm: "put the reported value on the place: it is believable for this place and nothing speaks against it",
@@ -330,6 +336,58 @@ const CASE_GUIDE: Partial<Record<HeldCase["case"], { about?: readonly string[]; 
 /** What a decision means for this case. */
 const meaning = (c: HeldCase, d: ReviewDecision) => CASE_GUIDE[c.case]?.means?.[d] ?? MEANINGS[d];
 
+/** How to judge a held review: approve it unless its text is one of the kinds a person reads. */
+export const REVIEW_GUIDE: readonly string[] = [
+  "The item is a review. Approve it unless it reads as spam or advertising, or contains drugs, violence, bad language or sexual content. Give leave for those.",
+  "Its tone, its star rating, a short text or its being the contributor's first review are never reasons to leave.",
+];
+
+/** How to judge a value that fills a blank: travellers can report a wrong one, so only spam or the impossible is kept off. */
+export const GAP_FILL_GUIDE: readonly string[] = [
+  "The place had no value for this fact, so the value fills a blank. Confirm it unless it reads as spam or is impossible for this place, and dismiss it when it does.",
+  "A value you cannot check is not a reason to leave: travellers who see a wrong value can report it.",
+];
+
+/** How to judge an item that changes a value the place already had, or a status report. */
+const CHANGED_VALUE_GUIDE = "Judge the item itself: keep or approve it when it is believable for this place, and give leave when it reads like spam or you cannot tell.";
+
+/** How to judge an unconfirmed value that replaces one the place had, or that travellers doubted. */
+const UNCONFIRMED_CHANGE_GUIDE =
+  "Confirm only when the value is believable for this place and nothing speaks against it. A website that clearly states the value is good evidence. Dismiss a value the website or the place clearly contradicts, or one that reads like vandalism.";
+
+/** On an unconfirmed value that fills a blank: the place's own website still outweighs it. */
+const UNCONFIRMED_WEBSITE_GUIDE = "Dismiss it too when the place's own website clearly contradicts it.";
+
+/** What the kinds a kind change most often moves between mean, and how to check one against the place's facts. */
+export const KIND_GUIDE: readonly string[] = [
+  "In a change of kind, from and to are kind codes, and from_label and to_label their names. What the kinds mean:",
+  "- national_park_campsite: a campsite inside a national park, only when the place lies in an area whose name says National Park.",
+  "- reserve_campsite: a campsite in a conservation park, a nature or regional reserve, a regional park, a state conservation area or a similar protected area that is not a national park.",
+  "- state_forest_campsite: a campsite inside a state forest, only when the place lies in one.",
+  "- caravan_park: a commercial holiday park or caravan park with powered sites.",
+  "- Other kinds mean what their names say.",
+  "The place's facts.protected_area is the smallest named protected area its location lies in, from OpenStreetMap. A Conservation Park, a Reserve, a Regional Park or a State Forest is not a national park, whoever manages it.",
+  "Approve a change of kind only when the evidence in the case supports the new kind: the place's name, its facts such as protected_area and operator, its description and whether it is in OpenStreetMap. Revert one the evidence contradicts, and give leave when the evidence says neither.",
+];
+
+/**
+ * The guide's lines that depend on the case itself, not only its kind: a held
+ * review, a value that fills a blank or changes one, and a change of kind.
+ */
+function situationGuide(c: HeldCase, place: Place): readonly string[] {
+  if (c.case === "intake_check") {
+    if (c.about === "review") return REVIEW_GUIDE;
+    if (c.about === "fact" && c.value === undefined) return GAP_FILL_GUIDE;
+    return [CHANGED_VALUE_GUIDE];
+  }
+  if (c.case === "unconfirmed_fact") {
+    const current = (place.facts as Record<string, unknown>)[c.fact!];
+    return current === undefined && (c.doubts?.length ?? 0) === 0 ? [...GAP_FILL_GUIDE, UNCONFIRMED_WEBSITE_GUIDE] : [UNCONFIRMED_CHANGE_GUIDE];
+  }
+  if (c.case === "place_change" && c.change === "kind") return KIND_GUIDE;
+  return [];
+}
+
 /** What the model reads of a place. Values travellers or the owner sent are data, not instructions. */
 function placeView(place: Place) {
   return {
@@ -346,10 +404,12 @@ function placeView(place: Place) {
   };
 }
 
-function systemPrompt(c: HeldCase, allowed: readonly ReviewDecision[]): string {
+/** The system prompt both models get for a case on `place`. */
+export function systemPrompt(c: HeldCase, place: Place, allowed: readonly ReviewDecision[] = allowedDecisions(c)): string {
   return [
     "You review held cases for an open database of camping places. A case is a new place or a change that the automatic checks held for a reviewer.",
     ...(CASE_GUIDE[c.case]?.about ?? []),
+    ...situationGuide(c, place),
     "Answer with JSON only: {\"decision\": ..., \"reason\": ..., \"sure\": true or false}.",
     `The decisions you may give for this case are: ${allowed.join(", ")}.`,
     ...allowed.map((d) => `- ${d}: ${meaning(c, d)}.`),
@@ -454,7 +514,15 @@ function caseEvidence(
       : {}),
     ...(c.case === "vehicle_access_candidate" ? { fact: c.fact, value: c.value } : {}),
     ...(c.case === "commons_mismatch" ? { file: c.file, reporting_sources: c.sources } : {}),
-    ...(c.case === "place_change" ? { change: c.change, from: c.from, to: c.to, ...(c.change === "location" ? { distance_m: c.distance_m } : {}) } : {}),
+    ...(c.case === "place_change"
+      ? {
+          change: c.change,
+          from: c.from,
+          to: c.to,
+          ...(c.change === "location" ? { distance_m: c.distance_m } : {}),
+          ...(c.change === "kind" ? kindLabels(c, extra.kindLabels) : {}),
+        }
+      : {}),
     ...(c.case === "contact_check" ? { contact: c.fact, failed_checks: c.checks, found: c.problem, value_before: c.value } : {}),
     ...(c.case === "implausible_location" ? { hit: c.hit, found: c.problem } : {}),
     ...(c.case === "disputed" ? { fact: c.fact, values: choices, sources: c.sources } : {}),
@@ -489,6 +557,33 @@ function caseEvidence(
 interface CaseExtra {
   review?: { stars: number; text: string };
   website?: SiteView;
+  /** On a `place_change` of the kind: each kind's label by code, from the data repository's `schema/kinds.json`. */
+  kindLabels?: ReadonlyMap<string, string>;
+}
+
+/** The data repository's list of place kinds, with their labels. */
+export const KINDS_PATH = "schema/kinds.json";
+
+/** Each kind's label by code, from the text of `schema/kinds.json`, or none when it does not parse. */
+export function kindLabelsOf(text: string): Map<string, string> {
+  try {
+    const kinds = (JSON.parse(text) as { kinds?: unknown }).kinds;
+    if (!Array.isArray(kinds)) return new Map();
+    return new Map(
+      kinds
+        .filter((k): k is { code: string; label: string } => typeof k === "object" && k !== null && typeof k.code === "string" && typeof k.label === "string")
+        .map((k) => [k.code, k.label]),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+/** The labels of a kind change's two kinds, each left out when the list has no label for it. */
+function kindLabels(c: HeldCase, labels: ReadonlyMap<string, string> | undefined): { from_label?: string; to_label?: string } {
+  const from = typeof c.from === "string" ? labels?.get(c.from) : undefined;
+  const to = typeof c.to === "string" ? labels?.get(c.to) : undefined;
+  return { ...(from !== undefined ? { from_label: from } : {}), ...(to !== undefined ? { to_label: to } : {}) };
 }
 
 /** A model's answer object as a decision: `leave`, and unsure, unless it is a sure decision the case allows. */
@@ -532,7 +627,7 @@ export async function askModel(
       REVIEW_TIMEOUT_MS,
       ai.run(model, {
         messages: [
-          { role: "system", content: systemPrompt(c, allowed) },
+          { role: "system", content: systemPrompt(c, place, allowed) },
           { role: "user", content: caseEvidence(c, place, duplicateOf, choices, candidates, extra) },
         ],
         temperature: 0,
@@ -591,7 +686,7 @@ async function askSecondStage(
   let answer: Awaited<ReturnType<typeof askSecondModel>>;
   try {
     const choices = disputeChoices(c, place);
-    answer = await askSecondModel(deps.second, systemPrompt(c, allowed), caseEvidence(c, place, duplicateOf, choices, candidates, extra), decisionSchema(allowed, choices, candidates));
+    answer = await askSecondModel(deps.second, systemPrompt(c, place, allowed), caseEvidence(c, place, duplicateOf, choices, candidates, extra), decisionSchema(allowed, choices, candidates));
   } catch (error) {
     if (!(error instanceof SecondModelUnavailable)) throw error;
     onError(deps, error);
@@ -753,6 +848,14 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
     distinct = new Set(pairs.filter((p) => typeof p.a === "string" && typeof p.b === "string").map((p) => pairKey(p.a as string, p.b as string)));
     return distinct;
   };
+  // Kind labels, read once and only for a change of kind.
+  let labels: Map<string, string> | undefined;
+  const kindLabelMap = async () => {
+    if (labels) return labels;
+    const file = await read(KINDS_PATH);
+    labels = file ? kindLabelsOf(file.text) : new Map<string, string>();
+    return labels;
+  };
   const failures = await modelFailures(deps.db);
   const failedReason = (n: number) => `the model call failed in ${n} runs, so a person decides this case`;
   // The cases whose model call failed in this run, and how many model calls answered.
@@ -784,7 +887,8 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
           : speaks
             ? { decision: "leave" as const, reason: "the place's website reads like instructions to a reviewer, so a person decides" }
             : ruled;
-      const extra: CaseExtra = { ...(review ? { review } : {}), ...(website ? { website } : {}) };
+      const kinds = c.case === "place_change" && c.change === "kind" && ruled === null && !closed ? await kindLabelMap() : undefined;
+      const extra: CaseExtra = { ...(review ? { review } : {}), ...(website ? { website } : {}), ...(kinds ? { kindLabels: kinds } : {}) };
       let decision: ReviewDecision;
       let reason: string;
       let by = reviewer;
