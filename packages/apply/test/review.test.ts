@@ -286,3 +286,28 @@ describe("place_change cases of a name", () => {
     expect(settleByRules(rename(), renamed(null))?.reason).toContain("neither the OSM name it replaces");
   });
 });
+
+describe("place_change cases of a kind", () => {
+  const rekind = (from: string, to: string): HeldCase => ({ ...base, case: "place_change", change: "kind", from, from_group: "overnight", to, from_source: "osm" });
+  const rekinded = (kind: string, facts: Record<string, unknown> = {}) =>
+    place({ standing: undefined, kind, osm: { type: "way", id: 1, version: 1 }, facts: facts as Place["facts"], fact_sources: {} });
+  const area = (name: string) => ({ protected_area: { name, osm_id: 1234, osm_type: "relation" } });
+
+  it("leaves a change to a national park campsite on a place in a conservation park to a person", () => {
+    expect(settleByRules(rekind("reserve_campsite", "national_park_campsite"), rekinded("national_park_campsite", area("Fowlers Bay Conservation Park")))).toEqual({
+      decision: "leave",
+      reason: "nothing on the place says it lies in a national park, so a person checks the kind",
+    });
+  });
+
+  it("leaves a change to a national park or state forest campsite on a place with no protected area to a person", () => {
+    expect(settleByRules(rekind("free_camp", "national_park_campsite"), rekinded("national_park_campsite"))?.decision).toBe("leave");
+    expect(settleByRules(rekind("free_camp", "state_forest_campsite"), rekinded("state_forest_campsite", area("Example Regional Reserve")))?.reason).toContain("state forest");
+  });
+
+  it("leaves to a reviewer a change whose protected area names the kind's area, and a change to any other kind", () => {
+    expect(settleByRules(rekind("reserve_campsite", "national_park_campsite"), rekinded("national_park_campsite", area("Example National Park")))).toBeNull();
+    expect(settleByRules(rekind("free_camp", "state_forest_campsite"), rekinded("state_forest_campsite", area("Example State Forest")))).toBeNull();
+    expect(settleByRules(rekind("campground", "caravan_park"), rekinded("caravan_park"))).toBeNull();
+  });
+});
