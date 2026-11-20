@@ -22,7 +22,7 @@ const WITHHELD = "(withheld, read it in the inbox)";
 const escapeMarkdown = (text: string) => text.replace(/[\\[\]()!*_#|~&]/g, "\\$&");
 
 /** Whether a quoted traveller value is kept out of the PR: the text rules call it rude or spam, or it reads as abuse or advertising. */
-function valueWithheld(value: string): boolean {
+export function valueWithheld(value: string): boolean {
   if (!/\p{L}/u.test(value)) return false;
   const problem = textProblem(tidyText(value));
   return problem === "rude" || problem === "spam" || hasProfanity(value) || isAdvertising(value);
@@ -159,7 +159,7 @@ const shortened = (text: string, max: number) => {
 };
 
 /** Plain text with all markdown punctuation escaped, on one line, mentioning no one. */
-const plainText = (text: string) => escapeMarkdown(text).replace(/[<>`]/g, "").replace(/@/g, "@​").replace(/\s+/g, " ");
+export const plainText = (text: string) => escapeMarkdown(text).replace(/[<>`]/g, "").replace(/@/g, "@​").replace(/\s+/g, " ");
 
 /**
  * A web address a stranger chose, shortened and written as code, so it never
