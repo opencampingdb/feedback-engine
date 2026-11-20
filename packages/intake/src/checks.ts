@@ -205,6 +205,23 @@ async function hostListed(deps: CheckDeps, key: string, host: string): Promise<b
  * JSON answer (`{ safe, categories }`), and its plain text answer ("safe", or
  * "unsafe" and the categories) is read too.
  */
+/**
+ * The content check on a review's text: Llama Guard reads it, as it reads a
+ * report's free text, so a review about drugs, violence or sexual content goes
+ * to a person (`ai_check`). Bad language, spam and contact details are the
+ * apply's review moderation. `check_unavailable` when the model can't be asked.
+ */
+export async function reviewHold(ai: AiLike | undefined, text: string): Promise<"ai_check" | "check_unavailable" | null> {
+  const tidy = tidyText(text);
+  if (tidy.length === 0) return null;
+  if (!ai) return "check_unavailable";
+  try {
+    return (await guardUnsafe(ai, tidy)) ? "ai_check" : null;
+  } catch {
+    return "check_unavailable";
+  }
+}
+
 async function guardUnsafe(ai: AiLike, text: string): Promise<boolean> {
   const out = await withTimeout(CHECK_TIMEOUT_MS, () =>
     ai.run(GUARD_MODEL, {
