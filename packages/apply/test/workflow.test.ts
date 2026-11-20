@@ -124,6 +124,97 @@ describe("the apply workflow's review publish step", () => {
   }, 30_000);
 });
 
+describe("the apply workflow's review summary", () => {
+  /**
+   * Runs the review publish step on an open PR 7 whose body is `currentBody`,
+   * with an engine whose summary CLI writes a fixed summary (or fails), and
+   * returns gh's calls in order.
+   */
+  async function publish(currentBody: string, summaryExit = 0): Promise<string[]> {
+    const remote = join(root, "data.git");
+    git(root, "init", "--bare", "-b", "main", remote);
+    const checkout = join(root, "data-review");
+    git(root, "clone", "-q", remote, checkout);
+    identity(checkout);
+    await mkdir(join(checkout, "places"), { recursive: true });
+    await writeFile(join(checkout, "places", "a.json"), "{}\n");
+    git(checkout, "add", "-A");
+    git(checkout, "commit", "-q", "-m", "data");
+    git(checkout, "push", "-q", "origin", "HEAD:refs/heads/main", "HEAD:refs/heads/feedback/review");
+    git(checkout, "fetch", "-q", "origin");
+    git(checkout, "switch", "-q", "-c", "feedback/review", "origin/feedback/review");
+    await writeFile(join(checkout, "places", "b.json"), "{}\n");
+
+    // An engine with the real shared shell and a stand-in summary CLI.
+    const engine = join(root, "engine");
+    await mkdir(join(engine, "packages", "apply", "scripts"), { recursive: true });
+    await mkdir(join(engine, "packages", "apply", "dist"), { recursive: true });
+    await writeFile(join(engine, "packages", "apply", "scripts", "publish.sh"), await readFile(join(ENGINE_DIR, "packages", "apply", "scripts", "publish.sh"), "utf8"));
+    await writeFile(
+      join(engine, "packages", "apply", "dist", "summary-cli.js"),
+      `const out = process.argv[process.argv.indexOf("--out") + 1]; require("node:fs").writeFileSync(out, "<!-- review-summary -->\\nsummary\\n"); process.exit(${summaryExit});\n`,
+    );
+    await writeFile(join(engine, "packages", "apply", "dist", "package.json"), '{"type": "commonjs"}\n');
+
+    const temp = join(root, "temp");
+    const bin = join(root, "bin");
+    await mkdir(temp);
+    await mkdir(bin);
+    await writeFile(join(temp, "review-pr-body.md"), "run text\n");
+    await writeFile(join(root, "current.md"), currentBody);
+    await writeFile(
+      join(bin, "gh"),
+      `#!/bin/sh\necho "$@" >> "${join(root, "gh.log")}"\nif [ "$1 $2" = "pr view" ]; then case "$*" in *--json\\ body*) cat "${join(root, "current.md")}" ;; *) echo OPEN ;; esac; fi\n`,
+    );
+    await chmod(join(bin, "gh"), 0o755);
+    const result = spawnSync("bash", ["-e", "-c", await stepScript("Publish changes for review")], {
+      cwd: checkout,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        GH_TOKEN: "x",
+        ENGINE_DIR: engine,
+        DATA_REPO: "example/data",
+        BASE_BRANCH: "main",
+        PR_OPEN: "true",
+        PR_NUMBER: "7",
+        OWNER_CLAIMS: "false",
+        APP_SLUG: "example-bot",
+        RUN_ID: "2",
+        RUNNER_TEMP: temp,
+        GITHUB_WORKSPACE: root,
+        GITHUB_OUTPUT: join(temp, "output"),
+      },
+    });
+    expect(result.stderr).not.toContain("::error");
+    expect(result.status).toBe(0);
+    return (await readFile(join(root, "gh.log"), "utf8"))
+      .split("\n")
+      .filter((l) => /^pr (comment|edit) 7/.test(l))
+      .map((l) => l.replace(temp, "TEMP"));
+  }
+
+  it("keeps a body that is not a summary as a comment before the run's comment, then writes the summary", async () => {
+    expect(await publish("- held-case {}\n")).toEqual([
+      "pr comment 7 --repo example/data --body-file TEMP/review-current-body.md",
+      "pr comment 7 --repo example/data --body-file TEMP/review-pr-body.md",
+      "pr edit 7 --repo example/data --body-file TEMP/review-summary.md",
+    ]);
+  }, 30_000);
+
+  it("writes over a summary without keeping it", async () => {
+    expect(await publish("<!-- review-summary -->\nolder summary\n")).toEqual([
+      "pr comment 7 --repo example/data --body-file TEMP/review-pr-body.md",
+      "pr edit 7 --repo example/data --body-file TEMP/review-summary.md",
+    ]);
+  }, 30_000);
+
+  it("leaves the body alone when the summary cannot be written", async () => {
+    expect(await publish("- held-case {}\n", 1)).toEqual(["pr comment 7 --repo example/data --body-file TEMP/review-pr-body.md"]);
+  }, 30_000);
+});
+
 describe("the apply workflow's automatic publish step", () => {
   /** A data checkout on feedback/auto with one change, a body the apply wrote, and gh answering `merge` with `mergeExit`. */
   async function setUp(mergeExit: number, autoMergeSet = "false") {

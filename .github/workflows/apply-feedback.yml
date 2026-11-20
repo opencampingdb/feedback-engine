@@ -603,6 +603,8 @@ jobs:
           PR_NUMBER: ${{ steps.branches.outputs.review_pr }}
           OWNER_CLAIMS: ${{ steps.apply.outputs.owner_claims }}
           CLAIM_REVIEWERS: ${{ inputs.claim-reviewers }}
+          APP_SLUG: ${{ steps.data-token.outputs.app-slug }}
+          REVIEWER_LOGIN: ${{ inputs.reviewer-login }}
           RUN_ID: ${{ github.run_id }}
           ENGINE_DIR: ${{ github.workspace }}/engine
         working-directory: data-review
@@ -639,6 +641,42 @@ jobs:
             gh pr comment "$1" --repo "$DATA_REPO" \
               --body "${mentions}owner claims are waiting for your decision on this PR. Tick the box for each one you approve, then merge." ||
               echo "::warning::could not tell the claim reviewers about PR ${1} on ${DATA_REPO}"
+          }
+          # The body is a summary of everything the PR changes, by place, written again each run
+          # (ocdb-review-summary). Each run's own text, with the machine-readable lines later runs
+          # and the AI reviewer read, is a comment. A body that is not a summary yet (a PR's first
+          # text, or one from before summaries) is copied to a comment first, before this run's
+          # comment, so no line is lost and the lines keep their order. A summary that cannot be
+          # written leaves the body as it was, and then nothing is copied.
+          summary="$RUNNER_TEMP/review-summary.md"
+          summary_ready=false
+          prepare_summary() {
+            if node "$ENGINE_DIR/packages/apply/dist/summary-cli.js" --data . --base "origin/${BASE_BRANCH}" \
+              --inbox "$GITHUB_WORKSPACE/inbox" --repo "$DATA_REPO" --branch feedback/review \
+              --review-prs "$RUNNER_TEMP/review-prs.json" --pr "${1##*/}" --bot-login "$APP_SLUG" \
+              ${REVIEWER_LOGIN:+--reviewer-login "$REVIEWER_LOGIN"} --out "$summary"; then
+              summary_ready=true
+            else
+              echo "::warning title=Review summary failed::could not write the summary of PR ${1##*/} on ${DATA_REPO}; its body is unchanged"
+            fi
+          }
+          keep_body() {
+            [ "$summary_ready" = "true" ] || return 0
+            current="$RUNNER_TEMP/review-current-body.md"
+            if ! gh pr view "${1##*/}" --repo "$DATA_REPO" --json body --jq .body > "$current"; then
+              summary_ready=false
+              return 0
+            fi
+            head -n 1 "$current" | grep -qF '<!-- review-summary -->' && return 0
+            if ! gh pr comment "${1##*/}" --repo "$DATA_REPO" --body-file "$current"; then
+              echo "::warning title=Review summary skipped::could not keep the body of PR ${1##*/} as a comment, so the body is unchanged"
+              summary_ready=false
+            fi
+          }
+          write_summary() {
+            [ "$summary_ready" = "true" ] || return 0
+            gh pr edit "${1##*/}" --repo "$DATA_REPO" --body-file "$summary" ||
+              echo "::warning title=Review summary refused::could not write the summary of PR ${1##*/} on ${DATA_REPO}"
           }
           git add -A
           start="$(git rev-parse HEAD)"
@@ -678,6 +716,8 @@ jobs:
             fi
           fi
           if [ "$PR_OPEN" = "true" ]; then
+            prepare_summary "$PR_NUMBER"
+            keep_body "$PR_NUMBER"
             if gh pr comment "$PR_NUMBER" --repo "$DATA_REPO" --body-file "$body"; then
               echo "claims_listed=true" >> "$GITHUB_OUTPUT"
               follow_ups "$PR_NUMBER"
@@ -685,6 +725,8 @@ jobs:
             else
               refused "comment on PR ${PR_NUMBER}"
             fi
+            # Also when the comment was refused: the old body is already kept as a comment.
+            write_summary "$PR_NUMBER"
             if [ "$OWNER_CLAIMS" = "true" ]; then
               gh pr edit "$PR_NUMBER" --repo "$DATA_REPO" --add-label owner-claim ||
                 echo "::warning::could not label PR ${PR_NUMBER} on ${DATA_REPO} owner-claim"
@@ -699,8 +741,11 @@ jobs:
             if url="$(gh pr create --repo "$DATA_REPO" --base "$BASE_BRANCH" --head feedback/review \
               --title "Feedback: for a person to check" --body-file "$body")"; then
               echo "claims_listed=true" >> "$GITHUB_OUTPUT"
+              prepare_summary "$url"
+              keep_body "$url"
               follow_ups "$url"
               tell_reviewers "$url"
+              write_summary "$url"
               # Labels go on in their own call, so a missing label never stops the PR.
               labels="needs-review"
               if [ "$OWNER_CLAIMS" = "true" ]; then labels="needs-review,owner-claim"; fi

@@ -37,7 +37,8 @@
   },
   "bin": {
     "ocdb-apply": "./dist/cli.js",
-    "ocdb-photos": "./dist/photos-cli.js"
+    "ocdb-photos": "./dist/photos-cli.js",
+    "ocdb-review-summary": "./dist/summary-cli.js"
   },
   "engines": {
     "node": ">=22.12"
