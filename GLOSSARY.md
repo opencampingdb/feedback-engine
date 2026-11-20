@@ -126,7 +126,7 @@ _Avoid_: unverified place, anonymous place (it has a contributor)
 
 **Trusted contributor**:
 A signed-in contributor five of whose edits other sources have confirmed, with no upheld doubt about any of their edits since. Only an attested or signed-in item this run applied, from another device, network and contributor, confirms an edit. A doubt is upheld when doubts take the value down, the AI reviewer keeps it down, dismisses or reverts the edit or takes the place down, or a person leaves the edit out of a merged review PR. Their new places list at once, and their contacts go live once they pass the contact checks, without a second source.
-_Avoid_: verified contributor, trusted reviewer (a contributor whose reviews publish)
+_Avoid_: verified contributor, trusted reviewer
 
 **Merge**:
 Folding a new place added twice into the place it duplicates, leaving the new place as a tombstone that points at it.

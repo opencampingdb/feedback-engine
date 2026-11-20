@@ -76,7 +76,6 @@ function run(
     places?: Place[];
     reviews?: Review[];
     blocked?: string[];
-    reviewers?: string[];
     recent?: RulesInput["recent"];
     extra?: Partial<RulesInput>;
   } = {},
@@ -95,7 +94,6 @@ function run(
       ["picnic_site", "utility"],
     ]),
     blocked: new Set(opts.blocked ?? []),
-    reviewers: new Set(opts.reviewers ?? []),
     ...(opts.recent !== undefined ? { recent: opts.recent } : {}),
     ...opts.extra,
   };
@@ -1097,7 +1095,7 @@ describe("reviews", () => {
   it("accepts a trusted contributor's clean review and recalculates the rating", () => {
     const r = review(0, "sam", 3, "Shady, flat sites near the water.");
     const existing = [line(1, "kim", 5), line(2, "lee", 4)];
-    const out = run([r], { reviews: existing, reviewers: [ctr("sam")], places: [place({ rating: { count: 2, mean: 4.5 } })] });
+    const out = run([r], { reviews: existing, places: [place({ rating: { count: 2, mean: 4.5 } })] });
     expect(out.outcome(r)).toBe("applied");
     expect(out.reviews.get(PLACE)).toEqual([
       ...existing,
@@ -1118,27 +1116,46 @@ describe("reviews", () => {
   it("refuses a trusted contributor's review that fails the SDK text rules", () => {
     for (const text of ["Flat sites. The ranger is a spaz and a poofter.", "Flat sites and clean toilets. Best crypto tips on whatsapp"]) {
       const r = review(0, "sam", 1, text);
-      const out = run([r], { reviewers: [ctr("sam")] });
+      const out = run([r]);
       expect(out.outcome(r)).toBe("refused");
       expect(out.reviews.size).toBe(0);
     }
   });
 
-  it("holds a contributor's first review for a person", () => {
-    const r = review(0, "sam", 4, "Quiet and level");
+  it("publishes a contributor's first review that passes the checks", () => {
+    const r = review(0, "sam", 5, "Great little spot. Lots of rain but solid ground that drained well.");
+    const out = run([r]);
+    expect(out.outcome(r)).toBe("applied");
+    expect(out.reviews.get(PLACE)).toEqual([expect.objectContaining({ contributor: ctr("sam"), stars: 5 })]);
+    expect(out.changes).toEqual([expect.objectContaining({ place: PLACE, automatic: true, feedback: [r.id] })]);
+    expect(out.edits).toEqual([]);
+  });
+
+  it("sends a first review the intake held for ai_check to a person", () => {
+    const r = { ...review(0, "sam", 5, "Great little spot. Lots of rain but solid ground that drained well."), intake: { state: "held", held_reason: "ai_check" } } as StoredFeedback;
     const out = run([r]);
     expect(out.outcome(r)).toBe("needs_review");
+    expect(out.decisions[0]?.reason).toContain("ai_check");
+    expect(out.decisions[0]?.reason).toContain("a person");
+    expect(out.held).toEqual([]);
     expect(out.reviews.size).toBe(0);
-    expect(out.after()).toBeUndefined();
-    expect(out.edits).toEqual([{ kind: "review", place: PLACE, review: expect.objectContaining({ contributor: ctr("sam"), stars: 4 }), feedback: r.id }]);
+    expect(out.changes).toEqual([expect.objectContaining({ automatic: false, feedback: [r.id] })]);
+  });
+
+  it("refuses a first review with bad language", () => {
+    const r = review(0, "sam", 1, "Shit place, the fucking toilets were locked.");
+    const out = run([r]);
+    expect(out.outcome(r)).toBe("refused");
+    expect(out.reviews.size).toBe(0);
+    expect(out.edits).toEqual([]);
   });
 
   it("does not quote a held review's text in the change for a person, and names the inbox item", () => {
-    const first = review(0, "sam", 4, "Quiet and level, ask Jo Bloggs at number 12 for the gate");
+    const first = { ...review(0, "sam", 4, "Quiet and level, ask Jo Bloggs at number 12 for the gate"), intake: { state: "held", held_reason: "ai_check" } } as StoredFeedback;
     const repeatedText = "Best camp in the state, everyone should stay here at least once!";
     const other = applied(review(-3, "kim", 5, repeatedText, OTHER));
     const repeated = review(0, "lee", 5, repeatedText);
-    const out = run([first, repeated], { history: [other], reviewers: [ctr("lee")] });
+    const out = run([first, repeated], { history: [other] });
     expect(out.outcome(first)).toBe("needs_review");
     expect(out.outcome(repeated)).toBe("needs_review");
     const held = out.changes.filter((c) => !c.automatic);
@@ -1149,32 +1166,20 @@ describe("reviews", () => {
     }
   });
 
-  it("trusts a contributor whose review was applied before", () => {
+  it("publishes a review whether or not a person held the contributor's earlier one", () => {
     const earlier = applied(review(-5, "sam", 5, "Shady", OTHER));
     const held = applied(review(-5, "kim", 5, "Shady", OTHER), "needs_review");
     const a = review(0, "sam", 4, "Quiet");
     const b = review(0, "kim", 4, "Quiet");
-    const out = run([a, b], { history: [earlier, held], places: [place(), place({ id: OTHER })] });
-    expect(out.outcome(a)).toBe("applied");
-    expect(out.outcome(b)).toBe("needs_review");
-  });
-
-  it("does not trust a contributor whose only applied feedback is of another type", () => {
-    const earlier = [
-      applied({ ...check(-5, "sam", true), contributor: ctr("sam") } as StoredFeedback),
-      applied({ ...base(-4, "sam", null), contributor: ctr("sam"), type: "review_erasure" } as StoredFeedback),
-      applied({ ...base(-3, "sam", null), contributor: ctr("sam"), type: "photo_erasure" } as StoredFeedback),
-    ];
-    const r = review(0, "sam", 1, "Quiet");
-    const out = run([r], { history: earlier });
-    expect(out.outcome(r)).toBe("needs_review");
-    expect(out.reviews.size).toBe(0);
+    const c = review(0, "lee", 4, "Quiet");
+    const out = run([a, b, c], { history: [earlier, held], places: [place(), place({ id: OTHER })] });
+    expect([a, b, c].map(out.outcome)).toEqual(["applied", "applied", "applied"]);
   });
 
   for (const reason of ["repeated_text", "check_unavailable"]) {
     it(`sends a trusted contributor's review the intake held for ${reason} to a person`, () => {
       const r = { ...review(0, "sam", 5, "Lovely"), intake: { state: "held", held_reason: reason } } as StoredFeedback;
-      const out = run([r], { reviewers: [ctr("sam")] });
+      const out = run([r]);
       expect(out.outcome(r)).toBe("needs_review");
       expect(out.decisions.find((d) => d.id === r.id)?.reason).toContain(reason);
       expect(out.reviews.size).toBe(0);
@@ -1183,7 +1188,7 @@ describe("reviews", () => {
 
   it("keeps visited_nearby on the published line", () => {
     const r = { ...review(0, "sam", 5, "Lovely"), review: { stars: 5, text: "Lovely", visited: "2026-06", visited_nearby: true } } as StoredFeedback;
-    const out = run([r], { reviewers: [ctr("sam")] });
+    const out = run([r]);
     expect(out.reviews.get(PLACE)?.[0]?.visited_nearby).toBe(true);
   });
 
@@ -1191,7 +1196,7 @@ describe("reviews", () => {
     const earlier = applied(review(-5, "sam", 5, "Lovely"));
     const r = review(0, "sam", 2, "Gone downhill");
     const existing = [{ ...line(1, "sam", 5), id: reviewIdOf(earlier) }, line(2, "kim", 4)];
-    const out = run([r], { history: [earlier], reviews: existing, reviewers: [ctr("sam")], places: [place({ rating: { count: 2, mean: 4.5 } })] });
+    const out = run([r], { history: [earlier], reviews: existing, places: [place({ rating: { count: 2, mean: 4.5 } })] });
     expect(out.outcome(r)).toBe("applied");
     expect(out.reviews.get(PLACE)?.map((l) => l.contributor)).toEqual([ctr("kim"), ctr("sam")]);
     expect(out.reviews.get(PLACE)?.map((l) => l.stars)).toEqual([4, 2]);
@@ -1209,7 +1214,7 @@ describe("reviews", () => {
 
     it("is held for a person when it comes from another device and is not proved, and the earlier review stays", () => {
       const { r, earlier, existing } = replacing("other-phone");
-      const out = run([r], { history: [earlier], reviews: existing, reviewers: [ctr("sam")], places: [place({ rating: { count: 1, mean: 5 } })] });
+      const out = run([r], { history: [earlier], reviews: existing, places: [place({ rating: { count: 1, mean: 5 } })] });
       expect(out.outcome(r)).toBe("needs_review");
       expect(out.decisions.find((d) => d.id === r.id)?.reason).toMatch(/earlier review/);
       expect(out.reviews.get(PLACE) ?? existing).toEqual(existing);
@@ -1219,26 +1224,26 @@ describe("reviews", () => {
 
     it("is held when the earlier review's item is no longer in the history", () => {
       const { r, existing } = replacing("sam");
-      const out = run([r], { reviews: existing, reviewers: [ctr("sam")] });
+      const out = run([r], { reviews: existing });
       expect(out.outcome(r)).toBe("needs_review");
     });
 
     it("applies when the intake recorded the contributor as proved", () => {
       const { r, existing } = replacing("other-phone", { proved: true });
-      const out = run([r], { reviews: existing, reviewers: [ctr("sam")] });
+      const out = run([r], { reviews: existing });
       expect(out.outcome(r)).toBe("applied");
       expect(out.reviews.get(PLACE)?.map((l) => l.stars)).toEqual([1]);
     });
 
     it("applies when it comes from the same attested key on another device id", () => {
       const { r, earlier, existing } = replacing("other-phone", { attest_key: "ak_0123456789abcdef" }, { attest_key: "ak_0123456789abcdef" });
-      const out = run([r], { history: [earlier], reviews: existing, reviewers: [ctr("sam")] });
+      const out = run([r], { history: [earlier], reviews: existing });
       expect(out.outcome(r)).toBe("applied");
     });
 
     it("is held when it comes from another attested key", () => {
       const { r, earlier, existing } = replacing("other-phone", { attest_key: "ak_fedcba9876543210" }, { attest_key: "ak_0123456789abcdef" });
-      const out = run([r], { history: [earlier], reviews: existing, reviewers: [ctr("sam")] });
+      const out = run([r], { history: [earlier], reviews: existing });
       expect(out.outcome(r)).toBe("needs_review");
     });
   });
@@ -1246,7 +1251,7 @@ describe("reviews", () => {
   it("refuses everything from a blocked contributor", () => {
     const r = review(0, "spammer", 5, "Great");
     const c = { ...check(0, "spammer", true), contributor: ctr("spammer") } as StoredFeedback;
-    const out = run([r, c], { blocked: [ctr("spammer")], reviewers: [ctr("spammer")] });
+    const out = run([r, c], { blocked: [ctr("spammer")] });
     expect(out.outcome(r)).toBe("refused");
     expect(out.outcome(c)).toBe("refused");
     expect(out.decisions[0]?.reason).toBe("the contributor is blocked");
@@ -1255,18 +1260,18 @@ describe("reviews", () => {
   it("refuses a review a person removed, so it is never written back (audit run-2 OCDB-07)", () => {
     const r = review(0, "sam", 5, "Ring Jo on the number at the gate");
     const removed = new Set([reviewIdOf(r)]);
-    const out = run([r], { reviewers: [ctr("sam")], extra: { removedReviews: removed } });
+    const out = run([r], { extra: { removedReviews: removed } });
     expect(out.outcome(r)).toBe("refused");
     expect(out.decisions[0]?.reason).toBe("the review was removed by a moderator");
     expect(out.reviews.get(PLACE) ?? []).toEqual([]);
     const other = review(0, "kim", 4, "Fine");
-    expect(run([other], { reviewers: [ctr("kim")], extra: { removedReviews: removed } }).outcome(other)).toBe("applied");
+    expect(run([other], { extra: { removedReviews: removed } }).outcome(other)).toBe("applied");
   });
 
   it("leaves hidden and blocked reviews out of the rating", () => {
     const r = review(0, "sam", 4, "Fine");
     const existing = [line(1, "kim", 1, { hidden: "reported" }), line(2, "bad", 1), line(3, "lee", 5)];
-    const out = run([r], { reviews: existing, blocked: [ctr("bad")], reviewers: [ctr("sam")] });
+    const out = run([r], { reviews: existing, blocked: [ctr("bad")] });
     expect(out.after()?.rating).toEqual({ count: 2, mean: 4.5 });
   });
 
@@ -1274,7 +1279,7 @@ describe("reviews", () => {
     const text = "Best camp in the state, everyone should stay here at least once!";
     const other = applied(review(-3, "kim", 5, text, OTHER));
     const r = review(0, "sam", 5, text.toUpperCase());
-    const out = run([r], { history: [other], reviewers: [ctr("sam")] });
+    const out = run([r], { history: [other] });
     expect(out.outcome(r)).toBe("needs_review");
     expect(out.decisions[0]?.reason).toMatch(/another place/);
   });
@@ -1312,13 +1317,13 @@ describe("reviews", () => {
   it("does not add the same review twice", () => {
     const r = review(0, "sam", 4, "Nice");
     const existing: Review = { ...line(1, "sam", 4), id: `rev_${r.id.slice(3)}`, text: "Nice", visited: "2026-06", created: r.received };
-    const out = run([r], { reviews: [existing], reviewers: [ctr("sam")], places: [place({ rating: { count: 1, mean: 4 } })] });
+    const out = run([r], { reviews: [existing], places: [place({ rating: { count: 1, mean: 4 } })] });
     expect(out.outcome(r)).toBe("applied");
     expect(out.reviews.size).toBe(0);
   });
 
   it("rounds the mean to 1 decimal place", () => {
-    const out = run([review(0, "a", 5, ""), review(0, "b", 4, ""), review(0, "c", 4, "")], { reviewers: [ctr("a"), ctr("b"), ctr("c")] });
+    const out = run([review(0, "a", 5, ""), review(0, "b", 4, ""), review(0, "c", 4, "")]);
     expect(out.after()?.rating).toEqual({ count: 3, mean: 4.3 });
   });
 
@@ -2275,13 +2280,12 @@ describe("items the intake held for a check", () => {
     expect(dismissed.after()).toBeUndefined();
   });
 
-  it("sends a review held for network_reputation from a contributor with a track record to the AI reviewer", () => {
+  it("sends a review held for network_reputation to the AI reviewer, a contributor's first review too", () => {
     const r = heldFor(attested(review(0, "sam", 5, "Shady sites near the water and clean toilets.")), "network_reputation");
-    const out = run([r], { reviewers: [ctr("sam")] });
+    const out = run([r]);
     expect(out.outcome(r)).toBe("needs_review");
+    expect(out.decisions[0]?.reason).toContain("the AI reviewer");
     expect(out.held).toEqual([expect.objectContaining({ case: "intake_check", about: "review", review: `rev_${r.id.slice(3)}`, held_for: "network_reputation" })]);
-    // A first review still goes to a person.
-    expect(run([r]).held).toEqual([]);
   });
 
   it("tells the AI reviewer a name change was held for network_reputation, and sends one held for another check to a person", () => {
@@ -2313,6 +2317,66 @@ describe("items the intake held for a check", () => {
   it("applies a held fact the place already has, which changes nothing", () => {
     const r = heldFor(attested(fact(0, "dev-a", "power", false)), "daily_cap");
     expect(run([r]).outcome(r)).toBe("applied");
+  });
+
+  describe("gap fills the intake held only for daily_cap", () => {
+    const GAPS = ["caravans", "toilets", "swimming", "walking_tracks", "scenery", "wildlife", "shade"];
+    const fromOne = (item: StoredFeedback) => ({ ...item, contributor: ctr("dev-a") }) as StoredFeedback;
+
+    for (const how of ["without attestation", "attested"]) {
+      it(`applies seven gap fills from one contributor ${how}, as the rules decide them`, () => {
+        const reports = GAPS.map((name, i) => {
+          const r = fromOne({ ...fact(0, "dev-a", name, true), received: new Date(Date.parse(at(0)) + i * 1000).toISOString() } as StoredFeedback);
+          return heldFor(how === "attested" ? attested(r) : r, "daily_cap");
+        });
+        const out = run(reports);
+        expect(reports.map(out.outcome)).toEqual(GAPS.map(() => "applied"));
+        expect(out.after()?.facts).toEqual({ power: false, fee: true, ...Object.fromEntries(GAPS.map((name) => [name, true])) });
+        expect(out.changes).toHaveLength(GAPS.length);
+        expect(out.changes.every((c) => c.automatic)).toBe(true);
+        expect(out.edits).toEqual([]);
+      });
+    }
+
+    it("still sends a report that changes a value the place has to a person", () => {
+      const r = heldFor(attested(fact(0, "dev-a", "power", true)), "daily_cap");
+      const out = run([r]);
+      expect(out.outcome(r)).toBe("needs_review");
+      expect(out.decisions[0]?.reason).toContain("daily_cap");
+      expect(out.after()).toBeUndefined();
+      expect(out.changes).toEqual([expect.objectContaining({ automatic: false, feedback: [r.id] })]);
+    });
+
+    it("still sends a link the intake never looked up to a person, and decides one whose links passed", () => {
+      const site = heldFor(attested(fact(0, "dev-a", "website", "https://camp.example.org")), "daily_cap");
+      const out = run([site]);
+      expect(out.outcome(site)).toBe("needs_review");
+      expect(out.decisions[0]?.reason).toContain("daily_cap");
+      expect(out.after()).toBeUndefined();
+
+      const passed = { ...site, intake: { state: "held", held_reason: "daily_cap", links: "passed" } } as StoredFeedback;
+      const checked = run([passed]);
+      expect(checked.outcome(passed)).toBe("applied");
+      expect(checked.after()?.facts.website).toBe("https://camp.example.org");
+    });
+
+    it("still sends a gap fill held for another check to a person", () => {
+      for (const reason of ["text_check", "link_check", "ai_check", "check_unavailable"]) {
+        const r = heldFor(attested(fact(0, "dev-a", "toilets", true)), reason);
+        const out = run([r]);
+        expect(out.outcome(r)).toBe("needs_review");
+        expect(out.after()).toBeUndefined();
+      }
+    });
+
+    it("still sends other items held for daily_cap to a person", () => {
+      const rename = heldFor(attested({ ...base(0, "dev-a"), type: "report", report: { kind: "name", value: "Eppalock Foreshore Camp" } } as StoredFeedback), "daily_cap");
+      const added = heldFor(newPlace("dev-b"), "daily_cap");
+      const said = heldFor(review(0, "sam", 5, "Great little spot. Lots of rain but solid ground that drained well."), "daily_cap");
+      const out = run([rename, added, said]);
+      expect([rename, added, said].map(out.outcome)).toEqual(["needs_review", "needs_review", "needs_review"]);
+      expect(out.reviews.size).toBe(0);
+    });
   });
 
   it("takes no contact down on a report held for a check, though it counts towards a later one", () => {
@@ -2378,7 +2442,7 @@ describe("results the data validator would refuse", () => {
 
   it("sends a trusted contributor's review whose line would fail the data checks to a person, and writes no line", () => {
     const r = review(0, "sam", 4, "Great camp \ud83d by the lake.");
-    const out = run([r], { reviewers: [ctr("sam")] });
+    const out = run([r]);
     expect(out.outcome(r)).toBe("needs_review");
     expect(out.reviews.size).toBe(0);
     expect(out.after()).toBeUndefined();
@@ -2387,7 +2451,7 @@ describe("results the data validator would refuse", () => {
 
   it("leaves a run whose results pass the data checks as it was", () => {
     const r = review(0, "sam", 4, "Great camp 😀 by the lake.");
-    const out = run([r], { reviewers: [ctr("sam")] });
+    const out = run([r]);
     expect(out.outcome(r)).toBe("applied");
     expect(out.reviews.get(PLACE)).toHaveLength(1);
   });

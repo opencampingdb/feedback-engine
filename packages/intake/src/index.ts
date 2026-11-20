@@ -87,7 +87,7 @@ import {
 } from "./recent.js";
 import { cellHashes, getIndexedPlace, MAX_PLACE_INDEX_BYTES, parsePlaceIndex, readIndexBody, replaceCells } from "./place-index.js";
 import { geometryAt, type GeometryBucket } from "./place-geometry.js";
-import { createChecks, pruneLiveCounts, releaseLive, type AiLike, type LiveSlot } from "./checks.js";
+import { createChecks, pruneLiveCounts, releaseLive, reviewHold, type AiLike, type LiveSlot } from "./checks.js";
 import { checkRepeated, pruneTextVectors, repeatedTextOf, type RepeatedResult, type VectorizeLike } from "./repeated.js";
 import {
   decideAtSendTime,
@@ -2222,10 +2222,12 @@ export function createHandler(deps: Deps) {
       stored.intake = decision.linksPassed && answer.state === "held" ? { ...answer, links: "passed" } : answer;
       // The items after it in a batch are decided as if it were stored already.
       decision.addToDecided?.(intake.decided);
-    } else if (stored.type === "review" && repeated) {
-      // The apply decides a review. One repeated across sources, or one the check could not read, goes to a person.
-      const found = await repeated();
-      if (found === "repeated_text" || found === "check_unavailable") stored.intake = { state: "held", held_reason: found };
+    } else if (stored.type === "review") {
+      // The apply decides a review. One repeated across sources, one Llama Guard calls unsafe (drugs,
+      // violence, sexual content), or one a check could not read, goes to a person.
+      const found = repeated ? await repeated() : undefined;
+      const hold = found === "repeated_text" || found === "check_unavailable" ? found : await reviewHold(env.AI, stored.review.text);
+      if (hold) stored.intake = { state: "held", held_reason: hold };
     }
     // An item decided without the checks still leaves its text for the items after it.
     if (repeated) await repeated();

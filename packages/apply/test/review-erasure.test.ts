@@ -63,7 +63,6 @@ function rules(pending: StoredFeedback[], lines: Review[], blocked: string[] = [
     places: new Map([place(PLACE, { count: 2, mean: 4 }), place(OTHER, { count: 1, mean: 5 })].map((p) => [p.id, p])),
     reviews: byPlace,
     blocked: new Set(blocked.map(ctr)),
-    reviewers: new Set(lines.map((r) => r.contributor)),
     allReviews: lines,
   });
   return { ...out, outcome: (item: StoredFeedback) => out.decisions.find((d) => d.id === item.id)?.outcome };
@@ -204,12 +203,15 @@ describe("review erasure across runs", () => {
     const e = { ...erasure("sam", "2026-11-02T10:00:00Z"), outcome: { result: "applied", reason: "", run: "2026-11-02T12:00:00Z" } };
     await put(join(inbox, "applied", "2026-11-02", `${e.id}.json`), JSON.stringify(e));
     const before = reviewItem("sam", PLACE, "2026-11-02T09:00:00Z");
-    const after = reviewItem("sam", PLACE, "2026-11-02T11:00:00Z");
+    const sent = reviewItem("sam", PLACE, "2026-11-02T11:00:00Z") as Extract<StoredFeedback, { type: "review" }>;
+    const after = { ...sent, review: { ...sent.review, visited: "2026-10" } } as StoredFeedback;
     for (const item of [before, after]) await put(join(inbox, "pending", "2026-11-02", `${item.id}.json`), JSON.stringify(item));
     const summary = await run({ inbox, data, reviewData: review, now: new Date(NOW) });
     expect(summary.decisions.find((d) => d.id === before.id)).toMatchObject({ outcome: "refused", reason: "the contributor's reviews were erased at their request" });
-    // The erasure earns no trust, so the later review is a first review for a person.
-    expect(summary.decisions.find((d) => d.id === after.id)?.outcome).toBe("needs_review");
-    await expect(readFile(join(data, reviewPath(PLACE)), "utf8")).rejects.toThrow();
+    // The later review is decided like any other: it passes the checks, so it is published.
+    expect(summary.decisions.find((d) => d.id === after.id)?.outcome).toBe("applied");
+    const lines = (await readFile(join(data, reviewPath(PLACE)), "utf8")).trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(`rev_${after.id.slice(3)}`);
   });
 });

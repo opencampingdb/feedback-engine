@@ -132,6 +132,8 @@ describe("intake", () => {
       app_version: "1.0.0",
       consent: true,
       review: { stars: 4, text: "Lovely spot. Call [removed] or email [removed]", visited: "2026-10" },
+      // No AI binding here, so Llama Guard can't read the review and the apply sends it to a person.
+      intake: { state: "held", held_reason: "check_unavailable" },
     });
     expect(stored.device).toMatch(/^[0-9a-f]{16}$/);
     expect(JSON.stringify(stored)).not.toContain(DEVICE);

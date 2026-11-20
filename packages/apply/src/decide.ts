@@ -132,7 +132,9 @@ export function setsLink(item: StoredFeedback): boolean {
 /**
  * The check the intake held `item` for at send time (its `intake` field), or
  * null when it did not hold it for one. The apply has none of those checks,
- * so such an item goes to a person, never into the data on its own. An item
+ * so such an item goes to a person, never into the data on its own, except a
+ * gap fill held only for `daily_cap` (`gapFillPastDailyCap`), which
+ * `applyRules` decides with these rules. An item
  * the intake held for a reason of these rules is decided here as before,
  * unless it would set a link and the intake does not say its links passed
  * the link rules and URLhaus (`links: "passed"`): its links were never looked
@@ -146,6 +148,29 @@ export function heldForCheck(item: StoredFeedback): CheckHold | null {
   if (state !== "held" || typeof reason !== "string") return null;
   if ((CHECK_HOLDS as readonly string[]).includes(reason)) return reason as CheckHold;
   return links !== "passed" && setsLink(item) ? "link_check" : null;
+}
+
+/**
+ * Whether `item` is a gap fill the intake held only because its sender had
+ * reached the daily cap of live changes (`daily_cap`), which the rules then
+ * decide as if the intake had not held it (ADR 0006). It is a `fact` report
+ * of a fact `place` has no value for. New information is not held back for
+ * the cap: travellers can report a wrong value, and the apply's own gap fill
+ * limit and the other rules still apply. A report that changes a value the
+ * place has, and every other kind of item, still goes to a person. So does a
+ * gap fill that would set a link, unless the intake says its links passed
+ * (`links: "passed"`), since the intake looks links up only for items it
+ * does not hold. `place` is the place as it is now, or undefined when it is
+ * not in the data.
+ */
+export function gapFillPastDailyCap(item: StoredFeedback, place: PlaceState | undefined): boolean {
+  if (place === undefined || item.type !== "report" || item.report.kind !== "fact") return false;
+  const intake: unknown = (item as { intake?: unknown }).intake;
+  if (typeof intake !== "object" || intake === null) return false;
+  const { state, held_reason: reason, links } = intake as { state?: unknown; held_reason?: unknown; links?: unknown };
+  if (state !== "held" || reason !== "daily_cap") return false;
+  if (setsLink(item) && links !== "passed") return false;
+  return (place.facts as Record<string, unknown>)[item.report.fact as string] === undefined;
 }
 
 /** How a `fact_doubted` case was settled: its value restored, or replaced with another. */

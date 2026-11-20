@@ -592,7 +592,7 @@ A review is 1 to 5 whole stars, `text` of up to 2,000 characters (it may be empt
 **What happens to a review.**
 
 - One review per contributor per place: a newer one replaces the older. The replacement is published at the next apply run only when it comes from the install (or App Attest key) that sent the review it replaces, or when it carries a contributor proof the intake checked. Any other replacement is held for a person, and the earlier review stays until then.
-- A contributor's first review is held for a person. Only a review earns trust: once one of their reviews is visible in the data, or an apply run published one of their reviews in the last 90 days, later reviews are published at the next apply run. Checks, reports, photos and erasures earn no trust for reviews.
+- A review that passes the text checks is published at the next apply run, a contributor's first review too. Travellers can report one that should not be there (below). A review the intake held for a check goes to a person, or to the AI reviewer when it was held for its network.
 - The review PR does not quote a held review's text. It names the inbox item, where a person reads the text before merging.
 - Text sent word for word for another place is held for a person.
 
@@ -770,7 +770,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `text_check` | Free text failed the text checks. |
 | `unconfirmed` | A contact report from one source, or with none attested. |
 | `no_contributor` | A new place sent without a contributor. |
-| `daily_cap` | The contributor, their network or their install's App Attest key has had 50 live changes today (UTC). |
+| `daily_cap` | The contributor, their network or their install's App Attest key has had 50 live changes today (UTC). A fact report that fills a gap (the place has no value for that fact) is still decided at the next apply run by the usual rules. A link among them goes to a person, and so does every other item held for it. |
 | `ai_check` | The AI check flagged its free text. |
 | `check_unavailable` | A check could not run, so it waits rather than going live unchecked. |
 | `unknown_place` | The intake does not have the place yet, such as a place newer than the last release. |

@@ -560,10 +560,29 @@ describe("run", () => {
     expect(record.rating).toEqual({ count: 2, mean: 4.5 });
   });
 
-  it("holds a newcomer's review in the review checkout with the rating it would give", async () => {
+  it("publishes a newcomer's first review that passes the checks", async () => {
+    await pending(3, "2026-10-29T00:00:00Z", "aaaa", {
+      type: "review",
+      contributor: NEWCOMER,
+      review: { stars: 5, text: "Great little spot. Lots of rain but solid ground that drained well.", visited: "2026-10" },
+    });
+    const summary = await run({ inbox, data, now: NOW });
+    expect(summary.counts).toMatchObject({ applied: 1 });
+    expect(summary.counts.needs_review ?? 0).toBe(0);
+    expect(await readFile(join(data, "reviews", `${PLACE}.ndjson`), "utf8")).toContain(NEWCOMER);
+    const record = JSON.parse(await readFile(join(data, "places", "za", `${PLACE}.json`), "utf8")) as Place;
+    expect(record.rating).toEqual({ count: 1, mean: 5 });
+  });
+
+  it("holds a review the intake held for a check in the review checkout with the rating it would give", async () => {
     const review = join(root, "data-review");
     await put(join(review, "places", "za", `${PLACE}.json`), dumpPlace(place));
-    await pending(3, "2026-10-29T00:00:00Z", "aaaa", { type: "review", contributor: NEWCOMER, review: { stars: 4, text: "Quiet.", visited: "2026-10" } });
+    await pending(3, "2026-10-29T00:00:00Z", "aaaa", {
+      type: "review",
+      contributor: NEWCOMER,
+      review: { stars: 4, text: "Quiet.", visited: "2026-10" },
+      intake: { state: "held", held_reason: "ai_check" },
+    });
     const summary = await run({ inbox, data, reviewData: review, now: NOW });
     expect(summary.counts.needs_review).toBe(1);
     expect(summary.auto_changed).toBe(false);
@@ -571,7 +590,7 @@ describe("run", () => {
     expect(await readFile(join(review, "reviews", `${PLACE}.ndjson`), "utf8")).toContain(NEWCOMER);
     const proposed = JSON.parse(await readFile(join(review, "places", "za", `${PLACE}.json`), "utf8")) as Place;
     expect(proposed.rating).toEqual({ count: 1, mean: 4 });
-    expect(summary.review_pr_body).toContain("first review from this contributor");
+    expect(summary.review_pr_body).toContain("the intake held it for ai_check");
   });
 
   it("hides a review reported by three contributors and refuses a blocked contributor", async () => {

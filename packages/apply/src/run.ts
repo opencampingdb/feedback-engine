@@ -317,7 +317,6 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const reviews = new Map<string, Review[]>();
   for (const id of reviewIds) reviews.set(id, await auto.reviews(id));
   const blocked = await auto.blocked();
-  const reviewers = await auto.reviewers(blocked);
   const removedReviews = crowd.some((p) => p.type === "review") ? await auto.removedReviews() : new Set<string>();
   // Every record, for the duplicates check, when anything in this run is about a new place.
   const aboutNewPlaces = crowd.some(
@@ -402,7 +401,6 @@ export async function run(options: RunOptions): Promise<RunSummary> {
     ...(kinds ? { kinds } : {}),
     blocked,
     removedReviews,
-    reviewers,
     allReviews,
     photos,
     photoVotes,

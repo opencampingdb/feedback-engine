@@ -71,6 +71,8 @@ function embed(text: string): number[] {
 function fakeAi() {
   const ai = {
     fail: false,
+    unsafe: false,
+    guardFail: false,
     embeddings: 0,
     guards: 0,
     run: async (model: string, inputs: Record<string, unknown>) => {
@@ -81,7 +83,8 @@ function fakeAi() {
         return { shape: [texts.length, 768], data: texts.map(embed), pooling: "mean" };
       }
       ai.guards += 1;
-      return { response: { safe: true, categories: [] } };
+      if (ai.guardFail) throw new Error("guard down");
+      return { response: ai.unsafe ? { safe: false, categories: ["S2"] } : { safe: true, categories: [] } };
     },
   };
   return ai;
@@ -264,6 +267,19 @@ describe("repeated text across sources", () => {
     expect(queued(store).map((item) => item.intake)).toEqual([undefined, undefined, undefined]);
     await send(review(10, SPAM));
     expect(queued(store).at(-1)!.intake).toEqual({ state: "held", held_reason: "repeated_text" });
+  });
+
+  it("has Llama Guard read every review, and marks one it calls unsafe for the apply to send to a person", async () => {
+    await send(review(1, "Quiet spot by the river, good shade."));
+    expect(queued(store).at(-1)!.intake).toBeUndefined();
+    expect(ai.guards).toBe(1);
+    ai.unsafe = true;
+    await send(review(2, "A quiet spot by the river where people come to deal at night."));
+    expect(queued(store).at(-1)!.intake).toEqual({ state: "held", held_reason: "ai_check" });
+    ai.unsafe = false;
+    ai.guardFail = true;
+    await send(review(3, "Lovely creek, lots of birds in the morning."));
+    expect(queued(store).at(-1)!.intake).toEqual({ state: "held", held_reason: "check_unavailable" });
   });
 
   it("leaves short text alone, such as a name", async () => {

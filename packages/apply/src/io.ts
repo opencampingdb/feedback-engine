@@ -834,18 +834,6 @@ export class DataRepo {
     return new Set((list.reviews ?? []).map((entry) => entry.review));
   }
 
-  /**
-   * Contributors with at least one visible review anywhere in the data, so
-   * their next reviews are trusted. Reads every review file.
-   */
-  async reviewers(blocked: ReadonlySet<string>): Promise<Set<string>> {
-    const out = new Set<string>();
-    for (const review of await this.allReviews()) {
-      if (review.hidden === undefined && review.contributor && !blocked.has(review.contributor)) out.add(review.contributor);
-    }
-    return out;
-  }
-
   /** Every review line in the data. Reads every review file. */
   async allReviews(): Promise<Review[]> {
     const folder = join(this.root, "reviews");
