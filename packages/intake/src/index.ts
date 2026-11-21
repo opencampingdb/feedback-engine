@@ -37,7 +37,7 @@ import { AttestError, verifyAssertion, verifyAttestation, type AttestedKey, type
 import { refuse, type RefusalBody } from "./refusal.js";
 import { HUMAN_CHECK_HEADER, humanCheckAllows, parseHumanCheck, verifyHumanCheck, type HumanCheckConfig, type HumanCheckResult } from "./humancheck.js";
 import { fromBase64, hex, sha256, toBase64, toBase64Url } from "./bytes.js";
-import { GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
+import { CONTENTS_READ, GitHubApp, type Fetch, type GitHubAppConfig } from "./github.js";
 import type { MajorRoads } from "@opencampingdb/apply/review";
 import { recordInboxWrite, startApplyIfDue, type RunOutcome } from "./runs.js";
 import { parseTimetable, startTimedIfDue, type TimedStart } from "./timed.js";
@@ -342,6 +342,14 @@ export interface Env {
    * not limited per network.
    */
   PER_IP?: RateLimiterLike;
+  /**
+   * A photo service's intake: the URL of Open Camping DB's owner check
+   * (`https://<intake>/v1/owner/check`), which `photo_hero` needs. Without it
+   * a `photo_hero` is refused with `404 photo_hero_not_served_here`.
+   */
+  OWNER_CHECK_URL?: string;
+  /** Secret: the app key the photo intake sends to the owner check. */
+  OWNER_CHECK_KEY?: string;
 }
 
 /** The part of a Workers rate limiting binding the intake uses. */
@@ -650,6 +658,33 @@ function base64url(bytes: Uint8Array): string {
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** An owner token: 32 random bytes, base64url. */
+const OWNER_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+
+/** Whether two texts are the same, taking the same time wherever they differ. */
+export function sameText(a: string, b: string): boolean {
+  const x = new TextEncoder().encode(a);
+  const y = new TextEncoder().encode(b);
+  let diff = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) diff |= (x[i] ?? 0) ^ (y[i] ?? 0);
+  return diff === 0;
+}
+
+/**
+ * Asks Open Camping DB's owner check whether `token` is the place's approved
+ * owner's. `unavailable` when it can't be reached or gives no clear answer.
+ */
+async function askOwnerCheck(fetchImpl: Fetch, url: string, key: string, place: string, token: string): Promise<boolean | "unavailable"> {
+  try {
+    const res = await fetchImpl(url, { method: "POST", headers: { "content-type": "application/json", "x-app-key": key }, body: JSON.stringify({ place, token }) });
+    if (res.status !== 200) return "unavailable";
+    const answer = (await res.json()) as { owner?: unknown } | null;
+    return typeof answer?.owner === "boolean" ? answer.owner : "unavailable";
+  } catch {
+    return "unavailable";
+  }
 }
 
 /** SHA-256 of the token text, as lower case hex. */
@@ -1958,7 +1993,7 @@ export function createHandler(deps: Deps) {
     if (!checked.ok) return { status: 400, body: { error: "invalid", details: checked.errors } };
     // Phone numbers are stored the standard way, whichever app sent them.
     const submission = formatSubmissionPhones(checked.value);
-    if ("batch" in intake && (submission.type === "photo" || isOwnerSubmission(submission))) {
+    if ("batch" in intake && (submission.type === "photo" || submission.type === "photo_hero" || isOwnerSubmission(submission))) {
       return { status: 400, body: { error: "type_not_allowed_in_batch" } };
     }
     if (submission.type === "photo") return { status: 400, body: { error: "invalid", details: ["photos are sent to /v1/photos"] } };
@@ -1968,10 +2003,17 @@ export function createHandler(deps: Deps) {
     }
     // Photo reports, removals and erasures belong to a photo service: an intake with a photo bucket.
     if (
-      (submission.type === "photo_report" || submission.type === "photo_erasure" || submission.type === "photo_removal" || submission.type === "photo_vote") &&
+      (submission.type === "photo_report" ||
+        submission.type === "photo_erasure" ||
+        submission.type === "photo_removal" ||
+        submission.type === "photo_vote" ||
+        submission.type === "photo_hero") &&
       !env.PHOTOS_PENDING
     ) {
       return { status: 404, body: { error: "photos_not_served_here" } };
+    }
+    if (submission.type === "photo_hero" && (!env.OWNER_CHECK_URL || !env.OWNER_CHECK_KEY)) {
+      return { status: 404, body: { error: "photo_hero_not_served_here" } };
     }
     const device = await hashDevice(env.DEVICE_SALT, submission.device);
     const isOwner = isOwnerSubmission(submission);
@@ -2074,6 +2116,12 @@ export function createHandler(deps: Deps) {
           return { status: 403, body: { error: "own_photo" } };
         }
       }
+      // Only the place's approved owner chooses its hero photo. Nothing is stored unless Open Camping DB's owner check says so.
+      if (feedback.type === "photo_hero") {
+        const isOwner = await askOwnerCheck(deps.fetch, env.OWNER_CHECK_URL!, env.OWNER_CHECK_KEY!, feedback.place, feedback.token);
+        if (isOwner === "unavailable") return { status: 503, body: { error: "owner_check_unavailable" }, headers: { "retry-after": "60" } };
+        if (!isOwner) return { status: 403, body: { error: "not_owner" } };
+      }
       if (feedback.type === "photo_report" && env.RECENT_LIST && (await isBlocked(env.RECENT_LIST, contributor!).catch(() => false))) {
         reportMayWithhold = false;
       }
@@ -2150,6 +2198,8 @@ export function createHandler(deps: Deps) {
       ...("photo_report" in rest ? { photo_report: rest.photo_report } : {}),
       ...("photo_removal" in rest ? { photo_removal: rest.photo_removal } : {}),
       ...("photo_vote" in rest ? { photo_vote: rest.photo_vote } : {}),
+      // The owner's token is never stored: only that the owner check passed.
+      ...("photo_hero" in rest ? { photo_hero: rest.photo_hero, owner_checked: true } : {}),
     } as StoredFeedback;
     // A report for a reason on the withhold list, or a removal by the photo's own contributor,
     // stops the photo being served at once. The stored item says so, for the apply run. A report
@@ -2497,6 +2547,39 @@ export function createHandler(deps: Deps) {
     return json(200, { items: out }, cors);
   }
 
+  /**
+   * `POST /v1/owner/check` with `{place, token}`: whether the token is the one
+   * from the place's approved owner claim, as `owners/<place>.json` in the
+   * inbox holds its SHA-256. Answers only `{owner: true | false}`, stores
+   * nothing, and is limited per app key with the PER_IP binding.
+   */
+  async function ownerCheck(request: Request, env: Env, app: AppEntry, cors: Record<string, string>): Promise<Response> {
+    if (env.PER_IP) {
+      const key = await hashDevice(env.DEVICE_SALT, `owner-check:${app.app}`);
+      if (!(await env.PER_IP.limit({ key })).success) return limited(60, cors);
+    }
+    const read = await readJsonBody(request, MAX_BODY_BYTES);
+    if (!read.ok) return json(read.status, read.body, cors);
+    const { place, token } = (read.body ?? {}) as { place?: unknown; token?: unknown };
+    if (!isPlaceId(place) || typeof token !== "string" || !OWNER_TOKEN.test(token)) {
+      return json(400, { error: "invalid", details: ["place must be an Open Camping DB id and token the 43 character token from the claim"] }, cors);
+    }
+    let file: { text: string } | null;
+    try {
+      file = await new GitHubApp(deps.fetch, deps.now).readFile(inboxConfig(env), `owners/${place}.json`, env.INBOX_BRANCH ?? "main", CONTENTS_READ);
+    } catch {
+      return json(503, { error: "unavailable" }, { ...cors, "retry-after": "60" });
+    }
+    let kept: unknown;
+    try {
+      kept = file ? (JSON.parse(file.text) as { token_sha256?: unknown }).token_sha256 : undefined;
+    } catch {
+      kept = undefined;
+    }
+    const owner = typeof kept === "string" && sameText(await hashToken(token), kept);
+    return json(200, { owner }, cors);
+  }
+
   return async function handle(request: Request, env: Env): Promise<Response> {
     const cors = corsHeaders(request, env);
     const url = new URL(request.url);
@@ -2593,7 +2676,8 @@ export function createHandler(deps: Deps) {
       route !== "/v1/photos/pass" &&
       route !== "/v1/photos/erase" &&
       route !== "/v1/attest/challenge" &&
-      route !== "/v1/attest/register"
+      route !== "/v1/attest/register" &&
+      route !== "/v1/owner/check"
     ) {
       return json(404, { error: "not_found" }, cors);
     }
@@ -2608,6 +2692,7 @@ export function createHandler(deps: Deps) {
     const app = apps.get(request.headers.get("x-app-key") ?? "");
     if (!app) return json(401, { error: "invalid_app_key" }, cors);
 
+    if (route === "/v1/owner/check") return ownerCheck(request, env, app, cors);
     if (route === "/v1/photos") return photo(request, env, app, cors);
     if (route === "/v1/photos/erase") return operatorErase(request, env, app, cors);
     if (route === "/v1/feedback/batch") return feedbackBatch(request, env, app, cors);

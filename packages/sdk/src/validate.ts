@@ -29,6 +29,7 @@ import type {
   PlaceAddress,
   PhotoReportBody,
   PhotoRemovalBody,
+  PhotoHeroBody,
   PhotoVoteBody,
   PhotoVoteValue,
   PhotoReportReason,
@@ -53,6 +54,7 @@ export const FEEDBACK_TYPES = [
   "photo_erasure",
   "photo_removal",
   "photo_vote",
+  "photo_hero",
   "review_erasure",
   "withdraw",
 ] as const;
@@ -466,6 +468,7 @@ const TOP_LEVEL_KEYS = new Set([
   "photo_report",
   "photo_removal",
   "photo_vote",
+  "photo_hero",
   "contributor_proof",
   "terms_accepted",
   "token",
@@ -869,6 +872,23 @@ function checkPhotoVote(value: unknown, errors: string[]): PhotoVoteBody | undef
   return { ...target, vote: vote as PhotoVoteValue };
 }
 
+function checkPhotoHero(value: unknown, errors: string[]): PhotoHeroBody | undefined {
+  if (!isObject(value)) {
+    errors.push("photo_hero must be an object");
+    return undefined;
+  }
+  const before = errors.length;
+  for (const key of Object.keys(value)) if (!["photo", "commons", "none"].includes(key)) errors.push(`unknown field photo_hero.${key}`);
+  const given = ["photo", "commons", "none"].filter((k) => value[k] !== undefined);
+  if (given.length === 0) errors.push("photo_hero needs one of photo, commons or none");
+  else if (given.length > 1) errors.push("photo_hero takes one of photo, commons or none");
+  else if (value.photo !== undefined && !isPhotoId(value.photo)) errors.push("photo_hero.photo must be a photo id (pho_<ulid>)");
+  else if (value.commons !== undefined && !isCommonsFileName(value.commons)) errors.push("photo_hero.commons must be a Commons file name, without File:");
+  else if (value.none !== undefined && value.none !== true) errors.push("photo_hero.none must be true");
+  if (errors.length > before) return undefined;
+  return value.photo !== undefined ? { photo: value.photo as string } : value.commons !== undefined ? { commons: value.commons as string } : { none: true };
+}
+
 /** The problem with a photo's caption as sent, or null: a string on one line of at most `MAX_PHOTO_CAPTION_LENGTH` characters. */
 export function photoCaptionProblem(caption: unknown): string | null {
   if (typeof caption !== "string") return "must be a string";
@@ -1016,8 +1036,8 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     return { ok: false, errors };
   }
   if ((OWNER_TYPES as readonly string[]).includes(type)) return validateOwner(input, type as OwnerSubmission["type"]);
-  for (const other of ["report", "review", "check", "review_report", "photo", "photo_report", "photo_removal", "photo_vote", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
-    if (other !== type && input[other] !== undefined) errors.push(`${other} is not allowed when type is ${type}`);
+  for (const other of ["report", "review", "check", "review_report", "photo", "photo_report", "photo_removal", "photo_vote", "photo_hero", "terms_accepted", "token", "owner", "claim", "listing", "update"]) {
+    if (other !== type && !(other === "token" && type === "photo_hero") && input[other] !== undefined) errors.push(`${other} is not allowed when type is ${type}`);
   }
 
   if (input.consent !== true) errors.push("consent must be true");
@@ -1102,6 +1122,10 @@ export function validateSubmission(input: unknown, now: Date = new Date()): Vali
     } else if (type === "photo_vote") {
       const vote = checkPhotoVote(input.photo_vote, errors);
       if (vote) value = { ...base, place: place as string, type: "photo_vote", photo_vote: vote };
+    } else if (type === "photo_hero") {
+      if (typeof input.token !== "string" || !TOKEN.test(input.token)) errors.push("token must be the 43 character token from the claim");
+      const hero = checkPhotoHero(input.photo_hero, errors);
+      if (hero && typeof input.token === "string") value = { ...base, place: place as string, type: "photo_hero", token: input.token, photo_hero: hero };
     } else if (type === "withdraw") {
       value = { ...base, place: place as string, type: "withdraw" };
     } else {
@@ -1296,7 +1320,7 @@ const OWNER_FIELDS: Record<OwnerSubmission["type"], string[]> = {
 /** Validates the three owner submission types (SPEC "Owners"). */
 function validateOwner(input: Record<string, unknown>, type: OwnerSubmission["type"]): ValidationResult {
   const errors: string[] = [];
-  for (const key of ["report", "review", "check", "review_report", "photo", "photo_report", "photo_removal", "photo_vote", "contributor", "contributor_proof", "token", "owner", "claim", "listing", "update", "location"]) {
+  for (const key of ["report", "review", "check", "review_report", "photo", "photo_report", "photo_removal", "photo_vote", "photo_hero", "contributor", "contributor_proof", "token", "owner", "claim", "listing", "update", "location"]) {
     if (input[key] !== undefined && !OWNER_FIELDS[type].includes(key)) errors.push(`${key} is not allowed when type is ${type}`);
   }
   if (input.terms_accepted !== true) errors.push("terms_accepted must be true");

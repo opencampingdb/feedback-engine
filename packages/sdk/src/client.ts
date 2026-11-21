@@ -442,6 +442,18 @@ export interface PhotoVoteInput {
   ref?: string;
 }
 
+/** An owner's hero photo choice: one of `photo`, `commons` or `none`. */
+export interface HeroPhotoInput {
+  place: string;
+  /** A published photo of the place, `pho_<ulid>`. */
+  photo?: string;
+  /** A Commons file matched to the place, its name without `File:`. */
+  commons?: string;
+  /** Clears the owner's choice. */
+  none?: true;
+  consent: boolean;
+}
+
 export interface PhotoReportInput {
   /** The photo's place. */
   place: string;
@@ -773,6 +785,16 @@ export interface PhotoClient {
    * retried, like feedback.
    */
   votePhoto(input: PhotoVoteInput): Promise<SubmitResult>;
+  /**
+   * Sets the place's hero photo for its verified owner, with the token from
+   * their approved claim: a traveller photo, a Commons file, or `none` to
+   * clear the choice. Sent at once, never queued. The photo intake checks the
+   * token with Open Camping DB's owner check first, and throws
+   * `OwnerRequestError` with 403 when it is not the place's owner's, or 503
+   * when the check can't be made. The records carry `hero: true` from the
+   * next apply run.
+   */
+  setHeroPhoto(token: string, input: HeroPhotoInput): Promise<AcceptedResponse>;
   /**
    * Asks for one of the contributor's own photos to be removed. The photo
    * service stops serving it at once when it can confirm the photo is theirs,
@@ -1711,6 +1733,11 @@ function createClient(
   /** Sends an owner submission straight away and returns the intake's answer. */
   async function sendOwner(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (body.terms_accepted !== true) throw new OwnerTermsRequiredError();
+    return sendNow(body);
+  }
+
+  /** Validates and sends one item at once, never queued, and gives the intake's answer or throws `OwnerRequestError`. */
+  async function sendNow(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     const full = { ...body, device: await serial(device), app_version: appVersion };
     const checked = validateSubmission(full);
     if (!checked.ok) throw new FeedbackValidationError(checked.errors);
@@ -2164,6 +2191,12 @@ function createClient(
         { place, photo_report: { photo, reason }, ...(contributor !== undefined ? { contributor } : {}), consent, ref },
         "photo_report",
       ),
+    setHeroPhoto: async (token, { place, photo, commons, none, consent }) => {
+      if (consent !== true) throw new ConsentRequiredError();
+      const photo_hero = { ...(photo !== undefined ? { photo } : {}), ...(commons !== undefined ? { commons } : {}), ...(none !== undefined ? { none } : {}) };
+      const answer = await sendNow({ type: "photo_hero", place, token, photo_hero, consent });
+      return { id: String(answer.id ?? "") };
+    },
     votePhoto: ({ place, photo, commons, vote, helpful, contributor, consent, ref }) =>
       submit(
         {
@@ -2198,7 +2231,7 @@ function createClient(
 
 /** A client for Open Camping DB's feedback intake: reports, reviews, checks and owner requests. */
 export function createFeedbackClient(options: FeedbackClientOptions): FeedbackClient {
-  const { photo: _photo, photoPass: _pass, reportPhoto: _report, votePhoto: _vote, removePhoto: _remove, erasePhotos: _erase, photoQueuedRefs: _refs, ...feedback } = createClient(options as PhotoClientOptions);
+  const { photo: _photo, photoPass: _pass, reportPhoto: _report, votePhoto: _vote, setHeroPhoto: _hero, removePhoto: _remove, erasePhotos: _erase, photoQueuedRefs: _refs, ...feedback } = createClient(options as PhotoClientOptions);
   return feedback;
 }
 
@@ -2213,6 +2246,7 @@ export function createPhotoClient(options: PhotoClientOptions): PhotoClient {
     photoPass: client.photoPass,
     reportPhoto: client.reportPhoto,
     votePhoto: client.votePhoto,
+    setHeroPhoto: client.setHeroPhoto,
     removePhoto: client.removePhoto,
     erasePhotos: client.erasePhotos,
     flush: client.flush,

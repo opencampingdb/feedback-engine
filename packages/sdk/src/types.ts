@@ -15,6 +15,7 @@ export type FeedbackType =
   | "photo_erasure"
   | "photo_removal"
   | "photo_vote"
+  | "photo_hero"
   | "review_erasure"
   | "withdraw";
 export type OwnerType = "owner_claim" | "owner_listing" | "owner_update";
@@ -605,6 +606,35 @@ export interface PhotoVoteSubmission extends SubmissionBase {
   photo_vote: PhotoVoteBody;
 }
 
+/** A place's hero photo, as its verified owner chooses it: a traveller photo, a Commons file, or none to clear the choice. */
+export type PhotoHeroBody =
+  | {
+      /** Id of a published photo of the place, `pho_<ulid>`. */
+      photo: string;
+    }
+  | {
+      /** A Commons file matched to the place, its name without `File:`. */
+      commons: string;
+    }
+  | {
+      /** Clears the owner's choice. */
+      none: true;
+    };
+
+/**
+ * A place's verified owner choosing its hero photo, with the token from their
+ * approved claim. The photo intake checks the token with the Open Camping DB
+ * intake's owner check before it stores anything, and stores only that it
+ * checked.
+ */
+export interface PhotoHeroSubmission extends SubmissionBase {
+  type: "photo_hero";
+  place: string;
+  /** The token returned with the approved owner claim. Never stored. */
+  token: string;
+  photo_hero: PhotoHeroBody;
+}
+
 /**
  * Asks for every photo from the contributor to be removed, before their
  * account is deleted. `place` is null. Needs a contributor.
@@ -731,6 +761,7 @@ export type FeedbackSubmission =
   | PhotoErasureSubmission
   | PhotoRemovalSubmission
   | PhotoVoteSubmission
+  | PhotoHeroSubmission
   | ReviewErasureSubmission
   | WithdrawSubmission;
 
@@ -743,8 +774,9 @@ export type Submission = FeedbackSubmission | OwnerSubmission;
  * id, the time it arrived and the app name taken from the app key.
  */
 export type StoredFeedback =
-  | (DistributiveOmit<Exclude<FeedbackSubmission, PhotoSubmission>, "device" | "contributor"> & StoredFields)
-  | (Omit<PhotoSubmission, "device" | "contributor" | "photo"> & StoredFields & { photo: StoredPhotoFiles });
+  | (DistributiveOmit<Exclude<FeedbackSubmission, PhotoSubmission | PhotoHeroSubmission>, "device" | "contributor"> & StoredFields)
+  | (Omit<PhotoSubmission, "device" | "contributor" | "photo"> & StoredFields & { photo: StoredPhotoFiles })
+  | (Omit<PhotoHeroSubmission, "device" | "contributor" | "token"> & StoredFields & { /** The intake's owner check said the token is the place's approved owner's. */ owner_checked: true });
 
 /**
  * An owner submission as stored. A claim or listing gains the `code` the owner
