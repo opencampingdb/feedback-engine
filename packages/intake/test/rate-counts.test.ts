@@ -204,7 +204,7 @@ describe("daily counters in D1", () => {
     expect((await handle(post({ ...claim, device: device(11) }), e)).status).toBe(429);
   });
 
-  it(`limits each contributor to ${NEW_PLACE_DAILY_LIMIT} new places a day`, async () => {
+  it(`takes every new place from a contributor past ${NEW_PLACE_DAILY_LIMIT} a day, held, and keeps the count at the limit`, async () => {
     const e = env();
     const newPlace = (i: number) => ({
       type: "report",
@@ -217,7 +217,12 @@ describe("daily counters in D1", () => {
       report: { kind: "new_place", place_kind: "free_camp", note: "Gravel pit off the highway, room for three vans" },
     });
     for (let i = 0; i < NEW_PLACE_DAILY_LIMIT; i++) expect((await handle(post(newPlace(i)), e)).status).toBe(202);
-    expect((await handle(post(newPlace(NEW_PLACE_DAILY_LIMIT)), e)).status).toBe(429);
+    for (let i = NEW_PLACE_DAILY_LIMIT; i < NEW_PLACE_DAILY_LIMIT + 3; i++) {
+      const res = await handle(post(newPlace(i)), e);
+      expect(res.status).toBe(202);
+      expect(await res.json()).toMatchObject({ state: "held" });
+    }
+    expect(rows().filter((r) => r.key.startsWith("np:")).map((r) => r.count)).toEqual([NEW_PLACE_DAILY_LIMIT]);
   });
 
   /** Puts PLACE in the place index, as a release would. */
@@ -238,6 +243,42 @@ describe("daily counters in D1", () => {
     const unknown = review({ type: "report", place: "ocdb_01JC0000000000000000000AAA", review: undefined, report: { kind: "fact", fact: "toilets", value: true } });
     for (let i = 0; i < 3; i++) expect((await handle(post(unknown), e)).status).toBe(202);
     expect(rows().find((r) => r.key.startsWith("d:"))?.count).toBe(3);
+  });
+
+  it("counts a device's reports about its own new place from today once against its day, though the place is not listed", async () => {
+    const e = env();
+    const added = {
+      type: "report",
+      place: null,
+      location: { lat: -36.12345, lon: 146.88765 },
+      device: DEVICE,
+      contributor: "acct_3f9a8b7c6d5e4f30",
+      app_version: "1.0.0",
+      consent: true,
+      report: { kind: "new_place", place_kind: "free_camp" },
+    };
+    const res = await handle(post(added), e);
+    expect(res.status).toBe(202);
+    const answer = (await res.json()) as { id: string; state?: string };
+    // Without attestation the place is held, so it is on neither the recent list nor the place index.
+    expect(answer.state).toBe("held");
+    const place = `ocdb_${answer.id.slice(3)}`;
+    const fact = (name: string, who: Record<string, unknown> = {}) =>
+      review({ type: "report", place, review: undefined, report: { kind: "fact", fact: name, value: true }, ...who });
+    for (const name of ["toilets", "showers", "drinking_water", "bbq"]) expect((await handle(post(fact(name)), e)).status).toBe(202);
+    const count = (prefix: string) => rows().filter((r) => r.key.startsWith(prefix)).map((r) => r.count);
+    // The new place, and its first report: the rest of the edit is free of the device's and the contributor's day.
+    expect(count("d:")).toEqual([2]);
+    expect(count("c:")).toEqual([2]);
+    expect(count("a:")).toEqual([5]);
+    // Another device's reports about it count each time.
+    const other = { device: device(7), contributor: "acct_another_one_0000" };
+    for (const name of ["toilets", "showers"]) expect((await handle(post(fact(name, other)), e)).status).toBe(202);
+    expect(count("d:")).toEqual(expect.arrayContaining([2, 2]));
+    // The next day it is no longer today's own new place.
+    clock += DAY;
+    for (const name of ["toilets", "showers"]) expect((await handle(post(fact(name)), e)).status).toBe(202);
+    expect(rows().filter((r) => r.key.startsWith("d:") && r.day !== "2026-11-07").map((r) => r.count)).toEqual([2]);
   });
 
   it("counts a device's reports about one place in a day once, up to the place edit limit", async () => {

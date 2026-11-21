@@ -442,7 +442,7 @@ await feedback.report({
 });
 ```
 
-Each contributor (or install, without one) may send 10 new places a day. The eleventh gets `429 rate_limited`.
+Each contributor's first 50 new places of the UTC day (each install's, without a contributor) are decided as usual: listed at once when they pass the checks. From the 51st, a new place is held instead of refused by this count. The intake takes it (`202`) and answers `held` with `new_place_cap`: it is not listed, and the AI reviewer checks it before it is published, then a person when the reviewer is unsure. Every app and every traveller has the same 50. Each new place still counts against the [daily limits](#6-reviews-contributors-reports-and-blocking) like any submission (200 a day for the install, the contributor and the App Attest key, 500 for the network), so one contributor can add at most 200 new places a day, and past that gets `429`.
 
 **Details before the id is known.** A new place gets its id when its report is sent. To send more about it straight away, give the `new_place` report a `ref` and name the place as `{ newPlace: <that ref> }` in `report`, `reportFacts`, `check` or `review`. Those items wait in the queue, unsent, until the new place is sent, then take its `ocdb_` id and go in order. They survive restarts, and a waiting item never holds up the items behind it. If the new place is dropped or refused, the waiting items are dropped too, and `onAnswered` gets `{ kind: "dropped", httpStatus: 0, reason: "new_place_dropped" }`. A ref that names no queued or sent new place, or one that was dropped, throws `FeedbackValidationError`. `feedback.newPlace(ref)` says where it stands: `waiting`, `sent` (with its `ocdb_` id as `place`), `dropped` or `unknown`. Photos of the new place can wait too: see [photos.md](photos.md), "A photo of a place the traveller has just added".
 
@@ -598,7 +598,7 @@ A review is 1 to 5 whole stars, `text` of up to 2,000 characters (it may be empt
 - The review PR does not quote a held review's text. It names the inbox item, where a person reads the text before merging.
 - Text sent word for word for another place is held for a person.
 
-**Daily limits.** Each contributor may send 200 submissions a day (the app key can set `contributor_daily_limit`), and so may each install and each App Attest key. Each client network may send 500. An install's reports about one released place in a day count as one of the install's and the contributor's submissions, up to 100 reports a place, so a full edit of a place (`reportFacts`) costs the traveller one. Each report still counts against the app's daily limit and the client network's. Past a limit the intake answers `429 rate_limited`, and the item stays queued.
+**Daily limits.** Each contributor may send 200 submissions a day (the app key can set `contributor_daily_limit`), and so may each install and each App Attest key. Each client network may send 500. An install's reports about one released place in a day count as one of the install's and the contributor's submissions, up to 100 reports a place, so a full edit of a place (`reportFacts`) costs the traveller one. The same goes for a new place the install added that UTC day, listed or held, including reports sent with `{ newPlace: ref }`. Each report still counts against the app's daily limit, the client network's and the App Attest key's. Past a limit the intake answers `429 rate_limited`, and the item stays queued.
 
 **Was there.** Set `review.visited_nearby: true` only when your app saw the phone within its set distance of the place in the 60 days before the review, for example from a check or a saved visit. Never send the location. It is published with the review so apps can show it. An app key with `requires_visited_nearby` refuses reviews without it (`400 visited_nearby_required`).
 
@@ -772,7 +772,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `text_check` | Free text failed the text checks. |
 | `unconfirmed` | A contact report from one source, or with none attested. |
 | `no_contributor` | A new place sent without a contributor. |
-| `daily_cap` | The contributor, their network or their install's App Attest key has had 50 live changes today (UTC). A fact report that fills a gap (the place has no value for that fact) is still decided at the next apply run by the usual rules. A link among them goes to a person, and so does every other item held for it. |
+| `daily_cap` | The contributor, their network or their install's App Attest key has had 50 live changes today (UTC). A fact report that fills a gap (the place has no value for that fact) is still decided at the next apply run by the usual rules. A new place goes to the AI reviewer, as one held for `new_place_cap` does, once its links pass the malware check. A link among the gap fills goes to a person, and so does every other item held for it. |
 | `ai_check` | The AI check flagged its free text. |
 | `check_unavailable` | A check could not run, so it waits rather than going live unchecked. |
 | `unknown_place` | The intake does not have the place yet, such as a place newer than the last release. |
@@ -793,6 +793,7 @@ The codes are exported as `HELD_REASONS` and the type as `HeldReason`. Show your
 | `source_link` | A fact report without attestation that carries a source link. The apply run reads the page: the value goes into the data when the page shows it, or when a second source agrees. |
 | `disputed` | The place is frozen: three or more sources sent conflicting values for one of its facts within 24 hours. No fact report, doubt, clear or contact report changes the place until a reviewer settles the value, or for 14 days when no one does, and then reports are decided as usual. |
 | `implausible_location` | A new place the map data puts in the sea or a lake, on a major road's carriageway or inside a building footprint. It is not listed, and the AI reviewer checks it: a person sees it only when the reviewer is unsure. A remote place is never held for being remote. |
+| `new_place_cap` | A new place past the contributor's first 50 new places this UTC day (the install's, without a contributor). It is taken (`202`), and its install's reports about it that UTC day count as one edit, but it is not listed: the AI reviewer checks it, and approves, merges or takes it down as it does a new place without attestation. A person sees it only when the reviewer is unsure. |
 | `waiting_value` | A doubt about a fact while another source's report of a new value for it waits for a second source (an [unconfirmed value](#the-recent-list)). It counts against that report: one sends it to the AI reviewer, and two from sources on different client networks refuse it. The place's fact stays. |
 
 Being held is not a refusal: a reviewer (a person, bot or AI the maintainers allow) decides the item. A code this SDK does not know is left out of `heldReason`, and `state` is still `held`.
@@ -1204,8 +1205,14 @@ const feedback = createFeedbackClient({
 
 ## What changed by version
 
-What an app moving to 0.41.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
+What an app moving to 0.42.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
 
+- **0.42.0.** New places past the day's 50, for every app:
+  - Each contributor's first 50 new places of the UTC day (each install's, without a contributor) are decided as usual, up from 10. From the 51st the intake no longer answers `429`: it takes the place (`202`) and answers `held` with `new_place_cap`. The place is not listed, and the AI reviewer checks it, then a person when the reviewer is unsure. Every app and traveller has the same 50 ([Reports](#5-send-reports-reviews-checks-and-charges)).
+  - `HELD_REASONS` gains `new_place_cap`. Show your own message for it, and treat a code you do not know as `held`.
+  - An install's reports about a new place it added that UTC day, listed or held, including those sent with `{ newPlace: ref }`, count as one edit against the install's and the contributor's daily limits, as reports about a released place do. They still count against the App Attest key's and the network's ([Daily limits](#6-reviews-contributors-reports-and-blocking)).
+  - A new place held as `daily_cap`, because the contributor had made 50 live changes that day, now goes to the AI reviewer as one held for `new_place_cap` does, once its links pass the malware check, instead of straight to a person.
+  - Move both SHAs of the apply engine in the inbox's `apply-feedback.yml` to the 0.42.0 commit before deploying the intake: an older apply does not know `new_place_cap` and would publish such a place.
 - **0.41.0.** Photo votes and an owner's hero photo, for photo services ([photos.md](photos.md#photo-votes)):
   - `photo_vote` takes `vote`: `helpful`, `not_helpful` or `none` (takes the vote back), and `votePhoto` takes `vote`. The older `helpful: true | false` is still accepted from apps on older SDKs, as `helpful` and `none`. Photo records gain `not_helpful` and `not_helpful_12m` next to `helpful` and `helpful_12m`, each left out at 0. `PhotoVoteValue` is exported, and `PhotoVoteBody` is now `{photo, vote}` or `{commons, vote}`.
   - `photo_vote` may name a Wikimedia Commons file matched to the place, `commons: "<file name>"` without `File:`, in place of `photo`. The apply run refuses a file not matched to the place or on the do-not-match list, and the photo server serves each place's counts at `GET /v1/places/<place id>/commons.ndjson`.

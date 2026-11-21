@@ -38,7 +38,8 @@ import {
   inWindow,
   newPlaceFields,
   newPlaceListing,
-  reviewerDecidesNewPlace,
+  pastNewPlaceCap,
+  reviewerNewPlaceCase,
   protectedSource,
   restoreWeight,
   REVIEWED_FACTS,
@@ -667,6 +668,23 @@ function dataCheckFailures(input: RulesInput, out: RulesOutput): Map<string, str
 }
 
 function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): RulesOutput {
+  /**
+   * An opaque label for a sender, the same for each of their `new_place_cap`
+   * cases in this run and random each run, so the AI reviewer can take turns
+   * by sender while the review PR never links the cases to a contributor id,
+   * across PRs or with `first_place` lines.
+   */
+  const senders = new Map<string, string>();
+  const senderOf = (who: string): string => {
+    let label = senders.get(who);
+    if (label === undefined) {
+      const bytes = crypto.getRandomValues(new Uint8Array(8));
+      label = `snd_${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+      senders.set(who, label);
+    }
+    return label;
+  };
+
   const now = Date.parse(input.now);
   const nowIso = new Date(now).toISOString().replace(/\.\d{3}Z$/, "Z");
   const sourceConfirmed = input.sourceConfirmed ?? new Set<string>();
@@ -2428,7 +2446,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
    * `newPlaceStanding`: `shown` and `confirmed` places go straight into the
    * data, much as reviews do. A `held` or `hidden` place that is not
    * in the data yet is drafted for a person instead, or for the AI reviewer
-   * when only a lack of attestation keeps it off the list (`unattested_place`), a `withdrawn` one is
+   * when only a lack of attestation keeps it off the list (`unattested_place`) or only the intake's
+   * hold past its contributor's new places or live changes for the day (`new_place_cap`), a `withdrawn` one is
    * not written and is removed if it was. Every case a person should look
    * at is listed in `held`.
    */
@@ -2488,9 +2507,12 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       // A new place in the water, on a major road or inside a building is held for the AI reviewer.
       const implausible = existing || !isPending ? null : implausibleOf(origin);
       const published = (standing === "shown" || standing === "confirmed") && unlisted === undefined && implausible === null;
-      // Kept off the list only for want of attestation, past the plausibility, duplicate and text checks: the AI reviewer decides it.
+      // Kept off the list only for want of attestation, or only for being past the day's new places, once it
+      // passed the plausibility, duplicate and text checks: the AI reviewer decides it.
       const forReviewer =
-        isPending && !existing && unlisted !== undefined && implausible === null && (standing === "shown" || standing === "confirmed") && reviewerDecidesNewPlace(origin, isTrusted(origin, trusted));
+        isPending && !existing && unlisted !== undefined && implausible === null && (standing === "shown" || standing === "confirmed")
+          ? reviewerNewPlaceCase(origin, isTrusted(origin, trusted))
+          : null;
       // Contact facts and the address. A published place carries those that pass
       // the link and spam checks; the rest wait for a person. A draft for a person carries them all.
       const { contacts: heldFacts, failing, descriptionProblem } = newPlaceFields(origin);
@@ -2503,8 +2525,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       const caseFor = (kind: HeldCase["case"], feedback: readonly StoredFeedback[]): HeldCase => ({
         case: kind,
         place: id,
-        // An implausible or unattested place is drafted as held, unless reports hid it.
-        standing: ((kind === "implausible_location" || kind === "unattested_place") && standing !== "hidden" ? "held" : standing) as NonNullable<HeldCase["standing"]>,
+        // An implausible or unattested place, or one past the day's new places, is drafted as held, unless reports hid it.
+        standing: ((kind === "implausible_location" || kind === "unattested_place" || kind === "new_place_cap") && standing !== "hidden" ? "held" : standing) as NonNullable<HeldCase["standing"]>,
         location: { lat: roundCoord(origin.location!.lat), lon: roundCoord(origin.location!.lon) },
         kind: (existing ?? draftOf(origin)).kind,
         ...(kind === "duplicate" && duplicate ? { duplicate_of: duplicate.place, distance_m: duplicate.distance } : {}),
@@ -2512,8 +2534,9 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         ...(kind === "contacts" ? { contacts: failing } : {}),
         ...(kind === "description" && descriptionProblem !== null ? { problem: descriptionProblem } : {}),
         ...(kind === "first_place" && origin.contributor ? { contributor: origin.contributor } : {}),
+        ...(kind === "new_place_cap" ? { sender: senderOf(origin.contributor ?? origin.device) } : {}),
         ...(kind === "implausible_location" && implausible !== null ? { hit: implausible.hit, problem: implausible.problem } : {}),
-        ...(kind === "unattested_place" ? { candidates: mergeCandidates(id, origin) } : {}),
+        ...(kind === "unattested_place" || kind === "new_place_cap" ? { candidates: mergeCandidates(id, origin) } : {}),
         feedback: feedback.map((f) => f.id),
       });
 
@@ -2603,7 +2626,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       if (isPending && firstPlace) held.push(caseFor("first_place", [origin]));
       if (isPending && hasNote) held.push(caseFor("note", [origin]));
       if (implausible !== null && !published) held.push(caseFor("implausible_location", [origin]));
-      if (forReviewer) held.push(caseFor("unattested_place", [origin]));
+      if (forReviewer !== null) held.push(caseFor(forReviewer, [origin]));
     }
   }
 
@@ -2629,7 +2652,10 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   /** Why the intake would not list a new place or did not, or undefined when it would. */
   function whyNotListed(item: ReportItem): string | undefined {
     const check = heldNow(item);
-    return newPlaceListing(item, isTrusted(item, trusted))?.why ?? (check === null ? undefined : `held by the intake for ${check}`);
+    const listing = newPlaceListing(item, isTrusted(item, trusted))?.why;
+    if (listing !== undefined) return listing;
+    if (check !== null) return `held by the intake for ${check}`;
+    return pastNewPlaceCap(item) ? "past its contributor's new places for the day" : undefined;
   }
 
   /** A new place's record as its report describes it, with no standing yet. */

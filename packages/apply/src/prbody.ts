@@ -290,7 +290,7 @@ export function reviewPrBody(
 
 const HELD_INTRO =
   "Cases a person, a bot or an AI reviewer should look at, one per line: `held-case` and a JSON object. `case` is `duplicate`, `hidden`, " +
-  "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate`, `commons_mismatch`, `contact_check`, `implausible_location`, `note`, `place_change`, `disputed`, `unattested_place`, `intake_check` or `unconfirmed_fact`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
+  "`contacts`, `description`, `first_place`, `contact_withdrawn`, `fact_doubted`, `vehicle_access_candidate`, `commons_mismatch`, `contact_check`, `implausible_location`, `note`, `place_change`, `disputed`, `unattested_place`, `new_place_cap`, `intake_check` or `unconfirmed_fact`, and `feedback` names the inbox items it comes from. To keep a held or hidden place, " +
   "set its `standing` to `shown` in this PR. `contacts` and `description` name what was left off a published new place: " +
   "contact details, addresses and descriptions travellers sent are in the inbox items, never here. " +
   "`contact_withdrawn` is a contact taken off a place after reports from two sources: its `value` is the place's own published contact, " +
@@ -301,6 +301,8 @@ const HELD_INTRO =
   "To keep it, set its `standing` to `shown`, or move its `location` first. " +
   "`unattested_place` is a new place from an install without attestation, drafted as held after it passed the location, duplicate and text checks. " +
   "`candidates` are places in its group nearby. To keep it, set its `standing` to `shown`, or merge it into the candidate it duplicates. " +
+  "`new_place_cap` is a new place the intake held because its contributor had already added the day's number of new places, or made the day's number of live changes, drafted as held after the intake's block list, attestation, location, repeated text and link checks and the apply's text, link, location and duplicate checks. Llama Guard has not read its text. " +
+  "It lists `candidates` and is kept or merged the same way. " +
   "`fact_doubted` is a fact travellers say is wrong without giving the right value: with `taken_down` doubts from two sources took it off the place, " +
   "otherwise one traveller doubts it and it stays. `value` is what the place published, and `doubts` and `confirmations` name the reports weighed. " +
   "To restore it, set `facts.<fact>` back to `value`. Doubt notes are in the inbox, never here. " +

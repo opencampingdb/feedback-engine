@@ -1,4 +1,5 @@
 import { DEVICE_DAILY_LIMIT, ORIGIN_DAILY_LIMIT, PLACE_EDIT_DAILY_LIMIT } from "../src/ratelimit.js";
+import { NEW_PLACE_DAILY_LIMIT } from "../src/recent.js";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { FEE_RETIRED } from "@opencampingdb/feedback";
@@ -323,6 +324,33 @@ describe("intake", () => {
     // The next day the edit starts again.
     clock += 24 * 60 * 60 * 1000;
     expect((await handle(post(fact), e)).status).toBe(202);
+  });
+
+  it("stores a contributor's new place past the day's new places held as new_place_cap, on an intake without D1", async () => {
+    const kv = fakeKv();
+    const e = { ...env(kv), APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 10_000 } }) };
+    const added = (i: number) => ({
+      type: "report",
+      place: null,
+      location: { lat: -36.1 - i / 100, lon: 146.8 },
+      device: `${String(i).padStart(8, "0")}-e2bb-4255-8caf-4136c566a962`,
+      contributor: "acct_3f9a8b7c6d5e4f30",
+      app_version: "1.0.0",
+      consent: true,
+      report: { kind: "new_place", place_kind: "free_camp" },
+    });
+    for (let i = 0; i < NEW_PLACE_DAILY_LIMIT; i++) {
+      const res = await handle(post(added(i)), e);
+      expect(res.status).toBe(202);
+      expect(await res.json()).toEqual({ id: expect.any(String) });
+    }
+    const res = await handle(post(added(NEW_PLACE_DAILY_LIMIT)), e);
+    expect(res.status).toBe(202);
+    const { id } = (await res.json()) as { id: string };
+    const puts = gh.calls.filter((c) => c.method === "PUT");
+    expect(puts).toHaveLength(NEW_PLACE_DAILY_LIMIT + 1);
+    expect(decodeContent(puts.at(-1)!)).toMatchObject({ id, intake: { state: "held", held_reason: "new_place_cap" } });
+    expect(puts.slice(0, -1).every((p) => decodeContent(p).intake === undefined)).toBe(true);
   });
 
   it("counts a report about another place, and a new place, against the daily limits as usual", async () => {

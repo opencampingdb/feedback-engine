@@ -1004,6 +1004,84 @@ describe("the AI reviewer", () => {
     });
   });
 
+  describe("new_place_cap cases", () => {
+    const capped = (n: number, candidates: { place: string; distance_m: number }[] = []) => heldCase(n, { case: "new_place_cap", standing: "held", candidates });
+    const nearby = (n: number, overrides: Partial<Place> = {}) =>
+      place(n, { standing: undefined, name: "Creek Bend 0", facts: { toilets: true }, fact_sources: { name: "osm", toilets: "osm" }, fact_dates: undefined, ...overrides });
+    const schemaOf = (input: Record<string, unknown>) =>
+      (input.response_format as { json_schema: { properties: { decision: { enum: string[] }; target?: { enum: string[] } } } }).json_schema.properties;
+
+    it("tells the model the place came past its contributor's new places for the day, and approves a believable one: standing shown", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [capped(0, [{ place: id(1), distance_m: 320 }])]));
+      gh.put(place(0));
+      gh.put(nearby(1, { name: "Lakeside Park", kind: "caravan_park" }));
+      const { ai, asked } = fakeAi(() => reply("approve", "A believable free camp."));
+
+      const result = await run(gh, ai);
+      expect(result).toMatchObject({ decisions: [{ case: "new_place_cap", decision: "approve", reviewer: REVIEWER, committed: true }] });
+      expect(caseOf(asked[0]!.input)).toMatchObject({ case: "new_place_cap", place: { id: id(0) }, candidates: [{ id: id(1), name: "Lakeside Park", distance_m: 320 }] });
+      const system = JSON.stringify((asked[0]!.input.messages as { content: string }[])[0]!.content);
+      expect(system).toContain("new_place_cap");
+      expect(system).toContain("travel journal");
+      expect(schemaOf(asked[0]!.input).decision.enum).toEqual(["approve", "take_down", "leave"]);
+      expect(gh.read(0)).toMatchObject({ standing: "shown", updated: AT });
+    });
+
+    it("merges it into a candidate the model names, when the rules allow the merge", async () => {
+      const roads = majorRoads(['{"coords":[[144.549,-36.9],[144.551,-36.9]],"highway":"primary","name":"Example Road","road":5}']);
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [capped(0, [{ place: id(1), distance_m: 220 }])]));
+      gh.put(place(0));
+      gh.put(nearby(1, { location: { lat: -36.852, lon: 144.55 } }));
+      const { ai } = fakeAi(() => ({ response: { decision: "merge", target: id(1), reason: "The same camp.", sure: true } }));
+      const result = await createReviewer({ fetch: gh.fetch, now: () => clock, roads })({ ...env, AI: ai });
+      expect(result).toMatchObject({ decisions: [{ decision: "merge", target: id(1), committed: true }] });
+      expect(gh.read(0)).toMatchObject({ status: "merged", merged_into: id(1) });
+    });
+
+    it("takes one case per contributor before a second, and leaves a model slot for the other cases waiting", async () => {
+      const A = "snd_aaaaaaaaaaaaaaaa";
+      const B = "snd_bbbbbbbbbbbbbbbb";
+      const from = (n: number, sender: string) => heldCase(n, { case: "new_place_cap", standing: "held", candidates: [], sender });
+      const lines = [from(0, A), from(1, A), from(2, A), from(3, A), from(4, A), from(5, B), from(6, B), heldCase(7, { case: "unattested_place", standing: "held", candidates: [] })];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], lines));
+      for (let n = 0; n <= 7; n++) gh.put(place(n));
+      const { ai, asked } = fakeAi(() => reply("approve", "A believable free camp."));
+      await run(gh, ai);
+      expect(asked.map((a) => (caseOf(a.input).place as { id: string }).id)).toEqual([id(0), id(5), id(1), id(6), id(7)]);
+    });
+
+    it("gives every model slot to these cases when the only other cases after them are settled without the model", async () => {
+      const from = (n: number) => heldCase(n, { case: "new_place_cap", standing: "held", candidates: [], sender: `snd_${String(n).repeat(16)}` });
+      const settled = heldCase(6, { case: "unattested_place", standing: "held", candidates: [] });
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [from(0), from(1), from(2), from(3), from(4), settled]));
+      for (let n = 0; n <= 4; n++) gh.put(place(n));
+      // No longer held: the rules leave it without asking.
+      gh.put(place(6, { standing: "shown" }));
+      const { ai, asked } = fakeAi(() => reply("approve", "A believable free camp."));
+      const result = await run(gh, ai);
+      expect(asked.map((a) => (caseOf(a.input).place as { id: string }).id)).toEqual([id(0), id(1), id(2), id(3), id(4)]);
+      expect(result).toMatchObject({ decisions: expect.arrayContaining([expect.objectContaining({ place: id(6), decision: "leave", by_rules: true })]) });
+    });
+
+    it("leaves one the model is unsure of to a person, and one no longer held or with a verified owner without asking", async () => {
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [capped(0), capped(1), capped(2)]));
+      gh.put(place(0));
+      gh.put(place(1, { standing: "shown" }));
+      gh.put(place(2, { owner_verified: true }));
+      const { ai, asked } = fakeAi(() => reply("approve", "Maybe a camp.", false));
+      const result = await run(gh, ai);
+      expect(asked).toHaveLength(1);
+      expect(result).toMatchObject({
+        decisions: [
+          { decision: "leave", by_rules: false },
+          { decision: "leave", by_rules: true },
+          { decision: "leave", by_rules: true, reason: "the place has a verified owner" },
+        ],
+      });
+      expect(gh.commits()).toHaveLength(0);
+    });
+  });
+
   describe("merging a duplicate", () => {
     const dup = (n: number, of: number) => heldCase(n, { case: "duplicate", standing: "held", duplicate_of: id(of), distance_m: 70 });
     const existing = (n: number, overrides: Partial<Place> = {}) =>

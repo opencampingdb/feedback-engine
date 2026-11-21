@@ -16,9 +16,9 @@
  *   with a verified owner, a pair on `moderation/distinct_places.json` or a
  *   pair across a major road (without road data, only the same name less
  *   than 25 m apart);
- * - approve, take down or merge an unattested new place, merging only into
- *   one of the candidates its case lists, by the same rules, named as
- *   `target`;
+ * - approve, take down or merge an unattested new place, or one held past
+ *   its contributor's new places or live changes for the day, merging only into one of the
+ *   candidates its case lists, by the same rules, named as `target`;
  * - restore a withdrawn contact, restore or keep down a fact doubts took
  *   down, and dismiss doubts about a fact that stays;
  * - confirm `vehicle_access` on a place whose name says only heavy vehicles
@@ -147,6 +147,28 @@ export interface ReviewerDeps {
   second?: SecondStage;
 }
 
+/**
+ * The cases in the order the reviewer takes them: as listed, except that the
+ * `new_place_cap` cases, in the places they hold in the list, go round their
+ * senders (`sender`, the apply's opaque label for a contributor), one case
+ * from each before a second from any, so one contributor's long day does not
+ * hold up everyone else's. A case without a sender is a sender of its own.
+ */
+export function fairOrder<T extends [string, HeldCase]>(cases: readonly T[]): T[] {
+  const capped = cases.filter(([, c]) => c.case === "new_place_cap");
+  const byContributor = new Map<string, T[]>();
+  for (const entry of capped) {
+    const who = entry[1].sender ?? `place:${entry[1].place}`;
+    byContributor.set(who, [...(byContributor.get(who) ?? []), entry]);
+  }
+  const rounds: T[] = [];
+  for (let round = 0; rounds.length < capped.length; round++) {
+    for (const list of byContributor.values()) if (list[round]) rounds.push(list[round]!);
+  }
+  let next = 0;
+  return cases.map((entry) => (entry[1].case === "new_place_cap" ? rounds[next++]! : entry));
+}
+
 /** One decision, as the reviewer records it on the PR. */
 export interface ReviewRecord {
   key: string;
@@ -164,7 +186,7 @@ export interface ReviewRecord {
   held?: "ai_cap";
   /** On `confirm` of a `disputed` case: the value set. */
   value?: FactValue;
-  /** On `merge` of an `unattested_place` case: the candidate it was merged into. */
+  /** On `merge` of an `unattested_place` or `new_place_cap` case: the candidate it was merged into. */
   target?: string;
 }
 
@@ -331,6 +353,18 @@ const CASE_GUIDE: Partial<Record<HeldCase["case"], { about?: readonly string[]; 
         "merge the new place into the candidate you give as target: the two are clearly one place added twice, with the same or nearly the same name and nothing to tell them apart",
     },
   },
+  new_place_cap: {
+    about: [
+      "In a new_place_cap case, a traveller added more new places, or made more changes, in one day than most do, so this one waits for a reviewer instead of being listed at once. It passed the automatic location, duplicate and text checks. candidates are places of the same group nearby, with how far each is.",
+      "Adding many places in a day is normal for someone entering places from a travel journal. A sparse or remote place is normal for camping. Take it down only when it is clearly spam or not a place at all.",
+      "With merge, give target: the id of the candidate it duplicates, one of those listed as mergeable.",
+    ],
+    means: {
+      approve: "publish the place: it is believable as a real place of its kind, here",
+      merge:
+        "merge the new place into the candidate you give as target: the two are clearly one place added twice, with the same or nearly the same name and nothing to tell them apart",
+    },
+  },
 };
 
 /** What a decision means for this case. */
@@ -439,7 +473,7 @@ function decisionSchema(allowed: readonly ReviewDecision[], choices: readonly Fa
   };
 }
 
-/** A place an `unattested_place` case lists nearby, and whether a reviewer may merge the case's place into it. */
+/** A place an `unattested_place` or `new_place_cap` case lists nearby, and whether a reviewer may merge the case's place into it. */
 export interface Candidate {
   place: Place;
   distance_m: number;
@@ -490,7 +524,7 @@ export interface ModelDecision {
   unsure: boolean;
   /** On `confirm` of a disputed case: the value, one of its choices. */
   value?: FactValue;
-  /** On `merge` of an `unattested_place` case: the candidate to merge into. */
+  /** On `merge` of an `unattested_place` or `new_place_cap` case: the candidate to merge into. */
   target?: string;
 }
 
@@ -526,7 +560,7 @@ function caseEvidence(
     ...(c.case === "contact_check" ? { contact: c.fact, failed_checks: c.checks, found: c.problem, value_before: c.value } : {}),
     ...(c.case === "implausible_location" ? { hit: c.hit, found: c.problem } : {}),
     ...(c.case === "disputed" ? { fact: c.fact, values: choices, sources: c.sources } : {}),
-    ...(c.case === "unattested_place"
+    ...(c.case === "unattested_place" || c.case === "new_place_cap"
       ? { candidates: candidates.map((n) => ({ ...placeView(n.place), distance_m: n.distance_m, mergeable: n.mergeable })) }
       : {}),
     ...(c.case === "place_change" && c.held_for !== undefined ? { held_for: c.held_for } : {}),
@@ -710,7 +744,7 @@ async function askSecondStage(
 }
 
 /**
- * The candidates an `unattested_place` case lists, read from the branch:
+ * The candidates an `unattested_place` or `new_place_cap` case lists, read from the branch:
  * those whose file is there and is a place, each marked `mergeable` when
  * `reviewerMergeProblem` allows a merge into it.
  */
@@ -862,8 +896,12 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
   const failedNow: { key: string; c: HeldCase; error: unknown }[] = [];
   let answered = 0;
   let asked = 0;
+  let askedCapped = 0;
+  // In fairOrder's order. A new_place_cap case held back for a slot goes again at the end (below).
+  const queue = fairOrder([...cases]);
   try {
-    for (const [key, c] of cases) {
+    for (let i = 0; i < queue.length; i++) {
+      const [key, c] = queue[i]!;
       const path = placePath(c.place);
       const file = await read(path);
       const place = file ? parsePlace(file.text) : undefined;
@@ -897,7 +935,7 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
       let target: string | undefined;
       let otherFile: { text: string } | null = null;
       let other: Place | undefined;
-      // On an unattested_place case: its candidates as the branch has them, with their files.
+      // On an unattested_place or new_place_cap case: its candidates as the branch has them, with their files.
       let candidates: (Candidate & { file: { text: string } })[] = [];
       const failed = failures.get(key)?.failures ?? 0;
       if (settled) {
@@ -908,13 +946,21 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         reason = failedReason(failed);
       } else {
         if (asked >= MAX_MODEL_CASES) continue;
+        // New places past the day's limits never take the last model slot while another kind of case waits after
+        // them: the case goes again after the others, and gets the slot only when none of them asked the model.
+        if (c.case === "new_place_cap" && askedCapped >= MAX_MODEL_CASES - 1 && queue.slice(i + 1).some(([, o]) => o.case !== "new_place_cap")) {
+          queue.push(queue[i]!);
+          continue;
+        }
         asked++;
+        if (c.case === "new_place_cap") askedCapped++;
         otherFile = c.case === "duplicate" && c.duplicate_of ? await read(placePath(c.duplicate_of)) : null;
         other = otherFile ? parsePlace(otherFile.text) : undefined;
         // A merge only where the rules allow one: never into an owner's place or a pair a person found separate.
-        const pairs = c.case === "duplicate" || c.case === "unattested_place" ? await distinctPairs() : undefined;
-        if (c.case === "unattested_place") candidates = await readCandidates(c, place!, read, pairs!, deps.roads);
-        const mergeable = c.case === "unattested_place" ? candidates.some((n) => n.mergeable) : reviewerMergeProblem(place!, other, pairs, deps.roads) === null;
+        const listsCandidates = c.case === "unattested_place" || c.case === "new_place_cap";
+        const pairs = c.case === "duplicate" || listsCandidates ? await distinctPairs() : undefined;
+        if (listsCandidates) candidates = await readCandidates(c, place!, read, pairs!, deps.roads);
+        const mergeable = listsCandidates ? candidates.some((n) => n.mergeable) : reviewerMergeProblem(place!, other, pairs, deps.roads) === null;
         const allowed = allowedDecisions(c).filter((d) => d !== "merge" || mergeable);
         let first: ModelDecision;
         try {

@@ -102,7 +102,13 @@ Key registration refusals use the same codes. Registration also answers `malform
 
 A patch version (0.28.1) is a fix or a small change to an existing call. A minor version (0.32.0) adds a call, option, field or type, and before 1.0.0 may also mark a breaking change, which its release notes spell out. [docs/integration.md](../../docs/integration.md#what-changed-by-version), "What changed by version", lists the recent ones.
 
-This is 0.41.0. What an app moving to it needs to know (0.38.0 to 0.40.0 are in [What changed by version](../../docs/integration.md#what-changed-by-version)):
+This is 0.42.0. What an app moving to it needs to know (0.38.0 to 0.40.0 are in [What changed by version](../../docs/integration.md#what-changed-by-version)):
+
+- A contributor's first 50 new places of the UTC day (an install's, without a contributor) are decided as usual, up from 10. From the 51st the intake takes the place and answers `held` with the new code `new_place_cap`, instead of `429` (it still counts against the 200 a day limits): the AI reviewer checks it before it is listed. A new place held as `daily_cap` goes to the AI reviewer the same way.
+- An install's reports about a new place it added that UTC day, listed or held, count as one edit against the install's and the contributor's daily limits.
+- Move both SHAs of the apply engine in the inbox's `apply-feedback.yml` to the 0.42.0 commit before deploying the intake: an older apply would publish a place held as `new_place_cap`.
+
+What an app moving to 0.41.0 needed to know:
 
 - `votePhoto` takes `vote`: `helpful`, `not_helpful` or `none` (takes the vote back), and may name a Commons file matched to the place with `commons` in place of `photo`. `helpful: true | false` still works. Records carry `not_helpful` and `not_helpful_12m` next to `helpful` and `helpful_12m`, and the photo server serves each place's Commons vote counts at `/v1/places/<place id>/commons.ndjson` ([docs/photos.md](../../docs/photos.md#photo-votes)).
 - `setHeroPhoto(token, { place, photo | commons | none, consent })` lets a place's verified owner choose its hero photo, sent at once. The photo intake checks the token with Open Camping DB's owner check first. Records gain `hero: true` ([docs/photos.md](../../docs/photos.md#an-owners-hero-photo)).

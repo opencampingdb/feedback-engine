@@ -199,11 +199,22 @@ describe("POST /v1/feedback/batch", () => {
     expect(counts.pe).toBe(3);
   });
 
-  it("lists the new places in a batch up to the contributor's daily new places, and refuses the rest", async () => {
-    const answers = await send(Array.from({ length: NEW_PLACE_DAILY_LIMIT + 1 }, (_, i) => newPlace(i)));
-    expect(answers.slice(0, NEW_PLACE_DAILY_LIMIT).every((a) => a.status === 202 && a.state === "live")).toBe(true);
-    expect(answers[NEW_PLACE_DAILY_LIMIT]).toMatchObject({ status: 429, error: "rate_limited" });
-    expect(rows("new_places")).toHaveLength(NEW_PLACE_DAILY_LIMIT);
+  it("lists the contributor's first 50 new places of the day, and stores the rest held for review", async () => {
+    expect(NEW_PLACE_DAILY_LIMIT).toBe(50);
+    const first = await send(Array.from({ length: 50 }, (_, i) => newPlace(i)));
+    expect(first.every((a) => a.status === 202 && a.state === "live")).toBe(true);
+    const past = await send([newPlace(50), newPlace(51)]);
+    expect(past).toEqual([
+      { status: 202, id: expect.stringMatching(/^fb_/), state: "held", held_reason: "new_place_cap" },
+      { status: 202, id: expect.stringMatching(/^fb_/), state: "held", held_reason: "new_place_cap" },
+    ]);
+    expect(rows("new_places")).toHaveLength(50);
+    expect(queued()).toHaveLength(52);
+    const ids = new Set(past.map((a) => a.id));
+    expect(queued().filter((q) => ids.has(q.id as string)).map((q) => q.intake)).toEqual([
+      { state: "held", held_reason: "new_place_cap" },
+      { state: "held", held_reason: "new_place_cap" },
+    ]);
   });
 
   it("decides each item with the ones before it in the batch, as if each were sent alone in turn", async () => {

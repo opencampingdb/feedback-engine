@@ -43,8 +43,12 @@ export type Evidence =
 
 /** How long the adder may withdraw a new place outright. */
 export const WITHDRAW_WINDOW_MS = 24 * 60 * 60 * 1000;
-/** New places per contributor (or device, without one) per day. */
-export const NEW_PLACE_DAILY_LIMIT = 10;
+/**
+ * New places per contributor (or device, without one) per UTC day that follow
+ * the usual path. Past it this count refuses nothing: the place is stored and held as
+ * `new_place_cap`, for the AI reviewer and then a person.
+ */
+export const NEW_PLACE_DAILY_LIMIT = 50;
 /** Seconds the recent list is cached at the edge. */
 export const RECENT_CACHE_SECONDS = 30;
 /** Most ids one removal call may name. */
@@ -65,6 +69,26 @@ export const isoSeconds = (ms: number) => new Date(ms).toISOString().replace(/\.
 export const chunks = <T>(items: readonly T[], size: number): T[][] =>
   Array.from({ length: Math.ceil(items.length / size) }, (_, i) => items.slice(i * size, (i + 1) * size));
 const marks = (n: number) => Array.from({ length: n }, () => "?").join(", ");
+
+/**
+ * The mark that `device` added new place `place` on `day`, kept as a row in
+ * `rate_counts` so the scheduled job prunes it with the day's counters. The
+ * device's reports about the place that day count once against its day and
+ * its contributor's, as an edit of a known place does, whether or not the
+ * place is listed.
+ */
+const ownNewPlaceKey = (day: string, device: string, place: string) => `own:${day}:${device}:${place}`;
+
+/** The statement that marks `place` as a new place `device` added on `day`, written with the item. */
+export function ownNewPlaceStatement(db: D1Like, day: string, device: string, place: string): D1Statement {
+  return db.prepare("INSERT OR IGNORE INTO rate_counts (key, day, count) VALUES (?, ?, 1)").bind(ownNewPlaceKey(day, device, place), day);
+}
+
+/** Whether `device` added new place `place` on `day`. */
+export async function isOwnNewPlace(db: D1Like, day: string, device: string, place: string): Promise<boolean> {
+  const row = await db.prepare("SELECT 1 AS found FROM rate_counts WHERE key = ?").bind(ownNewPlaceKey(day, device, place)).first<{ found: number }>();
+  return row !== null && row !== undefined;
+}
 
 /**
  * Writes a new place. A place already there is left as it is, so writing the
