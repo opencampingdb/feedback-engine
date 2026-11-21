@@ -81,6 +81,7 @@ describe("the owner check", () => {
     expect(await refused.json()).toEqual({ error: "owner_check_not_allowed_for_app_key" });
     const unlimited = await ask(handle, baseEnv(), { place: PLACE, token: TOKEN });
     expect(unlimited.status).toBe(503);
+    expect(unlimited.headers.get("retry-after")).toBe("60");
     expect(await unlimited.json()).toEqual({ error: "owner_check_unavailable" });
     expect(gh.reads).toEqual([]);
   });
@@ -155,12 +156,12 @@ describe("an owner's hero photo at the photo intake", () => {
     };
     const handle = createHandler({ fetch, now: () => NOW, randomBytes: (n) => new Uint8Array(n) });
     const env: Env = { ...baseEnv(), PHOTOS_PENDING: bucket(), OWNER_CHECK_URL, OWNER_CHECK_KEY };
-    const send = (hero: Record<string, unknown>, target: Env = env) =>
+    const send = (hero: Record<string, unknown>, target: Env = env, from: { device?: string; ip?: string } = {}) =>
       handle(
         new Request("https://photos-intake.example/v1/feedback", {
           method: "POST",
-          headers: { "x-app-key": APP_KEY },
-          body: JSON.stringify({ type: "photo_hero", place: PLACE, token: TOKEN, photo_hero: hero, device: DEVICE, app_version: "1", consent: true }),
+          headers: { "x-app-key": APP_KEY, ...(from.ip ? { "cf-connecting-ip": from.ip } : {}) },
+          body: JSON.stringify({ type: "photo_hero", place: PLACE, token: TOKEN, photo_hero: hero, device: from.device ?? DEVICE, app_version: "1", consent: true }),
         }),
         target,
       );
@@ -185,6 +186,37 @@ describe("an owner's hero photo at the photo intake", () => {
     expect(res.status).toBe(202);
     expect(t.asked).toEqual([{ place: PLACE, token: TOKEN }]);
     expect(t.gh.puts).toHaveLength(1);
+  });
+
+  it("takes at most 20 hero choices a day from a device, refusals included, before asking the owner check", async () => {
+    const t = setup(owner(false));
+    const answers: number[] = [];
+    for (let i = 0; i < 21; i++) answers.push((await t.send({ none: true })).status);
+    expect(answers.slice(0, 20).every((s) => s === 403)).toBe(true);
+    expect(answers[20]).toBe(429);
+    expect(t.asked).toHaveLength(20);
+    // Another device on another network still gets through.
+    expect((await t.send({ none: true }, t.env, { device: "9b241101-e2bb-4255-8caf-4136c566a962", ip: "198.51.100.9" })).status).toBe(403);
+  });
+
+  it("takes at most 20 hero choices a day from a client network, across devices", async () => {
+    const t = setup(owner(false));
+    const answers: number[] = [];
+    for (let i = 0; i < 21; i++) {
+      const device = `3b241101-e2bb-4255-8caf-${String(i).padStart(12, "0")}`;
+      answers.push((await t.send({ none: true }, t.env, { device, ip: "203.0.113.5" })).status);
+    }
+    expect(answers[19]).toBe(403);
+    expect(answers[20]).toBe(429);
+    expect(t.asked).toHaveLength(20);
+  });
+
+  it("gives the day's count back when the owner check can't be reached", async () => {
+    let up = false;
+    const t = setup(() => (up ? owner(true)() : new Response("{}", { status: 500 })));
+    for (let i = 0; i < 25; i++) expect((await t.send({ none: true })).status).toBe(503);
+    up = true;
+    expect((await t.send({ none: true })).status).toBe(202);
   });
 
   it("refuses a token that is not the place's owner's, and stores nothing", async () => {

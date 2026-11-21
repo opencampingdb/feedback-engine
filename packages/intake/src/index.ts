@@ -664,6 +664,8 @@ function base64url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/** Hero photo choices a device, and a client network, may send a day, refusals included. */
+export const PHOTO_HERO_DAILY_LIMIT = 20;
 /** How long an isolate keeps an owner check's answer. A deleted owner record stops matching within this. */
 export const OWNER_ANSWER_TTL_MS = 60_000;
 /** Most owner check answers an isolate keeps before it starts again. */
@@ -2035,10 +2037,15 @@ export function createHandler(deps: Deps) {
       return { status: 403, body: { error: "type_not_allowed_for_app_key" } };
     }
     // The blocklist and the human check (`screen`). A batch was screened once for all its items.
-    // An owner's hero photo is proved by the owner token, which the owner check tests: it is neither attested nor screened, as an owner submission is not.
+    // An owner's hero photo is proved by the owner token, which the owner check tests, so it is not attested.
+    // It is still screened, as an unattested item: one from a listed network is dropped before the owner check.
     const ownerProved = submission.type === "photo_hero";
     const screened =
-      "batch" in intake ? intake.batch : isOwner || ownerProved ? NOT_SCREENED : await screen(request, env, app, intake.text, app.requires_attestation === true);
+      "batch" in intake
+        ? intake.batch
+        : isOwner
+          ? NOT_SCREENED
+          : await screen(request, env, app, intake.text, app.requires_attestation === true && !ownerProved);
     if ("status" in screened) return screened;
     const { standing, humanChecked, dropped } = screened;
     // A human-check key sends only reports (humanCheckAllows), so the submission is feedback.
@@ -2129,9 +2136,19 @@ export function createHandler(deps: Deps) {
         }
       }
       // Only the place's approved owner chooses its hero photo. Nothing is stored unless Open Camping DB's owner check says so.
+      // Each device and client network may ask a few times a day, refusals included, so random tokens
+      // can't use up the photo service's limit at the owner check. A check that can't be made gives the count back.
       if (feedback.type === "photo_hero") {
+        const heroLimit = await intake.counts.check([
+          { key: `hd:${day}:${device}`, limit: PHOTO_HERO_DAILY_LIMIT },
+          ...(origin !== undefined ? [{ key: `hn:${day}:${origin}`, limit: PHOTO_HERO_DAILY_LIMIT }] : []),
+        ]);
+        if (!heroLimit.allowed) return rateLimited(heroLimit.retryAfter);
         const isOwner = await askOwnerCheck(deps.fetch, env.OWNER_CHECK_URL!, env.OWNER_CHECK_KEY!, feedback.place, feedback.token);
-        if (isOwner === "unavailable") return { status: 503, body: { error: "owner_check_unavailable" }, headers: { "retry-after": "60" } };
+        if (isOwner === "unavailable") {
+          await intake.counts.giveBack().catch(() => undefined);
+          return { status: 503, body: { error: "owner_check_unavailable" }, headers: { "retry-after": "60" } };
+        }
         if (!isOwner) return { status: 403, body: { error: "not_owner" } };
       }
       if (feedback.type === "photo_report" && env.RECENT_LIST && (await isBlocked(env.RECENT_LIST, contributor!).catch(() => false))) {
@@ -2576,7 +2593,7 @@ export function createHandler(deps: Deps) {
   async function ownerCheck(request: Request, env: Env, app: AppEntry, cors: Record<string, string>): Promise<Response> {
     if (!app.owner_check) return json(403, { error: "owner_check_not_allowed_for_app_key" }, cors);
     // Never unlimited: without the binding the check is off.
-    if (!env.PER_IP) return json(503, { error: "owner_check_unavailable" }, cors);
+    if (!env.PER_IP) return json(503, { error: "owner_check_unavailable" }, { ...cors, "retry-after": "60" });
     const limitKey = await hashDevice(env.DEVICE_SALT, `owner-check:${app.app}`);
     if (!(await env.PER_IP.limit({ key: limitKey })).success) return limited(60, cors);
     const read = await readJsonBody(request, MAX_BODY_BYTES);
