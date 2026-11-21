@@ -146,6 +146,15 @@ describe("an owner's hero photo at the photo intake", () => {
     expect(JSON.stringify(t.gh.puts[0])).not.toContain(TOKEN);
   });
 
+  it("takes the owner's token as the proof on an app key that requires attestation", async () => {
+    const t = setup(owner(true));
+    const attested = { ...t.env, APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 100, requires_attestation: true, ios: { app_id: "ABCDE12345.com.example.app" } } }) };
+    const res = await t.send({ photo: PHOTO }, attested);
+    expect(res.status).toBe(202);
+    expect(t.asked).toEqual([{ place: PLACE, token: TOKEN }]);
+    expect(t.gh.puts).toHaveLength(1);
+  });
+
   it("refuses a token that is not the place's owner's, and stores nothing", async () => {
     const t = setup(owner(false));
     const res = await t.send({ photo: PHOTO });

@@ -2026,7 +2026,10 @@ export function createHandler(deps: Deps) {
       return { status: 403, body: { error: "type_not_allowed_for_app_key" } };
     }
     // The blocklist and the human check (`screen`). A batch was screened once for all its items.
-    const screened = "batch" in intake ? intake.batch : isOwner ? NOT_SCREENED : await screen(request, env, app, intake.text, app.requires_attestation === true);
+    // An owner's hero photo is proved by the owner token, which the owner check tests: it is neither attested nor screened, as an owner submission is not.
+    const ownerProved = submission.type === "photo_hero";
+    const screened =
+      "batch" in intake ? intake.batch : isOwner || ownerProved ? NOT_SCREENED : await screen(request, env, app, intake.text, app.requires_attestation === true);
     if ("status" in screened) return screened;
     const { standing, humanChecked, dropped } = screened;
     // A human-check key sends only reports (humanCheckAllows), so the submission is feedback.
@@ -2047,7 +2050,7 @@ export function createHandler(deps: Deps) {
     if (!isOwner) {
       const feedback = submission as FeedbackSubmission;
       if ("batch" in intake) proof = intake.batch.proof;
-      else if (app.requires_attestation) {
+      else if (app.requires_attestation && !ownerProved) {
         const result = await attest(request, env, app, intake.text);
         if ("error" in result) {
           if (result.error === "unavailable") return { status: 503, body: { error: "unavailable" }, headers: { "retry-after": "60" } };
