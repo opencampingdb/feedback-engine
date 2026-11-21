@@ -76,7 +76,7 @@ import { roundCoord } from "./serialise.js";
 import { doNotMatchProblems, newProblems, placeProblems, reviewProblems, textProblems } from "./data-check.js";
 import { dropSource, setSource } from "./sources.js";
 import { confirms, earnsTrust, emptyTrust, isTrusted, nextTrust, trustedContributors, type Confirmation, type TrustRecord, type UpheldDoubt, type Withdrawal } from "./trust.js";
-import type { Photo, PhotoVote, PhotoVotes, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
+import type { CommonsCounts, CommonsVotes, Photo, PhotoVote, PhotoVotes, Place, RemovedPhotos, Review, Source, SourceKey } from "./types.js";
 
 export type { ClosedCase, HeldCase };
 
@@ -226,6 +226,16 @@ export interface RulesInput {
    * `helpful_12m` from it, so pass `photos` whenever it holds a vote.
    */
   photoVotes?: PhotoVotes;
+  /** The votes on Commons files that count (`votes/commons.json` in the inbox). Left out, there are none yet. */
+  commonsVotes?: CommonsVotes;
+  /**
+   * The Commons files matched to each place (`commons/matches.ndjson` in
+   * Open Camping DB's data), for every place with a Commons vote. Left out,
+   * the checkout has none: Commons votes wait, and their counts stay as they are.
+   */
+  commonsMatches?: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Every Commons count line in the photo repository. None when left out. */
+  commonsCounts?: readonly CommonsCounts[];
   /** Licence id written on new photo lines. Defaults to CC-BY-4.0. */
   photoLicence?: string;
   /**
@@ -386,8 +396,12 @@ export interface RulesOutput {
   photos: Map<string, Photo[]>;
   /** Photos whose files are deleted: refused uploads and erased contributors' photos. */
   removedPhotos: RemovedPhotos["photos"];
-  /** The helpful votes after this run, to write back to the inbox. */
+  /** The photo votes after this run, to write back to the inbox. */
   photoVotes: PhotoVotes;
+  /** The votes on Commons files after this run, to write back to the inbox. */
+  commonsVotes: CommonsVotes;
+  /** Every Commons count line of each place whose counts changed, sorted by file. An empty list means the place has none left. */
+  commonsCounts: Map<string, CommonsCounts[]>;
   /** The track records after this run, to write back to the inbox. */
   trust: TrustRecord;
   /** Changes for a person, in the order they arrived. */
@@ -790,6 +804,12 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   const photoById = new Map((input.photos ?? []).map((p) => [p.id, p]));
   const removedPhotos: RemovedPhotos["photos"] = [];
   const votes: PhotoVotes = { photos: Object.fromEntries(Object.entries(input.photoVotes?.photos ?? {}).map(([id, list]) => [id, list.map((v) => ({ ...v }))])) };
+  const commonsVotes: CommonsVotes = {
+    places: Object.fromEntries(
+      Object.entries(input.commonsVotes?.places ?? {}).map(([id, files]) => [id, Object.fromEntries(Object.entries(files).map(([file, list]) => [file, list.map((v) => ({ ...v }))]))]),
+    ),
+  };
+  const commonsCounts = new Map<string, CommonsCounts[]>();
   const removePhoto = (photo: string, reason: RemovedPhotos["photos"][number]["reason"]) => {
     if (!removedPhotos.some((r) => r.photo === photo)) removedPhotos.push({ photo, removed: nowIso, reason });
   };
@@ -933,6 +953,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   applyPhotoRemovals(known.filter((i): i is RemovalItem => i.type === "photo_removal"));
   applyPhotoReports(known.filter((i): i is PhotoReportItem => i.type === "photo_report"));
   applyPhotoVotes(known.filter((i): i is VoteItem => i.type === "photo_vote"), erased);
+  applyCommonsVotes(known.filter((i): i is VoteItem => i.type === "photo_vote" && i.photo_vote.commons !== undefined), erased);
   for (const lines of newPhotos.values()) lines.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   applyStatus(
     known.filter(
@@ -995,6 +1016,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     photos: newPhotos,
     removedPhotos,
     photoVotes: votes,
+    commonsVotes,
+    commonsCounts,
     doNotMatch,
     edits,
     changes,
@@ -1391,6 +1414,91 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     }
   }
 
+  /**
+   * Records votes on the Commons files matched to a place, then recounts
+   * each place's Commons count lines. A file must be matched to the place
+   * and not on the do-not-match list. Without the matches every vote waits
+   * and the counts stay as they are. The votes of a merged place move to the
+   * place it was merged into.
+   */
+  function applyCommonsVotes(items: VoteItem[], erased: ReadonlySet<string>): void {
+    const matches = input.commonsMatches;
+    if (matches === undefined) {
+      for (const item of items) decide(item, "waiting", "the Commons matches are not in this checkout");
+      return;
+    }
+    const doNotMatch = new Set((input.doNotMatch ?? []).map((e) => `${e.place}\u0000${e.file}`));
+    const shown = (place: string, file: string) => (matches.get(place)?.has(file) ?? false) && !doNotMatch.has(`${place}\u0000${file}`);
+    const byFile = new Map<string, VoteItem[]>();
+    for (const item of items) {
+      const file = item.photo_vote.commons!;
+      if (refuseVoter(item, erased)) continue;
+      if (!matches.get(item.place)?.has(file)) {
+        decide(item, "refused", `Commons file ${file} is not matched to this place`);
+        continue;
+      }
+      if (doNotMatch.has(`${item.place}\u0000${file}`)) {
+        decide(item, "refused", `Commons file ${file} is on the do-not-match list for this place`);
+        continue;
+      }
+      const files = (commonsVotes.places[item.place] ??= {});
+      const kept = recordVote(item, files[file] ?? [], "Commons file");
+      if (kept) {
+        files[file] = kept;
+        const key = `${item.place}\u0000${file}`;
+        byFile.set(key, [...(byFile.get(key) ?? []), item]);
+      }
+    }
+
+    // A merged place's votes move to the place it was merged into, the latest from each source counting.
+    for (const placeId of Object.keys(commonsVotes.places).sort()) {
+      const target = resolvePlace(placeId, input.places);
+      if (target === undefined || target === placeId) continue;
+      const into = (commonsVotes.places[target] ??= {});
+      for (const [file, list] of Object.entries(commonsVotes.places[placeId]!)) {
+        let merged = into[file] ?? [];
+        for (const vote of list) {
+          const ids = [vote.contributor, vote.device, ...(vote.attest_key ? [vote.attest_key] : [])];
+          const same = merged.filter((v) => sharesSource(v, ids));
+          if (same.some((v) => v.at > vote.at || (v.at === vote.at && v.feedback > vote.feedback))) continue;
+          merged = [...merged.filter((v) => !sharesSource(v, ids)), vote];
+        }
+        into[file] = merged;
+      }
+      delete commonsVotes.places[placeId];
+    }
+
+    // Votes that no longer count: an erased or blocked voter's.
+    for (const [placeId, files] of Object.entries(commonsVotes.places)) {
+      for (const [file, list] of Object.entries(files)) {
+        const left = list.filter((v) => !erased.has(v.contributor) && !blocked.has(v.contributor));
+        if (left.length > 0) files[file] = left;
+        else delete files[file];
+      }
+      if (Object.keys(files).length === 0) delete commonsVotes.places[placeId];
+    }
+
+    // Recount every place with votes or count lines. Only a file still matched and not on the do-not-match list has a line.
+    const before = new Map<string, CommonsCounts[]>();
+    for (const line of input.commonsCounts ?? []) before.set(line.place, [...(before.get(line.place) ?? []), line]);
+    for (const placeId of [...new Set([...before.keys(), ...Object.keys(commonsVotes.places)])].sort()) {
+      const lines: CommonsCounts[] = [];
+      for (const [file, list] of Object.entries(commonsVotes.places[placeId] ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+        const counts = countVotes(list);
+        if (shown(placeId, file) && hasVoteCounts(counts)) lines.push({ place: placeId, file, ...counts });
+      }
+      const old = before.get(placeId) ?? [];
+      const sameAs = (a: CommonsCounts, b: CommonsCounts | undefined) => b !== undefined && a.file === b.file && VOTE_COUNTS.every((k) => (a[k] ?? 0) === (b[k] ?? 0));
+      if (old.length === lines.length && lines.every((l) => sameAs(l, old.find((o) => o.file === l.file)))) continue;
+      commonsCounts.set(placeId, lines);
+      for (const line of lines) {
+        const was = old.find((o) => o.file === line.file);
+        if (!sameAs(line, was)) note(placeId, `Commons file ${line.file} ${voteSummary(line)}`, true, byFile.get(`${placeId}\u0000${line.file}`) ?? []);
+      }
+      for (const gone of old.filter((o) => !lines.some((l) => l.file === o.file))) note(placeId, `Commons file ${gone.file} has no votes that count`, true, []);
+    }
+  }
+
   /** Refuses a vote with no contributor, or from an erased or blocked one. True when it was refused. */
   function refuseVoter(item: VoteItem, erased: ReadonlySet<string>): boolean {
     if (item.contributor === undefined) decide(item, "refused", "photo vote has no contributor");
@@ -1405,7 +1513,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
    * to keep, or undefined when nothing changes: a vote sent before one already
    * kept from the same source (an item put back in pending and run again).
    */
-  function recordVote(item: VoteItem, before: readonly PhotoVote[]): PhotoVote[] | undefined {
+  function recordVote(item: VoteItem, before: readonly PhotoVote[], what = "photo"): PhotoVote[] | undefined {
     const value = itemVote(item);
     const ids = [item.contributor!, item.device, ...(item.attest_key ? [item.attest_key] : [])];
     const replaced = before.filter((v) => sharesSource(v, ids));
@@ -1422,7 +1530,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
       ...(item.attest_key ? { attest_key: item.attest_key } : {}),
     };
     const reason =
-      value === "helpful" ? "photo marked helpful" : value === "not_helpful" ? "photo marked not helpful" : replaced.some((v) => voteOf(v) !== "none") ? "vote taken back" : "no vote to take back";
+      value === "helpful" ? `${what} marked helpful` : value === "not_helpful" ? `${what} marked not helpful` : replaced.some((v) => voteOf(v) !== "none") ? "vote taken back" : "no vote to take back";
     decide(item, "applied", reason);
     // A take-back is kept too, so an older vote run again later can't undo it.
     return [...before.filter((v) => !sharesSource(v, ids)), vote];

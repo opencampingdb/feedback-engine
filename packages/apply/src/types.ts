@@ -160,6 +160,30 @@ export interface PhotoVotes {
 }
 
 /**
+ * `votes/commons.json` in the inbox: each source's latest vote or take-back
+ * on a Wikimedia Commons file, by place id and then file name (without
+ * `File:`).
+ */
+export interface CommonsVotes {
+  places: Record<string, Record<string, PhotoVote[]>>;
+}
+
+/**
+ * One line of `commons/<place id>.ndjson` in a photo repository: the vote
+ * counts of one Commons file matched to the place. Only files with a vote
+ * that counts have a line, and each count is left out at 0.
+ */
+export interface CommonsCounts {
+  place: string;
+  /** The Commons file name without `File:`, as the release's `commons.ndjson.gz` names it. */
+  file: string;
+  helpful?: number;
+  helpful_12m?: number;
+  not_helpful?: number;
+  not_helpful_12m?: number;
+}
+
+/**
  * `moderation/removed_photos.json` in the data repository: photos whose files
  * are deleted from both buckets. A removed id never comes back.
  */
