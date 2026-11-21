@@ -58,6 +58,7 @@ import {
   LINK_LOOKUP_ORIGIN_DAILY_LIMIT,
   itemCounters,
   type CountSession,
+  type Counter,
   pruneRateCounts,
   CONTRIBUTOR_DAILY_LIMIT,
   PHOTO_CONTRIBUTOR_DAILY_LIMIT,
@@ -2002,6 +2003,8 @@ export function createHandler(deps: Deps) {
     let reportMayWithhold = true;
     let proved = false;
     const extra: { prefix: string; id: string; limit: number }[] = [];
+    // A new place's count of the day's new places from its contributor, or its install without one.
+    let newPlaceCounter: Counter | undefined;
     if (!isOwner) {
       const feedback = submission as FeedbackSubmission;
       if ("batch" in intake) proof = intake.batch.proof;
@@ -2083,9 +2086,7 @@ export function createHandler(deps: Deps) {
       if (contributor) extra.push({ prefix: "c", id: contributor, limit: app.contributor_daily_limit ?? CONTRIBUTOR_DAILY_LIMIT });
       if (attestKey) extra.push({ prefix: "k", id: attestKey, limit: ATTEST_KEY_DAILY_LIMIT });
       if (feedback.type === "photo_vote") extra.push({ prefix: "v", id: contributor!, limit: PHOTO_VOTE_DAILY_LIMIT });
-      if (feedback.type === "report" && feedback.report.kind === "new_place") {
-        extra.push({ prefix: "np", id: contributor ?? device, limit: NEW_PLACE_DAILY_LIMIT });
-      }
+      if (feedback.type === "report" && feedback.report.kind === "new_place") newPlaceCounter = { key: `np:${day}:${contributor ?? device}`, limit: NEW_PLACE_DAILY_LIMIT };
       if (env.RECENT_LIST && feedback.place !== null && ["check", "report", "withdraw"].includes(feedback.type)) {
         target = await getPlace(env.RECENT_LIST, feedback.place).catch(() => undefined);
       }
@@ -2113,6 +2114,9 @@ export function createHandler(deps: Deps) {
       editedPlace === undefined ? undefined : { deviceHash: device, place: editedPlace },
     );
     if (!limit.allowed) return rateLimited(limit.retryAfter);
+    // Past the day's new places, a new place is not refused: it is stored and held for review.
+    // It is not counted then, so the count stays at the limit.
+    const pastNewPlaceCap = newPlaceCounter !== undefined && !(await intake.counts.check([newPlaceCounter])).allowed;
 
     const id = `fb_${intake.nextId()}`;
     const fileFor = (stored: unknown) => ({ id, path: `pending/${day}/${id}.json`, content: `${JSON.stringify(stored, null, 2)}\n` });
@@ -2190,6 +2194,10 @@ export function createHandler(deps: Deps) {
       stored.intake = decision.answer;
     } else if (reputationHold && (stored.type === "report" || stored.type === "review" || stored.type === "check")) {
       stored.intake = { state: "held", held_reason: reputationHold };
+    } else if (pastNewPlaceCap && !env.RECENT_LIST) {
+      // Without D1 the intake decides nothing else, but the apply still needs to know the place is past the day's new places.
+      decision = { answer: { state: "held", held_reason: "new_place_cap" }, writes: () => [] };
+      stored.intake = decision.answer;
     } else if (env.RECENT_LIST && decidedHere(stored)) {
       const db = env.RECENT_LIST;
       // Without a contributor, the hashed install stands in for one, as it does for a signed-out install's new places.
@@ -2213,6 +2221,7 @@ export function createHandler(deps: Deps) {
         decided: intake.decided,
         website: { fetch: (url, init) => deps.fetch(url, init), timeoutMs: deps.contactCheckMs ?? SEND_TIME_BUDGET_MS },
         placeGeometry: (p) => geometryAt(env.PLACE_GEOMETRY, p),
+        pastNewPlaceCap,
       }).catch((error: unknown) => {
         console.warn(`deciding ${id} failed: ${String(error)}`);
         return { answer: UNAVAILABLE, writes: () => [] };

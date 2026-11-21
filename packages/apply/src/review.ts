@@ -78,6 +78,10 @@ export type { Place };
  * CANDIDATE_DISTANCE_M, nearest first, which a reviewer may merge it into.
  * A reviewer approves it (standing `shown`), merges it into one of them or
  * takes it down.
+ * `new_place_cap`: a new place the intake held past its contributor's new
+ * places for the day, drafted as held, that passed the plausibility,
+ * duplicate and text checks and would otherwise be published. It lists
+ * `candidates` and is decided as an `unattested_place` case is.
  * `disputed`: a place frozen because `sources` independent sources sent
  * conflicting values for `fact` within 24 hours, from `frozen_at`. No fact
  * on it changes until a reviewer sets the fact to one value, which lifts the
@@ -118,6 +122,7 @@ export interface HeldCase {
     | "place_change"
     | "disputed"
     | "unattested_place"
+    | "new_place_cap"
     | "intake_check"
     | "unconfirmed_fact";
   place: string;
@@ -163,7 +168,7 @@ export interface HeldCase {
   /** On `fact_doubted`: the confirmations of the value counted against them. */
   confirmations?: string[];
   contributor?: string;
-  /** On `unattested_place`: places in its group nearby, nearest first, with how far each is. */
+  /** On `unattested_place` and `new_place_cap`: places in its group nearby, nearest first, with how far each is. */
   candidates?: { place: string; distance_m: number }[];
   /** On `disputed`: when the freeze started. Left out on cases listed before it was given. */
   frozen_at?: string;
@@ -236,6 +241,7 @@ export const HELD_CASES: readonly HeldCase["case"][] = [
   "place_change",
   "disputed",
   "unattested_place",
+  "new_place_cap",
   "intake_check",
   "unconfirmed_fact",
 ];
@@ -306,7 +312,7 @@ export function isHeldCase(v: unknown): v is HeldCase {
     const names: readonly unknown[] = ["website", "domain_age", "address"];
     if (v.fact === undefined || !Array.isArray(v.checks) || v.checks.length === 0 || !v.checks.every((c) => names.includes(c))) return false;
   }
-  if (v.case === "unattested_place") {
+  if (v.case === "unattested_place" || v.case === "new_place_cap") {
     const ok = (c: unknown) => isObject(c) && typeof c.place === "string" && PLACE_ID.test(c.place) && c.place !== v.place && typeof c.distance_m === "number";
     if (!Array.isArray(v.candidates) || v.candidates.length > MAX_CANDIDATES || !v.candidates.every(ok)) return false;
   } else if (v.candidates !== undefined) return false;
@@ -388,6 +394,7 @@ export function allowedDecisions(c: HeldCase): ReviewDecision[] {
     case "duplicate":
       return ["approve", "merge", "take_down", "leave"];
     case "unattested_place":
+    case "new_place_cap":
       return ["approve", "merge", "take_down", "leave"];
     case "hidden":
     case "first_place":
@@ -584,7 +591,7 @@ export function settleByRules(
   if (c.case === "hidden" && place.standing !== "hidden") return leave("the place is no longer hidden");
   if (c.case === "first_place" && place.standing === "hidden") return leave("the place is already hidden");
   if (c.case === "implausible_location" && place.standing !== "held") return leave("the place is no longer held");
-  if (c.case === "unattested_place" && place.standing !== "held") return leave("the place is no longer held");
+  if ((c.case === "unattested_place" || c.case === "new_place_cap") && place.standing !== "held") return leave("the place is no longer held");
   return null;
 }
 

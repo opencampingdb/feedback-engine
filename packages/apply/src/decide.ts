@@ -511,19 +511,36 @@ export function newPlaceListing(item: ReportItem, trusted = false): { reason: "n
 }
 
 /**
- * Whether the AI reviewer decides a new place the intake does not list: one
- * that only a lack of attestation keeps off the list. It has a contributor,
- * its name and note pass the text checks, its description passes them and
- * its contacts pass the link rules, and the intake did not hold it for one
- * of its checks (`heldForCheck`). Anything else waits for a person.
+ * Whether the intake held a new place as `new_place_cap`: its contributor
+ * (or install, without one) had already added the intake's daily number of
+ * new places that UTC day.
  */
-export function reviewerDecidesNewPlace(item: ReportItem, trusted = false): boolean {
-  if (newPlaceListing(item, trusted)?.reason !== "not_attested" || item.contributor === undefined) return false;
+export function pastNewPlaceCap(item: StoredFeedback): boolean {
+  const intake: unknown = (item as { intake?: unknown }).intake;
+  if (typeof intake !== "object" || intake === null) return false;
+  const { state, held_reason: reason } = intake as { state?: unknown; held_reason?: unknown };
+  return state === "held" && reason === ("new_place_cap" satisfies PublishedHeldReason);
+}
+
+/**
+ * The case the AI reviewer decides a new place the intake does not list
+ * under, or null when a person decides it. `unattested_place`: only a lack
+ * of attestation keeps it off the list. `new_place_cap`: it would be listed,
+ * but the intake held it past its contributor's new places for the day
+ * (`pastNewPlaceCap`). Either way it has a contributor, its name and note
+ * pass the text checks, its description passes them and its contacts pass
+ * the link rules, and the intake did not hold it for one of its checks
+ * (`heldForCheck`). Anything else waits for a person.
+ */
+export function reviewerNewPlaceCase(item: ReportItem, trusted = false): "unattested_place" | "new_place_cap" | null {
+  const listing = newPlaceListing(item, trusted);
+  const kind = listing?.reason === "not_attested" ? "unattested_place" : listing === null && pastNewPlaceCap(item) ? "new_place_cap" : null;
+  if (kind === null || item.contributor === undefined) return null;
   const { name, note } = item.report;
-  if (note !== undefined && firstProblem(tidyText(note)) !== null) return false;
-  if (name !== undefined && firstProblem(tidyName(name)) !== null) return false;
+  if (note !== undefined && firstProblem(tidyText(note)) !== null) return null;
+  if (name !== undefined && firstProblem(tidyName(name)) !== null) return null;
   const fields = newPlaceFields(item);
-  return fields.failing.length === 0 && fields.descriptionProblem === null && heldForCheck(item) === null;
+  return fields.failing.length === 0 && fields.descriptionProblem === null && heldForCheck(item) === null ? kind : null;
 }
 
 /** The fields a `new_place` report carries, and which of them a published place holds back. */

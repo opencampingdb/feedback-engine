@@ -157,3 +157,46 @@ describe("unattested new places", () => {
   });
 });
 
+
+describe("new places past the contributor's new places for the day", () => {
+  const capped = (report: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) =>
+    added(report, undefined, { attested: "app_attest", intake: { state: "held", held_reason: "new_place_cap" }, ...extra });
+
+  it("drafts an attested new place the intake held as new_place_cap as held and lists it for the AI reviewer", () => {
+    const item = capped();
+    const places = [inData(1, 200)];
+    const out = run([item], { everyPlace: places });
+    expect(out.decisions.find((d) => d.id === item.id)).toMatchObject({
+      outcome: "needs_review",
+      reason: "past its contributor's new places for the day, so the AI reviewer checks it",
+    });
+    expect(out.places.has(idOf(item))).toBe(false);
+    expect(out.edits).toEqual([expect.objectContaining({ kind: "new_place", record: expect.objectContaining({ id: idOf(item), standing: "held" }) })]);
+    expect(out.held.filter((c) => c.case === "new_place_cap")).toEqual([
+      expect.objectContaining({ case: "new_place_cap", place: idOf(item), standing: "held", candidates: [{ place: places[0]!.id, distance_m: 200 }], feedback: [item.id] }),
+    ]);
+    expect(out.held.filter((c) => c.case === "unattested_place")).toEqual([]);
+  });
+
+  it("lists it for the reviewer when its links passed the intake's checks, and sends it to a person when they were not looked up", () => {
+    const passed = capped({ contacts: { website: "https://creek.example.org" } }, { intake: { state: "held", held_reason: "new_place_cap", links: "passed" } });
+    const unchecked = capped({ contacts: { website: "https://creek.example.org" } });
+    const out = run([passed, unchecked]);
+    expect(out.held.filter((c) => c.case === "new_place_cap").map((c) => c.feedback)).toEqual([[passed.id]]);
+    expect(out.decisions.find((d) => d.id === unchecked.id)).toMatchObject({ outcome: "needs_review", reason: expect.stringContaining("so a person checks it") });
+  });
+
+  it("sends to a person a place past the day's new places that fails the text or link checks", () => {
+    const items = [
+      capped({ name: "Call 0400 000 000" }),
+      capped({ description: "Visit https://spam.example.org now" }),
+      capped({ contacts: { website: "not a link" } }, { intake: { state: "held", held_reason: "new_place_cap", links: "passed" } }),
+    ];
+    const out = run(items);
+    for (const item of items) {
+      expect(out.decisions.find((d) => d.id === item.id)).toMatchObject({ outcome: "needs_review", reason: expect.stringContaining("so a person checks it") });
+      expect(out.places.has(idOf(item))).toBe(false);
+    }
+    expect(out.held.filter((h) => h.case === "new_place_cap")).toEqual([]);
+  });
+});

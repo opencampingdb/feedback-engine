@@ -287,14 +287,15 @@ describe("recent places", () => {
     expect(seen.some((k) => k.includes("2001"))).toBe(false);
   });
 
-  it("refuses a contributor's new place past the daily limit, and takes it the next day", async () => {
+  it("holds a contributor's new place past the day's new places for review, unlisted, and lists one the next day", async () => {
     for (let i = 0; i < NEW_PLACE_DAILY_LIMIT; i++) await add({ device: otherDevice(i) });
     const res = await handle(feedback(newPlace({ device: otherDevice(NEW_PLACE_DAILY_LIMIT) })), e);
-    expect(res.status).toBe(429);
-    expect(await res.json()).toEqual({ error: "rate_limited" });
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ id: expect.stringMatching(/^fb_/), state: "held", held_reason: "new_place_cap" });
     expect(await list()).toHaveLength(NEW_PLACE_DAILY_LIMIT);
     clock += 24 * HOUR;
-    await add({ device: otherDevice(NEW_PLACE_DAILY_LIMIT) });
+    const next = await add({ device: otherDevice(NEW_PLACE_DAILY_LIMIT + 1) });
+    expect((await list()).map((p) => p.id)).toContain(next);
   });
 
   it("never lists the note, and lists the contacts the place is published with", async () => {

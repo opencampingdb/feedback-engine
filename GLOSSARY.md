@@ -124,6 +124,10 @@ _Avoid_: suspicious location, invalid location (it is held, not refused)
 A new place from an install without attestation, held for the AI reviewer once it passes the plausibility, duplicate and text checks. The reviewer publishes it, merges it into a nearby place it duplicates, or takes it down.
 _Avoid_: unverified place, anonymous place (it has a contributor)
 
+**New place cap**:
+The number of new places a contributor (or an install, without one) adds in a UTC day that are decided as usual: 50, the same for everyone. A new place past it is taken and held for the AI reviewer, then a person, never refused.
+_Avoid_: new place limit, quota (nothing past it is refused)
+
 **Trusted contributor**:
 A signed-in contributor five of whose edits other sources have confirmed, with no upheld doubt about any of their edits since. Only an attested or signed-in item this run applied, from another device, network and contributor, confirms an edit. A doubt is upheld when doubts take the value down, the AI reviewer keeps it down, dismisses or reverts the edit or takes the place down, or a person leaves the edit out of a merged review PR. Their new places list at once, and their contacts go live once they pass the contact checks, without a second source.
 _Avoid_: verified contributor, trusted reviewer

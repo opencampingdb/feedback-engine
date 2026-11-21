@@ -87,8 +87,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * major road's carriageway or inside a building footprint, which the AI
  * reviewer checks. `waiting_value`: a doubt about a fact while another
  * source's report of a new value for it waits for a second source, which
- * counts against that report and never takes the place's value down. The
- * apply decides each of these again when it runs.
+ * counts against that report and never takes the place's value down.
+ * `new_place_cap`: a new place past its contributor's first
+ * NEW_PLACE_DAILY_LIMIT new places of the UTC day, which the AI reviewer
+ * checks. The apply decides each of these again when it runs.
  */
 export type HeldReason =
   | RulesHeldReason
@@ -99,7 +101,8 @@ export type HeldReason =
   | "commons_report"
   | "source_link"
   | "implausible_location"
-  | "waiting_value";
+  | "waiting_value"
+  | "new_place_cap";
 // Every reason the intake answers is in the SDK's published list: this fails to compile otherwise.
 const PUBLISHED: readonly PublishedHeldReason[] = [] as HeldReason[];
 void PUBLISHED;
@@ -438,6 +441,12 @@ export interface DecideInput {
    * `check_unavailable`. Left out, new places are not checked.
    */
   placeGeometry?: (p: { lat: number; lon: number }) => Promise<PlaceGeometry | undefined>;
+  /**
+   * On a new place: its contributor (or install, without one) has added
+   * NEW_PLACE_DAILY_LIMIT new places already this UTC day, so it is held as
+   * `new_place_cap` instead of listed.
+   */
+  pastNewPlaceCap?: boolean;
 }
 
 const held = (reason: HeldReason, writes: SendTimeDecision["writes"] = () => [], addToDecided?: SendTimeDecision["addToDecided"]): SendTimeDecision => ({
@@ -712,9 +721,11 @@ async function decideClearHere({ db, checks, item, submission, contributor, deci
  * contributor, a note that passes the text checks) and the checks pass on
  * what would be published. Contacts that fail `contactProblem` and a
  * description that fails the text checks are left for a person, as the apply
- * leaves them, and the place is listed without them.
+ * leaves them, and the place is listed without them. A place past its
+ * contributor's new places for the day (`pastNewPlaceCap`) is held as
+ * `new_place_cap` where it would otherwise go to the checks.
  */
-async function decideNewPlace({ checks, item, submission, placeGeometry }: DecideInput, record: CheckContributor & { trusted: boolean }): Promise<SendTimeDecision> {
+async function decideNewPlace({ checks, item, submission, placeGeometry, pastNewPlaceCap }: DecideInput, record: CheckContributor & { trusted: boolean }): Promise<SendTimeDecision> {
   // A trusted contributor's place is listed without attestation, but only when it was sent signed in and not through a human check.
   const trusted = record.trusted && item.signed_in === true && item.human_checked === undefined;
   const listing = newPlaceListing(item, trusted);
@@ -731,6 +742,8 @@ async function decideNewPlace({ checks, item, submission, placeGeometry }: Decid
     }
     if (implausibleLocation(item.location, item.report.place_kind, geometry) !== null) return held("implausible_location");
   }
+  // Past the day's new places: stored for the AI reviewer, without taking a live change.
+  if (pastNewPlaceCap) return held("new_place_cap");
   const fields = newPlaceFields(item);
   const contacts = Object.fromEntries(
     Object.entries(fields.contacts).filter(([fact]) => !fields.failing.includes(fact as ContactFactName)),

@@ -43,8 +43,12 @@ export type Evidence =
 
 /** How long the adder may withdraw a new place outright. */
 export const WITHDRAW_WINDOW_MS = 24 * 60 * 60 * 1000;
-/** New places per contributor (or device, without one) per day. */
-export const NEW_PLACE_DAILY_LIMIT = 10;
+/**
+ * New places per contributor (or device, without one) per UTC day that follow
+ * the usual path. Past it a new place is not refused: it is stored and held as
+ * `new_place_cap`, for the AI reviewer and then a person.
+ */
+export const NEW_PLACE_DAILY_LIMIT = 50;
 /** Seconds the recent list is cached at the edge. */
 export const RECENT_CACHE_SECONDS = 30;
 /** Most ids one removal call may name. */

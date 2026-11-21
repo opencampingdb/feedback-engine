@@ -204,7 +204,7 @@ describe("daily counters in D1", () => {
     expect((await handle(post({ ...claim, device: device(11) }), e)).status).toBe(429);
   });
 
-  it(`limits each contributor to ${NEW_PLACE_DAILY_LIMIT} new places a day`, async () => {
+  it(`takes every new place from a contributor past ${NEW_PLACE_DAILY_LIMIT} a day, held, and keeps the count at the limit`, async () => {
     const e = env();
     const newPlace = (i: number) => ({
       type: "report",
@@ -217,7 +217,12 @@ describe("daily counters in D1", () => {
       report: { kind: "new_place", place_kind: "free_camp", note: "Gravel pit off the highway, room for three vans" },
     });
     for (let i = 0; i < NEW_PLACE_DAILY_LIMIT; i++) expect((await handle(post(newPlace(i)), e)).status).toBe(202);
-    expect((await handle(post(newPlace(NEW_PLACE_DAILY_LIMIT)), e)).status).toBe(429);
+    for (let i = NEW_PLACE_DAILY_LIMIT; i < NEW_PLACE_DAILY_LIMIT + 3; i++) {
+      const res = await handle(post(newPlace(i)), e);
+      expect(res.status).toBe(202);
+      expect(await res.json()).toMatchObject({ state: "held" });
+    }
+    expect(rows().filter((r) => r.key.startsWith("np:")).map((r) => r.count)).toEqual([NEW_PLACE_DAILY_LIMIT]);
   });
 
   /** Puts PLACE in the place index, as a release would. */

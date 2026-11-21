@@ -112,6 +112,7 @@ const INTAKE_HOLDS: Readonly<Record<string, string>> = {
   check_unavailable: "the intake's checks were down when it arrived",
   network_reputation: "it came from a network on a public list of abusive addresses",
   repeated_text: "its text is nearly the same as text other sources sent",
+  new_place_cap: "its contributor had already added the day's number of new places",
 };
 
 const SHOWN_CHARS = 300;
