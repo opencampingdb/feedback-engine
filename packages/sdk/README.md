@@ -49,7 +49,7 @@ await feedback.flush();
 
 `report`, `reportFacts`, `check` and `review` take `{ wait: false }` to resolve as soon as the input is saved, with the outcome sent to `onAnswered`. A place the traveller has just added can be named as `{ newPlace: <its report's ref> }` in `report`, `reportFacts`, `check` and `review`: the items wait unsent until the new place has its id.
 
-**Photo client** (`createPhotoClient(options)`, for an app's own photo service, [docs/photos.md](../../docs/photos.md)): `photo` (with an optional `focus`, `caption` and `taken`), `photoPass`, `reportPhoto`, `votePhoto`, `removePhoto`, `erasePhotos`, `flush`, `pending`, `queueSummary`, `queuedRefs` and `progress`. `photo` removes the Exif, XMP, IPTC and comment metadata, the multi-picture index and anything after the end of the image from both JPEGs before it uploads them. `stripJpegMetadata(bytes)` does the same for any JPEG, and `jpegMetadata(bytes)` names what a JPEG still carries. Where it meets a segment it can't read, it removes the metadata before that point and keeps the rest.
+**Photo client** (`createPhotoClient(options)`, for an app's own photo service, [docs/photos.md](../../docs/photos.md)): `photo` (with an optional `focus`, `caption` and `taken`), `photoPass`, `reportPhoto`, `votePhoto`, `setHeroPhoto`, `removePhoto`, `erasePhotos`, `flush`, `pending`, `queueSummary`, `queuedRefs` and `progress`. `photo` removes the Exif, XMP, IPTC and comment metadata, the multi-picture index and anything after the end of the image from both JPEGs before it uploads them. `stripJpegMetadata(bytes)` does the same for any JPEG, and `jpegMetadata(bytes)` names what a JPEG still carries. Where it meets a segment it can't read, it removes the metadata before that point and keeps the rest.
 
 **Release updater** (`createReleaseUpdater({ adapter, readableLayouts, readableFormats, gunzip?, fetch?, storage? })`): `update({ knownDataVersion })` keeps the app's SQLite copy of the release database current, by a chain of changesets in one transaction or a whole new database. It answers `up_to_date`, `updated`, `replaced`, `older_release`, `layout_unsupported`, `format_unsupported` or `failed` (with a `reason` and a `cause`), and never throws. Data releases are at format 13 and layout 2. See [docs/integration.md](../../docs/integration.md#10-keeping-the-data-current) section 10 for the adapter, a worked Expo SQLite adapter and the phone's peak memory.
 
@@ -102,14 +102,20 @@ Key registration refusals use the same codes. Registration also answers `malform
 
 A patch version (0.28.1) is a fix or a small change to an existing call. A minor version (0.32.0) adds a call, option, field or type, and before 1.0.0 may also mark a breaking change, which its release notes spell out. [docs/integration.md](../../docs/integration.md#what-changed-by-version), "What changed by version", lists the recent ones.
 
-This is 0.37.0. What an app moving to it needs to know:
+This is 0.41.0. What an app moving to it needs to know (0.38.0 to 0.40.0 are in [What changed by version](../../docs/integration.md#what-changed-by-version)):
+
+- `votePhoto` takes `vote`: `helpful`, `not_helpful` or `none` (takes the vote back), and may name a Commons file matched to the place with `commons` in place of `photo`. `helpful: true | false` still works. Records carry `not_helpful` and `not_helpful_12m` next to `helpful` and `helpful_12m`, and the photo server serves each place's Commons vote counts at `/v1/places/<place id>/commons.ndjson` ([docs/photos.md](../../docs/photos.md#photo-votes)).
+- `setHeroPhoto(token, { place, photo | commons | none, consent })` lets a place's verified owner choose its hero photo, sent at once. The photo intake checks the token with Open Camping DB's owner check first. Records gain `hero: true` ([docs/photos.md](../../docs/photos.md#an-owners-hero-photo)).
+- Move the apply pin, then the photo server and the Photo sync, then the photo intake to 0.41.0 before an app sends these: an older intake refuses them with `400`.
+
+What an app moving to 0.37.0 needed to know:
 
 - A place's `fact_sources` may name a new source, `overture`: a value from Overture Maps that fills a gap no other source fills, such as a name, website, phone or address. `FACT_SOURCES`, `isFactSource` and the `FactSource` type list every source, so an app can label where a value came from. Any other source replaces an `overture` value, doubts and contact reports take it down as they do a traveller's value, and it never goes to OpenStreetMap. Nothing an app sends changes.
 
 What an app moving to 0.36.0 needed to know:
 
 - `photo()` takes an optional `caption` (at most 200 characters, one line) and `taken` (`YYYY-MM`, read from the original file's Exif with `photoTakenMonth` before the SDK removes the metadata). Records carry both, and a caption that fails the review text checks is left out while the photo is published.
-- `votePhoto({ place, photo, helpful, contributor, consent })` marks someone else's photo helpful or takes it back, queued like a report. Records carry `helpful` and `helpful_12m`. The photo intake refuses a vote on the voter's own photo with `403 own_photo`. Deploy the photo intake and move the apply pin to 0.36.0 first: an older intake refuses these with `400` ([docs/photos.md](../../docs/photos.md#helpful-votes)).
+- `votePhoto({ place, photo, helpful, contributor, consent })` marks someone else's photo helpful or takes it back, queued like a report. Records carry `helpful` and `helpful_12m`. The photo intake refuses a vote on the voter's own photo with `403 own_photo`. Deploy the photo intake and move the apply pin to 0.36.0 first: an older intake refuses these with `400` ([docs/photos.md](../../docs/photos.md#photo-votes)).
 
 What an app moving to 0.35.0 needed to know:
 

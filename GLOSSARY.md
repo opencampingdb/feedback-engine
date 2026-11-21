@@ -84,6 +84,18 @@ _Avoid_: dispute, flag, removal report (for a fact)
 A fact report of the value a place has, or had before doubts took it down, weighed against the doubts about it.
 _Avoid_: check (for a fact), vote
 
+**Photo vote**:
+A traveller saying a photo of a place is helpful or not helpful, or taking that back, counted once per contributor, install or attested key. Covers a traveller's photo and a Wikimedia Commons file matched to the place. Not evidence about a new place, and not a confirmation of a fact.
+_Avoid_: like, rating, vote (on its own)
+
+**Hero photo**:
+The photo a place's verified owner chose to show first, a traveller's photo or a matched Commons file, kept by the app's photo service and never in the data. When there is none, an app chooses its own.
+_Avoid_: cover photo, featured photo, main photo
+
+**Owner check**:
+The intake answering whether a token is the one from a place's approved owner claim, and nothing else.
+_Avoid_: owner lookup, owner verification (a person approving a claim)
+
 **Edit**:
 A traveller's change to one place's facts, sent as one fact report for each fact.
 _Avoid_: update (an owner's change), batch (how items travel)

@@ -12,7 +12,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "1.9.0",
     "@opencampingdb/apply": "0.1.0",
-    "@opencampingdb/feedback": "0.40.0"
+    "@opencampingdb/feedback": "0.41.0"
   },
   "devDependencies": {
     "wrangler": "4.156.2"

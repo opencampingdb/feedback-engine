@@ -24,7 +24,7 @@ import { parseArgs, promisify } from "node:util";
 import { DataRepo } from "./io.js";
 import { readFile as readBytes } from "node:fs/promises";
 import { replacePhoto, ReplaceError } from "./photo-replace.js";
-import { checkPhotos, photoStates, planSync, recordFiles, RECORDS } from "./photorepo.js";
+import { checkPhotos, COMMONS_RECORDS, commonsRecordFiles, photoStates, planSync, recordFiles, RECORDS, staleRecords } from "./photorepo.js";
 
 const run = promisify(execFile);
 
@@ -124,17 +124,21 @@ async function sync(root: string, serving: string, pending: string, dryRun: bool
     if (!dryRun) await r2.delete(bucket, keys);
   }
 
-  // Each place's records are written again every run. Files for places with no visible photos go.
+  // Each place's records and Commons counts are written again every run. Files for places with none go.
   const records = await recordFiles(root);
   for (const [place, text] of records) {
     if (!dryRun) await r2.put(serving, `${RECORDS}${place}.ndjson`, text, "application/x-ndjson; charset=utf-8");
   }
-  const stale = [...servingKeys].filter((k) => k.startsWith(RECORDS) && !records.has(k.slice(RECORDS.length, -".ndjson".length)));
+  const commons = await commonsRecordFiles(root);
+  for (const [place, text] of commons) {
+    if (!dryRun) await r2.put(serving, `${COMMONS_RECORDS}${place}.ndjson`, text, "application/x-ndjson; charset=utf-8");
+  }
+  const stale = staleRecords(servingKeys, new Set(records.keys()), new Set(commons.keys()));
   for (const key of stale) console.log(`delete ${serving}/${key}`);
   if (!dryRun && stale.length > 0) await r2.delete(serving, stale);
 
   for (const key of todo.missing) console.error(`::error::no file for visible photo ${key}`);
-  console.log(`${visible.size} visible photos, ${records.size} places, ${todo.copies.length} copies, ${Object.values(todo.deletes).reduce((n, k) => n + k.length, 0) + stale.length} deletes`);
+  console.log(`${visible.size} visible photos, ${records.size} places, ${commons.size} places with Commons votes, ${todo.copies.length} copies, ${Object.values(todo.deletes).reduce((n, k) => n + k.length, 0) + stale.length} deletes`);
   return todo.missing.length > 0 ? 1 : 0;
 }
 

@@ -25,6 +25,8 @@ export type TokenPermissions = Partial<Record<"contents" | "actions" | "pull_req
 
 /** What writing to the inbox needs. */
 const CONTENTS_WRITE: TokenPermissions = { contents: "write" };
+/** What reading a file needs, and nothing else. */
+export const CONTENTS_READ: TokenPermissions = { contents: "read" };
 /** What starting a workflow needs, and nothing else. */
 const ACTIONS_WRITE: TokenPermissions = { actions: "write" };
 /** What the AI reviewer needs on the data repository: commits to the review branch and comments on its PR. */
@@ -331,8 +333,8 @@ export class GitHubApp {
   }
 
   /** A text file on `ref`, with the blob sha an update needs, or null when there is none. */
-  async readFile(config: GitHubAppConfig, path: string, ref: string): Promise<{ text: string; sha: string } | null> {
-    const res = await this.#call(config, REVIEW_WRITE, "GET", `/repos/${config.repo}/contents/${path}?ref=${encodeURIComponent(ref)}`);
+  async readFile(config: GitHubAppConfig, path: string, ref: string, permissions: TokenPermissions = REVIEW_WRITE): Promise<{ text: string; sha: string } | null> {
+    const res = await this.#call(config, permissions, "GET", `/repos/${config.repo}/contents/${path}?ref=${encodeURIComponent(ref)}`);
     if (res.status === 404) return null;
     if (!res.ok) throw new GitHubError(`reading ${path} failed with ${res.status}`, res.status);
     const body = (await res.json()) as { content?: string; encoding?: string; sha: string };

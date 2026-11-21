@@ -14,6 +14,7 @@ import type {
   ReviewBody,
   ReviewReportReason,
   PhotoReportReason,
+  PhotoVoteValue,
   PhotoFocus,
   FirstHand,
 } from "./types.js";
@@ -420,22 +421,70 @@ export interface PhotoInput {
   taken?: string;
 }
 
-export interface PhotoVoteInput {
-  /** The photo's place. */
+/** What a vote is on: a published traveller photo or a Commons file matched to the place, exactly one. */
+export type PhotoVoteTarget =
+  | {
+      /** Id of the published photo, `pho_<ulid>`. The intake refuses the traveller's own photo. */
+      photo: string;
+      commons?: never;
+    }
+  | {
+      /** A Wikimedia Commons file matched to the place, its name without `File:`. */
+      commons: string;
+      photo?: never;
+    };
+
+/** The vote, as `vote`, or as `helpful` from code written for an SDK before 0.41.0. Never both. */
+export type PhotoVoteChoice =
+  | {
+      /** `helpful`, `not_helpful`, or `none` to take back an earlier vote. */
+      vote: PhotoVoteValue;
+      helpful?: never;
+    }
+  | {
+      /** @deprecated Use `vote`. True is `helpful`, false is `none`. */
+      helpful: boolean;
+      vote?: never;
+    };
+
+export type PhotoVoteInput = PhotoVoteTarget &
+  PhotoVoteChoice & {
+    /** The photo's place. */
+    place: string;
+    /** The signed-in traveller's account id. Required for votes. */
+    contributor: string;
+    consent: boolean;
+    /**
+     * The caller's own id for this submission, 1 to 100 characters. Kept with
+     * the queued item and passed back to `onAnswered`. Never sent to the intake.
+     */
+    ref?: string;
+  };
+
+/** An owner's hero photo choice: exactly one of `photo`, `commons` or `none`. */
+export type HeroPhotoInput = {
   place: string;
-  /** Id of the published photo, `pho_<ulid>`. The intake refuses the traveller's own photo. */
-  photo: string;
-  /** True marks the photo helpful, false takes that back. */
-  helpful: boolean;
-  /** The signed-in traveller's account id. Required for votes. */
-  contributor: string;
   consent: boolean;
-  /**
-   * The caller's own id for this submission, 1 to 100 characters. Kept with
-   * the queued item and passed back to `onAnswered`. Never sent to the intake.
-   */
-  ref?: string;
-}
+} & (
+  | {
+      /** A published photo of the place, `pho_<ulid>`. */
+      photo: string;
+      commons?: never;
+      none?: never;
+    }
+  | {
+      /** A Commons file matched to the place, its name without `File:`. */
+      commons: string;
+      photo?: never;
+      none?: never;
+    }
+  | {
+      /** Clears the owner's choice. */
+      none: true;
+      photo?: never;
+      commons?: never;
+    }
+);
 
 export interface PhotoReportInput {
   /** The photo's place. */
@@ -760,12 +809,24 @@ export interface PhotoClient {
   /** Reports a published photo. Queued and retried, like feedback. */
   reportPhoto(input: PhotoReportInput): Promise<SubmitResult>;
   /**
-   * Marks a published photo helpful, or takes that back (`helpful: false`).
-   * One vote per traveller per photo counts, the latest one, and the photo's
-   * record carries the count from the next apply run. Keep the traveller's own
-   * votes on the phone to show them. Queued and retried, like feedback.
+   * Votes a published traveller photo, or a Commons file matched to the
+   * place, helpful or not helpful, or takes the vote back (`none`). One vote
+   * per traveller per photo counts, the latest one, and the photo's record (or
+   * the place's Commons counts) carries the counts from the next apply run.
+   * Keep the traveller's own votes on the phone to show them. Queued and
+   * retried, like feedback.
    */
   votePhoto(input: PhotoVoteInput): Promise<SubmitResult>;
+  /**
+   * Sets the place's hero photo for its verified owner, with the token from
+   * their approved claim: a traveller photo, a Commons file, or `none` to
+   * clear the choice. Sent at once, never queued. The photo intake checks the
+   * token with Open Camping DB's owner check first, and throws
+   * `OwnerRequestError` with 403 when it is not the place's owner's, or 503
+   * when the check can't be made. The records carry `hero: true` from the
+   * next apply run.
+   */
+  setHeroPhoto(token: string, input: HeroPhotoInput): Promise<AcceptedResponse>;
   /**
    * Asks for one of the contributor's own photos to be removed. The photo
    * service stops serving it at once when it can confirm the photo is theirs,
@@ -1704,6 +1765,11 @@ function createClient(
   /** Sends an owner submission straight away and returns the intake's answer. */
   async function sendOwner(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (body.terms_accepted !== true) throw new OwnerTermsRequiredError();
+    return sendNow(body);
+  }
+
+  /** Validates and sends one item at once, never queued, and gives the intake's answer or throws `OwnerRequestError`. */
+  async function sendNow(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     const full = { ...body, device: await serial(device), app_version: appVersion };
     const checked = validateSubmission(full);
     if (!checked.ok) throw new FeedbackValidationError(checked.errors);
@@ -2157,7 +2223,23 @@ function createClient(
         { place, photo_report: { photo, reason }, ...(contributor !== undefined ? { contributor } : {}), consent, ref },
         "photo_report",
       ),
-    votePhoto: ({ place, photo, helpful, contributor, consent, ref }) => submit({ place, photo_vote: { photo, helpful }, contributor, consent, ref }, "photo_vote"),
+    setHeroPhoto: async (token, { place, photo, commons, none, consent }) => {
+      if (consent !== true) throw new ConsentRequiredError();
+      const photo_hero = { ...(photo !== undefined ? { photo } : {}), ...(commons !== undefined ? { commons } : {}), ...(none !== undefined ? { none } : {}) };
+      const answer = await sendNow({ type: "photo_hero", place, token, photo_hero, consent });
+      return { id: String(answer.id ?? "") };
+    },
+    votePhoto: ({ place, photo, commons, vote, helpful, contributor, consent, ref }) =>
+      submit(
+        {
+          place,
+          photo_vote: { ...(photo !== undefined ? { photo } : {}), ...(commons !== undefined ? { commons } : {}), ...(vote !== undefined ? { vote } : {}), ...(helpful !== undefined ? { helpful } : {}) },
+          contributor,
+          consent,
+          ref,
+        },
+        "photo_vote",
+      ),
     removePhoto: ({ place, photo, contributor, contributorProof, consent, ref }) =>
       submit({ place, photo_removal: { photo }, contributor, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}), consent, ref }, "photo_removal"),
     eraseReviews: ({ contributor, contributorProof, consent, ref }) =>
@@ -2181,7 +2263,7 @@ function createClient(
 
 /** A client for Open Camping DB's feedback intake: reports, reviews, checks and owner requests. */
 export function createFeedbackClient(options: FeedbackClientOptions): FeedbackClient {
-  const { photo: _photo, photoPass: _pass, reportPhoto: _report, votePhoto: _vote, removePhoto: _remove, erasePhotos: _erase, photoQueuedRefs: _refs, ...feedback } = createClient(options as PhotoClientOptions);
+  const { photo: _photo, photoPass: _pass, reportPhoto: _report, votePhoto: _vote, setHeroPhoto: _hero, removePhoto: _remove, erasePhotos: _erase, photoQueuedRefs: _refs, ...feedback } = createClient(options as PhotoClientOptions);
   return feedback;
 }
 
@@ -2196,6 +2278,7 @@ export function createPhotoClient(options: PhotoClientOptions): PhotoClient {
     photoPass: client.photoPass,
     reportPhoto: client.reportPhoto,
     votePhoto: client.votePhoto,
+    setHeroPhoto: client.setHeroPhoto,
     removePhoto: client.removePhoto,
     erasePhotos: client.erasePhotos,
     flush: client.flush,
