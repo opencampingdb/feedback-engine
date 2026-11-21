@@ -440,7 +440,9 @@ export type PhotoVoteValue = "helpful" | "not_helpful" | "none";
  * source has one vote per photo, and the latest one counts.
  *
  * An older SDK sends `{ photo, helpful: true | false }`. The intake still
- * accepts it and reads true as `helpful` and false as `none`.
+ * accepts it and reads true as `helpful` and false as `none`. The intake
+ * stores `helpful` beside `vote` as well, true only for `helpful`, for apply
+ * runs older than 0.41.0.
  */
 export type PhotoVoteBody =
   | {

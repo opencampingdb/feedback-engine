@@ -174,6 +174,19 @@ describe("photo votes", () => {
   });
 });
 
+describe("votes from an intake that stores helpful beside vote", () => {
+  it("counts by vote, whatever helpful says", () => {
+    const item = { ...vote("kim", PHOTO, "not_helpful"), photo_vote: { photo: PHOTO, vote: "not_helpful", helpful: true } } as StoredFeedback;
+    const votes: PhotoVotes = {
+      photos: { [PHOTO]: [{ feedback: "fb_01JC0000000000000000000001", at: "2026-10-01T00:00:00Z", vote: "none", helpful: true, contributor: ctr("lee"), device: "dev-lee" }] },
+    };
+    const out = rules([item], { votes });
+    expect(out.reason(item)).toBe("photo marked not helpful");
+    expect(out.line()).toMatchObject({ not_helpful: 1, not_helpful_12m: 1 });
+    expect(out.line()).not.toHaveProperty("helpful");
+  });
+});
+
 describe("helpful votes", () => {
   it("counts one vote per traveller and publishes the count and the last 12 months' count", () => {
     const a = vote("kim", PHOTO);

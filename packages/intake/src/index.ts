@@ -2197,7 +2197,9 @@ export function createHandler(deps: Deps) {
       ...("review_report" in rest ? { review_report: rest.review_report } : {}),
       ...("photo_report" in rest ? { photo_report: rest.photo_report } : {}),
       ...("photo_removal" in rest ? { photo_removal: rest.photo_removal } : {}),
-      ...("photo_vote" in rest ? { photo_vote: rest.photo_vote } : {}),
+      // helpful goes beside vote, true only for a helpful vote, so an apply run older than SDK 0.41.0
+      // (which counts every vote whose helpful is not false) never counts not_helpful or none.
+      ...("photo_vote" in rest ? { photo_vote: { ...rest.photo_vote, helpful: rest.photo_vote.vote === "helpful" } } : {}),
       // The owner's token is never stored: only that the owner check passed.
       ...("photo_hero" in rest ? { photo_hero: rest.photo_hero, owner_checked: true } : {}),
     } as StoredFeedback;

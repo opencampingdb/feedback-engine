@@ -840,7 +840,7 @@ describe("a vote on a photo", () => {
     expect(t.gh.puts[0]!.content).toMatchObject({
       type: "photo_vote",
       place: PLACE,
-      photo_vote: { photo: PHOTO, vote: "helpful" },
+      photo_vote: { photo: PHOTO, vote: "helpful", helpful: true },
       contributor: await hashContributor("pepper", "example-app", CONTRIBUTOR),
     });
   });
@@ -850,17 +850,18 @@ describe("a vote on a photo", () => {
     expect((await t.send({ photo_vote: { photo: PHOTO, vote: "not_helpful" } })).status).toBe(202);
     expect((await t.send({ photo_vote: { photo: PHOTO, helpful: true } })).status).toBe(202);
     expect((await t.send({ photo_vote: { photo: PHOTO, helpful: false } })).status).toBe(202);
+    // helpful is stored as well, true only for a helpful vote, so an apply run older than 0.41.0 never counts the others.
     expect(t.gh.puts.map((p) => (p.content as { photo_vote: unknown }).photo_vote)).toEqual([
-      { photo: PHOTO, vote: "not_helpful" },
-      { photo: PHOTO, vote: "helpful" },
-      { photo: PHOTO, vote: "none" },
+      { photo: PHOTO, vote: "not_helpful", helpful: false },
+      { photo: PHOTO, vote: "helpful", helpful: true },
+      { photo: PHOTO, vote: "none", helpful: false },
     ]);
   });
 
   it("stores a vote on a Commons file without the own photo check", async () => {
     const t = setup(await hashContributor("pepper", "example-app", CONTRIBUTOR));
     expect((await t.send({ photo_vote: { commons: "Lake Eppalock camp 2019.jpg", vote: "helpful" } })).status).toBe(202);
-    expect(t.gh.puts[0]!.content).toMatchObject({ type: "photo_vote", photo_vote: { commons: "Lake Eppalock camp 2019.jpg", vote: "helpful" } });
+    expect(t.gh.puts[0]!.content).toMatchObject({ type: "photo_vote", photo_vote: { commons: "Lake Eppalock camp 2019.jpg", vote: "helpful", helpful: true } });
   });
 
   it("refuses a vote for the voter's own photo, and stores nothing", async () => {
