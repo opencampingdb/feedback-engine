@@ -293,10 +293,10 @@ export async function readPlaceGeometry(files: PlaceGeometryFiles, points: reado
   return geometry;
 }
 
-/** Where the apply run keeps the helpful votes that count, in the inbox. Private: it names installs. */
+/** Where the apply run keeps the photo votes that count, in the inbox. Private: it names installs. */
 export const PHOTO_VOTES_FILE = "votes/photos.json";
 
-/** The helpful votes that count, from the inbox. Empty when there are none yet. */
+/** The photo votes that count, from the inbox. Empty when there are none yet. */
 export async function readPhotoVotes(inbox: string): Promise<PhotoVotes> {
   let text: string;
   try {
@@ -335,11 +335,12 @@ function isPhotoVote(value: unknown): value is PhotoVotes["photos"][string][numb
     typeof v.contributor === "string" &&
     typeof v.device === "string" &&
     (v.attest_key === undefined || typeof v.attest_key === "string") &&
-    (v.helpful === undefined || typeof v.helpful === "boolean")
+    (v.helpful === undefined || typeof v.helpful === "boolean") &&
+    (v.vote === undefined || v.vote === "helpful" || v.vote === "not_helpful" || v.vote === "none")
   );
 }
 
-/** Writes the helpful votes back, photos in id order. True when the file changed. */
+/** Writes the photo votes back, photos in id order. True when the file changed. */
 export async function writePhotoVotes(inbox: string, votes: PhotoVotes): Promise<boolean> {
   const ordered: PhotoVotes = { photos: Object.fromEntries(Object.entries(votes.photos).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) };
   const text = `${JSON.stringify(ordered, null, 2)}\n`;

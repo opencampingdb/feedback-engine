@@ -16,6 +16,7 @@ import {
   type FactValue,
   type NewPlaceReportReason,
   type PhotoHeldReason,
+  type PhotoVoteValue,
   type ReportFactName,
   type StoredFeedback,
 } from "@opencampingdb/feedback";
@@ -580,6 +581,29 @@ export function applyRules(input: RulesInput): RulesOutput {
     }
   }
   return rulesOnce(input, setAside);
+}
+
+/** The counts a vote leaves on a photo line or a Commons count line. */
+const VOTE_COUNTS = ["helpful", "helpful_12m", "not_helpful", "not_helpful_12m"] as const;
+type VoteCounts = Partial<Record<(typeof VOTE_COUNTS)[number], number>>;
+
+const hasVoteCounts = (line: VoteCounts) => VOTE_COUNTS.some((k) => line[k] !== undefined);
+
+/** A kept vote's value. An older entry has `helpful` in its place: false is none, true or absent is helpful. */
+function voteOf(vote: PhotoVote): PhotoVoteValue {
+  return vote.vote ?? (vote.helpful === false ? "none" : "helpful");
+}
+
+/** A vote item's value. An older intake stored `helpful` true or false, read as helpful or none. */
+function itemVote(item: Extract<StoredFeedback, { type: "photo_vote" }>): PhotoVoteValue {
+  const body = item.photo_vote as { vote?: PhotoVoteValue; helpful?: boolean };
+  return body.vote ?? (body.helpful === false ? "none" : "helpful");
+}
+
+/** What a recount says about a photo's or a Commons file's votes, for the change list. */
+function voteSummary(counts: VoteCounts): string {
+  const helpful = `marked helpful by ${counts.helpful ?? 0} (${counts.helpful_12m ?? 0} in the last 12 months)`;
+  return counts.not_helpful ? `${helpful}, not helpful by ${counts.not_helpful} (${counts.not_helpful_12m ?? 0} in the last 12 months)` : helpful;
 }
 
 /** Whether a kept vote was sent with any of these ids: the same contributor, install or attested key. */
@@ -1314,29 +1338,19 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   }
 
   /**
-   * Records helpful votes and takes them back, then recounts every photo's
-   * `helpful` and `helpful_12m`. One vote counts per photo per contributor,
-   * install or attested key: a new vote replaces any that shares one of them.
-   * Votes from blocked or erased contributors, and for photos no longer in the
-   * data, stop counting.
+   * Records votes and take-backs, then recounts every photo's `helpful`,
+   * `not_helpful` and their last 12 months' counts. One vote counts per photo
+   * per contributor, install or attested key: a new vote replaces any that
+   * shares one of them. Votes from blocked or erased contributors, and for
+   * photos no longer in the data, stop counting.
    */
   function applyPhotoVotes(items: VoteItem[], erased: ReadonlySet<string>): void {
     const removed = new Set(removedPhotos.map((r) => r.photo));
     const byPhoto = new Map<string, VoteItem[]>();
     for (const item of items) {
-      const { photo: photoId, helpful } = item.photo_vote;
-      if (item.contributor === undefined) {
-        decide(item, "refused", "photo vote has no contributor");
-        continue;
-      }
-      if (erased.has(item.contributor)) {
-        decide(item, "refused", "the contributor asked for their photos to be removed");
-        continue;
-      }
-      if (blocked.has(item.contributor)) {
-        decide(item, "refused", "the contributor is blocked");
-        continue;
-      }
+      const photoId = item.photo_vote.photo;
+      if (photoId === undefined) continue;
+      if (refuseVoter(item, erased)) continue;
       // A photo stays filed under its place's old id after a merge, so find it by its own id.
       const filedUnder = photoById.get(photoId)?.place ?? item.place;
       const target = photoLinesOf(filedUnder).find((p) => p.id === photoId);
@@ -1348,26 +1362,11 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         decide(item, "refused", "a contributor cannot vote for their own photo");
         continue;
       }
-      const ids = [item.contributor, item.device, ...(item.attest_key ? [item.attest_key] : [])];
-      const before = votes.photos[photoId] ?? [];
-      const replaced = before.filter((v) => sharesSource(v, ids));
-      // A vote sent before one already kept from the same source (an item put back in pending and run again) changes nothing.
-      if (replaced.some((v) => v.at > item.received || (v.at === item.received && v.feedback > item.id))) {
-        decide(item, "applied", "a later vote from the same traveller already counts");
-        continue;
+      const kept = recordVote(item, votes.photos[photoId] ?? []);
+      if (kept) {
+        votes.photos[photoId] = kept;
+        byPhoto.set(photoId, [...(byPhoto.get(photoId) ?? []), item]);
       }
-      const vote: PhotoVote = {
-        feedback: item.id,
-        at: item.received,
-        helpful,
-        contributor: item.contributor,
-        device: item.device,
-        ...(item.attest_key ? { attest_key: item.attest_key } : {}),
-      };
-      // A take-back is kept too, so an older vote run again later can't undo it.
-      votes.photos[photoId] = [...before.filter((v) => !sharesSource(v, ids)), vote];
-      byPhoto.set(photoId, [...(byPhoto.get(photoId) ?? []), item]);
-      decide(item, "applied", helpful ? "photo marked helpful" : replaced.some((v) => v.helpful !== false) ? "helpful vote taken back" : "no helpful vote to take back");
     }
 
     // Votes that no longer count: an erased or blocked voter's, and those for photos gone from the data.
@@ -1379,22 +1378,70 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     }
 
     // Recount every photo with votes, or with counts on its line.
-    const recentSince = new Date(now - 365 * DAY_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
-    const counted = new Set([...Object.keys(votes.photos), ...(input.photos ?? []).filter((p) => p.helpful !== undefined || p.helpful_12m !== undefined).map((p) => p.id)]);
+    const counted = new Set([...Object.keys(votes.photos), ...(input.photos ?? []).filter(hasVoteCounts).map((p) => p.id)]);
     for (const photoId of [...counted].sort()) {
       const line = currentLine(photoId);
       if (line === undefined) continue;
-      const list = (votes.photos[photoId] ?? []).filter((v) => v.helpful !== false);
-      const total = list.length;
-      const recent = list.filter((v) => v.at >= recentSince).length;
-      if ((line.helpful ?? 0) === total && (line.helpful_12m ?? 0) === recent) continue;
+      const counts = countVotes(votes.photos[photoId] ?? []);
+      if (VOTE_COUNTS.every((k) => (line[k] ?? 0) === (counts[k] ?? 0))) continue;
       const editable = photoLinesOf(line.place).find((p) => p.id === photoId)!;
-      if (total > 0) editable.helpful = total;
-      else delete editable.helpful;
-      if (recent > 0) editable.helpful_12m = recent;
-      else delete editable.helpful_12m;
-      note(line.place, `photo ${photoId} marked helpful by ${total} (${recent} in the last 12 months)`, true, byPhoto.get(photoId) ?? []);
+      for (const k of VOTE_COUNTS) delete editable[k];
+      Object.assign(editable, counts);
+      note(line.place, `photo ${photoId} ${voteSummary(counts)}`, true, byPhoto.get(photoId) ?? []);
     }
+  }
+
+  /** Refuses a vote with no contributor, or from an erased or blocked one. True when it was refused. */
+  function refuseVoter(item: VoteItem, erased: ReadonlySet<string>): boolean {
+    if (item.contributor === undefined) decide(item, "refused", "photo vote has no contributor");
+    else if (erased.has(item.contributor)) decide(item, "refused", "the contributor asked for their photos to be removed");
+    else if (blocked.has(item.contributor)) decide(item, "refused", "the contributor is blocked");
+    else return false;
+    return true;
+  }
+
+  /**
+   * Decides a vote against the votes kept for its photo, and returns the list
+   * to keep, or undefined when nothing changes: a vote sent before one already
+   * kept from the same source (an item put back in pending and run again).
+   */
+  function recordVote(item: VoteItem, before: readonly PhotoVote[]): PhotoVote[] | undefined {
+    const value = itemVote(item);
+    const ids = [item.contributor!, item.device, ...(item.attest_key ? [item.attest_key] : [])];
+    const replaced = before.filter((v) => sharesSource(v, ids));
+    if (replaced.some((v) => v.at > item.received || (v.at === item.received && v.feedback > item.id))) {
+      decide(item, "applied", "a later vote from the same traveller already counts");
+      return undefined;
+    }
+    const vote: PhotoVote = {
+      feedback: item.id,
+      at: item.received,
+      vote: value,
+      contributor: item.contributor!,
+      device: item.device,
+      ...(item.attest_key ? { attest_key: item.attest_key } : {}),
+    };
+    const reason =
+      value === "helpful" ? "photo marked helpful" : value === "not_helpful" ? "photo marked not helpful" : replaced.some((v) => voteOf(v) !== "none") ? "vote taken back" : "no vote to take back";
+    decide(item, "applied", reason);
+    // A take-back is kept too, so an older vote run again later can't undo it.
+    return [...before.filter((v) => !sharesSource(v, ids)), vote];
+  }
+
+  /** The counts of a list of kept votes, each left out at 0. */
+  function countVotes(list: readonly PhotoVote[]): VoteCounts {
+    const recentSince = new Date(now - 365 * DAY_MS).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const out: VoteCounts = {};
+    for (const [value, total, recent] of [
+      ["helpful", "helpful", "helpful_12m"],
+      ["not_helpful", "not_helpful", "not_helpful_12m"],
+    ] as const) {
+      const these = list.filter((v) => voteOf(v) === value);
+      const fresh = these.filter((v) => v.at >= recentSince).length;
+      if (these.length > 0) out[total] = these.length;
+      if (fresh > 0) out[recent] = fresh;
+    }
+    return out;
   }
 
   /** A photo's line as this run leaves it so far, or undefined when it is not in the data (any more). */

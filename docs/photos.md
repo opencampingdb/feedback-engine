@@ -194,21 +194,22 @@ await photos.reportPhoto({ place, photo: "pho_01JC...", reason: "personal_detail
 
 Every report goes to a person on the review PR. Reports from three different contributors, sent from three different client networks, hide the photo at the next apply run, until the person decides. Hide a photo the traveller reported on their own phone straight away.
 
-### Helpful votes
+### Photo votes
 
-A traveller can mark someone else's photo helpful, and take that back:
+A traveller can vote someone else's photo helpful or not helpful, and take the vote back with `none`:
 
 ```ts
-await photos.votePhoto({ place, photo: "pho_01JC...", helpful: true, contributor, consent: true });
-await photos.votePhoto({ place, photo: "pho_01JC...", helpful: false, contributor, consent: true }); // takes it back
+await photos.votePhoto({ place, photo: "pho_01JC...", vote: "helpful", contributor, consent: true });
+await photos.votePhoto({ place, photo: "pho_01JC...", vote: "not_helpful", contributor, consent: true }); // replaces the helpful vote
+await photos.votePhoto({ place, photo: "pho_01JC...", vote: "none", contributor, consent: true }); // takes it back
 ```
 
-A vote is queued and retried like a report, and needs the signed-in traveller's contributor id. Keep the traveller's own votes on the phone to show them: the photo service never says who voted.
+A vote is queued and retried like a report, and needs the signed-in traveller's contributor id. Keep the traveller's own votes on the phone to show them: the photo service never says who voted. On the wire it is `"photo_vote": {"photo": "pho_…", "vote": "helpful" | "not_helpful" | "none"}`. The intake still takes `{"photo": "pho_…", "helpful": true | false}` from apps on an SDK before 0.41.0, and reads true as `helpful` and false as `none`.
 
-- **One vote per traveller.** Each photo counts one vote per contributor, install or attested key. A later vote that shares any of them replaces the earlier one, so a vote and its take-back from another install of the same account settle on the latest. A take-back with nothing to take back changes nothing.
+- **One vote per traveller.** Each photo counts one vote per contributor, install or attested key. A later vote that shares any of them replaces the earlier one, so a helpful vote, a not helpful vote and a take-back from another install of the same account settle on the latest. A take-back with nothing to take back changes nothing.
 - **Never your own photo.** With the serving bucket bound as `PHOTOS_SERVED`, the intake answers `403 {"error": "own_photo"}` for a vote on the voter's own photo and stores nothing. The apply run refuses it as well, and refuses a vote for a photo that is not in the records for that place.
 - **A daily limit.** A contributor may send 50 votes a day, as well as the usual limits per device, network, attested key and app key.
-- **The count.** The apply run keeps each source's latest vote or take-back in the inbox repository, at `votes/photos.json`, which names hashed contributors and installs and so stays private. A vote received before the one already kept from the same source changes nothing, so an item a run puts back in `pending/` can't undo a later take-back. A file that is not valid JSON stops the run until a person fixes it from its git history, and a malformed entry is skipped with a warning. Each run recounts every photo with votes and writes two fields on its line: `helpful`, the travellers who marked it helpful, and `helpful_12m`, those of them who did so in the last 12 months, for a "most helpful" order that favours recent votes. Both are left out at 0. A run with no new items still recounts, so `helpful_12m` falls as votes age.
+- **The counts.** The apply run keeps each source's latest vote or take-back in the inbox repository, at `votes/photos.json`, which names hashed contributors and installs and so stays private. Each entry holds its `vote`. An entry written before 0.41.0 holds `helpful` instead, and is read as `helpful` when true or left out and as `none` when false, so the file needs no change. A vote received before the one already kept from the same source changes nothing, so an item a run puts back in `pending/` can't undo a later take-back. A file that is not valid JSON stops the run until a person fixes it from its git history, and a malformed entry is skipped with a warning. Each run recounts every photo with votes and writes four fields on its line: `helpful`, the travellers who marked it helpful, `helpful_12m`, those of them who did so in the last 12 months, for a "most helpful" order that favours recent votes, and `not_helpful` and `not_helpful_12m` in the same way. Each is left out at 0, and `none` counts nothing. A run with no new items still recounts, so the 12 month counts fall as votes age.
 - **Votes that stop counting.** Votes from a contributor who erases their photos, or who is on the block list, stop counting at the next run, and the votes for a removed photo are deleted with it.
 
 Votes are not on the review PR and have no progress record, so a vote the apply run refuses (a photo not in the data for that place, the voter's own photo) is never reported back: they change only the counts, on the automatic PR. As with reviews, the contributor value the app sends is all a vote names: anyone who learns a traveller's value and holds the app key can vote, or take back a vote, as them, and fresh contributor values get around the daily limit. Form the value as an HMAC of the account id with a key only your server knows, and keep `requires_attestation` on the app key ([Prove the account](#prove-the-account-for-removal-and-erasure)).
@@ -342,7 +343,7 @@ GET https://photos.example.com/v1/photos/<id>/thumb.jpg
 X-Photo-Pass: <pass>
 ```
 
-A place's records list its visible photos, one JSON line each: `id`, `place`, `contributor`, `created`, `app`, `licence`, `width`, `height`, `focus` when the sending app gave one (see [A photo's point of interest](#a-photos-point-of-interest)), `caption` and `taken` when it sent them and the caption passed the checks ([A caption and the month it was taken](#a-caption-and-the-month-it-was-taken)), `helpful` and `helpful_12m` when travellers marked it helpful ([Helpful votes](#helpful-votes)), and `sha256`. A place without photos answers an empty list. Records are cached for five minutes and photos for a day, at the edge and on the phone.
+A place's records list its visible photos, one JSON line each: `id`, `place`, `contributor`, `created`, `app`, `licence`, `width`, `height`, `focus` when the sending app gave one (see [A photo's point of interest](#a-photos-point-of-interest)), `caption` and `taken` when it sent them and the caption passed the checks ([A caption and the month it was taken](#a-caption-and-the-month-it-was-taken)), `helpful`, `helpful_12m`, `not_helpful` and `not_helpful_12m` when travellers voted on it ([Photo votes](#photo-votes)), and `sha256`. A place without photos answers an empty list. Records are cached for five minutes and photos for a day, at the edge and on the phone.
 
 A server that shows photos can use a photo key in `X-App-Key` instead, since it can keep the key secret. Never put a photo key in an app. Credit each photo shown in the way your photo terms say.
 

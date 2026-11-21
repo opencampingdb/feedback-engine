@@ -84,6 +84,10 @@ _Avoid_: dispute, flag, removal report (for a fact)
 A fact report of the value a place has, or had before doubts took it down, weighed against the doubts about it.
 _Avoid_: check (for a fact), vote
 
+**Photo vote**:
+A traveller saying a photo of a place is helpful or not helpful, or taking that back, counted once per contributor, install or attested key. Covers a traveller's photo and a Wikimedia Commons file matched to the place. Not evidence about a new place, and not a confirmation of a fact.
+_Avoid_: like, rating, vote (on its own)
+
 **Edit**:
 A traveller's change to one place's facts, sent as one fact report for each fact.
 _Avoid_: update (an owner's change), batch (how items travel)
