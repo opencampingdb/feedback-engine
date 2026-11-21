@@ -668,6 +668,23 @@ function dataCheckFailures(input: RulesInput, out: RulesOutput): Map<string, str
 }
 
 function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): RulesOutput {
+  /**
+   * An opaque label for a sender, the same for each of their `new_place_cap`
+   * cases in this run and random each run, so the AI reviewer can take turns
+   * by sender while the review PR never links the cases to a contributor id,
+   * across PRs or with `first_place` lines.
+   */
+  const senders = new Map<string, string>();
+  const senderOf = (who: string): string => {
+    let label = senders.get(who);
+    if (label === undefined) {
+      const bytes = crypto.getRandomValues(new Uint8Array(8));
+      label = `snd_${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+      senders.set(who, label);
+    }
+    return label;
+  };
+
   const now = Date.parse(input.now);
   const nowIso = new Date(now).toISOString().replace(/\.\d{3}Z$/, "Z");
   const sourceConfirmed = input.sourceConfirmed ?? new Set<string>();
@@ -2516,7 +2533,8 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         ...(kind === "hidden" ? (isBlocked ? { blocked: true as const } : { reports: new Set(against.map((i) => i.device)).size, reasons }) : {}),
         ...(kind === "contacts" ? { contacts: failing } : {}),
         ...(kind === "description" && descriptionProblem !== null ? { problem: descriptionProblem } : {}),
-        ...((kind === "first_place" || kind === "new_place_cap") && origin.contributor ? { contributor: origin.contributor } : {}),
+        ...(kind === "first_place" && origin.contributor ? { contributor: origin.contributor } : {}),
+        ...(kind === "new_place_cap" ? { sender: senderOf(origin.contributor ?? origin.device) } : {}),
         ...(kind === "implausible_location" && implausible !== null ? { hit: implausible.hit, problem: implausible.problem } : {}),
         ...(kind === "unattested_place" || kind === "new_place_cap" ? { candidates: mergeCandidates(id, origin) } : {}),
         feedback: feedback.map((f) => f.id),

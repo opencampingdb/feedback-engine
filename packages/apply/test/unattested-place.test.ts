@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { StoredFeedback } from "@opencampingdb/feedback";
 import { applyRules, type RulesInput } from "../src/rules.js";
+import { reviewPrBody } from "../src/prbody.js";
 import type { Place } from "../src/types.js";
 
 const NOW = "2026-07-02T00:00:00Z";
@@ -178,11 +179,28 @@ describe("new places past the contributor's new places for the day", () => {
         place: idOf(item),
         standing: "held",
         candidates: [{ place: places[0]!.id, distance_m: 200 }],
-        contributor: item.contributor,
+        sender: expect.stringMatching(/^snd_[0-9a-f]{16}$/),
         feedback: [item.id],
       }),
     ]);
     expect(out.held.filter((c) => c.case === "unattested_place")).toEqual([]);
+  });
+
+  it("labels each case with an opaque sender for the run, and never puts the contributor in the review PR body", () => {
+    const first = capped();
+    const second = capped({}, { contributor: first.contributor, device: first.device });
+    const other = capped();
+    const out = run([first, second, other]);
+    const cases = out.held.filter((c) => c.case === "new_place_cap");
+    expect(cases.map((c) => c.contributor)).toEqual([undefined, undefined, undefined]);
+    const [a, b, c] = cases.map((h) => h.sender);
+    expect(a).toBe(b);
+    expect(c).not.toBe(a);
+    // Another run labels the same contributor differently, so labels can't be joined across PRs.
+    expect(run([first]).held.find((h) => h.case === "new_place_cap")!.sender).not.toBe(a);
+    const body = reviewPrBody("2026-07-02T00:00:00Z", [], new Map(), [], cases);
+    for (const item of [first, other]) expect(body).not.toContain(item.contributor!);
+    expect(body).toContain(a!);
   });
 
   it("lists it for the reviewer when its links passed the intake's checks, and sends it to a person when they were not looked up", () => {

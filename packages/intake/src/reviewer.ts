@@ -150,15 +150,15 @@ export interface ReviewerDeps {
 /**
  * The cases in the order the reviewer takes them: as listed, except that the
  * `new_place_cap` cases, in the places they hold in the list, go round their
- * contributors, one case from each before a second from any, so one
- * contributor's long day does not hold up everyone else's. A case without a
- * contributor is a contributor of its own.
+ * senders (`sender`, the apply's opaque label for a contributor), one case
+ * from each before a second from any, so one contributor's long day does not
+ * hold up everyone else's. A case without a sender is a sender of its own.
  */
 export function fairOrder<T extends [string, HeldCase]>(cases: readonly T[]): T[] {
   const capped = cases.filter(([, c]) => c.case === "new_place_cap");
   const byContributor = new Map<string, T[]>();
   for (const entry of capped) {
-    const who = entry[1].contributor ?? `place:${entry[1].place}`;
+    const who = entry[1].sender ?? `place:${entry[1].place}`;
     byContributor.set(who, [...(byContributor.get(who) ?? []), entry]);
   }
   const rounds: T[] = [];
@@ -897,9 +897,11 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
   let answered = 0;
   let asked = 0;
   let askedCapped = 0;
-  const ordered = fairOrder([...cases]);
+  // In fairOrder's order. A new_place_cap case held back for a slot goes again at the end (below).
+  const queue = fairOrder([...cases]);
   try {
-    for (const [i, [key, c]] of ordered.entries()) {
+    for (let i = 0; i < queue.length; i++) {
+      const [key, c] = queue[i]!;
       const path = placePath(c.place);
       const file = await read(path);
       const place = file ? parsePlace(file.text) : undefined;
@@ -944,8 +946,12 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         reason = failedReason(failed);
       } else {
         if (asked >= MAX_MODEL_CASES) continue;
-        // New places past the day's limits never take every model slot while another kind of case waits after them.
-        if (c.case === "new_place_cap" && askedCapped >= MAX_MODEL_CASES - 1 && ordered.slice(i + 1).some(([, o]) => o.case !== "new_place_cap")) continue;
+        // New places past the day's limits never take the last model slot while another kind of case waits after
+        // them: the case goes again after the others, and gets the slot only when none of them asked the model.
+        if (c.case === "new_place_cap" && askedCapped >= MAX_MODEL_CASES - 1 && queue.slice(i + 1).some(([, o]) => o.case !== "new_place_cap")) {
+          queue.push(queue[i]!);
+          continue;
+        }
         asked++;
         if (c.case === "new_place_cap") askedCapped++;
         otherFile = c.case === "duplicate" && c.duplicate_of ? await read(placePath(c.duplicate_of)) : null;

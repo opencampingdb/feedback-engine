@@ -1039,15 +1039,28 @@ describe("the AI reviewer", () => {
     });
 
     it("takes one case per contributor before a second, and leaves a model slot for the other cases waiting", async () => {
-      const A = "ctr_aaaaaaaaaaaaaaaa";
-      const B = "ctr_bbbbbbbbbbbbbbbb";
-      const from = (n: number, contributor: string) => heldCase(n, { case: "new_place_cap", standing: "held", candidates: [], contributor });
+      const A = "snd_aaaaaaaaaaaaaaaa";
+      const B = "snd_bbbbbbbbbbbbbbbb";
+      const from = (n: number, sender: string) => heldCase(n, { case: "new_place_cap", standing: "held", candidates: [], sender });
       const lines = [from(0, A), from(1, A), from(2, A), from(3, A), from(4, A), from(5, B), from(6, B), heldCase(7, { case: "unattested_place", standing: "held", candidates: [] })];
       const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], lines));
       for (let n = 0; n <= 7; n++) gh.put(place(n));
       const { ai, asked } = fakeAi(() => reply("approve", "A believable free camp."));
       await run(gh, ai);
       expect(asked.map((a) => (caseOf(a.input).place as { id: string }).id)).toEqual([id(0), id(5), id(1), id(6), id(7)]);
+    });
+
+    it("gives every model slot to these cases when the only other cases after them are settled without the model", async () => {
+      const from = (n: number) => heldCase(n, { case: "new_place_cap", standing: "held", candidates: [], sender: `snd_${String(n).repeat(16)}` });
+      const settled = heldCase(6, { case: "unattested_place", standing: "held", candidates: [] });
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [from(0), from(1), from(2), from(3), from(4), settled]));
+      for (let n = 0; n <= 4; n++) gh.put(place(n));
+      // No longer held: the rules leave it without asking.
+      gh.put(place(6, { standing: "shown" }));
+      const { ai, asked } = fakeAi(() => reply("approve", "A believable free camp."));
+      const result = await run(gh, ai);
+      expect(asked.map((a) => (caseOf(a.input).place as { id: string }).id)).toEqual([id(0), id(1), id(2), id(3), id(4)]);
+      expect(result).toMatchObject({ decisions: expect.arrayContaining([expect.objectContaining({ place: id(6), decision: "leave", by_rules: true })]) });
     });
 
     it("leaves one the model is unsure of to a person, and one no longer held or with a verified owner without asking", async () => {

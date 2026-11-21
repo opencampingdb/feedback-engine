@@ -83,8 +83,9 @@ export type { Place };
  * changes for the day (`daily_cap`) with its links passed, drafted as held,
  * that passed the plausibility,
  * duplicate and text checks and would otherwise be published. It lists
- * `candidates` and `contributor`, which the AI reviewer takes turns by, and
- * is decided as an `unattested_place` case is.
+ * `candidates` and `sender`, an opaque label for its contributor in this
+ * run that the AI reviewer takes turns by, and is decided as an
+ * `unattested_place` case is.
  * `disputed`: a place frozen because `sources` independent sources sent
  * conflicting values for `fact` within 24 hours, from `frozen_at`. No fact
  * on it changes until a reviewer sets the fact to one value, which lifts the
@@ -171,6 +172,8 @@ export interface HeldCase {
   /** On `fact_doubted`: the confirmations of the value counted against them. */
   confirmations?: string[];
   contributor?: string;
+  /** On `new_place_cap`: `snd_` and 16 hex, the same for each case from one contributor in a run and random each run. Never the contributor id. */
+  sender?: string;
   /** On `unattested_place` and `new_place_cap`: places in its group nearby, nearest first, with how far each is. */
   candidates?: { place: string; distance_m: number }[];
   /** On `disputed`: when the freeze started. Left out on cases listed before it was given. */
@@ -327,6 +330,7 @@ export function isHeldCase(v: unknown): v is HeldCase {
     if (v.about === "status" && !["closed", "reopened", "there", "gone"].includes(v.says as string)) return false;
   } else if (v.about !== undefined || v.review !== undefined || v.says !== undefined) return false;
   if (v.frozen_at !== undefined && (v.case !== "disputed" || typeof v.frozen_at !== "string")) return false;
+  if (v.sender !== undefined && (v.case !== "new_place_cap" || typeof v.sender !== "string" || !/^snd_[0-9a-f]{16}$/.test(v.sender))) return false;
   if (v.case === "implausible_location") {
     const hits: readonly unknown[] = ["water", "road", "building", "intake"];
     if (!hits.includes(v.hit) || typeof v.problem !== "string") return false;
