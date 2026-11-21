@@ -1541,6 +1541,11 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
           decide(item, "refused", `photo ${choice.photo} is not in the data for this place`);
           continue;
         }
+        // A hidden photo, or one from a blocked contributor, is not served, so it can't be the hero.
+        if (photoTarget.hidden !== undefined || blocked.has(photoTarget.contributor)) {
+          decide(item, "refused", `photo ${choice.photo} is hidden`);
+          continue;
+        }
       } else if (choice.commons !== undefined) {
         if (input.commonsMatches === undefined) {
           decide(item, "waiting", "the Commons matches are not in this checkout");

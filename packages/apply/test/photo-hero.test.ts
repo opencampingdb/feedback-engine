@@ -131,6 +131,14 @@ describe("an owner's hero photo", () => {
     expect([missing, elsewhere, listed, unchecked].map(out.outcome)).toEqual(["refused", "refused", "refused", "refused"]);
   });
 
+  it("refuses a hidden photo", () => {
+    const choice = hero({ photo: B });
+    const out = rules([choice], { photos: [photoLine(1), photoLine(2, { hidden: "reported" })] });
+    expect(out.outcome(choice)).toBe("refused");
+    expect(out.reason(choice)).toBe(`photo ${B} is hidden`);
+    expect(out.line(B)).not.toHaveProperty("hero");
+  });
+
   it("waits on a Commons choice without the matches", () => {
     const choice = hero({ commons: LAKE });
     expect(rules([choice], {}, null).outcome(choice)).toBe("waiting");

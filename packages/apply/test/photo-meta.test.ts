@@ -176,7 +176,7 @@ describe("photo votes", () => {
 
 describe("votes from an intake that stores helpful beside vote", () => {
   it("counts by vote, whatever helpful says", () => {
-    const item = { ...vote("kim", PHOTO, "not_helpful"), photo_vote: { photo: PHOTO, vote: "not_helpful", helpful: true } } as StoredFeedback;
+    const item = { ...vote("kim", PHOTO, "not_helpful"), photo_vote: { photo: PHOTO, vote: "not_helpful", helpful: true } } as unknown as StoredFeedback;
     const votes: PhotoVotes = {
       photos: { [PHOTO]: [{ feedback: "fb_01JC0000000000000000000001", at: "2026-10-01T00:00:00Z", vote: "none", helpful: true, contributor: ctr("lee"), device: "dev-lee" }] },
     };
