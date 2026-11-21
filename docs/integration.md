@@ -1205,8 +1205,14 @@ const feedback = createFeedbackClient({
 
 ## What changed by version
 
-What an app moving to 0.41.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
+What an app moving to 0.42.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
 
+- **0.42.0.** New places past the day's 50, for every app:
+  - Each contributor's first 50 new places of the UTC day (each install's, without a contributor) are decided as usual, up from 10. From the 51st the intake no longer answers `429`: it takes the place (`202`) and answers `held` with `new_place_cap`. The place is not listed, and the AI reviewer checks it, then a person when the reviewer is unsure. Every app and traveller has the same 50 ([Reports](#5-send-reports-reviews-checks-and-charges)).
+  - `HELD_REASONS` gains `new_place_cap`. Show your own message for it, and treat a code you do not know as `held`.
+  - An install's reports about a new place it added that UTC day, listed or held, including those sent with `{ newPlace: ref }`, count as one edit against the install's and the contributor's daily limits, as reports about a released place do. They still count against the App Attest key's and the network's ([Daily limits](#6-reviews-contributors-reports-and-blocking)).
+  - A new place held as `daily_cap`, because the contributor had made 50 live changes that day, now goes to the AI reviewer as one held for `new_place_cap` does, once its links pass the malware check, instead of straight to a person.
+  - Move the inbox's apply pin to 0.42.0 before deploying the intake: an older apply does not know `new_place_cap` and would publish such a place.
 - **0.41.0.** Photo votes and an owner's hero photo, for photo services ([photos.md](photos.md#photo-votes)):
   - `photo_vote` takes `vote`: `helpful`, `not_helpful` or `none` (takes the vote back), and `votePhoto` takes `vote`. The older `helpful: true | false` is still accepted from apps on older SDKs, as `helpful` and `none`. Photo records gain `not_helpful` and `not_helpful_12m` next to `helpful` and `helpful_12m`, each left out at 0. `PhotoVoteValue` is exported, and `PhotoVoteBody` is now `{photo, vote}` or `{commons, vote}`.
   - `photo_vote` may name a Wikimedia Commons file matched to the place, `commons: "<file name>"` without `File:`, in place of `photo`. The apply run refuses a file not matched to the place or on the do-not-match list, and the photo server serves each place's counts at `GET /v1/places/<place id>/commons.ndjson`.

@@ -224,6 +224,14 @@ The OSM notes workflow (`osm-notes.yml`) is retired, so don't add it. [osm.md](o
 
 Secrets stay in Cloudflare and need no change. The intake validates every submission, so a release that adds facts or report kinds needs this redeploy before apps send them. Until then the intake refuses them with `400`.
 
+### Moving to SDK 0.42.0: new places past the day's 50
+
+SDK 0.42.0 takes a contributor's new places past 50 a UTC day and holds them as `new_place_cap` for the AI reviewer, instead of refusing them, and sends a new place held for `daily_cap` to the AI reviewer too ([ADR 0007](adr/0007-new-places-past-the-day-are-held-not-refused.md)). No migration is needed. In this order:
+
+1. Move both SHAs in the inbox's `apply-feedback.yml` to the new commit first. An older apply run does not know `new_place_cap`, and would publish a place the intake held for it.
+2. Deploy the AI reviewer and the intake at the same commit (they are one Worker).
+3. Apps need no new build: an older SDK reads `new_place_cap` as `held` without a reason. Ship builds on SDK 0.42.0 to show their own message for it.
+
 ### Moving to SDK 0.41.0: photo votes
 
 SDK 0.41.0 lets a photo vote be `helpful`, `not_helpful` or `none`, lets it name a Wikimedia Commons file ([photos.md](photos.md#photo-votes)), and lets a place's verified owner choose its hero photo ([photos.md](photos.md#an-owners-hero-photo)). For an app's photo service, in this order:
