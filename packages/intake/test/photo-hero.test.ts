@@ -54,7 +54,7 @@ function fakeGitHub(owners: Record<string, Record<string, unknown>>, options: { 
 
 function baseEnv(): Env {
   return {
-    APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 100 }, [OWNER_CHECK_KEY]: { app: "example-photos", daily_limit: 100 } }),
+    APP_KEYS: JSON.stringify({ [APP_KEY]: { app: "example-app", daily_limit: 100 }, [OWNER_CHECK_KEY]: { app: "example-photos", daily_limit: 100, owner_check: true } }),
     DEVICE_SALT: "pepper",
     GH_APP_ID: "12345",
     GH_APP_PRIVATE_KEY: privateKey,
@@ -66,14 +66,46 @@ function baseEnv(): Env {
 
 const ownerRecord = (place: string, token: string) => ({ place, claim: "fb_01JBXK3M8Q4R5S6T7V8W9X0YZA", token_sha256: hex(token), approved: "2026-10-01", email: "owner@example.org", name: "Pat Owner" });
 
+const allow: RateLimiterLike = { limit: async () => ({ success: true }) };
+
 describe("the owner check", () => {
   const ask = (handle: ReturnType<typeof createHandler>, env: Env, body: unknown, key = OWNER_CHECK_KEY) =>
     handle(new Request("https://intake.example/v1/owner/check", { method: "POST", headers: { "x-app-key": key, "cf-connecting-ip": "203.0.113.5" }, body: JSON.stringify(body) }), env);
+  const checkEnv = (): Env => ({ ...baseEnv(), PER_IP: allow });
+
+  it("is only for app keys with owner_check, and only with a rate limit binding", async () => {
+    const gh = fakeGitHub({ [PLACE]: ownerRecord(PLACE, TOKEN) });
+    const handle = createHandler({ fetch: gh.fetch, now: () => NOW });
+    const refused = await ask(handle, checkEnv(), { place: PLACE, token: TOKEN }, APP_KEY);
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: "owner_check_not_allowed_for_app_key" });
+    const unlimited = await ask(handle, baseEnv(), { place: PLACE, token: TOKEN });
+    expect(unlimited.status).toBe(503);
+    expect(await unlimited.json()).toEqual({ error: "owner_check_unavailable" });
+    expect(gh.reads).toEqual([]);
+  });
+
+  it("keeps each answer for a minute, and reuses the installation token", async () => {
+    let clock = NOW;
+    const gh = fakeGitHub({ [PLACE]: ownerRecord(PLACE, TOKEN) });
+    let tokens = 0;
+    const fetch = async (url: string, init?: RequestInit) => (url.endsWith("/access_tokens") && tokens++, gh.fetch(url, init));
+    const handle = createHandler({ fetch, now: () => clock });
+    const env = checkEnv();
+    await ask(handle, env, { place: PLACE, token: TOKEN });
+    await ask(handle, env, { place: PLACE, token: TOKEN });
+    expect(gh.reads).toEqual([PLACE]);
+    await ask(handle, env, { place: PLACE, token: "U".repeat(43) });
+    clock += 61_000;
+    expect(await (await ask(handle, env, { place: PLACE, token: TOKEN })).json()).toEqual({ owner: true });
+    expect(gh.reads).toEqual([PLACE, PLACE, PLACE]);
+    expect(tokens).toBe(1);
+  });
 
   it("says whether a token is the place's approved owner's, and nothing about the owner", async () => {
     const gh = fakeGitHub({ [PLACE]: ownerRecord(PLACE, TOKEN) });
     const handle = createHandler({ fetch: gh.fetch, now: () => NOW });
-    const env = baseEnv();
+    const env = checkEnv();
     const yes = await ask(handle, env, { place: PLACE, token: TOKEN });
     expect(yes.status).toBe(200);
     expect(await yes.json()).toEqual({ owner: true });
@@ -85,15 +117,15 @@ describe("the owner check", () => {
   it("needs an app key, a place id and a token", async () => {
     const gh = fakeGitHub({});
     const handle = createHandler({ fetch: gh.fetch, now: () => NOW });
-    expect((await ask(handle, baseEnv(), { place: PLACE, token: TOKEN }, "nope")).status).toBe(401);
-    expect((await ask(handle, baseEnv(), { place: "nope", token: TOKEN })).status).toBe(400);
-    expect((await ask(handle, baseEnv(), { place: PLACE, token: "short" })).status).toBe(400);
+    expect((await ask(handle, checkEnv(), { place: PLACE, token: TOKEN }, "nope")).status).toBe(401);
+    expect((await ask(handle, checkEnv(), { place: "nope", token: TOKEN })).status).toBe(400);
+    expect((await ask(handle, checkEnv(), { place: PLACE, token: "short" })).status).toBe(400);
     expect(gh.reads).toEqual([]);
   });
 
   it("answers 503 when the owner records can't be read", async () => {
     const handle = createHandler({ fetch: fakeGitHub({}, { down: true }).fetch, now: () => NOW });
-    const res = await ask(handle, baseEnv(), { place: PLACE, token: TOKEN });
+    const res = await ask(handle, checkEnv(), { place: PLACE, token: TOKEN });
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "unavailable" });
   });

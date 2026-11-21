@@ -417,6 +417,8 @@ interface AppEntry {
    * type or kind is refused with `type_not_allowed_for_app_key`.
    */
   report_kinds?: ReportKind[];
+  /** The key may call `POST /v1/owner/check`: give it only to a photo service's intake. */
+  owner_check?: true;
   /** Reviews must carry `visited_nearby: true`. */
   requires_visited_nearby?: boolean;
   /** Feedback per contributor per day. Defaults to CONTRIBUTOR_DAILY_LIMIT. */
@@ -572,6 +574,7 @@ export function parseAppKeys(raw: string): Map<string, AppEntry> {
       (entry.contributor_daily_limit === undefined || isLimit(entry.contributor_daily_limit)) &&
       (entry.requires_visited_nearby === undefined || typeof entry.requires_visited_nearby === "boolean") &&
       (entry.photo_pass_unattested === undefined || typeof entry.photo_pass_unattested === "boolean") &&
+      (entry.owner_check === undefined || typeof entry.owner_check === "boolean") &&
       (entry.contributor_proof_key === undefined || isProofPublicKey(entry.contributor_proof_key)) &&
       kindsValid &&
       iosValid &&
@@ -595,6 +598,7 @@ export function parseAppKeys(raw: string): Map<string, AppEntry> {
               },
             }
           : {}),
+        ...(entry.owner_check ? { owner_check: true as const } : {}),
         ...(entry.requires_human_check ? { requires_human_check: true } : {}),
         ...(humanCheck ? { human_check: humanCheck } : {}),
         ...(entry.report_kinds !== undefined ? { report_kinds: [...entry.report_kinds] } : {}),
@@ -659,6 +663,11 @@ function base64url(bytes: Uint8Array): string {
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
+
+/** How long an isolate keeps an owner check's answer. A deleted owner record stops matching within this. */
+export const OWNER_ANSWER_TTL_MS = 60_000;
+/** Most owner check answers an isolate keeps before it starts again. */
+const OWNER_ANSWERS_KEPT = 1000;
 
 /** An owner token: 32 random bytes, base64url. */
 const OWNER_TOKEN = /^[A-Za-z0-9_-]{43}$/;
@@ -2552,26 +2561,38 @@ export function createHandler(deps: Deps) {
     return json(200, { items: out }, cors);
   }
 
+  // One GitHub App client for the isolate, so its installation token is kept between owner checks,
+  // and each answer for a minute, by place and token hash, so a busy owner costs one read a minute.
+  const ownerGitHub = new GitHubApp(deps.fetch, deps.now);
+  const ownerAnswers = new Map<string, { owner: boolean; until: number }>();
+
   /**
    * `POST /v1/owner/check` with `{place, token}`: whether the token is the one
    * from the place's approved owner claim, as `owners/<place>.json` in the
    * inbox holds its SHA-256. Answers only `{owner: true | false}`, stores
-   * nothing, and is limited per app key with the PER_IP binding.
+   * nothing, is open only to app keys with `owner_check`, and is limited per
+   * app key with the PER_IP binding (off without it).
    */
   async function ownerCheck(request: Request, env: Env, app: AppEntry, cors: Record<string, string>): Promise<Response> {
-    if (env.PER_IP) {
-      const key = await hashDevice(env.DEVICE_SALT, `owner-check:${app.app}`);
-      if (!(await env.PER_IP.limit({ key })).success) return limited(60, cors);
-    }
+    if (!app.owner_check) return json(403, { error: "owner_check_not_allowed_for_app_key" }, cors);
+    // Never unlimited: without the binding the check is off.
+    if (!env.PER_IP) return json(503, { error: "owner_check_unavailable" }, cors);
+    const limitKey = await hashDevice(env.DEVICE_SALT, `owner-check:${app.app}`);
+    if (!(await env.PER_IP.limit({ key: limitKey })).success) return limited(60, cors);
     const read = await readJsonBody(request, MAX_BODY_BYTES);
     if (!read.ok) return json(read.status, read.body, cors);
     const { place, token } = (read.body ?? {}) as { place?: unknown; token?: unknown };
     if (!isPlaceId(place) || typeof token !== "string" || !OWNER_TOKEN.test(token)) {
       return json(400, { error: "invalid", details: ["place must be an Open Camping DB id and token the 43 character token from the claim"] }, cors);
     }
+    const tokenHash = await hashToken(token);
+    const nowMs = deps.now();
+    const cacheKey = `${place}:${tokenHash}`;
+    const cached = ownerAnswers.get(cacheKey);
+    if (cached && cached.until > nowMs) return json(200, { owner: cached.owner }, cors);
     let file: { text: string } | null;
     try {
-      file = await new GitHubApp(deps.fetch, deps.now).readFile(inboxConfig(env), `owners/${place}.json`, env.INBOX_BRANCH ?? "main", CONTENTS_READ);
+      file = await ownerGitHub.readFile(inboxConfig(env), `owners/${place}.json`, env.INBOX_BRANCH ?? "main", CONTENTS_READ);
     } catch {
       return json(503, { error: "unavailable" }, { ...cors, "retry-after": "60" });
     }
@@ -2581,7 +2602,9 @@ export function createHandler(deps: Deps) {
     } catch {
       kept = undefined;
     }
-    const owner = typeof kept === "string" && sameText(await hashToken(token), kept);
+    const owner = typeof kept === "string" && sameText(tokenHash, kept);
+    if (ownerAnswers.size >= OWNER_ANSWERS_KEPT) ownerAnswers.clear();
+    ownerAnswers.set(cacheKey, { owner, until: nowMs + OWNER_ANSWER_TTL_MS });
     return json(200, { owner }, cors);
   }
 
