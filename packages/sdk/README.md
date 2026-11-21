@@ -109,7 +109,7 @@ This is 0.37.0. What an app moving to it needs to know:
 What an app moving to 0.36.0 needed to know:
 
 - `photo()` takes an optional `caption` (at most 200 characters, one line) and `taken` (`YYYY-MM`, read from the original file's Exif with `photoTakenMonth` before the SDK removes the metadata). Records carry both, and a caption that fails the review text checks is left out while the photo is published.
-- `votePhoto({ place, photo, helpful, contributor, consent })` marks someone else's photo helpful or takes it back, queued like a report. Records carry `helpful` and `helpful_12m`. The photo intake refuses a vote on the voter's own photo with `403 own_photo`. Deploy the photo intake and move the apply pin to 0.36.0 first: an older intake refuses these with `400` ([docs/photos.md](../../docs/photos.md#helpful-votes)).
+- `votePhoto({ place, photo, helpful, contributor, consent })` marks someone else's photo helpful or takes it back, queued like a report. Records carry `helpful` and `helpful_12m`. The photo intake refuses a vote on the voter's own photo with `403 own_photo`. Deploy the photo intake and move the apply pin to 0.36.0 first: an older intake refuses these with `400` ([docs/photos.md](../../docs/photos.md#photo-votes)).
 
 What an app moving to 0.35.0 needed to know:
 

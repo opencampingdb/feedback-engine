@@ -30,6 +30,7 @@ import type {
   PhotoReportBody,
   PhotoRemovalBody,
   PhotoVoteBody,
+  PhotoVoteValue,
   PhotoReportReason,
   FirstHand,
   ReportBody,
@@ -841,15 +842,31 @@ function checkPhotoRemoval(value: unknown, errors: string[]): PhotoRemovalBody |
   return { photo: value.photo as string };
 }
 
+const PHOTO_VOTE_VALUES: readonly string[] = ["helpful", "not_helpful", "none"];
+
 function checkPhotoVote(value: unknown, errors: string[]): PhotoVoteBody | undefined {
   if (!isObject(value)) {
     errors.push("photo_vote must be an object");
     return undefined;
   }
-  for (const key of Object.keys(value)) if (key !== "photo" && key !== "helpful") errors.push(`unknown field photo_vote.${key}`);
-  if (!isPhotoId(value.photo)) errors.push("photo_vote.photo must be a photo id (pho_<ulid>)");
-  if (typeof value.helpful !== "boolean") errors.push("photo_vote.helpful must be true or false");
-  return { photo: value.photo as string, helpful: value.helpful as boolean };
+  const before = errors.length;
+  for (const key of Object.keys(value)) if (!["photo", "commons", "vote", "helpful"].includes(key)) errors.push(`unknown field photo_vote.${key}`);
+  if (value.photo !== undefined && value.commons !== undefined) errors.push("photo_vote takes photo or commons, not both");
+  else if (value.photo === undefined && value.commons === undefined) errors.push("photo_vote needs photo or commons");
+  else if (value.photo !== undefined && !isPhotoId(value.photo)) errors.push("photo_vote.photo must be a photo id (pho_<ulid>)");
+  else if (value.commons !== undefined && !isCommonsFileName(value.commons)) errors.push("photo_vote.commons must be a Commons file name, without File:");
+  // An older SDK sends helpful: true or false, read as helpful or none.
+  let vote: unknown = value.vote;
+  if (value.helpful !== undefined) {
+    if (value.vote !== undefined) errors.push("photo_vote takes vote or helpful, not both");
+    else if (typeof value.helpful !== "boolean") errors.push("photo_vote.helpful must be true or false");
+    else vote = value.helpful ? "helpful" : "none";
+  } else if (typeof vote !== "string" || !PHOTO_VOTE_VALUES.includes(vote)) {
+    errors.push("photo_vote.vote must be helpful, not_helpful or none");
+  }
+  if (errors.length > before) return undefined;
+  const target = value.photo !== undefined ? { photo: value.photo as string } : { commons: value.commons as string };
+  return { ...target, vote: vote as PhotoVoteValue };
 }
 
 /** The problem with a photo's caption as sent, or null: a string on one line of at most `MAX_PHOTO_CAPTION_LENGTH` characters. */

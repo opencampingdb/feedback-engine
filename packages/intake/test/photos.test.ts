@@ -814,7 +814,7 @@ describe("a contributor proof for removal and erasure (audit run-2 OCDB-NV-06)",
   });
 });
 
-describe("a helpful vote on a photo", () => {
+describe("a vote on a photo", () => {
   const PHOTO = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZB";
   function setup(lineContributor?: string) {
     const gh = fakeGitHub();
@@ -827,7 +827,7 @@ describe("a helpful vote on a photo", () => {
         new Request("https://intake.example/v1/feedback", {
           method: "POST",
           headers: { "x-app-key": APP_KEY },
-          body: JSON.stringify({ device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true, type: "photo_vote", place: PLACE, photo_vote: { photo: PHOTO, helpful: true }, ...body }),
+          body: JSON.stringify({ device: DEVICE, contributor: CONTRIBUTOR, app_version: "1", consent: true, type: "photo_vote", place: PLACE, photo_vote: { photo: PHOTO, vote: "helpful" }, ...body }),
         }),
         target,
       );
@@ -840,9 +840,27 @@ describe("a helpful vote on a photo", () => {
     expect(t.gh.puts[0]!.content).toMatchObject({
       type: "photo_vote",
       place: PLACE,
-      photo_vote: { photo: PHOTO, helpful: true },
+      photo_vote: { photo: PHOTO, vote: "helpful" },
       contributor: await hashContributor("pepper", "example-app", CONTRIBUTOR),
     });
+  });
+
+  it("stores a not helpful vote, and an older app's helpful true or false as helpful or none", async () => {
+    const t = setup("ctr_0123456789abcdef");
+    expect((await t.send({ photo_vote: { photo: PHOTO, vote: "not_helpful" } })).status).toBe(202);
+    expect((await t.send({ photo_vote: { photo: PHOTO, helpful: true } })).status).toBe(202);
+    expect((await t.send({ photo_vote: { photo: PHOTO, helpful: false } })).status).toBe(202);
+    expect(t.gh.puts.map((p) => (p.content as { photo_vote: unknown }).photo_vote)).toEqual([
+      { photo: PHOTO, vote: "not_helpful" },
+      { photo: PHOTO, vote: "helpful" },
+      { photo: PHOTO, vote: "none" },
+    ]);
+  });
+
+  it("stores a vote on a Commons file without the own photo check", async () => {
+    const t = setup(await hashContributor("pepper", "example-app", CONTRIBUTOR));
+    expect((await t.send({ photo_vote: { commons: "Lake Eppalock camp 2019.jpg", vote: "helpful" } })).status).toBe(202);
+    expect(t.gh.puts[0]!.content).toMatchObject({ type: "photo_vote", photo_vote: { commons: "Lake Eppalock camp 2019.jpg", vote: "helpful" } });
   });
 
   it("refuses a vote for the voter's own photo, and stores nothing", async () => {
@@ -855,8 +873,8 @@ describe("a helpful vote on a photo", () => {
 
   it("stores a vote it can't check against the served records for the apply run", async () => {
     const t = setup();
-    expect((await t.send({ photo_vote: { photo: PHOTO, helpful: false } })).status).toBe(202);
-    expect(t.gh.puts[0]!.content).toMatchObject({ photo_vote: { photo: PHOTO, helpful: false } });
+    expect((await t.send({ photo_vote: { photo: PHOTO, vote: "none" } })).status).toBe(202);
+    expect(t.gh.puts[0]!.content).toMatchObject({ photo_vote: { photo: PHOTO, vote: "none" } });
   });
 
   it("needs a contributor and a photo service", async () => {
@@ -866,10 +884,13 @@ describe("a helpful vote on a photo", () => {
     expect(await (await t.send({}, noPhotos as Env)).json()).toEqual({ error: "photos_not_served_here" });
   });
 
-  it("takes at most 50 votes from a contributor in a day", async () => {
+  it("takes at most 50 votes from a contributor in a day, on photos and Commons files together", async () => {
     const t = setup("ctr_0123456789abcdef");
     const answers: number[] = [];
-    for (let i = 0; i < 51; i++) answers.push((await t.send({ photo_vote: { photo: PHOTO, helpful: i % 2 === 0 } })).status);
+    for (let i = 0; i < 51; i++) {
+      const target = i % 2 === 0 ? { photo: PHOTO } : { commons: "Lake Eppalock camp 2019.jpg" };
+      answers.push((await t.send({ photo_vote: { ...target, vote: i % 3 === 0 ? "helpful" : "not_helpful" } })).status);
+    }
     expect(answers.slice(0, 50).every((s) => s === 202)).toBe(true);
     expect(answers[50]).toBe(429);
   });

@@ -2068,8 +2068,8 @@ export function createHandler(deps: Deps) {
         if (typeof served !== "string" && proof === undefined && served.app !== app.app) reportMayWithhold = false;
       }
       // Nobody votes for their own photo. When the served records say whose it is, the intake answers at once;
-      // otherwise the apply run checks it against the photo lines.
-      if (feedback.type === "photo_vote" && env.PHOTOS_SERVED) {
+      // otherwise the apply run checks it against the photo lines. A Commons file is nobody's own photo here.
+      if (feedback.type === "photo_vote" && feedback.photo_vote.photo !== undefined && env.PHOTOS_SERVED) {
         if ((await photoOwner(env.PHOTOS_SERVED, feedback.place, feedback.photo_vote.photo, contributor!)) === "mine") {
           return { status: 403, body: { error: "own_photo" } };
         }

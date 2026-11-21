@@ -147,30 +147,53 @@ describe("photo client caption and taken", () => {
     expect(second.metas[0]!.photo).toMatchObject({ caption: "Shady site", taken: "2026-09" });
   });
 
-  it("sends a helpful vote and its take-back through the queue", async () => {
+  it("sends votes on a photo and on a Commons file through the queue", async () => {
     const t = setup();
-    await t.client.votePhoto({ place: PLACE, photo: PHOTO, helpful: true, contributor: CONTRIBUTOR, consent: true });
-    await t.client.votePhoto({ place: PLACE, photo: PHOTO, helpful: false, contributor: CONTRIBUTOR, consent: true, ref: "v2" });
+    await t.client.votePhoto({ place: PLACE, photo: PHOTO, vote: "helpful", contributor: CONTRIBUTOR, consent: true });
+    await t.client.votePhoto({ place: PLACE, photo: PHOTO, vote: "none", contributor: CONTRIBUTOR, consent: true, ref: "v2" });
+    await t.client.votePhoto({ place: PLACE, commons: "Lake Eppalock camp 2019.jpg", vote: "not_helpful", contributor: CONTRIBUTOR, consent: true });
     expect(t.posts.map((p) => JSON.parse(p.body))).toEqual([
-      expect.objectContaining({ type: "photo_vote", place: PLACE, contributor: CONTRIBUTOR, photo_vote: { photo: PHOTO, helpful: true } }),
-      expect.objectContaining({ type: "photo_vote", place: PLACE, contributor: CONTRIBUTOR, photo_vote: { photo: PHOTO, helpful: false } }),
+      expect.objectContaining({ type: "photo_vote", place: PLACE, contributor: CONTRIBUTOR, photo_vote: { photo: PHOTO, vote: "helpful" } }),
+      expect.objectContaining({ type: "photo_vote", place: PLACE, contributor: CONTRIBUTOR, photo_vote: { photo: PHOTO, vote: "none" } }),
+      expect.objectContaining({ type: "photo_vote", place: PLACE, contributor: CONTRIBUTOR, photo_vote: { commons: "Lake Eppalock camp 2019.jpg", vote: "not_helpful" } }),
     ]);
+  });
+
+  it("still takes an older helpful true or false from the app", async () => {
+    const t = setup();
+    await t.client.votePhoto({ place: PLACE, photo: PHOTO, helpful: false, contributor: CONTRIBUTOR, consent: true });
+    expect(JSON.parse(t.posts[0]!.body).photo_vote).toEqual({ photo: PHOTO, vote: "none" });
   });
 });
 
 describe("photo vote validation", () => {
-  const vote = { ...base, type: "photo_vote", photo_vote: { photo: PHOTO, helpful: true } };
-  it("accepts a vote for and against", () => {
-    expect(validateSubmission(vote, NOW)).toMatchObject({ ok: true, value: { type: "photo_vote", photo_vote: { photo: PHOTO, helpful: true } } });
-    expect(validateSubmission({ ...vote, photo_vote: { photo: PHOTO, helpful: false } }, NOW)).toMatchObject({ ok: true });
+  const vote = { ...base, type: "photo_vote", photo_vote: { photo: PHOTO, vote: "helpful" } };
+  const COMMONS = "Lake Eppalock camp 2019.jpg";
+  it("accepts helpful, not helpful and none on a traveller photo or a Commons file", () => {
+    for (const value of ["helpful", "not_helpful", "none"]) {
+      expect(validateSubmission({ ...vote, photo_vote: { photo: PHOTO, vote: value } }, NOW)).toMatchObject({ ok: true, value: { type: "photo_vote", photo_vote: { photo: PHOTO, vote: value } } });
+      expect(validateSubmission({ ...vote, photo_vote: { commons: COMMONS, vote: value } }, NOW)).toMatchObject({ ok: true, value: { photo_vote: { commons: COMMONS, vote: value } } });
+    }
   });
 
-  it("needs a contributor, a photo id, a true or false and nothing else", () => {
+  it("reads an older SDK's helpful true or false as helpful or none", () => {
+    const older = (helpful: boolean) => (validateSubmission({ ...vote, photo_vote: { photo: PHOTO, helpful } }, NOW) as { value: { photo_vote: object } }).value.photo_vote;
+    expect(older(true)).toEqual({ photo: PHOTO, vote: "helpful" });
+    expect(older(false)).toEqual({ photo: PHOTO, vote: "none" });
+  });
+
+  it("needs a contributor, one photo id or Commons file name, one vote and nothing else", () => {
     const { contributor: _c, ...anonymous } = vote;
     expect(errorsOf(anonymous)).toEqual(["contributor is required for a photo_vote"]);
-    expect(errorsOf({ ...vote, photo_vote: { photo: "rev_01JBXK3M8Q4R5S6T7V8W9X0YZA", helpful: true } })).toEqual(["photo_vote.photo must be a photo id (pho_<ulid>)"]);
+    expect(errorsOf({ ...vote, photo_vote: { photo: "rev_01JBXK3M8Q4R5S6T7V8W9X0YZA", vote: "helpful" } })).toEqual(["photo_vote.photo must be a photo id (pho_<ulid>)"]);
+    expect(errorsOf({ ...vote, photo_vote: { commons: "File:Lake.jpg", vote: "helpful" } })).toEqual(["photo_vote.commons must be a Commons file name, without File:"]);
+    expect(errorsOf({ ...vote, photo_vote: { vote: "helpful" } })).toEqual(["photo_vote needs photo or commons"]);
+    expect(errorsOf({ ...vote, photo_vote: { photo: PHOTO, commons: COMMONS, vote: "helpful" } })).toEqual(["photo_vote takes photo or commons, not both"]);
+    expect(errorsOf({ ...vote, photo_vote: { photo: PHOTO, vote: "great" } })).toEqual(["photo_vote.vote must be helpful, not_helpful or none"]);
+    expect(errorsOf({ ...vote, photo_vote: { photo: PHOTO } })).toEqual(["photo_vote.vote must be helpful, not_helpful or none"]);
     expect(errorsOf({ ...vote, photo_vote: { photo: PHOTO, helpful: "yes" } })).toEqual(["photo_vote.helpful must be true or false"]);
-    expect(errorsOf({ ...vote, photo_vote: { photo: PHOTO, helpful: true, stars: 5 } })).toEqual(["unknown field photo_vote.stars"]);
+    expect(errorsOf({ ...vote, photo_vote: { photo: PHOTO, vote: "helpful", helpful: true } })).toEqual(["photo_vote takes vote or helpful, not both"]);
+    expect(errorsOf({ ...vote, photo_vote: { photo: PHOTO, vote: "helpful", stars: 5 } })).toEqual(["unknown field photo_vote.stars"]);
     expect(errorsOf({ ...vote, place: null })).toContain("place is required for a photo_vote");
     expect(errorsOf({ ...vote, photo_report: { photo: PHOTO, reason: "offensive" } })).toContain("photo_report is not allowed when type is photo_vote");
   });

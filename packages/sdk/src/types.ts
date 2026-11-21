@@ -430,16 +430,30 @@ export interface PhotoRemovalBody {
   photo: string;
 }
 
+/** A traveller's vote on a photo. `none` takes back an earlier vote and counts nothing. */
+export type PhotoVoteValue = "helpful" | "not_helpful" | "none";
+
 /**
- * A traveller marks a published photo helpful (`helpful: true`) or takes that
- * back (`helpful: false`). Each source has one vote per photo, and the latest
- * one counts.
+ * A traveller's vote on a published traveller photo (`photo`) or on a
+ * Wikimedia Commons file matched to the place (`commons`), never both. Each
+ * source has one vote per photo, and the latest one counts.
+ *
+ * An older SDK sends `{ photo, helpful: true | false }`. The intake still
+ * accepts it and reads true as `helpful` and false as `none`.
  */
-export interface PhotoVoteBody {
-  /** Id of the published photo, `pho_<ulid>`. Never the traveller's own. */
-  photo: string;
-  helpful: boolean;
-}
+export type PhotoVoteBody =
+  | {
+      /** Id of the published photo, `pho_<ulid>`. Never the traveller's own. */
+      photo: string;
+      commons?: never;
+      vote: PhotoVoteValue;
+    }
+  | {
+      /** The Commons file name without `File:`, as the release's `commons.ndjson.gz` names it. */
+      commons: string;
+      photo?: never;
+      vote: PhotoVoteValue;
+    };
 
 /**
  * The files of a photo upload, as the meta part of `POST /v1/photos` names

@@ -14,6 +14,7 @@ import type {
   ReviewBody,
   ReviewReportReason,
   PhotoReportReason,
+  PhotoVoteValue,
   PhotoFocus,
   FirstHand,
 } from "./types.js";
@@ -423,10 +424,14 @@ export interface PhotoInput {
 export interface PhotoVoteInput {
   /** The photo's place. */
   place: string;
-  /** Id of the published photo, `pho_<ulid>`. The intake refuses the traveller's own photo. */
-  photo: string;
-  /** True marks the photo helpful, false takes that back. */
-  helpful: boolean;
+  /** Id of the published photo, `pho_<ulid>`. The intake refuses the traveller's own photo. Give this or `commons`. */
+  photo?: string;
+  /** A Wikimedia Commons file matched to the place, its name without `File:`. Give this or `photo`. */
+  commons?: string;
+  /** `helpful`, `not_helpful`, or `none` to take back an earlier vote. */
+  vote?: PhotoVoteValue;
+  /** @deprecated Use `vote`. True is `helpful`, false is `none`. */
+  helpful?: boolean;
   /** The signed-in traveller's account id. Required for votes. */
   contributor: string;
   consent: boolean;
@@ -760,10 +765,12 @@ export interface PhotoClient {
   /** Reports a published photo. Queued and retried, like feedback. */
   reportPhoto(input: PhotoReportInput): Promise<SubmitResult>;
   /**
-   * Marks a published photo helpful, or takes that back (`helpful: false`).
-   * One vote per traveller per photo counts, the latest one, and the photo's
-   * record carries the count from the next apply run. Keep the traveller's own
-   * votes on the phone to show them. Queued and retried, like feedback.
+   * Votes a published traveller photo, or a Commons file matched to the
+   * place, helpful or not helpful, or takes the vote back (`none`). One vote
+   * per traveller per photo counts, the latest one, and the photo's record (or
+   * the place's Commons counts) carries the counts from the next apply run.
+   * Keep the traveller's own votes on the phone to show them. Queued and
+   * retried, like feedback.
    */
   votePhoto(input: PhotoVoteInput): Promise<SubmitResult>;
   /**
@@ -2157,7 +2164,17 @@ function createClient(
         { place, photo_report: { photo, reason }, ...(contributor !== undefined ? { contributor } : {}), consent, ref },
         "photo_report",
       ),
-    votePhoto: ({ place, photo, helpful, contributor, consent, ref }) => submit({ place, photo_vote: { photo, helpful }, contributor, consent, ref }, "photo_vote"),
+    votePhoto: ({ place, photo, commons, vote, helpful, contributor, consent, ref }) =>
+      submit(
+        {
+          place,
+          photo_vote: { ...(photo !== undefined ? { photo } : {}), ...(commons !== undefined ? { commons } : {}), ...(vote !== undefined ? { vote } : { helpful }) },
+          contributor,
+          consent,
+          ref,
+        },
+        "photo_vote",
+      ),
     removePhoto: ({ place, photo, contributor, contributorProof, consent, ref }) =>
       submit({ place, photo_removal: { photo }, contributor, ...(contributorProof !== undefined ? { contributor_proof: contributorProof } : {}), consent, ref }, "photo_removal"),
     eraseReviews: ({ contributor, contributorProof, consent, ref }) =>
