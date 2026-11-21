@@ -39,6 +39,12 @@ Applied directly, each with the source `owner`:
 
 Sent to a person instead: a new name, a new location, and reopening a place that is `closed`.
 
+An app's own photo service can also let the owner choose the place's hero photo with the same token ([photos.md](photos.md#an-owners-hero-photo)). That choice stays with the app's photos and never reaches Open Camping DB's data: the photo service only asks the owner check below.
+
+## The owner check
+
+`POST /v1/owner/check`, open only to an app key with `"owner_check": true` (a photo service's intake, see [self-hosting.md](self-hosting.md#app-keys)), with the `X-App-Key` header and `{"place": "ocdb_…", "token": "<owner token>"}` answers `200 {"owner": true}` when the token is the one from the place's approved claim, and `{"owner": false}` otherwise, also for a place with no approved owner. It compares the token's SHA-256 with the one the inbox keeps in `owners/<place id>.json`, in constant time, reading the inbox through the intake's GitHub App with a read only token. It stores nothing, logs no token, and never says who the owner is. It answers `400` for a malformed place or token, `401` without a valid app key, `403 owner_check_not_allowed_for_app_key` for a key without `owner_check`, `429` past the limit per app key (the `PER_IP` binding), `503 owner_check_unavailable` with `retry-after: 60` when the intake has no `PER_IP` binding, and `503` with `retry-after: 60` when the owner records can't be read. Each answer is kept in memory for 60 seconds by place and token hash, so an owner record a person deletes stops matching within a minute.
+
 Owners never change reviews, ratings or checks. When a device reports a value that differs from one the owner set, a person decides, and the owner's value stays until then. The same goes for `contact` reports that say a contact the owner set is wrong or spam: however many arrive, a person decides and the contact stays until then. When two devices report that an `owner_verified` place, or one whose status the owner set, has closed, a person decides too. One report changes nothing.
 
 ## Private property listings

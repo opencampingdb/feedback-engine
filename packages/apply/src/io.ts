@@ -11,9 +11,9 @@ import { boundsNear, buildingFootprints, carriageways, landMask, missingLayers, 
 import { majorRoads, type LatLon, type MajorRoads } from "./roads.js";
 import type { Decision } from "./rules.js";
 import type { TrustRecord } from "./trust.js";
-import { dumpPhotoLine, dumpPlace, dumpReviewLine, photoPath, placePath, reviewPath } from "./serialise.js";
+import { commonsCountsPath, dumpCommonsCountsLine, dumpPhotoLine, dumpPlace, dumpReviewLine, photoPath, placePath, reviewPath } from "./serialise.js";
 import { NXDOMAIN_FILE, readOsmHistory, type NxdomainRecord, type NxdomainState, type OsmHistoryEntry } from "./closure-evidence.js";
-import type { BlockedList, Photo, PhotoVotes, Place, RemovedPhotos, Review, Source } from "./types.js";
+import type { BlockedList, CommonsCounts, CommonsVotes, Photo, PhotoVote, PhotoVotes, Place, RemovedPhotos, Review, Source } from "./types.js";
 
 export interface PendingFile {
   path: string;
@@ -293,16 +293,47 @@ export async function readPlaceGeometry(files: PlaceGeometryFiles, points: reado
   return geometry;
 }
 
-/** Where the apply run keeps the helpful votes that count, in the inbox. Private: it names installs. */
+/** Where the apply run keeps the photo votes that count, in the inbox. Private: it names installs. */
 export const PHOTO_VOTES_FILE = "votes/photos.json";
 
-/** The helpful votes that count, from the inbox. Empty when there are none yet. */
+/** The photo votes that count, from the inbox. Empty when there are none yet. */
 export async function readPhotoVotes(inbox: string): Promise<PhotoVotes> {
+  const photos = await readLedger(inbox, PHOTO_VOTES_FILE, "photos");
+  const out: PhotoVotes = { photos: {} };
+  for (const [photo, list] of Object.entries(photos)) {
+    const valid = validVotes(list, `${photo} in ${PHOTO_VOTES_FILE}`);
+    if (valid.length > 0) out.photos[photo] = valid;
+  }
+  return out;
+}
+
+/** Where the apply run keeps the votes on Commons files that count, in the inbox. Private: it names installs. */
+export const COMMONS_VOTES_FILE = "votes/commons.json";
+
+/** The votes on Commons files that count, from the inbox. Empty when there are none yet. */
+export async function readCommonsVotes(inbox: string): Promise<CommonsVotes> {
+  const places = await readLedger(inbox, COMMONS_VOTES_FILE, "places");
+  const out: CommonsVotes = { places: {} };
+  for (const [place, files] of Object.entries(places)) {
+    if (typeof files !== "object" || files === null || Array.isArray(files)) {
+      console.warn(`skipping malformed votes for ${place} in ${COMMONS_VOTES_FILE}`);
+      continue;
+    }
+    for (const [file, list] of Object.entries(files)) {
+      const valid = validVotes(list, `${place} ${file} in ${COMMONS_VOTES_FILE}`);
+      if (valid.length > 0) (out.places[place] ??= {})[file] = valid;
+    }
+  }
+  return out;
+}
+
+/** The object under `key` in a vote ledger in the inbox. Empty when the file is missing; throws when it can't be read. */
+async function readLedger(inbox: string, file: string, key: string): Promise<Record<string, unknown>> {
   let text: string;
   try {
-    text = await readFile(join(inbox, PHOTO_VOTES_FILE), "utf8");
+    text = await readFile(join(inbox, file), "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { photos: {} };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw error;
   }
   let parsed: unknown;
@@ -310,22 +341,23 @@ export async function readPhotoVotes(inbox: string): Promise<PhotoVotes> {
     parsed = JSON.parse(text);
   } catch {
     // Votes are never dropped by guessing: the run stops until a person fixes the file.
-    throw new Error(`${PHOTO_VOTES_FILE} in the inbox is not valid JSON: fix it by hand, from its git history`);
+    throw new Error(`${file} in the inbox is not valid JSON: fix it by hand, from its git history`);
   }
-  const photos = (parsed as { photos?: unknown } | null)?.photos;
-  const out: PhotoVotes = { photos: {} };
-  if (typeof photos !== "object" || photos === null) {
-    throw new Error(`${PHOTO_VOTES_FILE} in the inbox has no "photos" object: fix it by hand, from its git history`);
+  const inner = (parsed as Record<string, unknown> | null)?.[key];
+  if (typeof inner !== "object" || inner === null) {
+    throw new Error(`${file} in the inbox has no "${key}" object: fix it by hand, from its git history`);
   }
-  for (const [photo, list] of Object.entries(photos)) {
-    const valid = Array.isArray(list) ? list.filter(isPhotoVote) : [];
-    if (!Array.isArray(list) || valid.length < list.length) console.warn(`skipping malformed votes for ${photo} in ${PHOTO_VOTES_FILE}`);
-    if (valid.length > 0) out.photos[photo] = valid;
-  }
-  return out;
+  return inner as Record<string, unknown>;
 }
 
-function isPhotoVote(value: unknown): value is PhotoVotes["photos"][string][number] {
+/** The well formed votes of one list, with a warning when any were skipped. */
+function validVotes(list: unknown, where: string): PhotoVote[] {
+  const valid = Array.isArray(list) ? list.filter(isPhotoVote) : [];
+  if (!Array.isArray(list) || valid.length < list.length) console.warn(`skipping malformed votes for ${where}`);
+  return valid;
+}
+
+function isPhotoVote(value: unknown): value is PhotoVote {
   const v = value as Record<string, unknown> | null;
   return (
     typeof v === "object" &&
@@ -335,17 +367,29 @@ function isPhotoVote(value: unknown): value is PhotoVotes["photos"][string][numb
     typeof v.contributor === "string" &&
     typeof v.device === "string" &&
     (v.attest_key === undefined || typeof v.attest_key === "string") &&
-    (v.helpful === undefined || typeof v.helpful === "boolean")
+    (v.helpful === undefined || typeof v.helpful === "boolean") &&
+    (v.vote === undefined || v.vote === "helpful" || v.vote === "not_helpful" || v.vote === "none")
   );
 }
 
-/** Writes the helpful votes back, photos in id order. True when the file changed. */
+const byKey = <T>(record: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(record).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+
+/** Writes the photo votes back, photos in id order. True when the file changed. */
 export async function writePhotoVotes(inbox: string, votes: PhotoVotes): Promise<boolean> {
-  const ordered: PhotoVotes = { photos: Object.fromEntries(Object.entries(votes.photos).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) };
-  const text = `${JSON.stringify(ordered, null, 2)}\n`;
-  const path = join(inbox, PHOTO_VOTES_FILE);
+  return writeLedger(inbox, PHOTO_VOTES_FILE, { photos: byKey(votes.photos) }, Object.keys(votes.photos).length === 0);
+}
+
+/** Writes the votes on Commons files back, places and files in order. True when the file changed. */
+export async function writeCommonsVotes(inbox: string, votes: CommonsVotes): Promise<boolean> {
+  const places = byKey(Object.fromEntries(Object.entries(votes.places).map(([place, files]) => [place, byKey(files)])));
+  return writeLedger(inbox, COMMONS_VOTES_FILE, { places }, Object.keys(places).length === 0);
+}
+
+async function writeLedger(inbox: string, file: string, value: object, empty: boolean): Promise<boolean> {
+  const text = `${JSON.stringify(value, null, 2)}\n`;
+  const path = join(inbox, file);
   const before = await readFile(path, "utf8").catch(() => undefined);
-  if (before === text || (before === undefined && Object.keys(ordered.photos).length === 0)) return false;
+  if (before === text || (before === undefined && empty)) return false;
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, text, "utf8");
   return true;
@@ -757,6 +801,63 @@ export class DataRepo {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, text, "utf8");
     return photoPath(placeId);
+  }
+
+  /**
+   * The Commons files matched to each place, from `commons/matches.ndjson`
+   * (lines of `{place, files: [{file}]}`), for the places asked for.
+   * Undefined when the checkout has no such file.
+   */
+  async commonsMatches(places: ReadonlySet<string>): Promise<Map<string, Set<string>> | undefined> {
+    const path = join(this.root, "commons", "matches.ndjson");
+    if (!(await exists(path))) return undefined;
+    const out = new Map<string, Set<string>>();
+    for await (const line of createInterface({ input: createReadStream(path, "utf8"), crlfDelay: Infinity })) {
+      if (!line.trim()) continue;
+      const match = JSON.parse(line) as { place?: unknown; files?: { file?: unknown }[] };
+      if (typeof match.place !== "string" || !places.has(match.place) || !Array.isArray(match.files)) continue;
+      const files = out.get(match.place) ?? new Set<string>();
+      for (const f of match.files) if (typeof f?.file === "string") files.add(f.file);
+      out.set(match.place, files);
+    }
+    return out;
+  }
+
+  /** Every Commons count line in a photo repository (`commons/<place id>.ndjson`). */
+  async allCommonsCounts(): Promise<CommonsCounts[]> {
+    const folder = join(this.root, "commons");
+    if (!(await exists(folder))) return [];
+    const out: CommonsCounts[] = [];
+    for (const name of (await readdir(folder)).sort()) {
+      if (!/^ocdb_[0-9A-HJKMNP-TV-Z]{26}\.ndjson$/.test(name)) continue;
+      for (const line of (await readFile(join(folder, name), "utf8")).split("\n")) {
+        if (line.trim()) out.push(JSON.parse(line) as CommonsCounts);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Writes a place's Commons count lines, sorted by file. Removes the file
+   * when no lines are left. Returns the path, or undefined when nothing changed.
+   */
+  async writeCommonsCounts(placeId: string, lines: readonly CommonsCounts[]): Promise<string | undefined> {
+    const relativePath = commonsCountsPath(placeId);
+    const path = join(this.root, relativePath);
+    const there = await exists(path);
+    if (lines.length === 0) {
+      if (!there) return undefined;
+      await rm(path);
+      return relativePath;
+    }
+    const text = [...lines]
+      .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))
+      .map((l) => `${dumpCommonsCountsLine(l)}\n`)
+      .join("");
+    if (there && (await readFile(path, "utf8")) === text) return undefined;
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, text, "utf8");
+    return relativePath;
   }
 
   /** `moderation/removed_photos.json`. Empty when the file is missing. */

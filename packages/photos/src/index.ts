@@ -118,8 +118,12 @@ export const FLUSH_EVERY = 50;
 export const MAX_AGE_SECONDS = 24 * 60 * 60;
 
 const ROUTE = /^\/v1\/photos\/(pho_[0-9A-HJKMNP-TV-Z]{26})\/(full|thumb)\.jpg$/;
-/** A place's visible photo records, as the sync tool writes them to `records/<place id>.ndjson`. */
-const RECORDS_ROUTE = /^\/v1\/places\/([A-Za-z0-9_]{1,64})\/photos\.ndjson$/;
+/**
+ * A place's visible photo records, as the sync tool writes them to
+ * `records/<place id>.ndjson`, or its Commons vote counts, written to
+ * `records/commons/<place id>.ndjson`.
+ */
+const RECORDS_ROUTE = /^\/v1\/places\/([A-Za-z0-9_]{1,64})\/(photos|commons)\.ndjson$/;
 /** How long the edge and the app may keep a place's records. */
 export const RECORDS_MAX_AGE_SECONDS = 5 * 60;
 /** How long the edge keeps the answer for a photo that is not there. A photo the sync adds later shows within this. */
@@ -296,7 +300,9 @@ export function createHandler(deps: Deps) {
       return answer(503, "daily_read_cap", { "retry-after": String(secondsToMidnightUtc(nowMs)) });
     }
 
-    const object = await env.PHOTOS.get(photo ? `${photo[1]}/${photo[2]}.jpg` : `records/${records![1]}.ndjson`);
+    const object = await env.PHOTOS.get(
+      photo ? `${photo[1]}/${photo[2]}.jpg` : records![2] === "commons" ? `records/commons/${records![1]}.ndjson` : `records/${records![1]}.ndjson`,
+    );
     const contributor = object?.customMetadata?.contributor;
     // A photo that is not there, or one without its contributor (the server can't tell whether an
     // erasure covers it), is not served. It costs no read and the answer is cached briefly, so asking

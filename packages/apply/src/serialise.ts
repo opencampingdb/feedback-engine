@@ -6,7 +6,7 @@
  * ensure_ascii=False)` for review lines.
  */
 
-import type { Photo, Place, Review } from "./types.js";
+import type { CommonsCounts, Photo, Place, Review } from "./types.js";
 
 /** Paths in a place record whose numbers are floats in Python, so 4 is written 4.0. */
 const PLACE_FLOATS = new Set(["location.lat", "location.lon", "rating.mean"]);
@@ -97,4 +97,15 @@ export function reviewPath(placeId: string): string {
 export function photoPath(placeId: string): string {
   checkPlaceId(placeId);
   return `photos/${placeId}.ndjson`;
+}
+
+/** Where a photo repository keeps a place's Commons vote counts: `commons/<id>.ndjson`. Throws for an id that is not `ocdb_<ulid>`. */
+export function commonsCountsPath(placeId: string): string {
+  checkPlaceId(placeId);
+  return `commons/${placeId}.ndjson`;
+}
+
+/** One Commons count line, keys in sorted order. */
+export function dumpCommonsCountsLine(line: CommonsCounts): string {
+  return JSON.stringify(Object.fromEntries(Object.entries(line).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))));
 }

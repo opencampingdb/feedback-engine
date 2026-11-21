@@ -178,6 +178,19 @@ describe("network reputation", () => {
     expect(await e.RATE_LIMIT.get("silent:2026-11-17:network_reputation")).toBe("1");
   });
 
+  it("drops an owner's hero photo from a listed network silently, without asking the owner check", async () => {
+    const e = env({ requires_attestation: true, android: { package: PACKAGE } }, {
+      PHOTOS_PENDING: { put: async () => undefined, delete: async () => undefined },
+      OWNER_CHECK_URL: "https://intake.opencampingdb.example/v1/owner/check",
+      OWNER_CHECK_KEY: "photo-service-key-0123456789",
+    });
+    await scheduled(e);
+    const body = JSON.stringify({ type: "photo_hero", place: PLACE, token: "T".repeat(43), photo_hero: { none: true }, device: "3b241101-e2bb-4255-8caf-4136c566a962", app_version: "1", consent: true });
+    await looksAccepted(await handle(post(body, LISTED), e));
+    expect(services.asked.filter((u) => u.includes("owner/check"))).toEqual([]);
+    expect(services.writes).toEqual([]);
+  });
+
   it("takes a report from a network that is not listed as before", async () => {
     const e = env();
     await scheduled(e);

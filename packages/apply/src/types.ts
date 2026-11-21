@@ -1,4 +1,4 @@
-import type { FactName, FactSource, PlaceFacts, PlaceGroup, PlaceKind } from "@opencampingdb/feedback";
+import type { FactName, FactSource, PhotoVoteValue, PlaceFacts, PlaceGroup, PlaceKind } from "@opencampingdb/feedback";
 
 /** `merged` marks a tombstone: the record was merged into `merged_into` by a person. */
 export type PlaceStatus = "open" | "reported_closed" | "closed" | "temporarily_closed" | "merged";
@@ -122,6 +122,12 @@ export interface Photo {
   helpful?: number;
   /** Of those, the ones who marked it in the last 12 months, for a sort that favours recent votes. Absent when none. */
   helpful_12m?: number;
+  /** Travellers who marked the photo not helpful. Absent when none have. */
+  not_helpful?: number;
+  /** Of those, the ones who marked it in the last 12 months. Absent when none. */
+  not_helpful_12m?: number;
+  /** The place's verified owner chose it as the place's hero photo. Absent otherwise. */
+  hero?: true;
   /** SHA-256 of the full size file, lower case hex, to spot one photo sent for several places. */
   sha256: string;
   /** Left out of the release and not served. As for reviews. */
@@ -129,16 +135,18 @@ export interface Photo {
 }
 
 /**
- * One traveller's helpful vote on a photo, as the apply run keeps it in the
- * private inbox. Every id it was sent with is kept, so a later vote from the
- * same contributor, install or attested key replaces it.
+ * One traveller's vote on a photo, as the apply run keeps it in the private
+ * inbox. Every id it was sent with is kept, so a later vote from the same
+ * contributor, install or attested key replaces it.
  */
 export interface PhotoVote {
   /** The feedback id of the vote. */
   feedback: string;
   /** When the intake received it, ISO 8601 UTC. */
   at: string;
-  /** False for a take-back, kept so an older vote run again can't undo it. Counted only when not false. */
+  /** The vote. `none` is a take-back, kept so an older vote run again can't undo it. Absent on older entries: see `helpful`. */
+  vote?: PhotoVoteValue;
+  /** Older entries only, before `vote`: false is a take-back (`none`), true or absent is `helpful`. */
   helpful?: boolean;
   contributor: string;
   device: string;
@@ -146,11 +154,38 @@ export interface PhotoVote {
 }
 
 /**
- * `votes/photos.json` in the inbox: each source's latest helpful vote or
- * take-back, by photo id. Only votes for are counted.
+ * `votes/photos.json` in the inbox: each source's latest vote or take-back,
+ * by photo id.
  */
 export interface PhotoVotes {
   photos: Record<string, PhotoVote[]>;
+}
+
+/**
+ * `votes/commons.json` in the inbox: each source's latest vote or take-back
+ * on a Wikimedia Commons file, by place id and then file name (without
+ * `File:`).
+ */
+export interface CommonsVotes {
+  places: Record<string, Record<string, PhotoVote[]>>;
+}
+
+/**
+ * One line of `commons/<place id>.ndjson` in a photo repository: the vote
+ * counts of one Commons file matched to the place, and whether it is the
+ * owner's hero photo. Only files with a vote that counts, or the hero, have a
+ * line, and each count is left out at 0.
+ */
+export interface CommonsCounts {
+  place: string;
+  /** The Commons file name without `File:`, as the release's `commons.ndjson.gz` names it. */
+  file: string;
+  helpful?: number;
+  helpful_12m?: number;
+  not_helpful?: number;
+  not_helpful_12m?: number;
+  /** The place's verified owner chose this file as the place's hero photo. Absent otherwise. */
+  hero?: true;
 }
 
 /**

@@ -47,8 +47,9 @@ const upload = (who: string, n: number, photo: Record<string, unknown>): StoredF
     type: "photo",
     photo: { full_sha256: sha(n), full_bytes: 400_000, thumb_sha256: "f".repeat(64), thumb_bytes: 40_000, width: 1600, height: 1200, ...photo },
   }) as StoredFeedback;
-const vote = (who: string, photo: string, helpful = true, extra: Record<string, unknown> = {}): StoredFeedback =>
-  ({ ...base(who), type: "photo_vote", photo_vote: { photo, helpful }, ...extra }) as StoredFeedback;
+/** A vote as the intake stores it now, or with true or false, as an older intake stored it. */
+const vote = (who: string, photo: string, value: "helpful" | "not_helpful" | "none" | boolean = "helpful", extra: Record<string, unknown> = {}): StoredFeedback =>
+  ({ ...base(who), type: "photo_vote", photo_vote: typeof value === "boolean" ? { photo, helpful: value } : { photo, vote: value }, ...extra }) as StoredFeedback;
 const photoLine = (n: number, who: string, extra: Partial<Photo> = {}): Photo => ({
   id: `pho_01JA00000000000000000000${String(n).padStart(2, "0")}`,
   place: PLACE,
@@ -123,6 +124,69 @@ describe("photo caption and taken month", () => {
   });
 });
 
+describe("photo votes", () => {
+  it("counts helpful and not helpful votes apart, and none as nothing", () => {
+    const a = vote("kim", PHOTO, "helpful");
+    const b = vote("lee", PHOTO, "not_helpful");
+    const c = vote("amy", PHOTO, "not_helpful");
+    const d = vote("joe", PHOTO, "none");
+    const out = rules([a, b, c, d]);
+    expect(out.reason(b)).toBe("photo marked not helpful");
+    expect(out.reason(d)).toBe("no vote to take back");
+    expect(out.line()).toMatchObject({ helpful: 1, helpful_12m: 1, not_helpful: 2, not_helpful_12m: 2 });
+    expect(out.photoVotes.photos[PHOTO]!.map((v) => v.vote)).toEqual(["helpful", "not_helpful", "not_helpful", "none"]);
+    expect(out.changes).toContainEqual(
+      expect.objectContaining({ summary: `photo ${PHOTO} marked helpful by 1 (1 in the last 12 months), not helpful by 2 (2 in the last 12 months)` }),
+    );
+  });
+
+  it("replaces a helpful vote with a not helpful one from the same traveller", () => {
+    const votes: PhotoVotes = { photos: { [PHOTO]: [{ feedback: "fb_01JC0000000000000000000001", at: "2026-10-01T00:00:00Z", vote: "helpful", contributor: ctr("kim"), device: "dev-kim" }] } };
+    const change = vote("kim", PHOTO, "not_helpful");
+    const out = rules([change], { photos: [photoLine(1, "sam", { helpful: 1, helpful_12m: 1 })], votes });
+    expect(out.reason(change)).toBe("photo marked not helpful");
+    expect(out.line()).not.toHaveProperty("helpful");
+    expect(out.line()).toMatchObject({ not_helpful: 1, not_helpful_12m: 1 });
+  });
+
+  it("takes back a not helpful vote, and removes its counts at 0", () => {
+    const votes: PhotoVotes = { photos: { [PHOTO]: [{ feedback: "fb_01JC0000000000000000000001", at: "2026-10-01T00:00:00Z", vote: "not_helpful", contributor: ctr("kim"), device: "dev-kim" }] } };
+    const back = vote("kim", PHOTO, "none");
+    const out = rules([back], { photos: [photoLine(1, "sam", { not_helpful: 1, not_helpful_12m: 1 })], votes });
+    expect(out.reason(back)).toBe("vote taken back");
+    expect(out.line()).not.toHaveProperty("not_helpful");
+    expect(out.line()).not.toHaveProperty("not_helpful_12m");
+    expect(out.photoVotes.photos[PHOTO]).toEqual([expect.objectContaining({ feedback: back.id, vote: "none" })]);
+  });
+
+  it("reads older kept votes, helpful true or left out as helpful and false as none", () => {
+    const votes: PhotoVotes = {
+      photos: {
+        [PHOTO]: [
+          { feedback: "fb_01JC0000000000000000000001", at: "2026-10-01T00:00:00Z", contributor: ctr("kim"), device: "dev-kim" },
+          { feedback: "fb_01JC0000000000000000000002", at: "2026-10-01T00:00:00Z", helpful: true, contributor: ctr("lee"), device: "dev-lee" },
+          { feedback: "fb_01JC0000000000000000000003", at: "2026-10-01T00:00:00Z", helpful: false, contributor: ctr("amy"), device: "dev-amy" },
+        ],
+      },
+    };
+    const out = rules([vote("joe", PHOTO, "not_helpful")], { votes });
+    expect(out.line()).toMatchObject({ helpful: 2, helpful_12m: 2, not_helpful: 1, not_helpful_12m: 1 });
+  });
+});
+
+describe("votes from an intake that stores helpful beside vote", () => {
+  it("counts by vote, whatever helpful says", () => {
+    const item = { ...vote("kim", PHOTO, "not_helpful"), photo_vote: { photo: PHOTO, vote: "not_helpful", helpful: true } } as unknown as StoredFeedback;
+    const votes: PhotoVotes = {
+      photos: { [PHOTO]: [{ feedback: "fb_01JC0000000000000000000001", at: "2026-10-01T00:00:00Z", vote: "none", helpful: true, contributor: ctr("lee"), device: "dev-lee" }] },
+    };
+    const out = rules([item], { votes });
+    expect(out.reason(item)).toBe("photo marked not helpful");
+    expect(out.line()).toMatchObject({ not_helpful: 1, not_helpful_12m: 1 });
+    expect(out.line()).not.toHaveProperty("helpful");
+  });
+});
+
 describe("helpful votes", () => {
   it("counts one vote per traveller and publishes the count and the last 12 months' count", () => {
     const a = vote("kim", PHOTO);
@@ -151,16 +215,16 @@ describe("helpful votes", () => {
     const votes: PhotoVotes = { photos: { [PHOTO]: [{ feedback: "fb_01JC0000000000000000000001", at: "2026-10-01T00:00:00Z", contributor: ctr("kim"), device: "dev-kim" }] } };
     const back = vote("kim", PHOTO, false);
     const out = rules([back], { photos: [photoLine(1, "sam", { helpful: 1, helpful_12m: 1 })], votes });
-    expect(out.reason(back)).toBe("helpful vote taken back");
+    expect(out.reason(back)).toBe("vote taken back");
     expect(out.line()).not.toHaveProperty("helpful");
     expect(out.line()).not.toHaveProperty("helpful_12m");
-    expect(out.photoVotes.photos[PHOTO]).toEqual([expect.objectContaining({ feedback: back.id, helpful: false })]);
+    expect(out.photoVotes.photos[PHOTO]).toEqual([expect.objectContaining({ feedback: back.id, vote: "none" })]);
   });
 
   it("applies a take-back with no vote to take back, and changes nothing", () => {
     const back = vote("kim", PHOTO, false);
     const out = rules([back]);
-    expect(out.reason(back)).toBe("no helpful vote to take back");
+    expect(out.reason(back)).toBe("no vote to take back");
     expect(out.photos.get(PLACE)?.find((p) => p.id === PHOTO)).not.toHaveProperty("helpful");
   });
 
@@ -295,7 +359,7 @@ describe("helpful votes in a run", () => {
     const line = JSON.parse((await readFile(join(data, "photos", `${PLACE}.ndjson`), "utf8")).trim()) as Photo;
     expect(line).toMatchObject({ helpful: 1, helpful_12m: 1 });
     const kept = JSON.parse(await readFile(join(inbox, PHOTO_VOTES_FILE), "utf8")) as PhotoVotes;
-    expect(kept.photos[PHOTO]).toEqual([{ feedback: v.id, at: v.received, helpful: true, contributor: ctr("kim"), device: "dev-kim" }]);
+    expect(kept.photos[PHOTO]).toEqual([{ feedback: v.id, at: v.received, vote: "helpful", contributor: ctr("kim"), device: "dev-kim" }]);
   });
 
   it("stops on a votes file that is not JSON, and skips malformed entries in one that is", async () => {

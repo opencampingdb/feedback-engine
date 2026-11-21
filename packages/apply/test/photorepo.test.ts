@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { checkPhotos, KEPT, photoStates, planSync, recordFiles } from "../src/photorepo.js";
+import { checkPhotos, commonsRecordFiles, KEPT, photoStates, planSync, recordFiles, staleRecords } from "../src/photorepo.js";
 
 const A = "pho_01JA0000000000000000000001";
 const B = "pho_01JA0000000000000000000002";
@@ -24,6 +24,13 @@ const photo = (id: string, extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 const keys = (ids: string[], prefix = "") => new Set(ids.flatMap((id) => [`${prefix}${id}/full.jpg`, `${prefix}${id}/thumb.jpg`]));
+
+describe("staleRecords", () => {
+  it("lists the records and Commons records files of places that have none now", () => {
+    const serving = new Set([`records/${PLACE}.ndjson`, `records/${OTHER}.ndjson`, `records/commons/${PLACE}.ndjson`, `records/commons/${OTHER}.ndjson`, `${A}/full.jpg`]);
+    expect(staleRecords(serving, new Set([PLACE]), new Set([OTHER]))).toEqual([`records/commons/${PLACE}.ndjson`, `records/${OTHER}.ndjson`]);
+  });
+});
 
 describe("planSync", () => {
   it("publishes visible photos from the pending bucket", () => {
@@ -93,6 +100,13 @@ describe("a photo repository on disk", () => {
     expect([...states.visible]).toEqual([A]);
     expect([...states.other].sort()).toEqual([B, C, C.replace("3", "4")].sort());
     expect(await recordFiles(root)).toEqual(new Map([[PLACE, lines(photo(A))]]));
+  });
+
+  it("writes each place's Commons count lines as its Commons records file", async () => {
+    const counts = `${JSON.stringify({ file: "Lake.jpg", helpful: 2, helpful_12m: 1, place: PLACE })}\n`;
+    await put(`commons/${PLACE}.ndjson`, counts);
+    await put("commons/matches.ndjson", `${JSON.stringify({ place: PLACE, files: [] })}\n`);
+    expect(await commonsRecordFiles(root)).toEqual(new Map([[PLACE, counts]]));
   });
 
   it("checks photo lines: licence, order, place and the removed list", async () => {

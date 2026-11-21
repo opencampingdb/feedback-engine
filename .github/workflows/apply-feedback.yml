@@ -360,9 +360,12 @@ jobs:
         with:
           repository: ${{ inputs.places-repository }}
           path: places
+          # commons and moderation: the Commons matches and the do-not-match list that votes on Commons files are checked against.
           sparse-checkout: |
             places
             schema
+            commons
+            moderation
           persist-credentials: false
 
       - name: Set up Node

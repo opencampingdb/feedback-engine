@@ -388,6 +388,8 @@ A name is 1 to 300 characters (`MAX_NAME_LENGTH`) and a description at most 500 
 await feedback.report({ place, report: { kind: "commons_mismatch", file: "Brunswick River and Pool Precinct 6.jpg" }, consent: true });
 ```
 
+**Votes on Commons photos.** An app that runs its own photo service ([photos.md](photos.md#votes-on-commons-photos)) can let travellers vote a Commons photo helpful or not helpful with the photo client's `votePhoto({ place, commons: file, vote })`. Votes go to the app's photo service, never to Open Camping DB, and the app reads the counts from its own photo server at `/v1/places/<place id>/commons.ndjson`.
+
 ### Checks
 
 A check says the traveller was there on a day (`visited`, `YYYY-MM-DD`) and whether the place still exists. `nearby: true` says the app saw the phone near the place at the time, for example within a few hundred metres. Only `true` is sent: leave it out otherwise, and never send the location. A check that finds an open place still there sets the record's `last_confirmed` at the next apply run. One check is enough. Checks on a closed or temporarily closed place do not set it.
@@ -1203,8 +1205,13 @@ const feedback = createFeedbackClient({
 
 ## What changed by version
 
-What an app moving to 0.40.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
+What an app moving to 0.41.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
 
+- **0.41.0.** Photo votes and an owner's hero photo, for photo services ([photos.md](photos.md#photo-votes)):
+  - `photo_vote` takes `vote`: `helpful`, `not_helpful` or `none` (takes the vote back), and `votePhoto` takes `vote`. The older `helpful: true | false` is still accepted from apps on older SDKs, as `helpful` and `none`. Photo records gain `not_helpful` and `not_helpful_12m` next to `helpful` and `helpful_12m`, each left out at 0. `PhotoVoteValue` is exported, and `PhotoVoteBody` is now `{photo, vote}` or `{commons, vote}`.
+  - `photo_vote` may name a Wikimedia Commons file matched to the place, `commons: "<file name>"` without `File:`, in place of `photo`. The apply run refuses a file not matched to the place or on the do-not-match list, and the photo server serves each place's counts at `GET /v1/places/<place id>/commons.ndjson`.
+  - A place's verified owner can choose its hero photo, a traveller photo or a matched Commons file, or clear it, with the photo client's `setHeroPhoto(token, { place, photo | commons | none, consent })`, the new type `photo_hero`, sent at once. The photo intake asks Open Camping DB's new owner check, `POST /v1/owner/check`, first ([owners.md](owners.md#the-owner-check)). Photo records and Commons count lines gain `hero: true`. `PhotoHeroBody`, `PhotoHeroSubmission` and `HeroPhotoInput` are exported. Show the owner's hero first.
+  - Move the photo inbox's apply pin to 0.41.0 first, then deploy the photo server and move the Photo sync pin, then deploy the photo intake, and only then ship apps that send `vote`, `commons` or `photo_hero`: an older intake refuses them with `400`. For hero photos, the photo service's Open Camping DB app key needs `"owner_check": true` ([self-hosting.md](self-hosting.md#moving-to-sdk-0410-photo-votes)).
 - **0.40.0.** Gap fills and unconfirmed values:
   - A fact report without attestation (from a website after a human check, or an app key without attestation) of a fixed-value fact the place has no value for now goes into the data at the next apply run, without a second source ([gap fills](#reports)). The intake still answers `held` (`not_attested`). Any other change still waits for a second source, and after 7 days goes to the AI reviewer.
   - `RecentList` gains `unconfirmed_values`, the values waiting for a second source, typed `UnconfirmedValue`, and `unconfirmedValuesFor(place, unconfirmedValues)` gives one place's entries less any value it already has ([Values waiting for confirmation](#the-recent-list)). Ask travellers to confirm them with an ordinary `fact` report (Yes) or a `doubt` (No). An older intake leaves `unconfirmed_values` out.

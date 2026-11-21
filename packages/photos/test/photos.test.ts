@@ -99,6 +99,29 @@ describe("photo server", () => {
     expect((await handle(get(`/v1/places/${PLACE}/photos.ndjson`, "nope"), env, ctx())).status).toBe(401);
   });
 
+  it("serves a place's Commons vote counts for five minutes, and an empty list for a place without any", async () => {
+    const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
+    const line = `{"file":"Lake.jpg","helpful":2,"place":"${PLACE}"}\n`;
+    const asked: string[] = [];
+    env.PHOTOS = Object.assign(fakeBucket([]), {
+      get: async (key: string) => {
+        asked.push(key);
+        return key === `records/commons/${PLACE}.ndjson` ? { body: new Response(line).body!, httpEtag: '"c1"', size: line.length } : null;
+      },
+    }) as typeof env.PHOTOS;
+    const res = await handle(get(`/v1/places/${PLACE}/commons.ndjson`), env, ctx());
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/x-ndjson; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(await res.text()).toBe(line);
+    const none = await handle(get("/v1/places/ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZC/commons.ndjson"), env, ctx());
+    expect(none.status).toBe(200);
+    expect(await none.text()).toBe("");
+    expect(asked).toEqual([`records/commons/${PLACE}.ndjson`, "records/commons/ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZC.ndjson"]);
+    expect((await handle(get("/v1/places/not-a-place/commons.ndjson"), env, ctx())).status).toBe(404);
+    expect((await handle(get(`/v1/places/${PLACE}/commons.ndjson`, "nope"), env, ctx())).status).toBe(401);
+  });
+
   it("stops every photo from an erased contributor within a minute, cached or not, and leaves their lines out of the records", async () => {
     const PLACE = "ocdb_01JBXK3M8Q4R5S6T7V8W9X0YZA";
     const MINE = "pho_01JBXK3M8Q4R5S6T7V8W9X0YZC";

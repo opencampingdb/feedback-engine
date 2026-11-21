@@ -15,6 +15,7 @@ export type FeedbackType =
   | "photo_erasure"
   | "photo_removal"
   | "photo_vote"
+  | "photo_hero"
   | "review_erasure"
   | "withdraw";
 export type OwnerType = "owner_claim" | "owner_listing" | "owner_update";
@@ -430,16 +431,32 @@ export interface PhotoRemovalBody {
   photo: string;
 }
 
+/** A traveller's vote on a photo. `none` takes back an earlier vote and counts nothing. */
+export type PhotoVoteValue = "helpful" | "not_helpful" | "none";
+
 /**
- * A traveller marks a published photo helpful (`helpful: true`) or takes that
- * back (`helpful: false`). Each source has one vote per photo, and the latest
- * one counts.
+ * A traveller's vote on a published traveller photo (`photo`) or on a
+ * Wikimedia Commons file matched to the place (`commons`), never both. Each
+ * source has one vote per photo, and the latest one counts.
+ *
+ * An older SDK sends `{ photo, helpful: true | false }`. The intake still
+ * accepts it and reads true as `helpful` and false as `none`. The intake
+ * stores `helpful` beside `vote` as well, true only for `helpful`, for apply
+ * runs older than 0.41.0.
  */
-export interface PhotoVoteBody {
-  /** Id of the published photo, `pho_<ulid>`. Never the traveller's own. */
-  photo: string;
-  helpful: boolean;
-}
+export type PhotoVoteBody =
+  | {
+      /** Id of the published photo, `pho_<ulid>`. Never the traveller's own. */
+      photo: string;
+      commons?: never;
+      vote: PhotoVoteValue;
+    }
+  | {
+      /** The Commons file name without `File:`, as the release's `commons.ndjson.gz` names it. */
+      commons: string;
+      photo?: never;
+      vote: PhotoVoteValue;
+    };
 
 /**
  * The files of a photo upload, as the meta part of `POST /v1/photos` names
@@ -591,6 +608,35 @@ export interface PhotoVoteSubmission extends SubmissionBase {
   photo_vote: PhotoVoteBody;
 }
 
+/** A place's hero photo, as its verified owner chooses it: a traveller photo, a Commons file, or none to clear the choice. */
+export type PhotoHeroBody =
+  | {
+      /** Id of a published photo of the place, `pho_<ulid>`. */
+      photo: string;
+    }
+  | {
+      /** A Commons file matched to the place, its name without `File:`. */
+      commons: string;
+    }
+  | {
+      /** Clears the owner's choice. */
+      none: true;
+    };
+
+/**
+ * A place's verified owner choosing its hero photo, with the token from their
+ * approved claim. The photo intake checks the token with the Open Camping DB
+ * intake's owner check before it stores anything, and stores only that it
+ * checked.
+ */
+export interface PhotoHeroSubmission extends SubmissionBase {
+  type: "photo_hero";
+  place: string;
+  /** The token returned with the approved owner claim. Never stored. */
+  token: string;
+  photo_hero: PhotoHeroBody;
+}
+
 /**
  * Asks for every photo from the contributor to be removed, before their
  * account is deleted. `place` is null. Needs a contributor.
@@ -717,6 +763,7 @@ export type FeedbackSubmission =
   | PhotoErasureSubmission
   | PhotoRemovalSubmission
   | PhotoVoteSubmission
+  | PhotoHeroSubmission
   | ReviewErasureSubmission
   | WithdrawSubmission;
 
@@ -729,8 +776,9 @@ export type Submission = FeedbackSubmission | OwnerSubmission;
  * id, the time it arrived and the app name taken from the app key.
  */
 export type StoredFeedback =
-  | (DistributiveOmit<Exclude<FeedbackSubmission, PhotoSubmission>, "device" | "contributor"> & StoredFields)
-  | (Omit<PhotoSubmission, "device" | "contributor" | "photo"> & StoredFields & { photo: StoredPhotoFiles });
+  | (DistributiveOmit<Exclude<FeedbackSubmission, PhotoSubmission | PhotoHeroSubmission>, "device" | "contributor"> & StoredFields)
+  | (Omit<PhotoSubmission, "device" | "contributor" | "photo"> & StoredFields & { photo: StoredPhotoFiles })
+  | (Omit<PhotoHeroSubmission, "device" | "contributor" | "token"> & StoredFields & { /** The intake's owner check said the token is the place's approved owner's. */ owner_checked: true });
 
 /**
  * An owner submission as stored. A claim or listing gains the `code` the owner
