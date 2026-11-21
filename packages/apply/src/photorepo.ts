@@ -4,7 +4,9 @@
  * step with it and checks its lines. The serving bucket holds exactly the
  * visible photos (not hidden, not from a blocked contributor), plus
  * `records/<place id>.ndjson` with each place's visible lines for the photo
- * server's records route. The pending bucket holds uploads and `kept/` copies
+ * server's records route, and `records/commons/<place id>.ndjson` with each
+ * place's Commons vote counts (`commons/<place id>.ndjson` in the repository)
+ * for its Commons route. The pending bucket holds uploads and `kept/` copies
  * of hidden photos, so a photo shown again needs no new upload.
  */
 
@@ -14,6 +16,8 @@ import { DataRepo } from "./io.js";
 
 export const KEPT = "kept/";
 export const RECORDS = "records/";
+/** Where the serving bucket keeps each place's Commons vote counts, as the photo server's Commons route reads them. */
+export const COMMONS_RECORDS = "records/commons/";
 const SIZES = ["full", "thumb"] as const;
 
 export interface Buckets {
@@ -124,6 +128,32 @@ export async function recordFiles(root: string): Promise<Map<string, string>> {
     if (shown.length > 0) out.set(place, shown.map((l) => `${l.text}\n`).join(""));
   }
   return out;
+}
+
+/** Each place with Commons vote counts, and its Commons records file: `commons/<place id>.ndjson` as written. */
+export async function commonsRecordFiles(root: string): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  let names: string[] = [];
+  try {
+    names = (await readdir(join(root, "commons"))).filter((n) => /^ocdb_[0-9A-HJKMNP-TV-Z]{26}\.ndjson$/.test(n)).sort();
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    const text = await readFile(join(root, "commons", name), "utf8");
+    if (text.trim()) out.set(name.slice(0, -".ndjson".length), text);
+  }
+  return out;
+}
+
+/** Records and Commons records files in the serving bucket for places that have none now, to delete. */
+export function staleRecords(serving: ReadonlySet<string>, places: ReadonlySet<string>, commonsPlaces: ReadonlySet<string>): string[] {
+  const placeOf = (key: string, prefix: string) => key.slice(prefix.length, -".ndjson".length);
+  return [...serving]
+    .filter((k) =>
+      k.startsWith(COMMONS_RECORDS) ? !commonsPlaces.has(placeOf(k, COMMONS_RECORDS)) : k.startsWith(RECORDS) && !places.has(placeOf(k, RECORDS)),
+    )
+    .sort();
 }
 
 /** Problems with the photo lines: each must be for a known place, carry the licence, be sorted by id and not be on the removed list. */

@@ -25,6 +25,27 @@ async function stepScript(name: string): Promise<string> {
   return body.join("\n");
 }
 
+/** The folders the step named `name` checks out sparsely, in order. */
+async function sparseFolders(name: string): Promise<string[]> {
+  const lines = (await readFile(WORKFLOW, "utf8")).split("\n");
+  const start = lines.findIndex((line) => line.trim() === `- name: ${name}`);
+  if (start < 0) throw new Error(`no step named ${name}`);
+  const at = lines.findIndex((line, i) => i > start && /^\s+sparse-checkout: \|$/.test(line));
+  const indent = lines[at]!.length - lines[at]!.trimStart().length;
+  const out: string[] = [];
+  for (const line of lines.slice(at + 1)) {
+    if (line.length - line.trimStart().length <= indent) break;
+    out.push(line.trim());
+  }
+  return out;
+}
+
+describe("the places checkout of a photo repository's apply run", () => {
+  it("holds the place records, the schema, the Commons matches and the do-not-match list", async () => {
+    expect(await sparseFolders("Check out Open Camping DB place records")).toEqual(["places", "schema", "commons", "moderation"]);
+  });
+});
+
 let root: string;
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const identity = (cwd: string) => {

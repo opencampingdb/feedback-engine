@@ -16,7 +16,7 @@ The app's photo service runs separately from the Open Camping DB intake. The app
 
 1. The app sends the photo to its own intake at `POST /v1/photos`. The intake checks the app key, the attestation, the contributor, the rate limits and the files (and SafeSearch, when on), puts the files in the pending bucket and writes the item to the app's private inbox repository.
 2. The hourly apply run adds a line to `photos/<place id>.ndjson` in the app's records repository. A contributor's first photo, a file also sent for another place, and anything SafeSearch flags go to a person on the review PR. Once a contributor has a visible photo, their later photos are published at the next run. An app that relies on reports to catch a bad photo can publish first photos too: see "Publishing first photos" below.
-3. When the PR merges, the Photo sync workflow copies the files to the serving bucket and writes `records/<place id>.ndjson`.
+3. When the PR merges, the Photo sync workflow copies the files to the serving bucket and writes `records/<place id>.ndjson`, and `records/commons/<place id>.ndjson` for a place with votes on its Commons photos.
 4. The photo server serves the photo and lists it in the place's records.
 
 Nothing about a photo is public until step 3. A refused photo's files are deleted.
@@ -212,7 +212,21 @@ A vote is queued and retried like a report, and needs the signed-in traveller's 
 - **The counts.** The apply run keeps each source's latest vote or take-back in the inbox repository, at `votes/photos.json`, which names hashed contributors and installs and so stays private. Each entry holds its `vote`. An entry written before 0.41.0 holds `helpful` instead, and is read as `helpful` when true or left out and as `none` when false, so the file needs no change. A vote received before the one already kept from the same source changes nothing, so an item a run puts back in `pending/` can't undo a later take-back. A file that is not valid JSON stops the run until a person fixes it from its git history, and a malformed entry is skipped with a warning. Each run recounts every photo with votes and writes four fields on its line: `helpful`, the travellers who marked it helpful, `helpful_12m`, those of them who did so in the last 12 months, for a "most helpful" order that favours recent votes, and `not_helpful` and `not_helpful_12m` in the same way. Each is left out at 0, and `none` counts nothing. A run with no new items still recounts, so the 12 month counts fall as votes age.
 - **Votes that stop counting.** Votes from a contributor who erases their photos, or who is on the block list, stop counting at the next run, and the votes for a removed photo are deleted with it.
 
-Votes are not on the review PR and have no progress record, so a vote the apply run refuses (a photo not in the data for that place, the voter's own photo) is never reported back: they change only the counts, on the automatic PR. As with reviews, the contributor value the app sends is all a vote names: anyone who learns a traveller's value and holds the app key can vote, or take back a vote, as them, and fresh contributor values get around the daily limit. Form the value as an HMAC of the account id with a key only your server knows, and keep `requires_attestation` on the app key ([Prove the account](#prove-the-account-for-removal-and-erasure)).
+#### Votes on Commons photos
+
+Travellers vote the same way on the Wikimedia Commons photos matched to a place, the ones an app shows from the release's `commons.ndjson.gz`. Name the file as that file names it, without `File:`:
+
+```ts
+await photos.votePhoto({ place, commons: "Lake Eppalock camp 2019.jpg", vote: "helpful", contributor, consent: true });
+```
+
+On the wire it is `"photo_vote": {"commons": "<file name>", "vote": "helpful" | "not_helpful" | "none"}`, with exactly one of `photo` and `commons`. One vote per traveller per file counts, as for a traveller's photo, and the same daily limit of 50 covers both. A Commons file is nobody's own photo, so the own photo check does not apply.
+
+- **Checked against the data.** The apply run reads `commons/matches.ndjson` and `moderation/commons-do-not-match.json` from the Open Camping DB checkout it already has (`--places`; the Apply feedback workflow checks out `places`, `schema`, `commons` and `moderation`). It refuses a vote for a file not matched to that place, or on the do-not-match list for it. A checkout without `commons/matches.ndjson` (an older workflow) leaves every Commons vote waiting in `pending/`, and leaves the counts as they are.
+- **The counts.** The run keeps each source's latest vote in the inbox repository at `votes/commons.json`, by place id and file, private like `votes/photos.json`. It writes `commons/<place id>.ndjson` in the records repository: one line for each file with a vote that counts, `{"file", "helpful", "helpful_12m", "not_helpful", "not_helpful_12m", "place"}`, each count left out at 0, sorted by file. A file no longer matched, or put on the do-not-match list, loses its line and keeps its votes, so its counts come back if it is matched again. The votes of a place merged into another move to that place.
+- **Served next to the photo records.** The Photo sync workflow writes each place's lines to `records/commons/<place id>.ndjson` in the serving bucket, and the photo server answers `GET /v1/places/<place id>/commons.ndjson` with them, under the same pass, key, limits and caching as the photo records. A place without Commons votes answers an empty list. Open Camping DB's data holds no votes.
+
+Votes are not on the review PR and have no progress record, so a vote the apply run refuses (a photo not in the data for that place, the voter's own photo, a Commons file not matched to the place) is never reported back: they change only the counts, on the automatic PR. As with reviews, the contributor value the app sends is all a vote names: anyone who learns a traveller's value and holds the app key can vote, or take back a vote, as them, and fresh contributor values get around the daily limit. Form the value as an HMAC of the account id with a key only your server knows, and keep `requires_attestation` on the app key ([Prove the account](#prove-the-account-for-removal-and-erasure)).
 
 ### Reasons that withhold a photo at once
 
@@ -338,12 +352,13 @@ Simulators cannot attest. For development builds, set `photo_pass_unattested: tr
 
 ```
 GET https://photos.example.com/v1/places/<place id>/photos.ndjson
+GET https://photos.example.com/v1/places/<place id>/commons.ndjson
 GET https://photos.example.com/v1/photos/<id>/full.jpg
 GET https://photos.example.com/v1/photos/<id>/thumb.jpg
 X-Photo-Pass: <pass>
 ```
 
-A place's records list its visible photos, one JSON line each: `id`, `place`, `contributor`, `created`, `app`, `licence`, `width`, `height`, `focus` when the sending app gave one (see [A photo's point of interest](#a-photos-point-of-interest)), `caption` and `taken` when it sent them and the caption passed the checks ([A caption and the month it was taken](#a-caption-and-the-month-it-was-taken)), `helpful`, `helpful_12m`, `not_helpful` and `not_helpful_12m` when travellers voted on it ([Photo votes](#photo-votes)), and `sha256`. A place without photos answers an empty list. Records are cached for five minutes and photos for a day, at the edge and on the phone.
+A place's records list its visible photos, one JSON line each: `id`, `place`, `contributor`, `created`, `app`, `licence`, `width`, `height`, `focus` when the sending app gave one (see [A photo's point of interest](#a-photos-point-of-interest)), `caption` and `taken` when it sent them and the caption passed the checks ([A caption and the month it was taken](#a-caption-and-the-month-it-was-taken)), `helpful`, `helpful_12m`, `not_helpful` and `not_helpful_12m` when travellers voted on it ([Photo votes](#photo-votes)), and `sha256`. A place without photos answers an empty list. A place's Commons records list the vote counts of its Commons photos ([Votes on Commons photos](#votes-on-commons-photos)), and are served the same way. Records are cached for five minutes and photos for a day, at the edge and on the phone.
 
 A server that shows photos can use a photo key in `X-App-Key` instead, since it can keep the key secret. Never put a photo key in an app. Credit each photo shown in the way your photo terms say.
 

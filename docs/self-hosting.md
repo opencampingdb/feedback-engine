@@ -222,6 +222,17 @@ The OSM notes workflow (`osm-notes.yml`) is retired, so don't add it. [osm.md](o
 
 Secrets stay in Cloudflare and need no change. The intake validates every submission, so a release that adds facts or report kinds needs this redeploy before apps send them. Until then the intake refuses them with `400`.
 
+### Moving to SDK 0.41.0: photo votes
+
+SDK 0.41.0 lets a photo vote be `helpful`, `not_helpful` or `none`, and lets it name a Wikimedia Commons file ([photos.md](photos.md#photo-votes)). For an app's photo service, in this order:
+
+1. Deploy the photo intake at the new commit. It needs no new setting, and still takes the older `helpful: true | false`.
+2. Move both SHAs in the photo inbox's `apply-feedback.yml` to the same commit. The reusable workflow at that commit adds `commons` and `moderation` to the sparse checkout of the places repository, which the apply run checks Commons votes against. An apply run without them leaves Commons votes waiting. The run starts a ledger at `votes/commons.json` in the inbox, and writes `commons/<place id>.ndjson` in the records repository.
+3. Deploy the photo server, which adds `GET /v1/places/<place id>/commons.ndjson`, and move the Photo sync workflow's pin, which writes `records/commons/<place id>.ndjson`. Until both have moved, apps get no Commons counts: an older photo server answers `404` for the new route, and an older sync neither writes the files nor keeps them.
+4. Only then ship app builds on SDK 0.41.0.
+
+`votes/photos.json` needs no migration: entries written before 0.41.0 are read as they are.
+
 ### Moving to SDK 0.35.0: clearing a traveller's own value
 
 SDK 0.35.0 adds the `clear` report kind. An older intake refuses it with `400`, and an older apply leaves it undecided, so deploy the intake at 0.35.0 and move both SHAs in the inbox's `apply-feedback.yml` to the same commit before an app sends one. There is no migration.
