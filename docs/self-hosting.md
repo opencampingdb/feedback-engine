@@ -103,6 +103,7 @@ npx wrangler secret put URLHAUS_KEY -c wrangler.deploy.toml
 - `PLACES_TOKEN`, needed with `RECENT_LIST`, is a long random string (`openssl rand -hex 32`). The apply workflow and the data release send it to call the intake's operator routes. Keep the value: steps 9 and 10 need it again.
 - `URLHAUS_KEY`, needed with `RECENT_LIST`, is a free abuse.ch auth key from the abuse.ch authentication portal. The intake checks every link an item would publish with URLhaus. The `[ai]` binding in `wrangler.toml` gives the intake Workers AI for the Llama Guard check, so the Cloudflare account needs Workers AI. A check that isn't set up holds every item that needs it.
 - `CROWDSEC_BLOCKLIST_CREDENTIALS`, optional, turns on network reputation with the `CROWDSEC_BLOCKLIST_URL` variable ([Network reputation](#network-reputation)). It is the Basic auth username and password of a CrowdSec blocklist integration, as `username:password`. Without it, or without the variable, no list is fetched and no address is looked up.
+- `OWNER_CHECK_KEY`, optional and only for a photo service's intake, with the variable `OWNER_CHECK_URL`: the Open Camping DB app key and the URL of its owner check (`https://<intake>/v1/owner/check`) that the photo intake asks before it stores an owner's hero photo. Without both, the photo intake refuses `photo_hero` with `404 photo_hero_not_served_here`. The intake that answers the owner check needs nothing new: it reads `owners/<place id>.json` from its inbox with the GitHub App it already has, and limits the check per app key with the `PER_IP` binding when it is bound.
 - `GOOGLE_SERVICE_ACCOUNT`, needed only for an app key with `android`, is the JSON key file of a Google Cloud service account in the project linked to the app in Play Console, allowed to decode integrity tokens: `npx wrangler secret put GOOGLE_SERVICE_ACCOUNT -c wrangler.deploy.toml < key.json`.
 
 Setting a secret deploys it at once. To revoke an app key, set `APP_KEYS` again without it.
@@ -224,12 +225,13 @@ Secrets stay in Cloudflare and need no change. The intake validates every submis
 
 ### Moving to SDK 0.41.0: photo votes
 
-SDK 0.41.0 lets a photo vote be `helpful`, `not_helpful` or `none`, and lets it name a Wikimedia Commons file ([photos.md](photos.md#photo-votes)). For an app's photo service, in this order:
+SDK 0.41.0 lets a photo vote be `helpful`, `not_helpful` or `none`, lets it name a Wikimedia Commons file ([photos.md](photos.md#photo-votes)), and lets a place's verified owner choose its hero photo ([photos.md](photos.md#an-owners-hero-photo)). For an app's photo service, in this order:
 
 1. Deploy the photo intake at the new commit. It needs no new setting, and still takes the older `helpful: true | false`.
 2. Move both SHAs in the photo inbox's `apply-feedback.yml` to the same commit. The reusable workflow at that commit adds `commons` and `moderation` to the sparse checkout of the places repository, which the apply run checks Commons votes against. An apply run without them leaves Commons votes waiting. The run starts a ledger at `votes/commons.json` in the inbox, and writes `commons/<place id>.ndjson` in the records repository.
 3. Deploy the photo server, which adds `GET /v1/places/<place id>/commons.ndjson`, and move the Photo sync workflow's pin, which writes `records/commons/<place id>.ndjson`. Until both have moved, apps get no Commons counts: an older photo server answers `404` for the new route, and an older sync neither writes the files nor keeps them.
-4. Only then ship app builds on SDK 0.41.0.
+4. For owners' hero photos, deploy Open Camping DB's intake at the same commit (it adds `POST /v1/owner/check`), then set `OWNER_CHECK_URL` and the secret `OWNER_CHECK_KEY` on the photo intake.
+5. Only then ship app builds on SDK 0.41.0.
 
 `votes/photos.json` needs no migration: entries written before 0.41.0 are read as they are.
 
