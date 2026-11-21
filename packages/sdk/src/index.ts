@@ -57,6 +57,8 @@ export type {
   QueueSummary,
   PhotoReportInput,
   PhotoVoteInput,
+  PhotoVoteTarget,
+  PhotoVoteChoice,
   HeroPhotoInput,
   PhotoResult,
   RefusalReason,

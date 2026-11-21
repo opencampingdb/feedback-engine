@@ -70,7 +70,10 @@ describe("setHeroPhoto", () => {
     await expect(t.client.setHeroPhoto(TOKEN, { place: PLACE, photo: PHOTO, consent: true })).rejects.toMatchObject({ httpStatus: 403 });
     await expect(t.client.setHeroPhoto(TOKEN, { place: PLACE, photo: PHOTO, consent: true })).rejects.toBeInstanceOf(OwnerRequestError);
     const u = setup();
+    // @ts-expect-error A choice needs one of photo, commons or none.
     await expect(u.client.setHeroPhoto(TOKEN, { place: PLACE, consent: true })).rejects.toBeInstanceOf(FeedbackValidationError);
+    // @ts-expect-error Only one of them.
+    await expect(u.client.setHeroPhoto(TOKEN, { place: PLACE, photo: PHOTO, none: true, consent: true })).rejects.toBeInstanceOf(FeedbackValidationError);
     expect(u.posts).toHaveLength(0);
   });
 });

@@ -421,38 +421,70 @@ export interface PhotoInput {
   taken?: string;
 }
 
-export interface PhotoVoteInput {
-  /** The photo's place. */
-  place: string;
-  /** Id of the published photo, `pho_<ulid>`. The intake refuses the traveller's own photo. Give this or `commons`. */
-  photo?: string;
-  /** A Wikimedia Commons file matched to the place, its name without `File:`. Give this or `photo`. */
-  commons?: string;
-  /** `helpful`, `not_helpful`, or `none` to take back an earlier vote. */
-  vote?: PhotoVoteValue;
-  /** @deprecated Use `vote`. True is `helpful`, false is `none`. */
-  helpful?: boolean;
-  /** The signed-in traveller's account id. Required for votes. */
-  contributor: string;
-  consent: boolean;
-  /**
-   * The caller's own id for this submission, 1 to 100 characters. Kept with
-   * the queued item and passed back to `onAnswered`. Never sent to the intake.
-   */
-  ref?: string;
-}
+/** What a vote is on: a published traveller photo or a Commons file matched to the place, exactly one. */
+export type PhotoVoteTarget =
+  | {
+      /** Id of the published photo, `pho_<ulid>`. The intake refuses the traveller's own photo. */
+      photo: string;
+      commons?: never;
+    }
+  | {
+      /** A Wikimedia Commons file matched to the place, its name without `File:`. */
+      commons: string;
+      photo?: never;
+    };
 
-/** An owner's hero photo choice: one of `photo`, `commons` or `none`. */
-export interface HeroPhotoInput {
+/** The vote, as `vote`, or as `helpful` from code written for an SDK before 0.41.0. Never both. */
+export type PhotoVoteChoice =
+  | {
+      /** `helpful`, `not_helpful`, or `none` to take back an earlier vote. */
+      vote: PhotoVoteValue;
+      helpful?: never;
+    }
+  | {
+      /** @deprecated Use `vote`. True is `helpful`, false is `none`. */
+      helpful: boolean;
+      vote?: never;
+    };
+
+export type PhotoVoteInput = PhotoVoteTarget &
+  PhotoVoteChoice & {
+    /** The photo's place. */
+    place: string;
+    /** The signed-in traveller's account id. Required for votes. */
+    contributor: string;
+    consent: boolean;
+    /**
+     * The caller's own id for this submission, 1 to 100 characters. Kept with
+     * the queued item and passed back to `onAnswered`. Never sent to the intake.
+     */
+    ref?: string;
+  };
+
+/** An owner's hero photo choice: exactly one of `photo`, `commons` or `none`. */
+export type HeroPhotoInput = {
   place: string;
-  /** A published photo of the place, `pho_<ulid>`. */
-  photo?: string;
-  /** A Commons file matched to the place, its name without `File:`. */
-  commons?: string;
-  /** Clears the owner's choice. */
-  none?: true;
   consent: boolean;
-}
+} & (
+  | {
+      /** A published photo of the place, `pho_<ulid>`. */
+      photo: string;
+      commons?: never;
+      none?: never;
+    }
+  | {
+      /** A Commons file matched to the place, its name without `File:`. */
+      commons: string;
+      photo?: never;
+      none?: never;
+    }
+  | {
+      /** Clears the owner's choice. */
+      none: true;
+      photo?: never;
+      commons?: never;
+    }
+);
 
 export interface PhotoReportInput {
   /** The photo's place. */
@@ -2201,7 +2233,7 @@ function createClient(
       submit(
         {
           place,
-          photo_vote: { ...(photo !== undefined ? { photo } : {}), ...(commons !== undefined ? { commons } : {}), ...(vote !== undefined ? { vote } : { helpful }) },
+          photo_vote: { ...(photo !== undefined ? { photo } : {}), ...(commons !== undefined ? { commons } : {}), ...(vote !== undefined ? { vote } : {}), ...(helpful !== undefined ? { helpful } : {}) },
           contributor,
           consent,
           ref,

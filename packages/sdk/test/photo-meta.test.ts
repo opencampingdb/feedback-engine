@@ -159,6 +159,17 @@ describe("photo client caption and taken", () => {
     ]);
   });
 
+  it("refuses a vote with two targets, or with both vote and helpful, at compile time and before sending", async () => {
+    const t = setup();
+    // @ts-expect-error One target: photo or commons.
+    await expect(t.client.votePhoto({ place: PLACE, photo: PHOTO, commons: "Lake.jpg", vote: "helpful", contributor: CONTRIBUTOR, consent: true })).rejects.toThrow(FeedbackValidationError);
+    // @ts-expect-error vote or helpful, not both.
+    await expect(t.client.votePhoto({ place: PLACE, photo: PHOTO, vote: "helpful", helpful: true, contributor: CONTRIBUTOR, consent: true })).rejects.toThrow(FeedbackValidationError);
+    // @ts-expect-error A target is needed.
+    await expect(t.client.votePhoto({ place: PLACE, vote: "helpful", contributor: CONTRIBUTOR, consent: true })).rejects.toThrow(FeedbackValidationError);
+    expect(t.posts).toEqual([]);
+  });
+
   it("still takes an older helpful true or false from the app", async () => {
     const t = setup();
     await t.client.votePhoto({ place: PLACE, photo: PHOTO, helpful: false, contributor: CONTRIBUTOR, consent: true });
