@@ -126,6 +126,8 @@ export interface Photo {
   not_helpful?: number;
   /** Of those, the ones who marked it in the last 12 months. Absent when none. */
   not_helpful_12m?: number;
+  /** The place's verified owner chose it as the place's hero photo. Absent otherwise. */
+  hero?: true;
   /** SHA-256 of the full size file, lower case hex, to spot one photo sent for several places. */
   sha256: string;
   /** Left out of the release and not served. As for reviews. */
@@ -170,8 +172,9 @@ export interface CommonsVotes {
 
 /**
  * One line of `commons/<place id>.ndjson` in a photo repository: the vote
- * counts of one Commons file matched to the place. Only files with a vote
- * that counts have a line, and each count is left out at 0.
+ * counts of one Commons file matched to the place, and whether it is the
+ * owner's hero photo. Only files with a vote that counts, or the hero, have a
+ * line, and each count is left out at 0.
  */
 export interface CommonsCounts {
   place: string;
@@ -181,6 +184,8 @@ export interface CommonsCounts {
   helpful_12m?: number;
   not_helpful?: number;
   not_helpful_12m?: number;
+  /** The place's verified owner chose this file as the place's hero photo. Absent otherwise. */
+  hero?: true;
 }
 
 /**

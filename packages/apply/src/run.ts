@@ -235,7 +235,7 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   const checkProof = options.checkProof ?? ((url: string, code: string) => realCheckProof(url, code));
 
   const { files: pendingFiles, malformed } = await readPending(options.inbox);
-  const photoTypes = new Set(["photo", "photo_report", "photo_erasure", "photo_removal", "photo_vote"]);
+  const photoTypes = new Set(["photo", "photo_report", "photo_erasure", "photo_removal", "photo_vote", "photo_hero"]);
   const photosOnly = options.places !== undefined;
   // A photo repository takes photos only: everything else is refused here.
   const notPhotos: Decision[] = photosOnly
@@ -265,9 +265,15 @@ export async function run(options: RunOptions): Promise<RunSummary> {
 
   // Every photo line, when anything in this run is about photos, or any helpful vote counts (its photo's counts age).
   const photoVotes = await readPhotoVotes(options.inbox);
-  // Votes on Commons files: read with the Commons matches whenever any are pending or kept.
+  // Votes on Commons files: read with the Commons matches whenever any are pending or kept, or an owner chooses a hero photo.
   const commonsVotes = await readCommonsVotes(options.inbox);
-  const commonsVoting = crowd.some((p) => p.type === "photo_vote" && p.photo_vote.commons !== undefined) || Object.keys(commonsVotes.places).length > 0;
+  // An owner's hero choice reads them too: it may name a Commons file, and it clears any Commons hero of the place.
+  // Count lines already written are rechecked every run, so a hero on a file no longer matched drops away.
+  const commonsCounts = await auto.allCommonsCounts();
+  const commonsVoting =
+    crowd.some((p) => (p.type === "photo_vote" && p.photo_vote.commons !== undefined) || p.type === "photo_hero") ||
+    Object.keys(commonsVotes.places).length > 0 ||
+    commonsCounts.length > 0;
   const trust = await readTrust(options.inbox);
   // The AI reviewer's decisions on the review PRs, and the items a person turned down on a merged one.
   const botLogins = options.botLogins ?? [];
@@ -356,7 +362,6 @@ export async function run(options: RunOptions): Promise<RunSummary> {
   // Votes on Commons files check it too, from the places checkout in a photo repository.
   const doNotMatch =
     (crowd.some((p) => p.type === "report" && p.report.kind === "commons_mismatch") && !photosOnly) || commonsVoting ? await placeSource.doNotMatch() : undefined;
-  const commonsCounts = commonsVoting ? await auto.allCommonsCounts() : [];
   const commonsMatches = commonsVoting
     ? await placeSource.commonsMatches(new Set([...places.keys(), ...Object.keys(commonsVotes.places), ...commonsCounts.map((c) => c.place)]))
     : undefined;

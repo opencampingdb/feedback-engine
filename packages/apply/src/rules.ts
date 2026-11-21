@@ -428,6 +428,7 @@ type PhotoItem = Extract<StoredFeedback, { type: "photo" }>;
 type PhotoReportItem = Extract<StoredFeedback, { type: "photo_report" }>;
 type ErasureItem = Extract<StoredFeedback, { type: "photo_erasure" }>;
 type VoteItem = Extract<StoredFeedback, { type: "photo_vote" }>;
+type HeroItem = Extract<StoredFeedback, { type: "photo_hero" }>;
 type RemovalItem = Extract<StoredFeedback, { type: "photo_removal" }>;
 type ReviewErasureItem = Extract<StoredFeedback, { type: "review_erasure" }>;
 
@@ -954,6 +955,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
   applyPhotoReports(known.filter((i): i is PhotoReportItem => i.type === "photo_report"));
   applyPhotoVotes(known.filter((i): i is VoteItem => i.type === "photo_vote"), erased);
   applyCommonsVotes(known.filter((i): i is VoteItem => i.type === "photo_vote" && i.photo_vote.commons !== undefined), erased);
+  applyPhotoHeroes(known.filter((i): i is HeroItem => i.type === "photo_hero"));
   for (const lines of newPhotos.values()) lines.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   applyStatus(
     known.filter(
@@ -1481,21 +1483,98 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
     // Recount every place with votes or count lines. Only a file still matched and not on the do-not-match list has a line.
     const before = new Map<string, CommonsCounts[]>();
     for (const line of input.commonsCounts ?? []) before.set(line.place, [...(before.get(line.place) ?? []), line]);
+    // The owner's hero stays on its file's line, and drops away with it.
     for (const placeId of [...new Set([...before.keys(), ...Object.keys(commonsVotes.places)])].sort()) {
       const lines: CommonsCounts[] = [];
-      for (const [file, list] of Object.entries(commonsVotes.places[placeId] ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-        const counts = countVotes(list);
-        if (shown(placeId, file) && hasVoteCounts(counts)) lines.push({ place: placeId, file, ...counts });
-      }
       const old = before.get(placeId) ?? [];
-      const sameAs = (a: CommonsCounts, b: CommonsCounts | undefined) => b !== undefined && a.file === b.file && VOTE_COUNTS.every((k) => (a[k] ?? 0) === (b[k] ?? 0));
+      const voted = commonsVotes.places[placeId] ?? {};
+      const files = [...new Set([...Object.keys(voted), ...old.filter((o) => o.hero).map((o) => o.file)])].sort();
+      for (const file of files) {
+        const counts = countVotes(voted[file] ?? []);
+        const isHero = old.some((o) => o.file === file && o.hero);
+        if (shown(placeId, file) && (hasVoteCounts(counts) || isHero)) lines.push({ place: placeId, file, ...counts, ...(isHero ? { hero: true as const } : {}) });
+      }
+      const sameAs = (a: CommonsCounts, b: CommonsCounts | undefined) =>
+        b !== undefined && a.file === b.file && a.hero === b.hero && VOTE_COUNTS.every((k) => (a[k] ?? 0) === (b[k] ?? 0));
       if (old.length === lines.length && lines.every((l) => sameAs(l, old.find((o) => o.file === l.file)))) continue;
       commonsCounts.set(placeId, lines);
       for (const line of lines) {
         const was = old.find((o) => o.file === line.file);
-        if (!sameAs(line, was)) note(placeId, `Commons file ${line.file} ${voteSummary(line)}`, true, byFile.get(`${placeId}\u0000${line.file}`) ?? []);
+        if (!sameAs(line, was) && VOTE_COUNTS.some((k) => (line[k] ?? 0) !== (was?.[k] ?? 0))) {
+          note(placeId, `Commons file ${line.file} ${voteSummary(line)}`, true, byFile.get(`${placeId}\u0000${line.file}`) ?? []);
+        }
       }
-      for (const gone of old.filter((o) => !lines.some((l) => l.file === o.file))) note(placeId, `Commons file ${gone.file} has no votes that count`, true, []);
+      for (const gone of old.filter((o) => !lines.some((l) => l.file === o.file))) {
+        note(placeId, gone.hero && !shown(placeId, gone.file) ? `hero photo ${gone.file} is no longer matched to the place` : `Commons file ${gone.file} has no votes that count`, true, []);
+      }
+    }
+  }
+
+  /**
+   * Sets or clears each place's hero photo, as its verified owner chose it: a
+   * traveller photo line or a Commons count line gets `hero: true`, and every
+   * other line of the place loses it. The latest choice wins: one received
+   * before a choice already applied changes nothing.
+   */
+  function applyPhotoHeroes(items: HeroItem[]): void {
+    const removed = new Set(removedPhotos.map((r) => r.photo));
+    const doNotMatch = new Set((input.doNotMatch ?? []).map((e) => `${e.place}\u0000${e.file}`));
+    const latest = new Map<string, string>();
+    for (const h of input.history) {
+      if (h.type === "photo_hero" && h.place && wasApplied(h) && h.received > (latest.get(h.place) ?? "")) latest.set(h.place, h.received);
+    }
+    for (const item of items) {
+      const choice = item.photo_hero as { photo?: string; commons?: string; none?: true };
+      if (item.owner_checked !== true) {
+        decide(item, "refused", "the owner check did not pass");
+        continue;
+      }
+      if (item.received < (latest.get(item.place) ?? "")) {
+        decide(item, "applied", "a later choice of the owner already counts");
+        continue;
+      }
+      let photoTarget: Photo | undefined;
+      if (choice.photo !== undefined) {
+        const filedUnder = photoById.get(choice.photo)?.place ?? item.place;
+        photoTarget = photoLinesOf(filedUnder).find((p) => p.id === choice.photo);
+        if (!photoTarget || removed.has(choice.photo) || (resolvePlace(filedUnder, input.places) ?? filedUnder) !== item.place) {
+          decide(item, "refused", `photo ${choice.photo} is not in the data for this place`);
+          continue;
+        }
+      } else if (choice.commons !== undefined) {
+        if (input.commonsMatches === undefined) {
+          decide(item, "waiting", "the Commons matches are not in this checkout");
+          continue;
+        }
+        if (!input.commonsMatches.get(item.place)?.has(choice.commons)) {
+          decide(item, "refused", `Commons file ${choice.commons} is not matched to this place`);
+          continue;
+        }
+        if (doNotMatch.has(`${item.place}\u0000${choice.commons}`)) {
+          decide(item, "refused", `Commons file ${choice.commons} is on the do-not-match list for this place`);
+          continue;
+        }
+      }
+      // Every other hero of the place goes: on its own photo lines, those filed under ids merged into it, and its Commons lines.
+      const placeIds = new Set([item.place, ...(input.photos ?? []).filter((p) => resolvePlace(p.place, input.places) === item.place).map((p) => p.place)]);
+      for (const placeId of placeIds) {
+        if (!(input.photos ?? []).some((p) => p.place === placeId && p.hero) && !newPhotos.has(placeId)) continue;
+        for (const line of photoLinesOf(placeId)) if (line !== photoTarget) delete line.hero;
+      }
+      if (photoTarget) photoTarget.hero = true;
+      const before = commonsCounts.get(item.place) ?? (input.commonsCounts ?? []).filter((c) => c.place === item.place);
+      const lines = before.map((l) => ({ ...l })).filter((l) => hasVoteCounts(l) || l.file === choice.commons);
+      for (const line of lines) delete line.hero;
+      if (choice.commons !== undefined) {
+        const line = lines.find((l) => l.file === choice.commons);
+        if (line) line.hero = true;
+        else lines.push({ place: item.place, file: choice.commons, hero: true });
+        lines.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+      }
+      if (JSON.stringify(lines) !== JSON.stringify(before)) commonsCounts.set(item.place, lines);
+      const target = choice.photo ?? choice.commons;
+      decide(item, "applied", target === undefined ? "hero photo cleared" : "hero photo set");
+      note(item.place, target === undefined ? "hero photo cleared" : `hero photo set to ${target}`, true, [item]);
     }
   }
 
