@@ -2516,7 +2516,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
         ...(kind === "hidden" ? (isBlocked ? { blocked: true as const } : { reports: new Set(against.map((i) => i.device)).size, reasons }) : {}),
         ...(kind === "contacts" ? { contacts: failing } : {}),
         ...(kind === "description" && descriptionProblem !== null ? { problem: descriptionProblem } : {}),
-        ...(kind === "first_place" && origin.contributor ? { contributor: origin.contributor } : {}),
+        ...((kind === "first_place" || kind === "new_place_cap") && origin.contributor ? { contributor: origin.contributor } : {}),
         ...(kind === "implausible_location" && implausible !== null ? { hit: implausible.hit, problem: implausible.problem } : {}),
         ...(kind === "unattested_place" || kind === "new_place_cap" ? { candidates: mergeCandidates(id, origin) } : {}),
         feedback: feedback.map((f) => f.id),

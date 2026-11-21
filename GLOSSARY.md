@@ -137,8 +137,8 @@ A new place from an install without attestation, held for the AI reviewer once i
 _Avoid_: unverified place, anonymous place (it has a contributor)
 
 **New place cap**:
-The number of new places a contributor (or an install, without one) adds in a UTC day that are decided as usual: 50, the same for everyone. A new place past it is taken and held for the AI reviewer, then a person, never refused.
-_Avoid_: new place limit, quota (nothing past it is refused)
+The number of new places a contributor (or an install, without one) adds in a UTC day that are decided as usual: 50, the same for everyone. A new place past it is held for the AI reviewer, then a person, rather than refused by this count. It still counts against the device's, the contributor's and the App Attest key's daily limits (200 each) and the network's (500), so one contributor can add at most 200 new places a day.
+_Avoid_: new place limit, quota (the count itself refuses nothing)
 
 **Trusted contributor**:
 A signed-in contributor five of whose edits other sources have confirmed, with no upheld doubt about any of their edits since. Only an attested or signed-in item this run applied, from another device, network and contributor, confirms an edit. A doubt is upheld when doubts take the value down, the AI reviewer keeps it down, dismisses or reverts the edit or takes the place down, or a person leaves the edit out of a merged review PR. Their new places list at once, and their contacts go live once they pass the contact checks, without a second source.

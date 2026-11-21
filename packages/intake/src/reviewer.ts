@@ -147,6 +147,28 @@ export interface ReviewerDeps {
   second?: SecondStage;
 }
 
+/**
+ * The cases in the order the reviewer takes them: as listed, except that the
+ * `new_place_cap` cases, in the places they hold in the list, go round their
+ * contributors, one case from each before a second from any, so one
+ * contributor's long day does not hold up everyone else's. A case without a
+ * contributor is a contributor of its own.
+ */
+export function fairOrder<T extends [string, HeldCase]>(cases: readonly T[]): T[] {
+  const capped = cases.filter(([, c]) => c.case === "new_place_cap");
+  const byContributor = new Map<string, T[]>();
+  for (const entry of capped) {
+    const who = entry[1].contributor ?? `place:${entry[1].place}`;
+    byContributor.set(who, [...(byContributor.get(who) ?? []), entry]);
+  }
+  const rounds: T[] = [];
+  for (let round = 0; rounds.length < capped.length; round++) {
+    for (const list of byContributor.values()) if (list[round]) rounds.push(list[round]!);
+  }
+  let next = 0;
+  return cases.map((entry) => (entry[1].case === "new_place_cap" ? rounds[next++]! : entry));
+}
+
 /** One decision, as the reviewer records it on the PR. */
 export interface ReviewRecord {
   key: string;
@@ -874,8 +896,10 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
   const failedNow: { key: string; c: HeldCase; error: unknown }[] = [];
   let answered = 0;
   let asked = 0;
+  let askedCapped = 0;
+  const ordered = fairOrder([...cases]);
   try {
-    for (const [key, c] of cases) {
+    for (const [i, [key, c]] of ordered.entries()) {
       const path = placePath(c.place);
       const file = await read(path);
       const place = file ? parsePlace(file.text) : undefined;
@@ -920,7 +944,10 @@ export async function reviewHeldCases(deps: ReviewerDeps): Promise<ReviewResult>
         reason = failedReason(failed);
       } else {
         if (asked >= MAX_MODEL_CASES) continue;
+        // New places past the day's limits never take every model slot while another kind of case waits after them.
+        if (c.case === "new_place_cap" && askedCapped >= MAX_MODEL_CASES - 1 && ordered.slice(i + 1).some(([, o]) => o.case !== "new_place_cap")) continue;
         asked++;
+        if (c.case === "new_place_cap") askedCapped++;
         otherFile = c.case === "duplicate" && c.duplicate_of ? await read(placePath(c.duplicate_of)) : null;
         other = otherFile ? parsePlace(otherFile.text) : undefined;
         // A merge only where the rules allow one: never into an owner's place or a pair a person found separate.

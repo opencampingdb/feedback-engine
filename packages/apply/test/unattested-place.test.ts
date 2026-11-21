@@ -173,7 +173,14 @@ describe("new places past the contributor's new places for the day", () => {
     expect(out.places.has(idOf(item))).toBe(false);
     expect(out.edits).toEqual([expect.objectContaining({ kind: "new_place", record: expect.objectContaining({ id: idOf(item), standing: "held" }) })]);
     expect(out.held.filter((c) => c.case === "new_place_cap")).toEqual([
-      expect.objectContaining({ case: "new_place_cap", place: idOf(item), standing: "held", candidates: [{ place: places[0]!.id, distance_m: 200 }], feedback: [item.id] }),
+      expect.objectContaining({
+        case: "new_place_cap",
+        place: idOf(item),
+        standing: "held",
+        candidates: [{ place: places[0]!.id, distance_m: 200 }],
+        contributor: item.contributor,
+        feedback: [item.id],
+      }),
     ]);
     expect(out.held.filter((c) => c.case === "unattested_place")).toEqual([]);
   });

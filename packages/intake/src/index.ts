@@ -2198,7 +2198,7 @@ export function createHandler(deps: Deps) {
       editedPlace === undefined ? undefined : { deviceHash: device, place: editedPlace },
     );
     if (!limit.allowed) return rateLimited(limit.retryAfter);
-    // Past the day's new places, a new place is not refused: it is stored and held for review.
+    // Past the day's new places, this count refuses nothing: the place is stored and held for review.
     // It is not counted then, so the count stays at the limit.
     const pastNewPlaceCap = newPlaceCounter !== undefined && !(await intake.counts.check([newPlaceCounter])).allowed;
 

@@ -1038,6 +1038,18 @@ describe("the AI reviewer", () => {
       expect(gh.read(0)).toMatchObject({ status: "merged", merged_into: id(1) });
     });
 
+    it("takes one case per contributor before a second, and leaves a model slot for the other cases waiting", async () => {
+      const A = "ctr_aaaaaaaaaaaaaaaa";
+      const B = "ctr_bbbbbbbbbbbbbbbb";
+      const from = (n: number, contributor: string) => heldCase(n, { case: "new_place_cap", standing: "held", candidates: [], contributor });
+      const lines = [from(0, A), from(1, A), from(2, A), from(3, A), from(4, A), from(5, B), from(6, B), heldCase(7, { case: "unattested_place", standing: "held", candidates: [] })];
+      const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], lines));
+      for (let n = 0; n <= 7; n++) gh.put(place(n));
+      const { ai, asked } = fakeAi(() => reply("approve", "A believable free camp."));
+      await run(gh, ai);
+      expect(asked.map((a) => (caseOf(a.input).place as { id: string }).id)).toEqual([id(0), id(5), id(1), id(6), id(7)]);
+    });
+
     it("leaves one the model is unsure of to a person, and one no longer held or with a verified owner without asking", async () => {
       const gh = fakeDataRepo(reviewPrBody(AT, [], new Map(), [], [capped(0), capped(1), capped(2)]));
       gh.put(place(0));

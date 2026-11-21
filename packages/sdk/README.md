@@ -104,9 +104,9 @@ A patch version (0.28.1) is a fix or a small change to an existing call. A minor
 
 This is 0.42.0. What an app moving to it needs to know (0.38.0 to 0.40.0 are in [What changed by version](../../docs/integration.md#what-changed-by-version)):
 
-- A contributor's first 50 new places of the UTC day (an install's, without a contributor) are decided as usual, up from 10. From the 51st the intake takes the place and answers `held` with the new code `new_place_cap`, instead of `429`: the AI reviewer checks it before it is listed. A new place held as `daily_cap` goes to the AI reviewer the same way.
+- A contributor's first 50 new places of the UTC day (an install's, without a contributor) are decided as usual, up from 10. From the 51st the intake takes the place and answers `held` with the new code `new_place_cap`, instead of `429` (it still counts against the 200 a day limits): the AI reviewer checks it before it is listed. A new place held as `daily_cap` goes to the AI reviewer the same way.
 - An install's reports about a new place it added that UTC day, listed or held, count as one edit against the install's and the contributor's daily limits.
-- Move the inbox's apply pin to 0.42.0 before deploying the intake: an older apply would publish a place held as `new_place_cap`.
+- Move both SHAs of the apply engine in the inbox's `apply-feedback.yml` to the 0.42.0 commit before deploying the intake: an older apply would publish a place held as `new_place_cap`.
 
 What an app moving to 0.41.0 needed to know:
 

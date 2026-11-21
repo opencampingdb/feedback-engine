@@ -301,7 +301,7 @@ const HELD_INTRO =
   "To keep it, set its `standing` to `shown`, or move its `location` first. " +
   "`unattested_place` is a new place from an install without attestation, drafted as held after it passed the location, duplicate and text checks. " +
   "`candidates` are places in its group nearby. To keep it, set its `standing` to `shown`, or merge it into the candidate it duplicates. " +
-  "`new_place_cap` is a new place the intake held because its contributor had already added the day's number of new places, or made the day's number of live changes, drafted as held after it passed the same checks. " +
+  "`new_place_cap` is a new place the intake held because its contributor had already added the day's number of new places, or made the day's number of live changes, drafted as held after the intake's block list, attestation, location, repeated text and link checks and the apply's text, link, location and duplicate checks. Llama Guard has not read its text. " +
   "It lists `candidates` and is kept or merged the same way. " +
   "`fact_doubted` is a fact travellers say is wrong without giving the right value: with `taken_down` doubts from two sources took it off the place, " +
   "otherwise one traveller doubts it and it stays. `value` is what the place published, and `doubts` and `confirmations` name the reports weighed. " +

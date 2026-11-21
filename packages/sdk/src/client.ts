@@ -1039,8 +1039,9 @@ export type AnswerOutcome =
  *   for a second source (an unconfirmed value on the recent list). It counts against that report,
  *   and the place's fact stays.
  * - `new_place_cap`: a new place past the contributor's first 50 new places this UTC day (per install
- *   without a contributor). It is stored, not refused, and the AI reviewer checks it before it is
- *   listed, then a person when the reviewer is unsure.
+ *   without a contributor). It is stored rather than refused by that count, though the daily limits
+ *   still apply, and the AI reviewer checks it before it is listed, then a person when the reviewer
+ *   is unsure.
  */
 export const HELD_REASONS = [
   "not_attested",

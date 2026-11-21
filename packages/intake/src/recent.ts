@@ -45,7 +45,7 @@ export type Evidence =
 export const WITHDRAW_WINDOW_MS = 24 * 60 * 60 * 1000;
 /**
  * New places per contributor (or device, without one) per UTC day that follow
- * the usual path. Past it a new place is not refused: it is stored and held as
+ * the usual path. Past it this count refuses nothing: the place is stored and held as
  * `new_place_cap`, for the AI reviewer and then a person.
  */
 export const NEW_PLACE_DAILY_LIMIT = 50;

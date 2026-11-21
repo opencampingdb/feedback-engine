@@ -83,7 +83,8 @@ export type { Place };
  * changes for the day (`daily_cap`) with its links passed, drafted as held,
  * that passed the plausibility,
  * duplicate and text checks and would otherwise be published. It lists
- * `candidates` and is decided as an `unattested_place` case is.
+ * `candidates` and `contributor`, which the AI reviewer takes turns by, and
+ * is decided as an `unattested_place` case is.
  * `disputed`: a place frozen because `sources` independent sources sent
  * conflicting values for `fact` within 24 hours, from `frozen_at`. No fact
  * on it changes until a reviewer sets the fact to one value, which lifts the
