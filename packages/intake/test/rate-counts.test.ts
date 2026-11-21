@@ -245,6 +245,42 @@ describe("daily counters in D1", () => {
     expect(rows().find((r) => r.key.startsWith("d:"))?.count).toBe(3);
   });
 
+  it("counts a device's reports about its own new place from today once against its day, though the place is not listed", async () => {
+    const e = env();
+    const added = {
+      type: "report",
+      place: null,
+      location: { lat: -36.12345, lon: 146.88765 },
+      device: DEVICE,
+      contributor: "acct_3f9a8b7c6d5e4f30",
+      app_version: "1.0.0",
+      consent: true,
+      report: { kind: "new_place", place_kind: "free_camp" },
+    };
+    const res = await handle(post(added), e);
+    expect(res.status).toBe(202);
+    const answer = (await res.json()) as { id: string; state?: string };
+    // Without attestation the place is held, so it is on neither the recent list nor the place index.
+    expect(answer.state).toBe("held");
+    const place = `ocdb_${answer.id.slice(3)}`;
+    const fact = (name: string, who: Record<string, unknown> = {}) =>
+      review({ type: "report", place, review: undefined, report: { kind: "fact", fact: name, value: true }, ...who });
+    for (const name of ["toilets", "showers", "drinking_water", "bbq"]) expect((await handle(post(fact(name)), e)).status).toBe(202);
+    const count = (prefix: string) => rows().filter((r) => r.key.startsWith(prefix)).map((r) => r.count);
+    // The new place, and its first report: the rest of the edit is free of the device's and the contributor's day.
+    expect(count("d:")).toEqual([2]);
+    expect(count("c:")).toEqual([2]);
+    expect(count("a:")).toEqual([5]);
+    // Another device's reports about it count each time.
+    const other = { device: device(7), contributor: "acct_another_one_0000" };
+    for (const name of ["toilets", "showers"]) expect((await handle(post(fact(name, other)), e)).status).toBe(202);
+    expect(count("d:")).toEqual(expect.arrayContaining([2, 2]));
+    // The next day it is no longer today's own new place.
+    clock += DAY;
+    for (const name of ["toilets", "showers"]) expect((await handle(post(fact(name)), e)).status).toBe(202);
+    expect(rows().filter((r) => r.key.startsWith("d:") && r.day !== "2026-11-07").map((r) => r.count)).toEqual([2]);
+  });
+
   it("counts a device's reports about one place in a day once, up to the place edit limit", async () => {
     indexPlace();
     const e = env();

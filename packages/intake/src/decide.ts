@@ -528,11 +528,16 @@ const countAccepted = (decided: DecidedInRequest, contributor: string) => decide
  * marked `linksPassed`, without which the apply sends the item to a person.
  * Its text still gets the repeated text check, so it counts for later items,
  * and a repeat, or a check that could not run, is held for that instead.
+ * The same goes for a new place held at the daily cap of live changes
+ * (`daily_cap`), which the apply sends to the AI reviewer when its links
+ * passed.
  */
 export async function decideAtSendTime(input: DecideInput): Promise<SendTimeDecision> {
   const decision = await decideByRulesAndChecks(input);
   const { answer } = decision;
-  if (answer.state !== "held" || (CHECK_HOLDS as readonly string[]).includes(answer.held_reason) || answer.held_reason === "blocked") return decision;
+  // A new place held at the daily cap of live changes may go to the AI reviewer, so its links are still looked up.
+  const cappedPlace = answer.state === "held" && answer.held_reason === "daily_cap" && input.item.report.kind === "new_place";
+  if (answer.state !== "held" || (!cappedPlace && ((CHECK_HOLDS as readonly string[]).includes(answer.held_reason) || answer.held_reason === "blocked"))) return decision;
   // The rules held it, so the checks never ran: its text still counts, and a repeat goes to a person.
   const repeated = await input.checks.repeated();
   if (repeated === "repeated_text" || repeated === "check_unavailable") return { ...decision, answer: { state: "held", held_reason: repeated } };

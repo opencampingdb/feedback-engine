@@ -29,6 +29,7 @@ import {
   verifyContributorProof,
   REPORT_KINDS,
   sourceLinkProblem,
+  newPlaceId,
   type ReportKind,
 } from "@opencampingdb/feedback";
 import { placeOf, PROGRESS_UPDATE_STATES, type PhotoProgressUpdate, type ProgressUpdate } from "@opencampingdb/apply/progress-update";
@@ -74,6 +75,8 @@ import {
   MAX_TRUSTED_CONTRIBUTORS,
   MAX_REMOVE_IDS,
   NEW_PLACE_DAILY_LIMIT,
+  isOwnNewPlace,
+  ownNewPlaceStatement,
   parseBbox,
   RECENT_CACHE_SECONDS,
   markPlacesInData,
@@ -2182,9 +2185,13 @@ export function createHandler(deps: Deps) {
       !isOwner && (submission as FeedbackSubmission).type === "report" && typeof (submission as FeedbackSubmission).place === "string"
         ? ((submission as FeedbackSubmission).place as string)
         : undefined;
+    // So is a report about a new place the device added today, listed or held.
     const known =
       reportPlace !== undefined &&
-      (!env.RECENT_LIST || target !== undefined || (await getIndexedPlace(env.RECENT_LIST, reportPlace).catch(() => undefined)) !== undefined);
+      (!env.RECENT_LIST ||
+        target !== undefined ||
+        (await getIndexedPlace(env.RECENT_LIST, reportPlace).catch(() => undefined)) !== undefined ||
+        (await isOwnNewPlace(env.RECENT_LIST, day, device, reportPlace).catch(() => false)));
     const editedPlace = known ? reportPlace : undefined;
     const limit = await intake.counts.check(
       itemCounters(day, device, app.app, isOwner ? (app.owner_daily_limit ?? app.daily_limit) : app.daily_limit, kind, origin, extra),
@@ -2327,6 +2334,8 @@ export function createHandler(deps: Deps) {
           ...(decision ? decision.writes(env.RECENT_LIST) : []),
           // Where the item is, for GET /v1/feedback/progress: written with it, in the same batch.
           receivedStatement(env.RECENT_LIST, { id, received, place: placeOf(stored) }, decision?.answer),
+          // A new place: the device's reports about it today count as one edit.
+          ...(stored.type === "report" && stored.report.kind === "new_place" ? [ownNewPlaceStatement(env.RECENT_LIST, day, device, newPlaceId(id))] : []),
         ]
       : [];
     const state: ItemState | undefined = decision?.answer;

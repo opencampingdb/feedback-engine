@@ -2371,11 +2371,30 @@ describe("items the intake held for a check", () => {
 
     it("still sends other items held for daily_cap to a person", () => {
       const rename = heldFor(attested({ ...base(0, "dev-a"), type: "report", report: { kind: "name", value: "Eppalock Foreshore Camp" } } as StoredFeedback), "daily_cap");
-      const added = heldFor(newPlace("dev-b"), "daily_cap");
       const said = heldFor(review(0, "sam", 5, "Great little spot. Lots of rain but solid ground that drained well."), "daily_cap");
-      const out = run([rename, added, said]);
-      expect([rename, added, said].map(out.outcome)).toEqual(["needs_review", "needs_review", "needs_review"]);
+      const out = run([rename, said]);
+      expect([rename, said].map(out.outcome)).toEqual(["needs_review", "needs_review"]);
       expect(out.reviews.size).toBe(0);
+    });
+
+    it("sends a new place held only for daily_cap to the AI reviewer as a new_place_cap case, unpublished", () => {
+      const added = heldFor(newPlace("dev-b"), "daily_cap");
+      const out = run([added]);
+      expect(out.decisions.find((d) => d.id === added.id)).toMatchObject({
+        outcome: "needs_review",
+        reason: "held by the intake for daily_cap, so the AI reviewer checks it",
+      });
+      expect(out.places.has(idOf(added))).toBe(false);
+      expect(out.held.filter((c) => c.case === "new_place_cap")).toEqual([expect.objectContaining({ place: idOf(added), standing: "held", feedback: [added.id] })]);
+    });
+
+    it("sends a new place held for daily_cap to a person when its links were not looked up", () => {
+      const withLink = { ...newPlace("dev-b"), report: { kind: "new_place", place_kind: "free_camp", contacts: { website: "https://camp.example.org" } } } as StoredFeedback;
+      const unchecked = heldFor(withLink, "daily_cap");
+      const passed = { ...withLink, id: "fb_01JC0000000000000000PASSED", intake: { state: "held", held_reason: "daily_cap", links: "passed" } } as StoredFeedback;
+      const out = run([unchecked, passed]);
+      expect(out.decisions.find((d) => d.id === unchecked.id)?.reason).toContain("so a person checks it");
+      expect(out.held.filter((c) => c.case === "new_place_cap").map((c) => c.feedback)).toEqual([[passed.id]]);
     });
   });
 

@@ -17,7 +17,7 @@
  *   pair across a major road (without road data, only the same name less
  *   than 25 m apart);
  * - approve, take down or merge an unattested new place, or one held past
- *   its contributor's new places for the day, merging only into one of the
+ *   its contributor's new places or live changes for the day, merging only into one of the
  *   candidates its case lists, by the same rules, named as `target`;
  * - restore a withdrawn contact, restore or keep down a fact doubts took
  *   down, and dismiss doubts about a fact that stays;
@@ -333,7 +333,7 @@ const CASE_GUIDE: Partial<Record<HeldCase["case"], { about?: readonly string[]; 
   },
   new_place_cap: {
     about: [
-      "In a new_place_cap case, a traveller added more new places in one day than most do, so this one waits for a reviewer instead of being listed at once. It passed the automatic location, duplicate and text checks. candidates are places of the same group nearby, with how far each is.",
+      "In a new_place_cap case, a traveller added more new places, or made more changes, in one day than most do, so this one waits for a reviewer instead of being listed at once. It passed the automatic location, duplicate and text checks. candidates are places of the same group nearby, with how far each is.",
       "Adding many places in a day is normal for someone entering places from a travel journal. A sparse or remote place is normal for camping. Take it down only when it is clearly spam or not a place at all.",
       "With merge, give target: the id of the candidate it duplicates, one of those listed as mergeable.",
     ],

@@ -79,7 +79,9 @@ export type { Place };
  * A reviewer approves it (standing `shown`), merges it into one of them or
  * takes it down.
  * `new_place_cap`: a new place the intake held past its contributor's new
- * places for the day, drafted as held, that passed the plausibility,
+ * places for the day (`new_place_cap`), or only past its sender's live
+ * changes for the day (`daily_cap`) with its links passed, drafted as held,
+ * that passed the plausibility,
  * duplicate and text checks and would otherwise be published. It lists
  * `candidates` and is decided as an `unattested_place` case is.
  * `disputed`: a place frozen because `sources` independent sources sent

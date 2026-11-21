@@ -2430,7 +2430,7 @@ function rulesOnce(input: RulesInput, setAside: ReadonlyMap<string, string>): Ru
    * data, much as reviews do. A `held` or `hidden` place that is not
    * in the data yet is drafted for a person instead, or for the AI reviewer
    * when only a lack of attestation keeps it off the list (`unattested_place`) or only the intake's
-   * hold past its contributor's new places for the day (`new_place_cap`), a `withdrawn` one is
+   * hold past its contributor's new places or live changes for the day (`new_place_cap`), a `withdrawn` one is
    * not written and is removed if it was. Every case a person should look
    * at is listed in `held`.
    */

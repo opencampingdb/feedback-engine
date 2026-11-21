@@ -527,20 +527,36 @@ export function pastNewPlaceCap(item: StoredFeedback): boolean {
  * under, or null when a person decides it. `unattested_place`: only a lack
  * of attestation keeps it off the list. `new_place_cap`: it would be listed,
  * but the intake held it past its contributor's new places for the day
- * (`pastNewPlaceCap`). Either way it has a contributor, its name and note
- * pass the text checks, its description passes them and its contacts pass
- * the link rules, and the intake did not hold it for one of its checks
- * (`heldForCheck`). Anything else waits for a person.
+ * (`pastNewPlaceCap`), or only for its sender's live changes for the day
+ * (`daily_cap`), with its links passed when it has any. Either way it has a
+ * contributor, its name and note pass the text checks, its description
+ * passes them and its contacts pass the link rules, and the intake did not
+ * hold it for any other of its checks (`heldForCheck`). Anything else waits
+ * for a person.
  */
 export function reviewerNewPlaceCase(item: ReportItem, trusted = false): "unattested_place" | "new_place_cap" | null {
   const listing = newPlaceListing(item, trusted);
-  const kind = listing?.reason === "not_attested" ? "unattested_place" : listing === null && pastNewPlaceCap(item) ? "new_place_cap" : null;
+  const check = heldForCheck(item);
+  const kind =
+    listing?.reason === "not_attested" && check === null
+      ? "unattested_place"
+      : listing === null && (check === "daily_cap" || (check === null && pastNewPlaceCap(item)))
+        ? "new_place_cap"
+        : null;
   if (kind === null || item.contributor === undefined) return null;
   const { name, note } = item.report;
   if (note !== undefined && firstProblem(tidyText(note)) !== null) return null;
   if (name !== undefined && firstProblem(tidyName(name)) !== null) return null;
+  // The intake stops at the daily cap before it looks links up, so only links it says passed go to the reviewer.
+  if (check === "daily_cap" && setsLink(item) && !linksPassed(item)) return null;
   const fields = newPlaceFields(item);
-  return fields.failing.length === 0 && fields.descriptionProblem === null && heldForCheck(item) === null ? kind : null;
+  return fields.failing.length === 0 && fields.descriptionProblem === null ? kind : null;
+}
+
+/** Whether the intake recorded that `item`'s links passed the link rules and URLhaus. */
+function linksPassed(item: StoredFeedback): boolean {
+  const intake: unknown = (item as { intake?: unknown }).intake;
+  return typeof intake === "object" && intake !== null && (intake as { links?: unknown }).links === "passed";
 }
 
 /** The fields a `new_place` report carries, and which of them a published place holds back. */

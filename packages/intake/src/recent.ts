@@ -71,6 +71,26 @@ export const chunks = <T>(items: readonly T[], size: number): T[][] =>
 const marks = (n: number) => Array.from({ length: n }, () => "?").join(", ");
 
 /**
+ * The mark that `device` added new place `place` on `day`, kept as a row in
+ * `rate_counts` so the scheduled job prunes it with the day's counters. The
+ * device's reports about the place that day count once against its day and
+ * its contributor's, as an edit of a known place does, whether or not the
+ * place is listed.
+ */
+const ownNewPlaceKey = (day: string, device: string, place: string) => `own:${day}:${device}:${place}`;
+
+/** The statement that marks `place` as a new place `device` added on `day`, written with the item. */
+export function ownNewPlaceStatement(db: D1Like, day: string, device: string, place: string): D1Statement {
+  return db.prepare("INSERT OR IGNORE INTO rate_counts (key, day, count) VALUES (?, ?, 1)").bind(ownNewPlaceKey(day, device, place), day);
+}
+
+/** Whether `device` added new place `place` on `day`. */
+export async function isOwnNewPlace(db: D1Like, day: string, device: string, place: string): Promise<boolean> {
+  const row = await db.prepare("SELECT 1 AS found FROM rate_counts WHERE key = ?").bind(ownNewPlaceKey(day, device, place)).first<{ found: number }>();
+  return row !== null && row !== undefined;
+}
+
+/**
  * Writes a new place. A place already there is left as it is, so writing the
  * same place twice keeps one.
  */

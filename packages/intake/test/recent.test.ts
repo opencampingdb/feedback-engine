@@ -1155,6 +1155,19 @@ describe("send-time decisions", () => {
     expect(await send(fact(PLACE, "drinking_water", true))).toMatchObject({ state: "live" });
   });
 
+  it("looks up the links of a new place held for daily_cap, so the apply can send it to the AI reviewer", async () => {
+    expect(await send(fact(PLACE, "toilets", true))).toMatchObject({ state: "live" });
+    const contributor = written()[0]!.contributor as string;
+    store.db.prepare("UPDATE live_counts SET count = 50 WHERE contributor = ?").run(contributor);
+    const added = (website: string) =>
+      report("", { kind: "new_place", place_kind: "free_camp", contacts: { website } }, {});
+    const at = (body: Record<string, unknown>) => ({ ...body, place: null, location: { lat: -36.2, lon: 146.9 } });
+    expect(await send(at(added("https://camp.example.org")))).toMatchObject(held("daily_cap"));
+    expect(written()[1]!.intake).toEqual({ ...held("daily_cap"), links: "passed" });
+    services.listed.add("bad.example.org");
+    expect(await send(at(added("https://bad.example.org")))).toMatchObject(held("link_check"));
+  });
+
   it("holds a fact past 50 live changes for the day from one network, however often the install changes its contributor id", async () => {
     const network = { "cf-connecting-ip": "203.0.113.7" };
     for (let i = 0; i < 50; i++) {
