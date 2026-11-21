@@ -106,7 +106,7 @@ This is 0.41.0. What an app moving to it needs to know (0.38.0 to 0.40.0 are in 
 
 - `votePhoto` takes `vote`: `helpful`, `not_helpful` or `none` (takes the vote back), and may name a Commons file matched to the place with `commons` in place of `photo`. `helpful: true | false` still works. Records carry `not_helpful` and `not_helpful_12m` next to `helpful` and `helpful_12m`, and the photo server serves each place's Commons vote counts at `/v1/places/<place id>/commons.ndjson` ([docs/photos.md](../../docs/photos.md#photo-votes)).
 - `setHeroPhoto(token, { place, photo | commons | none, consent })` lets a place's verified owner choose its hero photo, sent at once. The photo intake checks the token with Open Camping DB's owner check first. Records gain `hero: true` ([docs/photos.md](../../docs/photos.md#an-owners-hero-photo)).
-- Deploy the photo intake, the apply pin, the photo server and the Photo sync at 0.41.0 first: an older intake refuses these with `400`.
+- Move the apply pin, then the photo server and the Photo sync, then the photo intake to 0.41.0 before an app sends these: an older intake refuses them with `400`.
 
 What an app moving to 0.37.0 needed to know:
 
