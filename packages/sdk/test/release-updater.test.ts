@@ -611,11 +611,24 @@ describe("createReleaseUpdater: unpacked sizes", () => {
     expect(await updaterFor(adapter, fetch).update()).toEqual({ status: "updated", dataVersion: v(3) });
   });
 
+  it("ignores a changeset's unpacked size that is not a whole number of bytes, under a cap", async () => {
+    for (const bad of ["99999", -1, 1.5, true, null]) {
+      const served = await release(3, chain(0, 3), { unpacked: true });
+      // Read as a number, "99999" would be over the cap and take the whole file.
+      (served.manifest.changesets[0] as { unpacked_bytes?: unknown }).unpacked_bytes = bad;
+      const { fetch } = fakeFetch(served);
+      const { adapter } = fakeDatabase({ dataVersion: v(0), layout: 1 });
+
+      expect(await updaterFor(adapter, fetch, { maxChangesetUnpackedBytes: 1_000 }).update()).toEqual({ status: "updated", dataVersion: v(3) });
+    }
+  });
+
   it("ignores an unpacked size that is not a whole number of bytes", async () => {
     // Read as a number, each would make the chain as large as the database and take the whole file.
     for (const bad of ["1", -1, 1.5, true, null]) {
       const served = await release(3, chain(0, 3), { unpacked: true });
       (served.manifest.database as { unpacked_bytes?: unknown }).unpacked_bytes = bad;
+      (served.manifest.changesets[0] as { unpacked_bytes?: unknown }).unpacked_bytes = bad;
       const { fetch } = fakeFetch(served);
       const { adapter } = fakeDatabase({ dataVersion: v(0), layout: 1 });
 
@@ -665,7 +678,26 @@ describe("createReleaseUpdater: maxChangesetUnpackedBytes", () => {
     expect(requests).toEqual([MANIFEST_URL, served.manifest.changesets[0]!.url, served.manifest.database.url]);
     expect(state.applied).toEqual([]);
     expect(state.chains).toEqual([]);
-    expect(sizes[0]).toBe(unpacked);
+    // The gzip trailer already says the changeset is too large, so only the whole database is gunzipped.
+    expect(sizes).toHaveLength(1);
+    expect(sizes[0]).not.toBe(unpacked);
+  });
+
+  it("checks the gunzipped size when the gzip trailer and the manifest understate it", async () => {
+    const served = await release(3, chain(0, 3), { unpacked: true });
+    for (const c of served.manifest.changesets) c.unpacked_bytes = 1;
+    const { fetch, requests } = fakeFetch(served);
+    const { adapter, state } = fakeDatabase({ dataVersion: v(0), layout: 1 });
+    const unpacked = encode({ from: v(0), to: v(1) }).length;
+    // An app's own gunzip, here one that pads, decides over what the trailer says.
+    const gunzip = async (bytes: Uint8Array) => {
+      const out = new Uint8Array(await new Response(new Blob([bytes.slice()]).stream().pipeThrough(new DecompressionStream("gzip") as unknown as TransformStream<Uint8Array, Uint8Array>)).arrayBuffer());
+      return new Uint8Array([...out, ...new Array(10).fill(0x20)]);
+    };
+
+    expect(await updaterFor(adapter, fetch, { gunzip, maxChangesetUnpackedBytes: unpacked + 5 }).update()).toEqual({ status: "replaced", dataVersion: v(3) });
+    expect(requests).toEqual([MANIFEST_URL, served.manifest.changesets[0]!.url, served.manifest.database.url]);
+    expect(state.applied).toEqual([]);
   });
 
   it("applies a chain without unpacked sizes when every changeset gunzips to at most the cap", async () => {

@@ -383,7 +383,7 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
    * whole database is held at most twice (compressed and not) while gunzip
    * runs, and once after.
    */
-  async function download(file: ReleaseFile): Promise<Uint8Array> {
+  async function download(file: ReleaseFile, maxUnpacked?: number): Promise<Uint8Array | "too_large"> {
     const res = await get(file.url, "application/octet-stream");
     let gz: Uint8Array;
     try {
@@ -393,11 +393,25 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
     }
     if (gz.length !== file.bytes) throw stopped("checksum", "SizeMismatch", `${file.url} is ${gz.length} bytes, the manifest says ${file.bytes}`);
     if (sha256HexBytes(gz) !== file.sha256.toLowerCase()) throw stopped("checksum", "ChecksumMismatch", `${file.url} does not match the manifest's SHA-256`);
+    // A gzip file ends with its unpacked size modulo 2^32 (RFC 1952, ISIZE): a
+    // file over the limit is dropped without gunzipping it.
+    if (maxUnpacked !== undefined && gz.length >= 18) {
+      const isize = (gz[gz.length - 4]! | (gz[gz.length - 3]! << 8) | (gz[gz.length - 2]! << 16) | (gz[gz.length - 1]! << 24)) >>> 0;
+      if (isize > maxUnpacked) return "too_large";
+    }
+    let unpacked: Uint8Array;
     try {
-      return await gunzipFn(gz);
+      unpacked = await gunzipFn(gz);
     } catch (error) {
       throw new UpdateStopped("gunzip", causeOf(error));
     }
+    // ISIZE wraps past 4 GiB, and an app's gunzip may differ: the gunzipped length decides.
+    return maxUnpacked !== undefined && unpacked.length > maxUnpacked ? "too_large" : unpacked;
+  }
+
+  /** download() for a file that is never over a limit: the whole database. */
+  async function downloadWhole(file: ReleaseFile): Promise<Uint8Array> {
+    return (await download(file)) as Uint8Array;
   }
 
   /** Runs an adapter call, stopping the update with `reason` when it throws. */
@@ -420,7 +434,7 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
    * the release the app's database holds after, or a mismatch.
    */
   async function replaceWhole(manifest: Manifest): Promise<{ dataVersion: string | null } | { refused: string | null }> {
-    const database = await download(manifest.database);
+    const database = await downloadWhole(manifest.database);
     if (adapter.candidateDataVersion) {
       const candidate = await orStop("read", () => adapter.candidateDataVersion!(database));
       if (candidate !== manifest.data_version) return { refused: candidate };
@@ -522,10 +536,10 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
         // failed download leaves it on its release.
         let chain: Uint8Array[] | null = [];
         for (const entry of path) {
-          const bytes = await download(entry);
+          const bytes = await download(entry, maxChangeset);
           // Larger once gunzipped than the app can apply, as a manifest without
-          // unpacked_bytes can hide: take the whole database instead.
-          if (maxChangeset !== undefined && bytes.length > maxChangeset) {
+          // unpacked_bytes, or one that understates it, can hide: take the whole database instead.
+          if (bytes === "too_large") {
             chain = null;
             break;
           }
