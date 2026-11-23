@@ -8,7 +8,8 @@ export const DEFAULT_MANIFEST_URL = "https://github.com/opencampingdb/data/relea
 /**
  * The most changesets one update applies. A longer path downloads the whole
  * database instead, as does a chain whose files add up to at least the
- * database's own `bytes`.
+ * database's own `bytes`, or, when the manifest gives every `unpacked_bytes`,
+ * whose changesets add up unpacked to at least the database's.
  */
 export const MAX_CHANGESET_CHAIN = 50;
 
@@ -86,6 +87,18 @@ export interface ReleaseUpdaterOptions {
    * remembers in memory without this, and across restarts with it.
    */
   storage?: StorageAdapter;
+  /**
+   * Optional. The largest changeset, in bytes once gunzipped, that this app
+   * can apply. A path with a larger one downloads the whole database
+   * instead. The updater reads the size from the manifest's `unpacked_bytes`
+   * before downloading anything, and checks each changeset again once
+   * gunzipped, so a manifest without the field is covered too (the larger
+   * changeset is then downloaded once, and dropped). Set it where the app's
+   * SQLite library copies a whole changeset into a heap of its own: on
+   * Android, expo-sqlite's `applyChangesetAsync` takes it as one Java byte
+   * array, which must fit under the app's heap limit (often 256 MB).
+   */
+  maxChangesetUnpackedBytes?: number;
 }
 
 /**
@@ -150,6 +163,8 @@ interface ReleaseFile {
   url: string;
   sha256: string;
   bytes: number;
+  /** The file's size once gunzipped (`unpacked_bytes`), when the manifest gives it. */
+  unpackedBytes?: number;
 }
 
 interface ChangesetEntry extends ReleaseFile {
@@ -195,6 +210,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 
 const isFile = (value: unknown): value is ReleaseFile =>
   isRecord(value) && typeof value.url === "string" && typeof value.sha256 === "string" && Number.isInteger(value.bytes);
+
+/** A manifest's `unpacked_bytes`, or undefined when it is missing or not a whole number of bytes. */
+const unpackedOf = (value: unknown): number | undefined => (Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : undefined);
 
 /** A url parsed as `fetch` reads it, or undefined when it is not https. */
 function httpsUrl(url: string): URL | undefined {
@@ -252,13 +270,20 @@ function readManifest(value: unknown): Manifest {
     const url = underHome(entry.url, home);
     if (url === undefined) continue;
     const { from, to, day } = entry as unknown as { from: string; to: string; day?: unknown };
-    changesets.push({ url, sha256: entry.sha256, bytes: entry.bytes, from, to, day: day === true });
+    const unpackedBytes = unpackedOf((entry as unknown as Record<string, unknown>).unpacked_bytes);
+    changesets.push({ url, sha256: entry.sha256, bytes: entry.bytes, ...(unpackedBytes === undefined ? {} : { unpackedBytes }), from, to, day: day === true });
   }
+  const databaseUnpacked = unpackedOf((value.database as unknown as Record<string, unknown>).unpacked_bytes);
   return {
     data_version: value.data_version,
     format_version: value.format_version as number,
     layout_version: value.layout_version as number,
-    database: { url: database.href, sha256: value.database.sha256, bytes: value.database.bytes },
+    database: {
+      url: database.href,
+      sha256: value.database.sha256,
+      bytes: value.database.bytes,
+      ...(databaseUnpacked === undefined ? {} : { unpackedBytes: databaseUnpacked }),
+    },
     changesets,
   };
 }
@@ -330,6 +355,10 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
   if (!wholeNumbers(readableLayouts)) throw new TypeError("createReleaseUpdater: readableLayouts must list the layout versions this build reads");
   if (!wholeNumbers(readableFormats)) throw new TypeError("createReleaseUpdater: readableFormats must list the format versions this build reads");
   const newestFormat = Math.max(...readableFormats);
+  const maxChangeset = options.maxChangesetUnpackedBytes;
+  if (maxChangeset !== undefined && !(Number.isSafeInteger(maxChangeset) && maxChangeset > 0)) {
+    throw new TypeError("createReleaseUpdater: maxChangesetUnpackedBytes must be a whole number of bytes above 0");
+  }
   const manifestUrl = options.manifestUrl ?? DEFAULT_MANIFEST_URL;
   const doFetch: ReleaseFetchLike = options.fetch ?? ((url, init) => (globalThis.fetch as unknown as ReleaseFetchLike)(url, init));
   let gunzipFn: Gunzip;
@@ -425,6 +454,23 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
     }
   }
 
+  /**
+   * Whether to apply a path rather than download the whole database: it is
+   * 1 to MAX_CHANGESET_CHAIN files, its downloads add up to fewer bytes than
+   * the database's, its changesets add up unpacked to fewer bytes than the
+   * database's when the manifest gives every size, and none is known to be
+   * larger unpacked than maxChangesetUnpackedBytes.
+   */
+  function takesChain(path: readonly ChangesetEntry[], database: ReleaseFile): boolean {
+    if (path.length === 0 || path.length > MAX_CHANGESET_CHAIN) return false;
+    if (path.reduce((sum, entry) => sum + entry.bytes, 0) >= database.bytes) return false;
+    const unpacked = path.map((entry) => entry.unpackedBytes);
+    if (database.unpackedBytes !== undefined && unpacked.every((size) => size !== undefined)) {
+      if (unpacked.reduce((sum: number, size) => sum + size!, 0) >= database.unpackedBytes) return false;
+    }
+    return maxChangeset === undefined || unpacked.every((size) => size === undefined || size <= maxChangeset);
+  }
+
   let running: Promise<ReleaseUpdateResult> | undefined;
 
   return {
@@ -471,21 +517,32 @@ export function createReleaseUpdater(options: ReleaseUpdaterOptions): ReleaseUpd
       }
 
       const path = dataVersion !== null && layout === manifest.layout_version ? changesetPath(manifest.changesets, dataVersion, manifest.data_version) : null;
-      const chainBytes = path?.reduce((sum, entry) => sum + entry.bytes, 0) ?? 0;
-      if (path && path.length > 0 && path.length <= MAX_CHANGESET_CHAIN && chainBytes < manifest.database.bytes) {
+      if (path && takesChain(path, manifest.database)) {
         // Download and check every file before touching the database, so a
         // failed download leaves it on its release.
-        const chain: Uint8Array[] = [];
-        for (const entry of path) chain.push(await download(entry));
-        await orStop("apply", () => adapter.applyChangesets(chain));
-        dataVersion = await orStop("read", () => adapter.currentDataVersion());
-        if (dataVersion === manifest.data_version) {
-        await writeFailed(null);
-        return { status: "updated", dataVersion };
-      }
-        // The chain left another release than the manifest's, as an apply
-        // that settles conflicts by replacing rows can: start again from the
-        // whole database.
+        let chain: Uint8Array[] | null = [];
+        for (const entry of path) {
+          const bytes = await download(entry);
+          // Larger once gunzipped than the app can apply, as a manifest without
+          // unpacked_bytes can hide: take the whole database instead.
+          if (maxChangeset !== undefined && bytes.length > maxChangeset) {
+            chain = null;
+            break;
+          }
+          chain.push(bytes);
+        }
+        if (chain) {
+          const ready = chain;
+          await orStop("apply", () => adapter.applyChangesets(ready));
+          dataVersion = await orStop("read", () => adapter.currentDataVersion());
+          if (dataVersion === manifest.data_version) {
+            await writeFailed(null);
+            return { status: "updated", dataVersion };
+          }
+          // The chain left another release than the manifest's, as an apply
+          // that settles conflicts by replacing rows can: start again from the
+          // whole database.
+        }
       }
       const replaced = await replaceWhole(manifest);
       if ("refused" in replaced) {

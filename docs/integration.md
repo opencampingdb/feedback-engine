@@ -898,12 +898,12 @@ const result = await updater.update(known === undefined ? {} : { knownDataVersio
 // { status: "up_to_date" | "updated" | "replaced" | "older_release" | "layout_unsupported" | "format_unsupported" | "failed", dataVersion, reason?, cause? }
 ```
 
-`createReleaseUpdater` throws `TypeError` when `readableLayouts` or `readableFormats` is empty or holds anything but whole numbers, and when there is neither `gunzip` nor `DecompressionStream`. `update()` does this:
+`createReleaseUpdater` throws `TypeError` when `readableLayouts` or `readableFormats` is empty or holds anything but whole numbers, when `maxChangesetUnpackedBytes` is given and is not a whole number above 0, and when there is neither `gunzip` nor `DecompressionStream`. `update()` does this:
 
 1. When `knownDataVersion`, the recent list's `release.data_version`, is the database's own, it answers `up_to_date` with no request.
 2. Otherwise it fetches the manifest, one request. When its `format_version` is higher than every one in `readableFormats`, it keeps the database and answers `format_unsupported`: the records have changed in a way this build can't read. A lower format is read, as CONNECTING.md says. When its `layout_version` is not in `readableLayouts`, it answers `layout_unsupported`. When its `data_version` and layout are the database's own, it answers `up_to_date`. When its `data_version` is older than the database's own (an older release marked latest), it changes nothing and answers `older_release`. A manifest whose `data_version` is not a release name (`<yyyymmdd>T<hhmmss>Z-<short sha>`, the short sha in lower-case hex), or is dated more than 7 days ahead of the phone's clock, or whose database url is not https, fails with `manifest` before anything is downloaded. `dataVersionProblem(dataVersion)` applies the same rule. A release refused for its date answers `{ status: "failed", reason: "manifest", cause: { name: "ManifestInvalid", message } }`, where `message` says the `data_version` is dated more than 7 days ahead of the clock, and the database stays on its release. The usual cause is a phone whose clock is set wrong, more than 7 days slow: the updater refuses every release until the clock is right, so when you see this reason with that message, ask the traveller to check the date and time on their phone. A database whose own `data_version` breaks that rule is not kept as newer: the updater moves it onto the manifest's release.
-3. It uses only changesets served from the same release downloads as the database: a changeset url, parsed as `fetch` reads it, must have the database url's origin and a path under the database url's path less its last two parts (on GitHub, `https://github.com/<owner>/<repo>/releases/download/`). Any other entry is ignored. It downloads the whole database when the app has none, when the layout differs from the database's, when no chain of changesets leads from the database's `data_version` to the newest, when the chain is more than 50 files (`MAX_CHANGESET_CHAIN`), or when the chain's files add up to at least the database's own `bytes`, and answers `replaced`.
-4. Otherwise it takes the chain with the fewest files, and of two as short, the one with more daily changesets. It downloads every file on it and checks each one's `bytes` and `sha256` before applying any, undoes gzip, hands the whole chain to one `applyChangesets` call, and answers `updated`.
+3. It uses only changesets served from the same release downloads as the database: a changeset url, parsed as `fetch` reads it, must have the database url's origin and a path under the database url's path less its last two parts (on GitHub, `https://github.com/<owner>/<repo>/releases/download/`). Any other entry is ignored. It downloads the whole database when the app has none, when the layout differs from the database's, when no chain of changesets leads from the database's `data_version` to the newest, when the chain is more than 50 files (`MAX_CHANGESET_CHAIN`), when the chain's files add up to at least the database's own `bytes`, when the manifest gives every `unpacked_bytes` and the chain's add up to at least the database's, or when a changeset on it is larger unpacked than `maxChangesetUnpackedBytes` (below), and answers `replaced`.
+4. Otherwise it takes the chain with the fewest files, and of two as short, the one with more daily changesets. It downloads every file on it and checks each one's `bytes` and `sha256` before applying any, undoes gzip, hands the whole chain to one `applyChangesets` call, and answers `updated`. With `maxChangesetUnpackedBytes`, a changeset that gunzips to more than it (one the manifest gave no `unpacked_bytes` for) stops the chain before anything is applied, and the updater downloads the whole database instead.
 5. After the chain it reads `data_version` back. When that is not the manifest's, it downloads the whole database and replaces the one the chain left, and answers `replaced`.
 6. When the adapter has `candidateDataVersion`, the updater asks it for the release a downloaded whole database holds before it calls `replaceDatabase`, and swaps the file in only when that is the manifest's `data_version`. Otherwise it answers `failed` with `mismatch` and the database is not touched, so a manifest that points at an older file can't roll the app back. Without the call the release is read only after the swap, so give your adapter this call. It may write the bytes to the file it would swap in and keep that file for `replaceDatabase`, as the Expo adapter below does. The Expo adapter also refuses a file that holds a trigger or a view, which the updater answers as `failed` with `read`, leaving the database as it was.
 7. A manifest whose database did not hold its release is remembered by its `data_version` and the database's `sha256`, and answered `failed` with `mismatch` without a download until the manifest changes. The updater remembers it in memory, and in `storage` under the key `ocdb.release.failed` when you pass `storage`, so an app that calls `update()` on each launch does not download the whole database each time.
@@ -983,6 +983,7 @@ Each release database is a file of its own, and the name of the one in use is ke
 ```ts
 // release-database.ts
 import { fetch } from "expo/fetch";
+import { Platform } from "react-native";
 import { Directory, File, FileMode } from "expo-file-system";
 import Storage from "expo-sqlite/kv-store";
 import { defaultDatabaseDirectory, deleteDatabaseAsync, openDatabaseAsync, type SQLiteDatabase } from "expo-sqlite";
@@ -1141,6 +1142,8 @@ export const releaseUpdater = createReleaseUpdater({
   fetch: fetch as unknown as ReleaseFetchLike,
   gunzip: (bytes) => gunzipSync(bytes),
   storage: Storage,
+  // expo-sqlite on Android copies a whole changeset into one Java byte array.
+  ...(Platform.OS === "android" ? { maxChangesetUnpackedBytes: 64 * 1024 * 1024 } : {}),
 });
 
 const HOUR = 60 * 60 * 1000;
@@ -1186,6 +1189,8 @@ A whole database is the largest thing the updater handles. With the adapter abov
 
 The release of 12 November 2026 has an `ocdb.sqlite.gz` of 14.3 MB, so scale the figures to the manifest's `database.bytes` and the plain size. Writing with `File.write(bytes)` instead would copy the whole plain database once more on iOS, and opening the bytes with `deserializeDatabaseAsync` would hold a second whole copy as an in-memory database. A chain's downloads add up to fewer bytes than the database's (step 3), and the chain is held only while one transaction applies it.
 
+On Android, expo-sqlite's `applyChangesetAsync` takes each changeset as one Kotlin `ByteArray`, so the whole plain changeset must fit on the Java heap with everything else the app holds there. The heap's growth limit is often 256 MB, and 192 MB on some devices, and a changeset can be larger unpacked than the whole database (one of 17 November 2026 was 187 MB, the database 122 MB), which fails the apply with `OutOfMemoryError` on every try. Pass `maxChangesetUnpackedBytes` on Android, well under the heap limit, as the adapter above does: a path with a larger changeset takes the whole database, which the adapter writes to a file a slice at a time. Since data format 13.5 the manifest gives each changeset's `unpacked_bytes` and lists none at least as large unpacked as the database, so the updater can choose before downloading anything.
+
 ## On the web
 
 Pass a storage adapter over `localStorage`. The intake answers CORS requests from the origins its operator allows.
@@ -1205,8 +1210,12 @@ const feedback = createFeedbackClient({
 
 ## What changed by version
 
-What an app moving to 0.42.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
+What an app moving to 0.43.0 needs to know. A minor version (0.37.0) adds a call, option, field or type, and before 1.0.0 may also break something, as noted here. A patch version (0.28.1) is a fix.
 
+- **0.43.0.** Changesets too large to apply:
+  - The updater reads `unpacked_bytes`, the size once gunzipped, from the manifest's database and changesets (data format 13.5), and downloads the whole database when a chain's add up to at least the database's.
+  - The new option `maxChangesetUnpackedBytes` caps one changeset's unpacked size: a path with a larger one downloads the whole database. It checks the manifest's size before downloading and each changeset's size once gunzipped. Pass it on Android, where expo-sqlite copies a whole changeset onto the Java heap ([Memory on a phone](#memory-on-a-phone)).
+  - Nothing to move on the server. A manifest without `unpacked_bytes` is read as before.
 - **0.42.0.** New places past the day's 50, for every app:
   - Each contributor's first 50 new places of the UTC day (each install's, without a contributor) are decided as usual, up from 10. From the 51st the intake no longer answers `429`: it takes the place (`202`) and answers `held` with `new_place_cap`. The place is not listed, and the AI reviewer checks it, then a person when the reviewer is unsure. Every app and traveller has the same 50 ([Reports](#5-send-reports-reviews-checks-and-charges)).
   - `HELD_REASONS` gains `new_place_cap`. Show your own message for it, and treat a code you do not know as `held`.

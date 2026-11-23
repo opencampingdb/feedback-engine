@@ -102,7 +102,12 @@ Key registration refusals use the same codes. Registration also answers `malform
 
 A patch version (0.28.1) is a fix or a small change to an existing call. A minor version (0.32.0) adds a call, option, field or type, and before 1.0.0 may also mark a breaking change, which its release notes spell out. [docs/integration.md](../../docs/integration.md#what-changed-by-version), "What changed by version", lists the recent ones.
 
-This is 0.42.0. What an app moving to it needs to know (0.38.0 to 0.40.0 are in [What changed by version](../../docs/integration.md#what-changed-by-version)):
+This is 0.43.0. What an app moving to it needs to know (0.38.0 to 0.40.0 are in [What changed by version](../../docs/integration.md#what-changed-by-version)):
+
+- The release updater reads `unpacked_bytes` from the manifest (data format 13.5) and downloads the whole database when a chain's changesets add up unpacked to at least the database's.
+- `createReleaseUpdater` takes `maxChangesetUnpackedBytes`: a path with a changeset larger than that once gunzipped downloads the whole database instead. Pass it on Android, where expo-sqlite's `applyChangesetAsync` copies the whole changeset onto the Java heap.
+
+What an app moving to 0.42.0 needed to know:
 
 - A contributor's first 50 new places of the UTC day (an install's, without a contributor) are decided as usual, up from 10. From the 51st the intake takes the place and answers `held` with the new code `new_place_cap`, instead of `429` (it still counts against the 200 a day limits): the AI reviewer checks it before it is listed. A new place held as `daily_cap` goes to the AI reviewer the same way.
 - An install's reports about a new place it added that UTC day, listed or held, count as one edit against the install's and the contributor's daily limits.
